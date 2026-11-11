@@ -251,7 +251,11 @@ async fn daemon_main() -> anyhow::Result<()> {
     // The agent templates are files in the config repo (PLAN §5b): the
     // first load writes the files of the templates from before them.
     terrariumd::template_files::configure(&daemon.state, repo).await;
-    daemon.state.db.write("system", terrariumd::required_templates::check_start).await?;
+    daemon
+        .state
+        .db
+        .write("system", terrariumd::required_templates::check_start)
+        .await?;
     let template_watch = terrariumd::template_files::spawn_watch(daemon.state.clone());
     let sync_task = terrariumd::api::spawn_config_sync(
         daemon.state.clone(),

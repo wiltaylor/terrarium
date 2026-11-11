@@ -253,7 +253,11 @@ impl Engine for Fake {
                 let failed = self.0.lock().unwrap().fail.contains("required-templates");
                 return Ok(ExecOut {
                     code: i64::from(failed),
-                    stderr: if failed { "required daemon template global:request is missing".into() } else { String::new() },
+                    stderr: if failed {
+                        "required daemon template global:request is missing".into()
+                    } else {
+                        String::new()
+                    },
                     ..Default::default()
                 });
             }
@@ -633,7 +637,10 @@ async fn unresolved_environment_stops_before_drain_backup_or_swap() {
 async fn missing_required_template_stops_before_drain_and_names_it() {
     let r = rig();
     r.fake.fail("required-templates");
-    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
     assert_eq!(run.outcome, Outcome::Failed);
     let step = run.steps.iter().find(|s| s.name == "environment").unwrap();
     assert!(step.detail.contains("global:request"));

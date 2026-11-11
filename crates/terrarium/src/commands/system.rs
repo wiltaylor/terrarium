@@ -242,7 +242,9 @@ pub async fn version(ctx: &Ctx) -> anyhow::Result<()> {
         }
         if let Some(missing) = v["daemon"]["missing_templates"].as_array() {
             for key in missing.iter().filter_map(Value::as_str) {
-                c.line(format!("warning: required daemon template {key} is missing"));
+                c.line(format!(
+                    "warning: required daemon template {key} is missing"
+                ));
             }
         }
     })

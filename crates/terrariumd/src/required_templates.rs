@@ -22,7 +22,9 @@ pub fn missing(conn: &Connection) -> ApiResult<Vec<String>> {
 }
 
 pub fn warning(key: &str) -> String {
-    format!("required daemon template {key} is missing; install it in the config repo before using operator request dispatch")
+    format!(
+        "required daemon template {key} is missing; install it in the config repo before using operator request dispatch"
+    )
 }
 
 /// Persist one critical notice per missing template, including across restarts
@@ -32,9 +34,12 @@ pub fn check_start(t: &mut Tx<'_>) -> ApiResult<()> {
         let context = format!("required-template:{key}");
         let exists: bool = t.query_row(
             "SELECT EXISTS(SELECT 1 FROM questions WHERE agent = 'system' AND context = ?1)",
-            [&context], |r| r.get(0),
+            [&context],
+            |r| r.get(0),
         )?;
-        if exists { continue; }
+        if exists {
+            continue;
+        }
         let id = ulid::Ulid::new().to_string();
         let at = now();
         let inserted = t.execute(
@@ -80,11 +85,14 @@ mod tests {
             check_start(t)?;
             let count: i64 = t.query_row(
                 "SELECT count(*) FROM questions WHERE kind = 'notice' AND priority = 'critical'",
-                [], |r| r.get(0),
+                [],
+                |r| r.get(0),
             )?;
             assert_eq!(count, 1);
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -94,7 +102,11 @@ mod tests {
         std::fs::create_dir(dir.path().join("templates")).unwrap();
         std::fs::write(dir.path().join("templates/request.wcl"), "invalid").unwrap();
         assert_eq!(precheck(dir.path()).len(), 1);
-        std::fs::write(dir.path().join("templates/request.wcl"), "harness = \"codex\"\n").unwrap();
+        std::fs::write(
+            dir.path().join("templates/request.wcl"),
+            "harness = \"codex\"\n",
+        )
+        .unwrap();
         assert!(precheck(dir.path()).is_empty());
     }
 
@@ -104,16 +116,25 @@ mod tests {
         crate::db::migrate(&mut conn).unwrap();
         let db = crate::db::Db::new(conn, crate::events::EventHub::default());
         db.write("system", |t| {
-            templates::create(t, &templates::NewTemplate {
-                name: "request".into(), project: None, description: String::new(),
-                spec: serde_json::from_value(serde_json::json!({"harness":"codex"})).unwrap(),
-                created_by: "system".into(), source: "config".into(),
-            }, None)?;
+            templates::create(
+                t,
+                &templates::NewTemplate {
+                    name: "request".into(),
+                    project: None,
+                    description: String::new(),
+                    spec: serde_json::from_value(serde_json::json!({"harness":"codex"})).unwrap(),
+                    created_by: "system".into(),
+                    source: "config".into(),
+                },
+                None,
+            )?;
             check_start(t)?;
             assert!(missing(t)?.is_empty());
             let count: i64 = t.query_row("SELECT count(*) FROM questions", [], |r| r.get(0))?;
             assert_eq!(count, 0);
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 }

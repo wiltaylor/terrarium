@@ -496,7 +496,10 @@ impl Updater {
                             vec!["/opt/terrarium/bundled/bin/terrariumd".into(), "required-templates-check".into()],
                         ).await?;
                         if out.code != 0 {
-                            return Err(format!("required daemon templates pre-check: {}", out.reason()));
+                            return Err(format!(
+                                "required daemon templates pre-check (exit {}): {}{}",
+                                out.code, out.stdout.trim(), out.stderr.trim()
+                            ));
                         }
                         Ok(prepared)
                     }

@@ -10434,6 +10434,18 @@ async fn version_prints_the_client_and_the_daemon() {
 }
 
 #[tokio::test]
+async fn version_names_missing_required_templates() {
+    let out = ok(
+        false,
+        &["version"],
+        vec![(200, json!({"version": terrarium_version::FULL,
+            "missing_templates": ["global:request"]}))],
+        vec![req(Get, "/api/system/version")],
+    ).await;
+    assert!(out.contains("warning: required daemon template global:request is missing"), "{out}");
+}
+
+#[tokio::test]
 async fn owners_and_target_grants() {
     // `--owner` on monitor new and edit, and on schedule new and set (edit).
     let m = json!({"id": "01MONMONMONMONMONMONMONMON", "name": "disk", "project": "terra",
