@@ -154,6 +154,7 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
         }
         let jid = log.job.clone();
         let target = log.target.clone();
+        let expected_project = project.clone();
         let found = state
             .db
             .read(move |c| {
@@ -161,7 +162,11 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
                 if matches!(job.state, jobs::JobState::Queued | jobs::JobState::Running) {
                     return Ok(None);
                 }
-                Ok(Some(targets::get(c, &target)?.def))
+                let target = targets::get(c, &target)?.def;
+                if target.project.as_ref().is_some_and(|p| p != &expected_project) {
+                    return Ok(None);
+                }
+                Ok(Some(target))
             })
             .await;
         let Ok(Some(target)) = found else {

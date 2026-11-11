@@ -3276,10 +3276,9 @@ async fn steps(
             if let Ok(bytes) = String::from_utf8_lossy(&result.stdout)
                 .trim()
                 .parse::<i64>()
+                && let Err(e) = crate::job_logs::completed(x.state, job, bytes).await
             {
-                if let Err(e) = crate::job_logs::completed(x.state, job, bytes).await {
-                    warn!(job = %job.id, "cannot record log size: {e}");
-                }
+                warn!(job = %job.id, "cannot record log size: {e}");
             }
         }
     }
