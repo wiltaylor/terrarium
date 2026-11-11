@@ -1504,6 +1504,14 @@ async fn queued(
     };
     let mut live_items = Vec::new();
     for turn in live.items {
+        if let Some(row) = turn.queued {
+            if let Some(index) = items.iter().position(|item| item.id == json!(row)) {
+                let mut item = items.remove(index);
+                item.source = "hold";
+                live_items.push(item);
+            }
+            continue;
+        }
         let text = redactor.redact_string_as(turn.text, &view).0;
         live_items.push(QueuedView {
             id: json!(turn.id),
@@ -1533,7 +1541,7 @@ async fn remove_queued(
 ) -> ApiResult<StatusCode> {
     let a = load(&state, &actor, id).await?;
     if let Some(s) = q.source.as_deref()
-        && ![QUEUE_STORE, "supervisor", "runner"].contains(&s)
+        && ![QUEUE_STORE, "supervisor", "runner", "hold"].contains(&s)
     {
         return Err(ApiError::invalid(format!(
             "unknown queue `{s}`: give the source of the turn in the list"
@@ -1542,7 +1550,9 @@ async fn remove_queued(
     policy::admin_project(&actor, &a.agent.project, "removing a queued turn")?;
     let lock = state.lifecycle.turn_lock(agent_id(&a));
     let _held = lock.lock().await;
-    if let Some(source @ ("runner" | "supervisor")) = q.source.as_deref() {
+    if let Some(source @ ("runner" | "supervisor" | "hold")) = q.source.as_deref()
+        && !(source == "hold" && turn.parse::<i64>().is_ok())
+    {
         if !state
             .supervisor
             .cancel_pending(agent_id(&a), source, turn.clone())
