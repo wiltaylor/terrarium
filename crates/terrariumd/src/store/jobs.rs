@@ -500,12 +500,12 @@ pub fn failed_step(tail: &str) -> Option<String> {
 
 /// The pass rate of the jobs of `project` created at or after `since`
 /// (RFC 3339, UTC, as `created_at` is stored).
-pub fn stats(conn: &Connection, project: &str, since: &str) -> ApiResult<JobStats> {
-    let mut st = conn.prepare(
-        "SELECT kind, state, attempt, outcome, parent,
+const STATS_SQL: &str = "SELECT kind, state, attempt, outcome, parent,
                 CASE WHEN state = 'failed' THEN tail END
-         FROM jobs WHERE project = ?1 AND created_at >= ?2",
-    )?;
+         FROM jobs WHERE project = ?1 AND created_at >= ?2";
+
+pub fn stats(conn: &Connection, project: &str, since: &str) -> ApiResult<JobStats> {
+    let mut st = conn.prepare(STATS_SQL)?;
     let rows = st
         .query_map(params![project, since], |r| {
             Ok((
@@ -2601,6 +2601,26 @@ mod tests {
             "     Running tests/card_sessions.rs\n[exit code None, signal Some(9), timeout]\n";
         assert_eq!(failed_step(killed).as_deref(), Some("timeout"));
         assert_eq!(failed_step("ok"), None);
+    }
+
+    #[test]
+    fn stats_uses_a_project_time_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
+        conn.execute_batch(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+             INSERT INTO jobs (id, project, card, kind, repo, branch, state, created_by, created_at)
+             SELECT 'job-' || x, 'p', 'C', 'validate', 'r', 'b', 'passed', 't',
+                    CASE WHEN x<9990 THEN '2026-10-01' ELSE '2026-11-01' END FROM n;
+             ANALYZE;",
+        ).unwrap();
+        let plan: String = conn.query_row(
+            &format!("EXPLAIN QUERY PLAN {STATS_SQL}"),
+            params!["p", "2026-11-01"], |r| r.get(3),
+        ).unwrap();
+        assert!(plan.contains("jobs_project_created_at"), "{plan}");
+        assert!(plan.contains("created_at>?") && !plan.contains("SCAN"), "{plan}");
+        assert_eq!(stats(&conn, "p", "2026-11-01").unwrap().jobs, 11);
     }
 
     #[test]
