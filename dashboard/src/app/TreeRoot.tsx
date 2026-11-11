@@ -6,13 +6,9 @@
 import { A } from "../instance/navigation";
 import { Show, type JSX } from "solid-js";
 import type { createRovingTree } from "./treeNav";
-import { localInstance } from "../stores";
 
 /** The `data-key` of a tree root row. */
 export const ROOT_KEY = "root";
-
-/** The open set of the sidebar tree: the Projects root, folders, and Bookmarks. */
-export const expanded = localInstance.expanded;
 
 /** The drop handlers of a row, and whether a drag is over it now. */
 export interface DropTarget {

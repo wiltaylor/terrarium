@@ -42,7 +42,7 @@ describe("instance scope", () => {
     expect(reopened.pins.collapsed()).toBe(true);
     expect(reopened.session?.getItem("draft:Q1")).toBe("remote answer");
     await lab.projects.refresh();
-    expect(fetch).toHaveBeenCalledWith("/api/remotes/lab/proxy/api/projects", expect.anything());
+    expect(fetch).toHaveBeenCalledWith("/api/remotes/lab/proxy/api/projects?limit=1000", expect.anything());
   });
 
   it("sends home CSRF to the proxy and does not end the home session on remote 401", async () => {

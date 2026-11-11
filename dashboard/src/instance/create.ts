@@ -68,7 +68,16 @@ export function createInstance(options: {
       href: (path: string) => instanceHref(name, path),
       path: (path: string) => name === undefined ? path : path.replace(new RegExp(`^/remote/${name}(?=/|$)`), "") || "/",
       bookmarks, events, projects, projectFolders, agents, repos, subscriptions, quota, leases, inbox, pins, cardPeek,
-      dispose: () => { events.stop(); dispose(); },
+      dispose: () => {
+        events.stop();
+        subscriptions.stop();
+        agents.dispose();
+        inbox.dispose();
+        pins.dispose();
+        leases.dispose();
+        quota.dispose();
+        dispose();
+      },
     };
   });
 }

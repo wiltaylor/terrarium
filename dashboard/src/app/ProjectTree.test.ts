@@ -35,7 +35,8 @@ vi.mock("../stores", async () => { const { instanceTestStores } = await import("
 })); });
 
 const { ProjectTree } = await import("./ProjectTree");
-const { expanded } = await import("./TreeRoot");
+const { useInstance } = await import("../instance");
+const { expanded } = useInstance();
 
 let dispose: (() => void) | undefined;
 let lastHistory: ReturnType<typeof createMemoryHistory>;

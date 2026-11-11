@@ -50,7 +50,7 @@ export default tseslint.config(
   },
   {
     files: ["src/features/**/*.{ts,tsx}", "src/components/**/*.{ts,tsx}", "src/app/**/*.{ts,tsx}"],
-    ignores: ["src/**/*.test.ts", "src/app/TreeRoot.tsx"],
+    ignores: ["src/**/*.test.ts"],
     rules: {
       "no-restricted-imports": ["error", {
         patterns: [{ regex: "(?:^|/)stores(?:/index)?$", message: "Read daemon state through useInstance(), not the local singleton." }],

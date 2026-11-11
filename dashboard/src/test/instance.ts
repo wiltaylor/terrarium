@@ -9,7 +9,7 @@ export function instanceTestStores<T extends object>(stores: T) {
     signOutNow: undefined, signOutAll: undefined, changePasswordNow: undefined, createBoardStore: undefined,
     ...stores,
     localInstance: {
-      key: "local", href: (p: string) => p, path: (p: string) => p,
+      key: "local", href: (p: string) => p, path: (p: string) => p, apiHref: (p: string) => p,
       storage: window.localStorage, session: window.sessionStorage,
       expanded: createExpandedStore(window.localStorage),
       promptLibrary: { version, refresh: () => setVersion((v) => v + 1) },

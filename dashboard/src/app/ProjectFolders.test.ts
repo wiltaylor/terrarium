@@ -35,7 +35,8 @@ const stores = (await import("../stores")) as unknown as {
   projectFolders: import("../stores/projectFolders").ProjectFoldersStore;
 };
 const { ProjectTree } = await import("./ProjectTree");
-const { expanded } = await import("./TreeRoot");
+const { useInstance } = await import("../instance");
+const { expanded } = useInstance();
 
 /** Wait until `check` gives a truthy value, and give it. */
 const want = <T>(check: () => T | null | undefined | false) =>

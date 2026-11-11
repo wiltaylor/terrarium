@@ -9,7 +9,8 @@ vi.mock("../stores", async () => {
   return instanceTestStores({ bookmarks: createBookmarksStore(null, window.location.origin) });
 });
 import { bookmarks } from "../stores";
-import { expanded } from "./TreeRoot";
+import { useInstance } from "../instance";
+const { expanded } = useInstance();
 import { Bookmarks } from "./Bookmarks";
 import ManageBookmarks from "./ManageBookmarks";
 import { waitFor } from "../test/wait";
