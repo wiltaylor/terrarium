@@ -6853,7 +6853,11 @@ Only the operator may override recreation safeguards:
 Neither override authorizes a foreign bind, unknown mount metadata, or a mount
 source in the request. Agents, including project admins, receive 403 for either
 override. Recreation rechecks the inspected identity and mounts before removal,
-and audits the discarded volume names. **Discard means detach, not delete**:
+and audits removal with the discarded volume names before starting the
+replacement. A second audit records the replacement's success or failure,
+so failed image pulls do not hide a completed discard. Link keys cannot use
+either override, even though they otherwise act on behalf of the operator.
+**Discard means detach, not delete**:
 no volume contents are inspected and no volumes are deleted. Old volume data
 remains on the host, but the replacement container does not attach it.
 

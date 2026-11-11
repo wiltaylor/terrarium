@@ -3037,7 +3037,12 @@ pub struct RecreateOpts {
 }
 
 /// Explicit consent to lose the container's writable layer, never volume data.
-pub async fn recreate(state: &Shared, def: &TargetDef, opts: &RecreateOpts) -> ApiResult<Value> {
+pub async fn recreate(
+    state: &Shared,
+    def: &TargetDef,
+    opts: &RecreateOpts,
+    audit_actor: &str,
+) -> ApiResult<Value> {
     if def.kind != TargetKind::Docker || def.container.is_some() || def.image.is_none() {
         return Err(ApiError::invalid(
             "recreate needs a managed Docker target with an image",
@@ -3170,6 +3175,7 @@ pub async fn recreate(state: &Shared, def: &TargetDef, opts: &RecreateOpts) -> A
             ));
         }
         let force = opts.force;
+        let removed_id = container_id.clone();
         verb_ok(state, def, "docker.rm", move |session| {
             DaemonFrame::DockerRm(DockerRm {
                 session,
@@ -3181,6 +3187,18 @@ pub async fn recreate(state: &Shared, def: &TargetDef, opts: &RecreateOpts) -> A
             })
         })
         .await?;
+        // Removal is irreversible even if starting the replacement fails.
+        // Persist the verified consent and outcome before attempting that start.
+        let (target, project) = (def.name.clone(), def.project.clone());
+        let discarded = opts.discard_volumes.clone();
+        state.db.write(audit_actor, move |t| {
+            t.audit("target.recreate.removed", &target, project.as_deref(), json!({
+                "container_id": removed_id,
+                "force": force,
+                "discarded_volumes": discarded,
+                "outcome": "removed",
+            }))
+        }).await?;
     }
     let lifecycle_opts = LifecycleOpts {
         recreate_workspaces: Some(preserved),

@@ -250,6 +250,9 @@ fn fake_tool(tool: &str, dir: &Path) -> String {
             r#"for a in "$@"; do c=$a; done
 if [ "$1" = run ]; then prev=; for a in "$@"; do if [ "$prev" = --name ]; then c=$a; fi; prev=$a; done; fi
 f='{s}'.$c
+if [ "$1" = run ] && [ -f '{mounts}.fail-run' ]; then
+  echo 'image pull failed' >&2; exit 1
+fi
 if [ "$1" = inspect ] && [ -f '{mounts}.race' ]; then
   n=$(cat '{mounts}.race'); n=$((n + 1)); printf '%s' "$n" > '{mounts}.race'
   if [ "$n" -eq 3 ]; then cp '{mounts}.next' '{mounts}'; fi
@@ -4695,6 +4698,68 @@ async fn docker_recreate_requires_admin_and_refuses_live_sessions() {
         .post_empty("/api/targets/external/recreate")
         .await
         .err(422, "invalid");
+}
+
+#[tokio::test]
+async fn docker_recreate_link_key_cannot_override_safety() {
+    use tower::ServiceExt;
+    use terrariumd::api::{LinkAuth, TokenAuth, tcp_router_with};
+
+    let lab = Lab::start().await;
+    let _host = lab.host("lab1").await;
+    lab.target(json!({"name":"dbox","kind":"docker","host":"lab1","image":"alpine:3"})).await;
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    let link = lab.td.post("/api/links", json!({"label":"home","read_only":false})).await.ok().clone();
+    let paired = lab.td.post("/api/links/pair", json!({
+        "code": link["code"],
+        "home_instance_id": ulid::Ulid::new().to_string(),
+        "home_name":"home",
+    })).await.ok().clone();
+    let key = paired["key"].as_str().unwrap();
+    assert!(key.starts_with("tlk_"));
+    let state = lab.state();
+    let app = tcp_router_with(state.clone(), TokenAuth::new("operator-test-token".into(), false).with_links(LinkAuth {
+        db: state.db.clone(), runtime: state.links.clone(),
+    }), false);
+    let before = lab.log();
+    for body in [json!({"force":true}), json!({"discard_volumes":["data"]}), json!({"force":true,"discard_volumes":["data"]})] {
+        let request = axum::http::Request::builder()
+            .method("POST").uri("/api/targets/dbox/recreate")
+            .header("authorization", format!("Bearer {key}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string())).unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+    assert_eq!(lab.log(), before, "link overrides must not reach Docker");
+    assert!(!lab.log().contains("docker rm"));
+}
+
+#[tokio::test]
+async fn docker_recreate_audits_discard_when_replacement_fails() {
+    let lab = Lab::start().await;
+    let _host = lab.host("lab1").await;
+    lab.target(json!({"name":"dbox","kind":"docker","host":"lab1","image":"alpine:3"})).await;
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
+    std::fs::write(lab.bins.path().join("docker.mounts"), json!([
+        {"Type":"volume","Name":"data","Destination":"/data"}
+    ]).to_string()).unwrap();
+    std::fs::write(lab.bins.path().join("docker.mounts.fail-run"), "").unwrap();
+    let result = lab.td.post("/api/targets/dbox/recreate", json!({"discard_volumes":["data"]})).await;
+    assert!(!result.status.is_success(), "{}", result.body);
+    assert!(lab.log().contains("docker rm terrarium-dbox"));
+    assert!(!lab.bins.path().join("docker.state.terrarium-dbox").exists());
+    let removed = lab.td.get("/api/audit?action=target.recreate.removed").await.ok().clone();
+    assert_eq!(removed.as_array().unwrap().len(), 1);
+    assert_eq!(removed[0]["actor"], "operator");
+    assert_eq!(removed[0]["detail"]["outcome"], "removed");
+    assert_eq!(removed[0]["detail"]["discarded_volumes"], json!(["data"]));
+    let finished = lab.td.get("/api/audit?action=target.recreate").await.ok().clone();
+    assert_eq!(finished.as_array().unwrap().len(), 1);
+    assert_eq!(finished[0]["detail"]["outcome"], "failed");
+    assert_eq!(finished[0]["detail"]["discarded_volumes"], json!(["data"]));
+    assert!(finished[0]["detail"]["error"].as_str().unwrap().contains("docker.run failed"));
 }
 
 #[tokio::test]

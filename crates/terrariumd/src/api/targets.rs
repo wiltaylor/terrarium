@@ -660,12 +660,25 @@ async fn recreate(
 ) -> ApiResult<Json<Value>> {
     let opts = opts.unwrap_or_default();
     if opts.force || !opts.discard_volumes.is_empty() {
+        crate::links::refuse_for_link("override Docker recreation safety checks")?;
         policy::operator_only(&actor, "overriding Docker recreation safety checks")?;
     }
     let r = load(&state, &actor, name).await?;
     policy::define_target(&actor, r.def.project.as_deref())?;
-    let out = executor::recreate(&state, &r.def, &opts).await?;
-    let detail = out.clone();
+    let out = executor::recreate(&state, &r.def, &opts, actor.label()).await;
+    let detail = match &out {
+        Ok(value) => {
+            let mut detail = value.clone();
+            detail["outcome"] = "succeeded".into();
+            detail
+        }
+        Err(error) => json!({
+            "outcome": "failed",
+            "error": error.message,
+            "force": opts.force,
+            "discarded_volumes": opts.discard_volumes,
+        }),
+    };
     state
         .db
         .write(actor.label(), move |t| {
@@ -677,7 +690,7 @@ async fn recreate(
             )
         })
         .await?;
-    Ok(Json(out))
+    Ok(Json(out?))
 }
 
 /// Lifecycle verbs: an actor that may use the target, or one that may
