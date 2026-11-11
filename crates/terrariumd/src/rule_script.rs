@@ -587,6 +587,17 @@ fn slots(pool: Pool) -> &'static Slots {
     }
 }
 
+/// The slots of `pool` that runs hold now. For the tests, which wait
+/// until a run holds its slot rather than for a fixed time (TER-680).
+#[doc(hidden)]
+pub fn slots_in_use(pool: Pool) -> usize {
+    let total = match pool {
+        Pool::Engine => MAX_RUNNING,
+        Pool::DryRun => DRY_RUN_SLOTS,
+    };
+    total.saturating_sub(slots(pool).all.available_permits())
+}
+
 /// The pool of a script's child.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pool {

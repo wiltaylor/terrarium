@@ -7,6 +7,7 @@ import { type Component, createComponent, createSignal, type JSX, Show } from "s
 import { render } from "solid-js/web";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../../test/wait";
 import type { Card } from "../../api/types";
 import { createCardPeekStore } from "../../stores/cardPeek";
 
@@ -70,7 +71,7 @@ describe("CardPeek", () => {
     mount(() => createComponent(CardPeek, {}));
     expect(document.querySelector(".drawer")).toBeNull();
     cardPeek.open({ project: "terrarium", id: "TER-1" });
-    await vi.waitFor(() => expect(peek()).not.toBeNull());
+    await waitFor(() => expect(peek()).not.toBeNull());
     expect(get).toHaveBeenCalledWith("TER-1");
     expect(peek()!.querySelector("h2")!.textContent).toBe("Card TER-1");
     expect(document.querySelector(".drawer .chip")!.textContent).toBe("review");
@@ -84,9 +85,9 @@ describe("CardPeek", () => {
     get.mockImplementation((id: string) => Promise.resolve(card(id)));
     mount(() => createComponent(CardPeek, {}));
     cardPeek.open({ project: "terrarium", id: "TER-1" });
-    await vi.waitFor(() => expect(peek()).not.toBeNull());
+    await waitFor(() => expect(peek()).not.toBeNull());
     peek()!.querySelector<HTMLAnchorElement>("a.card-key")!.click();
-    await vi.waitFor(() => expect(peek()!.querySelector("h2")!.textContent).toBe("Card TER-2"));
+    await waitFor(() => expect(peek()!.querySelector("h2")!.textContent).toBe("Card TER-2"));
     expect(document.querySelectorAll(".drawer")).toHaveLength(1);
   });
 
@@ -94,7 +95,7 @@ describe("CardPeek", () => {
     get.mockResolvedValue(card("TER-1", { body: "", comments: [] }));
     mount(() => createComponent(CardPeek, {}));
     cardPeek.open({ project: "terrarium", id: "TER-1" });
-    await vi.waitFor(() => expect(peek()).not.toBeNull());
+    await waitFor(() => expect(peek()).not.toBeNull());
     expect(peek()!.textContent).toContain("No description.");
     expect(peek()!.textContent).toContain("No comments.");
     document.querySelector<HTMLButtonElement>('.drawer button[aria-label="Close"]')!.click();
@@ -102,7 +103,7 @@ describe("CardPeek", () => {
     expect(document.querySelector(".drawer")).toBeNull();
 
     cardPeek.open({ project: "terrarium", id: "TER-1" });
-    await vi.waitFor(() => expect(peek()).not.toBeNull());
+    await waitFor(() => expect(peek()).not.toBeNull());
     const board = [...peek()!.querySelectorAll("a")].find((a) => a.textContent === "Open on the board")!;
     expect(board.getAttribute("href")).toBe("/p/terrarium/board?card=TER-1");
     board.click();
@@ -113,7 +114,7 @@ describe("CardPeek", () => {
     get.mockRejectedValue(new Error("no such card"));
     mount(() => createComponent(CardPeek, {}));
     cardPeek.open({ project: "terrarium", id: "TER-404" });
-    await vi.waitFor(() => expect(document.querySelector(".drawer")!.textContent).toContain("no such card"));
+    await waitFor(() => expect(document.querySelector(".drawer")!.textContent).toContain("no such card"));
     expect(document.querySelector(".drawer")!.textContent).not.toContain("Loading the card.");
     expect(peek()).toBeNull();
   });
@@ -135,7 +136,7 @@ describe("CardPeek", () => {
       createComponent(CardPeek, {}),
     ]);
     cardPeek.open({ project: "terrarium", id: "TER-1" });
-    await vi.waitFor(() => expect(peek()).not.toBeNull());
+    await waitFor(() => expect(peek()).not.toBeNull());
     expect(document.querySelectorAll(".drawer")).toHaveLength(2);
 
     escape();

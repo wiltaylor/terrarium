@@ -1012,14 +1012,46 @@ async fn upload_finishes_after_the_client_goes_away() {
     assert!(td.state.join("artifacts").join(&sha).is_file());
 }
 
-async fn wait_for_free_permits(ctx: &terrariumd::store::artifacts::ArtifactCtx, n: usize) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+/// The number of stored rows whose name starts with `prefix`.
+async fn stored_rows(td: &TestDaemon, prefix: &str) -> usize {
+    let list = td
+        .req(
+            Method::GET,
+            "/api/projects/proj/artifacts",
+            None,
+            Some("proj/w1"),
+        )
+        .await;
+    list.ok().to_string().matches(prefix).count()
+}
+
+/// Wait until `n` upload permits are free. The wait fails only after
+/// [`common::WAIT`] in which neither the free permits nor the stored
+/// `dropped-` rows changed, or after 120 s in all. Under merge-job load
+/// (load 20 to 24) the 8 store tasks, one after the other under the digest
+/// lock of their shared blob, took longer than a fixed 10 s (TER-682).
+async fn wait_for_free_permits(
+    td: &TestDaemon,
+    ctx: &terrariumd::store::artifacts::ArtifactCtx,
+    n: usize,
+) {
+    let mark = async || (ctx.free_upload_permits(), stored_rows(td, "dropped-").await);
+    let mut stall = common::Stall::with_limits(
+        mark().await,
+        common::WAIT,
+        std::time::Duration::from_secs(120),
+    );
     while ctx.free_upload_permits() != n {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "free upload permits: {}, want {n}",
-            ctx.free_upload_permits()
-        );
+        if stall.due() {
+            let now = mark().await;
+            assert!(
+                stall.moved(now),
+                "free upload permits: {}, want {n}, held {}, stored rows {}: {stall}",
+                now.0,
+                terrariumd::store::artifacts::MAX_CONCURRENT_UPLOADS - now.0,
+                now.1
+            );
+        }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
@@ -1056,7 +1088,7 @@ async fn uploads_past_the_limit_are_refused_and_permits_come_back() {
         .await;
         assert!(r.is_err(), "upload {i} did not wait for the lock");
     }
-    wait_for_free_permits(&ctx, 0).await;
+    wait_for_free_permits(&td, &ctx, 0).await;
     let body =
         serde_json::to_vec(&json!({"name": "one-more.bin", "data_base64": b64(b"other")})).unwrap();
     let r = raw(
@@ -1079,7 +1111,7 @@ async fn uploads_past_the_limit_are_refused_and_permits_come_back() {
     );
     // The detached tasks finish their rows and give their permits back.
     drop(guard);
-    wait_for_free_permits(&ctx, MAX_CONCURRENT_UPLOADS).await;
+    wait_for_free_permits(&td, &ctx, MAX_CONCURRENT_UPLOADS).await;
     let list = td
         .req(
             Method::GET,

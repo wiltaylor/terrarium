@@ -1577,9 +1577,9 @@ wakes the agent. A worker gets `403` (exit 3): it mails its lead.
 
 ```
 terrarium question ask "<text>" [--option <label>]... [--context <text|-> | --context-file <path>]
-                       [--card <id>] [--urgent | --critical] [--wait [--timeout 2h]]
+                       --card <id> [--urgent | --critical] [--wait [--timeout 2h]]
 terrarium question bundle "<summary>" (--item "<text>"... | --items-file <path|->)
-                       [--context <text|-> | --context-file <path>] [--card <id>] [--urgent | --critical]
+                       [--context <text|-> | --context-file <path>] --card <id> [--urgent | --critical]
                        [--wait [--timeout 2h]]
 terrarium notify "<text>" [--context <text|-> | --context-file <path>] [--card <id>] [--urgent | --critical]
                  [--reply-to <id>] [--wait [--timeout 2h]]

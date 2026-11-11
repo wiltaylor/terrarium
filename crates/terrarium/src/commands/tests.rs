@@ -7002,6 +7002,8 @@ async fn questions_ask_list_update_and_answer() {
             "question",
             "ask",
             "Ship v2 on Friday?",
+            "--card",
+            "TER-1",
             "-o",
             "yes",
             "--option",
@@ -7021,7 +7023,7 @@ async fn questions_ask_list_update_and_answer() {
             Some(
                 json!({"text": "Ship v2 on Friday?", "options": ["yes", "no"],
                         "context": "**CI** is green", "priority": "urgent", "wait": true,
-                        "timeout": "2h"}),
+                        "timeout": "2h", "card": "TER-1"}),
             ),
         )],
     )
@@ -7032,7 +7034,13 @@ async fn questions_ask_list_update_and_answer() {
     // --timeout needs --wait.
     assert!(Cli::try_parse_from(["terrarium", "question", "ask", "x", "--timeout", "2h"]).is_err());
     // The operator does not ask.
-    let r = exec(false, &["question", "ask", "x"], vec![], None).await;
+    let r = exec(
+        false,
+        &["question", "ask", "x", "--card", "TER-1"],
+        vec![],
+        None,
+    )
+    .await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
 
     let out = ok(
@@ -7253,6 +7261,8 @@ async fn question_bundles_ask_show_update_and_answer() {
             "question",
             "bundle",
             "Release plan",
+            "--card",
+            "TER-1",
             "--item",
             "Ship?",
             "--item",
@@ -7263,8 +7273,10 @@ async fn question_bundles_ask_show_update_and_answer() {
             Post,
             mine(),
             vec![],
-            Some(json!({"kind": "bundle", "text": "Release plan",
-                        "items": [{"text": "Ship?"}, {"text": "Region?"}]})),
+            Some(
+                json!({"kind": "bundle", "text": "Release plan", "card": "TER-1",
+                        "items": [{"text": "Ship?"}, {"text": "Region?"}]}),
+            ),
         )],
     )
     .await;
@@ -7283,6 +7295,8 @@ async fn question_bundles_ask_show_update_and_answer() {
             "question",
             "bundle",
             "Release plan",
+            "--card",
+            "TER-1",
             "--items-file",
             "-",
             "--urgent",
@@ -7295,7 +7309,7 @@ async fn question_bundles_ask_show_update_and_answer() {
             mine(),
             vec![],
             Some(
-                json!({"kind": "bundle", "text": "Release plan", "priority": "urgent",
+                json!({"kind": "bundle", "text": "Release plan", "priority": "urgent", "card": "TER-1",
                         "wait": true,
                         "items": [{"text": "Ship?", "options": ["yes", "no"]},
                                   {"text": "Notes?"}]}),
@@ -7327,7 +7341,15 @@ async fn question_bundles_ask_show_update_and_answer() {
     }
     let r = exec(
         true,
-        &["question", "bundle", "-", "--items-file", "-"],
+        &[
+            "question",
+            "bundle",
+            "-",
+            "--items-file",
+            "-",
+            "--card",
+            "TER-1",
+        ],
         vec![],
         Some("x"),
     )
@@ -7335,7 +7357,15 @@ async fn question_bundles_ask_show_update_and_answer() {
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
     let r = exec(
         true,
-        &["question", "bundle", "x", "--items-file", "-"],
+        &[
+            "question",
+            "bundle",
+            "x",
+            "--items-file",
+            "-",
+            "--card",
+            "TER-1",
+        ],
         vec![],
         Some("{"),
     )
@@ -7343,7 +7373,7 @@ async fn question_bundles_ask_show_update_and_answer() {
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
     let r = exec(
         false,
-        &["question", "bundle", "x", "--item", "a"],
+        &["question", "bundle", "x", "--item", "a", "--card", "TER-1"],
         vec![],
         None,
     )
@@ -7602,13 +7632,20 @@ async fn notify_and_the_admin_inbox() {
     assert!(Cli::try_parse_from(["terrarium", "notify", "x", "--urgent", "--critical"]).is_err());
     let out = ok(
         true,
-        &["question", "ask", "Roll back?", "--critical"],
+        &[
+            "question",
+            "ask",
+            "Roll back?",
+            "--critical",
+            "--card",
+            "TER-1",
+        ],
         vec![(201, crit)],
         vec![(
             Post,
             mine(),
             vec![],
-            Some(json!({"text": "Roll back?", "priority": "critical"})),
+            Some(json!({"text": "Roll back?", "priority": "critical", "card": "TER-1"})),
         )],
     )
     .await;

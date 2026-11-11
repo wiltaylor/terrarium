@@ -564,6 +564,42 @@ pub struct DeliverySetArgs {
         "docker_ci_reset_known_hosts",
     ])]
     pub clear_docker_ci: bool,
+    /// The release client target of release jobs (TER-623); `""` removes
+    /// it. It runs release jobs only: not the `--target` of any project
+    #[arg(long)]
+    pub release_target: Option<String>,
+    /// The release command (default `just release::publish`); `""` resets it
+    #[arg(long)]
+    pub release_recipe: Option<String>,
+    /// A secret of the release recipe's env, NAME=@secret:name[.field]
+    /// (GHCR_TOKEN, GH_TOKEN, COSIGN_PRIVATE_KEY, COSIGN_PASSWORD).
+    /// Repeat it; replaces the list
+    #[arg(long = "release-secret")]
+    pub release_secrets: Vec<String>,
+    /// Remove all release secret references
+    #[arg(long, conflicts_with = "release_secrets")]
+    pub clear_release_secrets: bool,
+    /// The release VM SSH destination, for example `root@vm`
+    #[arg(long)]
+    pub docker_release_destination: Option<String>,
+    /// The SSH port of the release VM destination
+    #[arg(long)]
+    pub docker_release_port: Option<u16>,
+    /// The administrator-verified known_hosts line of the release VM
+    #[arg(long)]
+    pub docker_release_known_hosts: Option<String>,
+    /// The release VM key, @secret:name[.field]; the daemon uses it, the
+    /// recipe never gets it
+    #[arg(long)]
+    pub docker_release_key: Option<String>,
+    /// Remove the whole release VM configuration
+    #[arg(long, conflicts_with_all = [
+        "docker_release_destination",
+        "docker_release_port",
+        "docker_release_known_hosts",
+        "docker_release_key",
+    ])]
+    pub clear_docker_release: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -586,6 +622,31 @@ pub enum JobCmd {
     Show { id: String },
     /// Cancel a queued or running job (a running one is killed)
     Cancel { id: String },
+    /// The protected release targets (TER-623): no agent uses or defines
+    /// them, also after a switch or a clear of `release_target`
+    ReleaseTargets,
+    /// Retire the protection of a target that is no longer a release
+    /// target (the operator only, audited)
+    ReleaseRetire {
+        /// The target
+        target: String,
+    },
+    /// Queue a release job on the card of the release (project admin,
+    /// TER-623): the release recipe on the project's release target, at
+    /// the head of `main`, with the release secrets in its env
+    Release {
+        /// The card of the release, for example the version card
+        card: String,
+        /// The repo, when the project has more than one
+        #[arg(long)]
+        repo: Option<String>,
+        /// The release merge commit: the head of `main` on the remote
+        #[arg(long)]
+        commit: Option<String>,
+        /// The planned duration, such as `45m`
+        #[arg(long)]
+        eta: Option<String>,
+    },
     /// The host caps: the most jobs of all projects that run on a host at
     /// once, and the jobs that run on each host now
     Hosts,
@@ -2797,7 +2858,7 @@ pub enum QuestionCmd {
         #[command(flatten)]
         context: QuestionContext,
         /// The card that the question is about
-        #[arg(long)]
+        #[arg(long, required = true)]
         card: Option<String>,
         /// Mark the question urgent
         #[arg(long, conflicts_with = "critical")]
@@ -2837,7 +2898,7 @@ pub enum QuestionCmd {
         #[command(flatten)]
         context: QuestionContext,
         /// The card that the bundle is about
-        #[arg(long)]
+        #[arg(long, required = true)]
         card: Option<String>,
         /// Mark the bundle urgent
         #[arg(long, conflicts_with = "critical")]

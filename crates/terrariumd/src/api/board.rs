@@ -174,10 +174,26 @@ async fn show(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
-) -> ApiResult<Json<Card>> {
+) -> ApiResult<Json<serde_json::Value>> {
     let card = state.db.read(move |c| board::get_card(c, &id)).await?;
     policy::read_project(&actor, &card.project)?;
-    Ok(Json(card))
+    let id = card.id.clone();
+    let mut questions = state
+        .db
+        .read(move |c| {
+            crate::store::questions::list(
+                c,
+                &crate::store::questions::Filter {
+                    card: Some(id),
+                    ..Default::default()
+                },
+            )
+        })
+        .await?;
+    questions.retain(|q| policy::read_questions(&actor, &q.agent, &q.project).is_ok());
+    let mut result = serde_json::json!(card);
+    result["questions"] = serde_json::json!(questions);
+    Ok(Json(result))
 }
 
 async fn update(

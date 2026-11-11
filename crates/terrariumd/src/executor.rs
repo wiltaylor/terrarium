@@ -1962,7 +1962,12 @@ pub async fn usable(state: &Shared, actor: &Actor, name: &str) -> ApiResult<Targ
         .read(move |c| {
             let row = targets::get(c, &n)?;
             let lease = match &agent {
-                Some(a) => leases::standing(c, &n, a)?,
+                Some(a) => {
+                    // TER-623: a release target is for the release job
+                    // and the operator only, whatever the policy or lease.
+                    crate::store::jobs::check_not_release_target(c, &n, "using the target")?;
+                    leases::standing(c, &n, a)?
+                }
                 None => leases::Standing::None,
             };
             Ok((row, lease))
@@ -2185,7 +2190,15 @@ pub async fn start_tool_exec(
     run: ToolRun,
 ) -> ApiResult<Arc<ExecSession>> {
     let n = name.to_owned();
-    let row = state.db.read(move |c| targets::get(c, &n)).await?;
+    let row = state
+        .db
+        .read(move |c| {
+            // TER-623: a tool defined before its target became a release
+            // target (or its machine one) does not run there.
+            crate::store::jobs::check_not_release_target(c, &n, "running a tool on the target")?;
+            targets::get(c, &n)
+        })
+        .await?;
     check_cap(state, actor)?;
     let def = resolved_def(state, &row, Some(actor), None).await?;
     let mut cmd = cmd;

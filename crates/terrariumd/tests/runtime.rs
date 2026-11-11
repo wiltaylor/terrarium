@@ -204,8 +204,12 @@ impl Td {
     /// stays), then start a new daemon with a new supervisor on the same
     /// state dir.
     async fn restart_daemon(&mut self) {
+        // Wait for the tasks of the old daemon and their database calls:
+        // after a bare shutdown a call on the blocking pool still ran, and
+        // the new daemon's open failed with `database is locked` under
+        // load (TER-646, TER-685).
         if let Some(d) = self.daemon.take() {
-            d.shutdown();
+            d.shutdown_and_wait().await;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         self.sup = Arc::new(supervisor(self.dir.path(), self.adapter.clone()));
@@ -1786,6 +1790,10 @@ async fn agent_rpc_write_answers_survive_restart_without_duplicate_mail() {
     );
 }
 
+/// The `wait` of the long polls in [`agent_rpc_tunnel_and_long_poll`], in
+/// seconds: below [`common::HARD_WAIT`] and the longest hold (300 s).
+const LONG_POLL: u64 = 120;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_rpc_tunnel_and_long_poll() {
     let td = Td::start_with(false).await;
@@ -1848,7 +1856,9 @@ async fn agent_rpc_tunnel_and_long_poll() {
 
     // Long-poll: the request waits until new mail arrives. Its wait is
     // long, so an answer before the wait ends came from the mail, also on
-    // a loaded machine.
+    // a loaded machine. A timeout answers an empty list, so the mail in
+    // the answer is the proof. 30 s ran out in a uid 1001 merge pass at
+    // load 30 (TER-685).
     let after = mail[0]["id"].as_str().unwrap().to_owned();
     let s2 = sock.clone();
     let started = Instant::now();
@@ -1857,7 +1867,7 @@ async fn agent_rpc_tunnel_and_long_poll() {
             &s2,
             "http",
             json!({"method": "GET", "path": "/api/mail",
-            "query": {"wait": 30, "cursor": after}}),
+            "query": {"wait": LONG_POLL, "cursor": after}}),
         )
         .await
     });
@@ -1865,9 +1875,12 @@ async fn agent_rpc_tunnel_and_long_poll() {
     assert!(!waiter.is_finished());
     td.post("/api/mail", Some(json!({"to": "demo/bob", "body": "late"})))
         .await;
-    let r = timeout(WAIT, waiter).await.unwrap().unwrap();
+    let r = timeout(common::HARD_WAIT, waiter).await.unwrap().unwrap();
     let took = started.elapsed();
-    assert!(took < Duration::from_secs(30), "the wait ran out: {took:?}");
+    assert!(
+        took < Duration::from_secs(LONG_POLL),
+        "the wait ran out: {took:?}"
+    );
     let mail = r["result"]["body"].as_array().unwrap();
     assert_eq!(mail.len(), 1, "{r}");
     assert_eq!(mail[0]["body"], "late");
@@ -1894,7 +1907,7 @@ async fn agent_rpc_tunnel_and_long_poll() {
             &s3,
             "http",
             json!({"method": "GET", "path": "/api/projects/demo/cards",
-            "query": {"assignee": "me", "wait": 10}}),
+            "query": {"assignee": "me", "wait": LONG_POLL}}),
         )
         .await
     });
@@ -1904,7 +1917,7 @@ async fn agent_rpc_tunnel_and_long_poll() {
         Some(json!({"assignee": "demo/bob"})),
     )
     .await;
-    let r = timeout(WAIT, waiter).await.unwrap().unwrap();
+    let r = timeout(common::HARD_WAIT, waiter).await.unwrap().unwrap();
     assert_eq!(r["result"]["body"].as_array().unwrap().len(), 1, "{r}");
 }
 

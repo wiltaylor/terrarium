@@ -3,6 +3,7 @@ import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../../test/wait";
 import { PROJECT_TABS } from "../../app/nav";
 import type { Agent, AgentEvent, ProjectCounts } from "../../api/types";
 
@@ -98,13 +99,13 @@ describe("ProjectScreen", () => {
   it("moves between tabs with browser back and forward", async () => {
     const { root, history } = mount("/p/demo/tests/1");
     links(root).find((a) => a.textContent === "Dashboard")!.click();
-    await vi.waitFor(() => expect(active(root).map((a) => a.textContent)).toEqual(["Dashboard"]));
+    await waitFor(() => expect(active(root).map((a) => a.textContent)).toEqual(["Dashboard"]));
     links(root).find((a) => a.textContent === "Knowledge")!.click();
-    await vi.waitFor(() => expect(active(root).map((a) => a.textContent)).toEqual(["Knowledge"]));
+    await waitFor(() => expect(active(root).map((a) => a.textContent)).toEqual(["Knowledge"]));
     history.back();
-    await vi.waitFor(() => expect(active(root).map((a) => a.textContent)).toEqual(["Dashboard"]));
+    await waitFor(() => expect(active(root).map((a) => a.textContent)).toEqual(["Dashboard"]));
     history.forward();
-    await vi.waitFor(() => expect(active(root).map((a) => a.textContent)).toEqual(["Knowledge"]));
+    await waitFor(() => expect(active(root).map((a) => a.textContent)).toEqual(["Knowledge"]));
   });
 
   it("scrolls the active tab into view on a phone, including after navigation", async () => {
@@ -118,7 +119,7 @@ describe("ProjectScreen", () => {
     expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
     expect(scrolled.at(-1)?.textContent).toBe("Settings");
     links(root).find((a) => a.textContent === "Board")!.click();
-    await vi.waitFor(() => expect(scrolled.at(-1)?.textContent).toBe("Board"));
+    await waitFor(() => expect(scrolled.at(-1)?.textContent).toBe("Board"));
   });
   it("shows the blocked agents, blocked cards, and open questions on their tabs, in the accessible name", async () => {
     state.agents = [
@@ -130,7 +131,7 @@ describe("ProjectScreen", () => {
     state.counts = { blocked_cards: 1, questions: { open: 3, urgent: 1, critical: 0 } };
     const { root } = mount("/p/demo/board");
     const tab = (label: string) => links(root).find((a) => a.textContent?.startsWith(label))!;
-    await vi.waitFor(() => expect(tab("Board").textContent).toBe("Board1, 1 blocked card"));
+    await waitFor(() => expect(tab("Board").textContent).toBe("Board1, 1 blocked card"));
     expect(state.reads).toEqual(["demo"]);
     expect(tab("Agents").textContent).toBe("Agents2, 2 agents blocked or in error");
     expect(tab("Dashboard").textContent).toBe("Dashboard3, 3 open questions, 1 urgent");
