@@ -636,7 +636,7 @@ mod fake {
         size: Option<(u16, u16)>,
         /// The quota hold, and the turns that wait for its end.
         held: Option<TurnHold>,
-        waiting: Vec<String>,
+        waiting: Vec<super::PendingTurn>,
         /// The bytes that the screen shows: the PTY echo and `feed_screen`.
         screen: Vec<u8>,
         /// `screen` answers as an old runner does.
@@ -894,7 +894,7 @@ mod fake {
             self.lock()
                 .agents
                 .get(&agent)
-                .map(|a| a.waiting.clone())
+                .map(|a| a.waiting.iter().map(|t| t.text.clone()).collect())
                 .unwrap_or_default()
         }
 
@@ -1205,7 +1205,14 @@ mod fake {
                         .lock()
                         .agents
                         .get(&agent)
-                        .map(|a| a.early.clone())
+                        .map(|a| {
+                            let mut items = a.early.clone();
+                            items.extend(a.waiting.iter().cloned().map(|mut t| {
+                                t.source = "hold";
+                                t
+                            }));
+                            items
+                        })
                         .unwrap_or_default(),
                     runner: None,
                 })
@@ -1219,6 +1226,7 @@ mod fake {
             id: String,
         ) -> BoxFuture<'_, Result<bool, SupervisorError>> {
             let supported = source == "supervisor";
+            let held = source == "hold";
             Box::pin(async move {
                 let mut inner = self.lock();
                 let Some(a) = inner.agents.get_mut(&agent) else {
@@ -1226,6 +1234,10 @@ mod fake {
                 };
                 if supported && let Some(index) = a.early.iter().position(|t| t.id == id) {
                     a.early.remove(index);
+                    return Ok(true);
+                }
+                if held && let Some(index) = a.waiting.iter().position(|t| t.id == id) {
+                    a.waiting.remove(index);
                     return Ok(true);
                 }
                 Ok(false)
@@ -1414,7 +1426,7 @@ mod fake {
                         && a.held.is_some()
                         && a.status.is_live()
                     {
-                        a.waiting.push(text);
+                        a.waiting.push(text.into());
                         return Ok(());
                     }
                     // A starting agent, one with early turns, or one that
@@ -1462,7 +1474,7 @@ mod fake {
                         }
                         if status.is_live() {
                             for text in waiting {
-                                self.turn(agent, text)?;
+                                self.turn(agent, text.text)?;
                             }
                         }
                     }
