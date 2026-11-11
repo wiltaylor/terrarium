@@ -34,11 +34,19 @@ export interface HomeApi {
 /** Empty pages still carry a continuation when the daemon filtered candidates. */
 export async function allHome<T>(page: (cursor?: string) => Promise<HomePage<T>>): Promise<T[]> {
   const items: T[] = [];
+  const seen = new Set<string>();
+  let pages = 0;
   let cursor: string | undefined;
   do {
     const result = await page(cursor);
+    pages++;
     items.push(...result.items);
     cursor = result.next ?? undefined;
+    if (cursor !== undefined) {
+      if (seen.has(cursor)) throw new Error("Home pagination returned a repeated cursor.");
+      if (pages >= 500) throw new Error("Home pagination exceeded the 500-page limit.");
+      seen.add(cursor);
+    }
   } while (cursor !== undefined);
   return items;
 }
