@@ -2398,10 +2398,17 @@ mod tests {
             let mut conn = Connection::open_in_memory().unwrap();
             crate::db::migrate(&mut conn).unwrap();
             let db = crate::db::Db::new(conn, crate::events::EventHub::default());
-            let id = db.write("system", |t| {
-                crate::required_templates::check_start(t)?;
-                Ok(t.query_row("SELECT id FROM questions WHERE agent = 'system'", [], |r| r.get::<_, String>(0))?)
-            }).await.unwrap();
+            let id = db
+                .write("system", |t| {
+                    crate::required_templates::check_start(t)?;
+                    Ok(
+                        t.query_row("SELECT id FROM questions WHERE agent = 'system'", [], |r| {
+                            r.get::<_, String>(0)
+                        })?,
+                    )
+                })
+                .await
+                .unwrap();
             db.write("operator", move |t| {
                 let q = if verb == "ack" {
                     acknowledge(t, &id, &mail::Address::Operator, Some("Noted"))?
@@ -2412,10 +2419,16 @@ mod tests {
                 assert_eq!(get(t, &id)?.status, status);
                 let mails: i64 = t.query_row("SELECT count(*) FROM mail", [], |r| r.get(0))?;
                 assert_eq!(mails, 0);
-                let audits: i64 = t.query_row("SELECT count(*) FROM audit WHERE action = ?1", [action], |r| r.get(0))?;
+                let audits: i64 = t.query_row(
+                    "SELECT count(*) FROM audit WHERE action = ?1",
+                    [action],
+                    |r| r.get(0),
+                )?;
                 assert_eq!(audits, 1);
                 Ok(())
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
         }
     }
 
