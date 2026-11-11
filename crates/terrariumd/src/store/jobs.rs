@@ -51,6 +51,7 @@ pub const LIST_MAX: usize = 200;
 pub enum JobKind {
     Validate,
     Merge,
+    E2e,
 }
 
 impl JobKind {
@@ -58,6 +59,7 @@ impl JobKind {
         match self {
             Self::Validate => "validate",
             Self::Merge => "merge",
+            Self::E2e => "e2e",
         }
     }
 
@@ -65,6 +67,7 @@ impl JobKind {
         match s {
             "validate" => Some(Self::Validate),
             "merge" => Some(Self::Merge),
+            "e2e" => Some(Self::E2e),
             _ => None,
         }
     }
@@ -1038,7 +1041,7 @@ pub fn pick(
             JobKind::Merge => {
                 merging.insert(j.project.clone());
             }
-            JobKind::Validate => {
+            JobKind::Validate | JobKind::E2e => {
                 *validating.entry(j.project.clone()).or_default() += 1;
                 if let Some(s) = j.slot {
                     held.entry(j.project.clone()).or_default().insert(s);
@@ -1532,7 +1535,7 @@ pub fn create_onto(t: &mut Tx<'_>, n: NewJob, onto: Option<&str>) -> ApiResult<J
             [card],
             |r| r.get(0),
         )?;
-        if is_group {
+        if is_group && n.kind != JobKind::E2e {
             return Err(ApiError::invalid(
                 "group cards cannot be validated or merged",
             ));

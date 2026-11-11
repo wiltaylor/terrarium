@@ -1858,10 +1858,12 @@ async fn run_inner(
         .target
         .clone()
         .ok_or_else(|| ApiError::invalid("the project has no delivery target"))?;
-    let recipe = def
+    let recipe = if job.kind == JobKind::E2e {
+        "TERRARIUM_DOCKER_CI=1 python3 scripts/docker_ci.py".to_owned()
+    } else { def
         .recipe
         .clone()
-        .ok_or_else(|| ApiError::invalid("the project has no delivery recipe"))?;
+        .ok_or_else(|| ApiError::invalid("the project has no delivery recipe"))? };
     let (project, repo_name, t_name) = (job.project.clone(), job.repo.clone(), target.clone());
     let (repo, row) = state
         .db
@@ -2895,7 +2897,7 @@ async fn merge_secrets(
     job: &Job,
     delivery: &DeliveryDef,
 ) -> ApiResult<Vec<secrets::run_env::Injected>> {
-    if job.kind != JobKind::Merge || delivery.merge_secrets.is_empty() {
+    if !matches!(job.kind, JobKind::Merge | JobKind::E2e) || delivery.merge_secrets.is_empty() {
         return Ok(Vec::new());
     }
     check_merge_refs(delivery)?;
@@ -3297,7 +3299,7 @@ pub(crate) fn failure_block(j: &Job) -> String {
 /// pack (`job.queue_comment`, TER-170).
 pub fn queue_comment(j: &Job, card: &str) -> String {
     match j.kind {
-        JobKind::Validate => format!(
+        JobKind::Validate | JobKind::E2e => format!(
             "Job queue: validate job {} queued. Repo {}, branch {}, commit {}.",
             j.id,
             j.repo,
@@ -3442,6 +3444,12 @@ async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
 /// The end of a job in one write: a `job.verdict` event for each card,
 /// then the coded card flow (the move, the rerun, or the split).
 fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    if j.kind == JobKind::E2e {
+        let group = crate::store::groups::get(t, &j.card)?;
+        let state = if j.state == jobs::JobState::Passed { "done" } else { "failed" };
+        crate::store::groups::step(t, &group, "version branch e2e", Some(state), Some(&end_comment(j, state)), None)?;
+        return Ok(());
+    }
     emit_verdicts(t, j)?;
     // The failed step and the output on each card (TER-614 R3), from the
     // daemon in both flows: the rules quote a template value onto one
@@ -3695,7 +3703,7 @@ pub fn card_view(j: &Job, c: &BatchCard) -> Job {
 fn pass_card(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     set_labels(t, &j.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
     let to = match j.kind {
-        JobKind::Validate => board::role_name(t, &j.project, board::REVIEW, COL_REVIEW)?,
+        JobKind::Validate | JobKind::E2e => board::role_name(t, &j.project, board::REVIEW, COL_REVIEW)?,
         JobKind::Merge => board::role_name(t, &j.project, board::ACCEPTED, COL_ACCEPTED)?,
     };
     let note = end_comment(j, "passed");

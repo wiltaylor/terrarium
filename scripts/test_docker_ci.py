@@ -21,10 +21,21 @@ class DockerGateTests(unittest.TestCase):
             self.assertFalse(docker_ci.passed_exactly(output, name))
 
     def test_worker_cannot_enter_gate(self):
-        with patch.dict(os.environ, {"TERRARIUM_JOB_KIND": "validate", "TERRARIUM_DOCKER_CI": "1"}):
+        with patch.dict(os.environ, {"TERRARIUM_JOB_KIND": "validate", "TERRARIUM_DOCKER_CI": "1", "TERRARIUM_DOCKER_HOST": "unix:///tmp/job/docker.sock"}):
             with patch.object(docker_ci, "gate") as gate:
                 self.assertEqual(docker_ci.main(), 1)
                 gate.assert_not_called()
+
+    def test_release_e2e_enters_gate_without_credentials(self):
+        endpoint = "unix:///tmp/job/docker.sock"
+        with patch.dict(os.environ, {"TERRARIUM_JOB_KIND": "e2e", "TERRARIUM_DOCKER_CI": "1",
+                                     "TERRARIUM_DOCKER_HOST": endpoint}, clear=True), \
+             patch.object(docker_ci, "gate", return_value=0) as gate:
+            self.assertEqual(docker_ci.main(), 0)
+        child = gate.call_args.args[0]
+        self.assertEqual(child["DOCKER_HOST"], endpoint)
+        self.assertNotIn("TERRARIUM_DOCKER_HOST", child)
+        self.assertNotIn("DOCKER_CI_KEY", child)
 
     def test_missing_endpoint_is_a_failure(self):
         with patch.dict(os.environ, {"TERRARIUM_JOB_KIND": "merge", "TERRARIUM_DOCKER_CI": "1"}, clear=True):
