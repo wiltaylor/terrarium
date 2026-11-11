@@ -201,7 +201,7 @@ fn online_zip_restore_is_the_pre_pause_point_not_the_swap_point() {
         .unwrap();
     // Optional production-size exercise. Keep normal CI small. Use real
     // allocated pages and files so local copy and ZIP costs are measurable.
-    let seed_mib: usize = std::env::var("TERRARIUM_BACKUP_SEED_MIB")
+    let seed_mib: usize = std::env::var("BACKUP_TEST_SEED_MIB")
         .ok()
         .map(|s| s.parse().unwrap())
         .unwrap_or(0);
