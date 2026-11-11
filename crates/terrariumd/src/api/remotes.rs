@@ -330,7 +330,8 @@ async fn proxy(
 ) -> ApiResult<Response> {
     operator(&actor)?;
     let r = load(&s, name).await?;
-    let prefix = format!("/api/remotes/{}/proxy", r.name);
+    // Axum's /api nesting strips that prefix from the request URI.
+    let prefix = format!("/remotes/{}/proxy", r.name);
     let path = req
         .uri()
         .path()

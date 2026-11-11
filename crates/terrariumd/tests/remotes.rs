@@ -18,6 +18,7 @@ async fn remote() -> TestDaemon {
     let mut d = TestDaemon::start().await;
     d.boot(Some("127.0.0.1:0"), Some("test-remote-operator"))
         .await;
+    d.project("terra").await;
     d
 }
 
@@ -135,6 +136,7 @@ async fn read_only_and_sysadmin_home_are_refused() {
         .await
         .err(403, "link_forbidden");
     home.get("/api/remotes/lab/proxy/api/projects").await.ok();
+    home.project("terra").await;
     let a = home
         .agent("terra", "admin", json!({"roles":["sysadmin"]}))
         .await;

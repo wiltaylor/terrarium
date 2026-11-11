@@ -25,14 +25,18 @@ pub fn unreachable() -> ApiError {
 
 pub fn connection_error(e: reqwest::Error) -> ApiError {
     use std::error::Error;
-    let mut source: Option<&(dyn Error + 'static)> = Some(&e);
-    while let Some(s) = source {
-        if s.is::<terrarium_host::tls::FingerprintMismatch>() {
-            let mut error = unreachable();
-            error.details = Some(serde_json::json!({"status":"pin_mismatch"}));
-            return error;
-        }
-        source = s.source();
+    fn is_pin(e: &(dyn Error + 'static)) -> bool {
+        if e.is::<terrarium_host::tls::FingerprintMismatch>() { return true; }
+        if let Some(rustls::Error::Other(inner)) = e.downcast_ref::<rustls::Error>()
+            && inner.0.is::<terrarium_host::tls::FingerprintMismatch>() { return true; }
+        if let Some(io) = e.downcast_ref::<std::io::Error>()
+            && let Some(inner) = io.get_ref() && is_pin(inner) { return true; }
+        e.source().is_some_and(is_pin)
+    }
+    if is_pin(&e) {
+        let mut error = unreachable();
+        error.details = Some(serde_json::json!({"status":"pin_mismatch"}));
+        return error;
     }
     unreachable()
 }
