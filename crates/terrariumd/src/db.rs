@@ -2597,7 +2597,7 @@ impl Db {
         F: FnOnce(&Connection) -> ApiResult<T> + Send + 'static,
     {
         let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::links::spawn_blocking(move || {
             let guard = match conn.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
@@ -2634,7 +2634,7 @@ impl Db {
         let link = crate::links::current_link_id()
             .or_else(|| actor.strip_prefix("link:").map(str::to_owned));
         let handle = self.redactor.clone();
-        let (value, events, audits) = tokio::task::spawn_blocking(move || {
+        let (value, events, audits) = crate::links::spawn_blocking(move || {
             let mut guard = match conn.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),

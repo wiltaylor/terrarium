@@ -111,6 +111,11 @@ pub async fn run(
     argv: Vec<String>,
     approval: Option<String>,
 ) -> ApiResult<Outcome> {
+    // Links have no agent grant and cannot use the operator's unapproved
+    // test-run path to a tool, its target, or its secrets.
+    if matches!(actor, Actor::Operator) {
+        crate::policy::operator_only(actor, "running a tool without an agent grant")?;
+    }
     let key = name.to_owned();
     let agent = actor.agent().map(|a| (a.id.clone(), a.project.clone()));
     let (row, granted) = state
