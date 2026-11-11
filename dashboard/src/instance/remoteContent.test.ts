@@ -7,6 +7,7 @@ import { InstanceProvider, createInstance, type Instance } from ".";
 import { createAuthStore } from "../stores/auth";
 import { Markdown } from "../components/Markdown";
 import { SafeHtml } from "../components/SafeHtml";
+import { waitFor } from "../test/wait";
 
 vi.mock("../stores", async () => {
   const { instanceTestStores } = await import("../test/instance");
@@ -34,6 +35,8 @@ describe.each([["Markdown", Markdown], ["SafeHtml", SafeHtml]] as const)("remote
     ["../../../../../../api/remotes", null],
     ["../../../../../../p/demo/board?card=C1", "/remote/lab/p/demo/board?card=C1"],
     ["/api/remotes", null],
+    [`${window.location.origin}/api/remotes`, null],
+    [`${window.location.origin}/p/demo/board`, "/remote/lab/p/demo/board"],
     ["/%61pi/remotes", null],
     ["/remote/lab/%2e%2e/%2e%2e/api/remotes", null],
     ["/p/demo%2f..%2f..%2fapi/board", null],
@@ -45,7 +48,7 @@ describe.each([["Markdown", Markdown], ["SafeHtml", SafeHtml]] as const)("remote
     ["?card=C1#reply", `${page}?card=C1#reply`],
     ["/p/my%20app/board", "/remote/lab/p/my%20app/board"],
     ["#reply", `${page}#reply`],
-  ])("normalizes %s before plain or modified clicks and new-tab navigation", (href, expected) => {
+  ])("normalizes %s before plain or modified clicks and new-tab navigation", async (href, expected) => {
     const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
     const { root, history } = mount(component, `<a href="${href}">go</a>`);
     const anchor = root.querySelector("a")!;
@@ -63,7 +66,7 @@ describe.each([["Markdown", Markdown], ["SafeHtml", SafeHtml]] as const)("remote
     }
     document.addEventListener("click", (e) => e.preventDefault(), { once: true });
     anchor.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    if (component === Markdown && expected) expect(history.get()).toBe(expected);
+    if (component === Markdown && expected) await waitFor(() => expect(history.get()).toBe(expected));
     expect(fetch).not.toHaveBeenCalled();
   });
 
