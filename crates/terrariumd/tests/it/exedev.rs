@@ -388,27 +388,28 @@ fn state(td: &TestDaemon) -> terrariumd::api::Shared {
 }
 
 #[tokio::test]
-async fn workspace_sync_is_refused_for_new_and_stored_exedev_definitions() {
-    let (td, _, _, _, _) = daemon().await;
+async fn workspace_sync_path_failure_on_exedev_explains_the_workaround() {
+    let (td, _, _, _, ssh) = daemon().await;
     let mut definition = target("sync", 3600);
     definition["sync_workspace"] = json!(true);
-    let response = td.post("/api/targets", definition.clone()).await;
-    response.err(422, "invalid");
-    let message = response.body["error"]["message"].as_str().unwrap();
-    assert!(message.contains("cannot write the sandbox workspace path"));
-    assert!(message.contains("sync_workspace = false"));
-    definition["sync_workspace"] = json!(false);
     td.post("/api/targets", definition).await.ok();
     td.patch("/api/targets/sync", json!({"sync_workspace":true}))
         .await
-        .err(422, "invalid");
-    // Simulate a definition saved by a version that allowed exe.dev sync.
-    db(&td).execute("UPDATE targets SET def=json_set(def,'$.sync_workspace',json('true')) WHERE name='sync'", []).unwrap();
+        .ok();
+    td.post_empty("/api/targets/sync/up").await.ok();
+    td.project("p").await;
+    let agent = td.agent("p", "worker", json!({})).await;
+    let agent = agent["id"].as_str().unwrap();
+    // Simulate the remote user's refusal to create the absolute sandbox path.
+    std::fs::write(&ssh, "#!/bin/sh\nexit 1\n").unwrap();
     let response = td
-        .post("/api/targets/sync/exec", json!({"cmd":["true"]}))
+        .post("/api/targets/sync/exec", json!({"agent":agent,"cmd":["true"]}))
         .await;
     response.err(422, "invalid");
+    assert!(response.body.to_string().contains("cannot write the sandbox workspace path"));
     assert!(response.body.to_string().contains("sync_workspace = false"));
+    assert!(response.body.to_string().contains("TER-873"));
+    assert_eq!(td.get("/api/targets/sync").await.ok()["sync_workspace"], true);
 }
 
 async fn started_agent(td: &TestDaemon, project: &str, name: &str) -> String {

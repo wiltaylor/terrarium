@@ -192,12 +192,7 @@ pub fn validate(def: &TargetDef) -> ApiResult<()> {
     if let Some(base) = &def.work_root {
         crate::target_roots::check_base(base)?;
     }
-    if def.sync_workspace && def.kind == TargetKind::Exedev {
-        return Err(ApiError::invalid(
-            "sync_workspace is not supported on exe.dev: the exe.dev user cannot write the sandbox workspace path; set sync_workspace = false or wait for workspace remapping under work_root",
-        ));
-    }
-    if def.sync_workspace && def.kind != TargetKind::Ssh {
+    if def.sync_workspace && !matches!(def.kind, TargetKind::Ssh | TargetKind::Exedev) {
         return Err(ApiError::invalid(
             "sync_workspace requires an ssh or exedev target",
         ));

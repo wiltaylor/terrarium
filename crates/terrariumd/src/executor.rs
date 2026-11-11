@@ -2106,6 +2106,7 @@ async fn start_exec_secrets(
         actor,
         &def,
         cmd.agent.as_deref().or(cmd.holder.as_deref()),
+        row.def.kind == TargetKind::Exedev,
     )
     .await?;
     let resources = state.executor.target_resource_lock(&def).lock_owned().await;
@@ -2551,7 +2552,7 @@ pub async fn start_cp(
     check_cap(state, actor)?;
     no_exec(&row.def)?;
     let def = resolved_def(state, &row, Some(actor), body.agent.as_deref()).await?;
-    let sync = workspace_sync::prepare(state, actor, &def, body.agent.as_deref()).await?;
+    let sync = workspace_sync::prepare(state, actor, &def, body.agent.as_deref(), row.def.kind == TargetKind::Exedev).await?;
     let push = body.direction == CpDirection::Push;
     let (sess, ctl) = ExecSession::new(
         name,
@@ -4280,8 +4281,6 @@ pub async fn resolved_def(
     agent: Option<&str>,
 ) -> ApiResult<TargetDef> {
     if row.def.kind == TargetKind::Exedev {
-        // Check stored definitions before losing the exe.dev kind in SSH resolution.
-        crate::store::targets::validate(&row.def)?;
         return crate::exedev::exec_def(state, &row.def);
     }
     if !is_instance_kind(&row.def) {

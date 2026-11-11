@@ -271,6 +271,7 @@ pub(super) async fn prepare(
     actor: &Actor,
     def: &TargetDef,
     selected: Option<&str>,
+    exedev: bool,
 ) -> ApiResult<Option<Sync>> {
     if !def.sync_workspace {
         return Ok(None);
@@ -354,6 +355,11 @@ pub(super) async fn prepare(
     .collect(4096)
     .await;
     if !mkdir.end().success() {
+        if exedev {
+            return Err(ApiError::invalid(
+                "could not create remote workspace on exe.dev: the exe.dev user cannot write the sandbox workspace path; set sync_workspace = false until workspace remapping under work_root is available (TER-873)",
+            ));
+        }
         return Err(ApiError::invalid("could not create remote workspace"));
     }
     let before = scan(&root).await?;
