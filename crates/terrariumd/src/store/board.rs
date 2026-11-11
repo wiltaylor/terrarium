@@ -2184,12 +2184,12 @@ pub(crate) fn create_card_with_author(
                 (!github_gate::allowed(&github_gate::authors(t, project)?, Some(author)))
                     .then_some(None)
             } else {
-            if github_gate::is_github(&title, &new.labels)
-                && !github_gate::authors(t, project)?.is_empty()
-            {
-                policy::operator_only(actor, "bypassing the GitHub author gate on creation")?;
-            }
-            None
+                if github_gate::is_github(&title, &new.labels)
+                    && !github_gate::authors(t, project)?.is_empty()
+                {
+                    policy::operator_only(actor, "bypassing the GitHub author gate on creation")?;
+                }
+                None
             }
         }
     };

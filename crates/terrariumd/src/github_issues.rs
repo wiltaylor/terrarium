@@ -74,7 +74,11 @@ pub(crate) fn import_webhook(
         }
         match repos.next {
             Some(cursor) => page.cursor = Some(cursor),
-            None => return Err(ApiError::invalid("GitHub repository is not registered in this project")),
+            None => {
+                return Err(ApiError::invalid(
+                    "GitHub repository is not registered in this project",
+                ));
+            }
         }
     }
 }
@@ -367,10 +371,26 @@ mod tests {
         let held = import_verified(&mut t, &actor, "p", "repo", "o/r", issue(2, "eve")).unwrap();
         assert_eq!(held.column, "blocked");
         assert!(held.labels.contains(&"hold".into()));
-        let operator_held = import_verified(&mut t, &Actor::Operator, "p", "repo", "o/r", issue(20, "eve")).unwrap();
+        let operator_held = import_verified(
+            &mut t,
+            &Actor::Operator,
+            "p",
+            "repo",
+            "o/r",
+            issue(20, "eve"),
+        )
+        .unwrap();
         assert_eq!(operator_held.column, "blocked");
         assert!(operator_held.labels.contains(&"hold".into()));
-        let operator_allowed = import_verified(&mut t, &Actor::Operator, "p", "repo", "o/r", issue(21, "wiltaylor")).unwrap();
+        let operator_allowed = import_verified(
+            &mut t,
+            &Actor::Operator,
+            "p",
+            "repo",
+            "o/r",
+            issue(21, "wiltaylor"),
+        )
+        .unwrap();
         assert_eq!(operator_allowed.column, "backlog");
         let again =
             import_verified(&mut t, &actor, "p", "repo", "o/r", issue(2, "wiltaylor")).unwrap();
@@ -402,7 +422,10 @@ mod tests {
         )
         .unwrap();
         let mut malicious = issue(4, "wiltaylor");
-        malicious.title = format!("bad\n\r\u{1b}\u{061c}\u{200e}\u{200f}\u{202e}\u{2066}{}", "x".repeat(1000));
+        malicious.title = format!(
+            "bad\n\r\u{1b}\u{061c}\u{200e}\u{200f}\u{202e}\u{2066}{}",
+            "x".repeat(1000)
+        );
         let imported = import_verified(&mut t, &actor, "p", "repo", "o/r", malicious).unwrap();
         assert_ne!(imported.id, forged.id);
         assert!(!imported.title.chars().any(char::is_control));
