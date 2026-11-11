@@ -69,7 +69,7 @@ export function createBookmarksStore(storage: Pick<Storage, "getItem" | "setItem
   let migrated = false;
   const enqueue = (work: () => Promise<void>) => {
     queue = queue.then(work).catch(async (e: unknown) => {
-      if (remote && e instanceof ApiError && e.status === 403) {
+      if (e instanceof ApiError && e.status === 403) {
         // Not the operator: the bookmarks stay in this browser.
         remote = undefined;
         save(items());
@@ -134,7 +134,7 @@ export function createBookmarksStore(storage: Pick<Storage, "getItem" | "setItem
       const r = remote;
       if (r) void enqueue(async () => {
         await migrate();
-        setItems(await r.add(title.trim(), href, previousHref));
+        if (remote) setItems(await remote.add(title.trim(), href, previousHref));
         setError(null);
       });
       return true;
@@ -146,7 +146,7 @@ export function createBookmarksStore(storage: Pick<Storage, "getItem" | "setItem
       const r = remote;
       if (r) void enqueue(async () => {
         await migrate();
-        setItems(await r.remove(href));
+        if (remote) setItems(await remote.remove(href));
         setError(null);
       });
     },
