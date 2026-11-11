@@ -229,6 +229,59 @@ async fn ops_monitor_gates_ready_and_wakes_on_green_and_red() {
         lab.wakes(&ops).await,
         ["monitor_green", "monitor_red", "monitor_green"]
     );
+
+    // A rename and a deletion both leave an unknown reference, wake the
+    // tracker, and allow an explicit unlink without resolving the old name.
+    for delete in [false, true] {
+        lab.td.wait_status(&agent, "idle").await;
+        lab.post_as(&agent, &ops, "Watching health.").await;
+        lab.parked(&agent).await;
+        let mid = monitor.clone();
+        state(&lab.td).db.write("system", move |t| {
+            if delete {
+                monitors::delete(t, &mid)?;
+            } else {
+                let m = monitors::get(t, &mid)?;
+                let mut def = m.def.clone();
+                def.name = "renamed".into();
+                monitors::update(t, &mid, &def, m.owner, None, chrono::Utc::now())?;
+            }
+            Ok(())
+        }).await.unwrap();
+        let th = lab.thread(&ops).await;
+        assert_eq!(th["status"], "waiting_agent");
+        assert!(th["messages"].as_array().unwrap().iter().any(|m|
+            m["text"].as_str().is_some_and(|s| s.contains("missing (unknown)"))));
+        assert_eq!(lab.wakes(&ops).await.last().unwrap(), "monitor_missing");
+        lab.td.wait_status(&agent, "idle").await;
+        let r = lab.td.post_as(&agent, &format!("/api/threads/{ops}/track"), json!({"monitor": ""})).await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert!(r.body["monitor"].is_null());
+        lab.parked(&agent).await;
+        if !delete {
+            let r = lab.td.post_as(&agent, &format!("/api/threads/{ops}/track"), json!({"monitor": "p:renamed"})).await;
+            assert_eq!(r.status, 200, "{}", r.body);
+        }
+    }
+}
+
+#[tokio::test]
+async fn card_moved_back_after_done_must_reach_review_again() {
+    let lab = lab().await;
+    let (tid, eph) = lab.started("consult", "Reopened work").await;
+    let card = lab.card("p", "Work").await;
+    lab.link(&tid, &format!("p:{card}")).await;
+    lab.track(&eph, &tid).await;
+    lab.parked(&eph).await;
+    lab.mv(&card, "done", None).await;
+    assert_eq!(lab.wakes(&tid).await, ["review"]);
+    lab.td.wait_status(&eph, "idle").await;
+    lab.post_as(&eph, &tid, "Ready.").await;
+    lab.parked(&eph).await;
+    lab.mv(&card, "in_progress", None).await;
+    assert_eq!(lab.wakes(&tid).await, ["review"]);
+    lab.mv(&card, "review", None).await;
+    assert_eq!(lab.wakes(&tid).await, ["review", "review"]);
 }
 
 async fn monitor_sample(lab: &Lab, monitor: &str, status: terrariumd::monitors::parse::Status) {
