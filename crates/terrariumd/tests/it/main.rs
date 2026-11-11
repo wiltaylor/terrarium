@@ -3,6 +3,7 @@
 
 #[path = "../common/mod.rs"]
 mod common;
+mod board_summary_growth;
 mod exedev;
 mod remotes;
 mod ter221_latency;
