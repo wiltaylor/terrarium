@@ -2660,7 +2660,11 @@ impl Db {
         // Capture the call site before constructing the future. An async fn's
         // track_caller would identify the executor, not the write's caller.
         // Source locations are static labels, never actor names or SQL.
-        let caller = queued.map(|_| std::panic::Location::caller());
+        let caller = if queued.is_some() {
+            Some(std::panic::Location::caller())
+        } else {
+            None
+        };
         async move {
             let (value, events, audits) = crate::links::spawn_blocking(move || {
                 let started = queued.map(|_| std::time::Instant::now());
