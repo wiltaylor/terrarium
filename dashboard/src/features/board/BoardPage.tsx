@@ -107,7 +107,7 @@ export function BoardPage(props: { done?: boolean }) {
     const b = board.state.board;
     if (!b) return;
     const lane = lanes().find((l) => l.key === toLane);
-    const cell = lane ? laneCells(lane, column).filter((c) => c.id !== id) : [];
+    const cell = lane ? laneCells(lane, column).filter((c) => c.id !== id && c.kind !== "group") : [];
     const index = columnIndex(cell, cardsIn(b, column).filter((c) => c.id !== id), cellIndex);
     const card = b.cards.find((c) => c.id === id);
     const labels = card ? laneMoveLabels(card.labels, fromLane, toLane) : null;
@@ -335,7 +335,7 @@ export function BoardPage(props: { done?: boolean }) {
                   >
                     {columnTitle(col)}
                     {/* The cards that the filters show, so a phone finds the matches. */}
-                    <span class="nav-count">{cardsIn(b(), col.name).filter(visible).length}</span>
+                    <span class="nav-count">{cardsIn(b(), col.name).filter((c) => c.kind !== "group" && visible(c)).length}</span>
                   </button>
                 )}
               </For>
