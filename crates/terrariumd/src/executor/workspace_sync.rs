@@ -345,36 +345,36 @@ pub(super) async fn prepare(
         if let Some(owned) = owned {
             PathBuf::from(owned).join("workspace")
         } else {
-        let base = if let Some(base) = &def.work_root {
-            base.clone()
-        } else {
-            let home = start_cmd(
-                state,
-                def,
-                &RemoteCmd {
-                    argv: vec!["sh".into(), "-c".into(), "printf '%s' \"$HOME\"".into()],
-                    timeout_secs: Some(30),
-                    ..RemoteCmd::default()
-                },
-            )?
-            .collect(4096)
-            .await;
-            if !home.end().success() {
-                return Err(ApiError::invalid(
-                    "could not discover remote workspace home",
-                ));
-            }
-            String::from_utf8(home.stdout)
-                .map_err(|_| ApiError::invalid("remote workspace home is not UTF-8"))?
-        };
-        let (project, agent) = info
-            .name
-            .split_once('/')
-            .ok_or_else(|| ApiError::invalid("invalid workspace holder"))?;
-        crate::target_roots::check_base(&base)?;
-        crate::store::check_name("project", project)?;
-        crate::store::check_name("agent", agent)?;
-        PathBuf::from(format!("{base}/{project}/{agent}/workspace"))
+            let base = if let Some(base) = &def.work_root {
+                base.clone()
+            } else {
+                let home = start_cmd(
+                    state,
+                    def,
+                    &RemoteCmd {
+                        argv: vec!["sh".into(), "-c".into(), "printf '%s' \"$HOME\"".into()],
+                        timeout_secs: Some(30),
+                        ..RemoteCmd::default()
+                    },
+                )?
+                .collect(4096)
+                .await;
+                if !home.end().success() {
+                    return Err(ApiError::invalid(
+                        "could not discover remote workspace home",
+                    ));
+                }
+                String::from_utf8(home.stdout)
+                    .map_err(|_| ApiError::invalid("remote workspace home is not UTF-8"))?
+            };
+            let (project, agent) = info
+                .name
+                .split_once('/')
+                .ok_or_else(|| ApiError::invalid("invalid workspace holder"))?;
+            crate::target_roots::check_base(&base)?;
+            crate::store::check_name("project", project)?;
+            crate::store::check_name("agent", agent)?;
+            PathBuf::from(format!("{base}/{project}/{agent}/workspace"))
         }
     } else {
         root.clone()
