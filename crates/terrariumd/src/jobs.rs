@@ -2089,6 +2089,7 @@ fn cleanup_job_files(root: &std::path::Path) -> std::io::Result<()> {
             })();
             if let Err(e) = result {
                 error.get_or_insert(e);
+                return;
             }
         }
     }
@@ -2260,7 +2261,7 @@ impl StepCtx<'_> {
             return Err(ApiError::conflict("the job was cancelled"));
         }
         let repo = self.repo.clone();
-        let lifetime = self.lifetime.clone();
+        let lifetime = self.lifetime.as_ref().map(|_| ());
         tokio::task::spawn_blocking(move || {
             let _lifetime = lifetime;
             f(&repo)
@@ -2752,7 +2753,7 @@ async fn steps(
                 (result, damaged)
             })
             .await?;
-        if !damaged || attempt == 1 {
+        if !damaged || attempt == 0 {
             prepared = Some(result);
             break;
         }
@@ -2772,7 +2773,7 @@ async fn steps(
         x.repo = repo;
         x.lifetime = Some(Arc::new(lifetime));
     }
-    drop(guard);
+    let _guard_until_end = guard;
     let (head, batch, base) =
         match prepared.ok_or_else(|| ApiError::internal("the prepare loop did not run"))? {
             Prepared::Ready { head, batch, base } => (head, batch, base),
@@ -3045,7 +3046,7 @@ async fn steps(
     let onto = job.onto().to_owned();
     let to = onto.clone();
     let pushed = x
-        .daemon(move |r| match r.commit_of(&h) {
+        .daemon(move |r| match r.commit_of("refs/job/merge") {
             Ok(Some(c)) if c == h => r.push(&h, &to),
             Ok(_) => Err(git::GitError::Refused(format!(
                 "the job repo does not hold the merge commit {h}"
