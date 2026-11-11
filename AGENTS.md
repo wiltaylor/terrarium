@@ -4,8 +4,8 @@ Instructions for agents that work in this repo.
 
 ## Validation
 
-The worker validates its card before review. The merge queue runs the full
-suite once per batch. There is no `validating` column and no `terrarium card
+The worker validates its card before review. The merge queue only merges.
+The full suite runs on the release branch at the version cut. There is no `validating` column and no `terrarium card
 validate` for card work (operator, 2026-11-07).
 
 ### The card check: the affected tests
@@ -37,8 +37,7 @@ git diff --name-only --no-renames "$(git merge-base origin/next HEAD)" HEAD > /t
 just ci::validate
 ```
 
-It runs, in this order, the same parts as the GitHub CI `check` job
-(`.github/workflows/ci.yml`), and stops at the first failure:
+It runs these checks in order and stops at the first failure:
 
 1. `ci::fmt-check`: `cargo fmt --all --check`
 2. `ci::lint`: clippy over the workspace, warnings fail
@@ -47,7 +46,7 @@ It runs, in this order, the same parts as the GitHub CI `check` job
    suite at the version cut) or a merge job (`TERRARIUM_JOB_KIND=merge`) it
    is followed by `ci::test-unprivileged`: the built terrarium-host test binaries and the
    terrariumd lib and `it` test binaries run again as uid 1001, the user of
-   the release CI, each with a private HOME and the shared /tmp (TER-579,
+   the release gate, each with a private HOME and the shared /tmp (TER-579,
    TER-611). The terrariumd lib and `it` binaries run alone, the others at
    most 2 at a time.
    The merge host needs a passwd entry for uid 1001 (OpenSSH tests need one):
@@ -66,8 +65,11 @@ It runs, in this order, the same parts as the GitHub CI `check` job
 4. `ci::scripts-test`: the Python tests under `scripts/`
 5. `ci::dashboard-check`: `npm run check`, then the dashboard unit tests (`npm run test -- --run`) in `dashboard/`
 
-The merge queue (a batch merge job) runs it on the merged result. Run it
-yourself only when your change touches the build (see above).
+The lead runs it on a clean release branch at the version cut, pushes the
+results with the version label, and adds `tested-at-cut: <test run id>` to
+the release merge only after that run passes. Releases use the local release
+job (`terrarium job release`), not GitHub Actions. Run the full suite for a
+card when its changes touch the build (see above).
 
 Merge jobs enter through `ci::validate-affected` and `ci::merge`. Only the
 cut-time `e2e` job may enter the Docker gate. Merge and validate jobs never
@@ -97,7 +99,7 @@ it writes nextest JUnit to `rust.xml` and doctest libtest JSON to `doctests.json
 Cargo test remains the default because the TER-239 matched-load comparison
 was 642.2s for cargo test versus 791.1s for this nextest profile (2495 passed each).
 
-The recipes set `RUSTUP_TOOLCHAIN=1.97.1` (the toolchain CI pins) and the
+The recipes set `RUSTUP_TOOLCHAIN=1.97.1` (the pinned validation toolchain) and the
 CI cargo env: `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`,
 `CARGO_PROFILE_TEST_DEBUG=0`. They do not run the release, image, or version
 jobs, and they do not run `ci::compat`.
@@ -167,8 +169,8 @@ git checkout -b <card-id-lowercase> origin/next
 4. Move the card to `review` with the command, the commit hash and the pass
    count in the comment, and clear your name.
 5. The lead (or a review agent) reviews; an accepted card goes to `merge_queue`.
-6. The merge queue merges the cards of the column as one batch and runs the
-   full suite; a green batch moves its cards to `accepted`.
+6. The merge queue merges the cards of the column as one batch without tests
+   and moves them to `accepted`. The full suite runs at the version cut.
 
 Never push to `main` or `next` directly, and never force-push a branch.
 Never add a Co-Authored-By or other co-author trailer to a commit.
