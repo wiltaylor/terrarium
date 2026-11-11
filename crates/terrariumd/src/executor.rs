@@ -4280,6 +4280,8 @@ pub async fn resolved_def(
     agent: Option<&str>,
 ) -> ApiResult<TargetDef> {
     if row.def.kind == TargetKind::Exedev {
+        // Check stored definitions before losing the exe.dev kind in SSH resolution.
+        crate::store::targets::validate(&row.def)?;
         return crate::exedev::exec_def(state, &row.def);
     }
     if !is_instance_kind(&row.def) {

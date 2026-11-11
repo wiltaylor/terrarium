@@ -387,6 +387,26 @@ fn state(td: &TestDaemon) -> terrariumd::api::Shared {
     td.daemon.as_ref().unwrap().state.clone()
 }
 
+#[tokio::test]
+async fn workspace_sync_is_refused_for_new_and_stored_exedev_definitions() {
+    let (td, _, _, _, _) = daemon().await;
+    let mut definition = target("sync", 3600);
+    definition["sync_workspace"] = json!(true);
+    let response = td.post("/api/targets", definition.clone()).await;
+    response.err(422, "invalid");
+    let message = response.body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("cannot write the sandbox workspace path"));
+    assert!(message.contains("sync_workspace = false"));
+    definition["sync_workspace"] = json!(false);
+    td.post("/api/targets", definition).await.ok();
+    td.patch("/api/targets/sync", json!({"sync_workspace":true})).await.err(422, "invalid");
+    // Simulate a definition saved by a version that allowed exe.dev sync.
+    db(&td).execute("UPDATE targets SET def=json_set(def,'$.sync_workspace',json('true')) WHERE name='sync'", []).unwrap();
+    let response = td.post("/api/targets/sync/exec", json!({"cmd":["true"]})).await;
+    response.err(422, "invalid");
+    assert!(response.body.to_string().contains("sync_workspace = false"));
+}
+
 async fn started_agent(td: &TestDaemon, project: &str, name: &str) -> String {
     let a = td.agent(project, name, json!({})).await;
     let id = a["id"].as_str().unwrap().to_owned();

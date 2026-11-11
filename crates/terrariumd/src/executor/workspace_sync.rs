@@ -275,8 +275,6 @@ pub(super) async fn prepare(
     if !def.sync_workspace {
         return Ok(None);
     }
-    // Also refuse definitions saved before sync_workspace was disabled.
-    crate::store::targets::validate(def)?;
     check_rsync().await?;
     // An exedev target comes here as the ssh target of its VM
     // (`executor::resolved_def`).
@@ -528,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_defaults_off_and_is_refused() {
+    fn sync_is_opt_in_and_ssh_only() {
         let mut def: TargetDef = serde_json::from_value(json!({
             "name": "fixture", "kind": "ssh", "address": "localhost"
         }))
@@ -541,13 +539,13 @@ mod tests {
                 .is_none()
         );
         def.sync_workspace = true;
-        assert!(crate::store::targets::validate(&def).is_err());
+        assert!(crate::store::targets::validate(&def).is_ok());
         def.kind = TargetKind::Host;
         assert!(
             crate::store::targets::validate(&def)
                 .unwrap_err()
                 .message
-                .contains("disable it")
+                .contains("requires an ssh or exedev target")
         );
     }
 
