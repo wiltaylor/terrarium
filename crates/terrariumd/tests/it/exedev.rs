@@ -399,10 +399,14 @@ async fn workspace_sync_is_refused_for_new_and_stored_exedev_definitions() {
     assert!(message.contains("sync_workspace = false"));
     definition["sync_workspace"] = json!(false);
     td.post("/api/targets", definition).await.ok();
-    td.patch("/api/targets/sync", json!({"sync_workspace":true})).await.err(422, "invalid");
+    td.patch("/api/targets/sync", json!({"sync_workspace":true}))
+        .await
+        .err(422, "invalid");
     // Simulate a definition saved by a version that allowed exe.dev sync.
     db(&td).execute("UPDATE targets SET def=json_set(def,'$.sync_workspace',json('true')) WHERE name='sync'", []).unwrap();
-    let response = td.post("/api/targets/sync/exec", json!({"cmd":["true"]})).await;
+    let response = td
+        .post("/api/targets/sync/exec", json!({"cmd":["true"]}))
+        .await;
     response.err(422, "invalid");
     assert!(response.body.to_string().contains("sync_workspace = false"));
 }
