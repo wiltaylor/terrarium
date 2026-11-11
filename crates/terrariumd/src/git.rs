@@ -3724,7 +3724,8 @@ mod tests {
         let origin = bare_repo(tmp.path());
         let c = checkout(tmp.path(), &origin, &tmp.path().join("cache/repo.git"));
         let r = JobRepo::create(c).unwrap();
-        r.fetch(&["+refs/heads/main:refs/remotes/job/old".into()]).unwrap();
+        r.fetch(&["+refs/heads/main:refs/remotes/job/old".into()])
+            .unwrap();
         let sha = r.commit_of("refs/remotes/job/old").unwrap().unwrap();
         r.set_ref("refs/job/merge", &sha).unwrap();
         r.maintain().unwrap();
@@ -3733,7 +3734,8 @@ mod tests {
         assert!(r.commit_of(&sha).unwrap().is_none());
         r.maintain().unwrap();
         assert!(!r.needs_rebuild());
-        r.fetch(&["+refs/heads/main:refs/remotes/job/new".into()]).unwrap();
+        r.fetch(&["+refs/heads/main:refs/remotes/job/new".into()])
+            .unwrap();
         assert_eq!(r.commit_of("refs/remotes/job/new").unwrap(), Some(sha));
     }
 

@@ -357,7 +357,9 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
         let mut cursor = 0;
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
-            let Some(state) = maintenance_state.upgrade() else { break };
+            let Some(state) = maintenance_state.upgrade() else {
+                break;
+            };
             if let Err(e) = maintain_job_cache(&state.state_dir, &state.db, &mut cursor).await {
                 warn!("job cache maintenance failed: {e}");
             }
@@ -2196,7 +2198,11 @@ fn repo_lock(path: &std::path::Path) -> Arc<RepoLocks> {
 /// One cache per minute, rotating through a sorted inventory. Busy caches
 /// are skipped, not waited on. The blocking task owns both guards even if
 /// the queue task is cancelled. No credential or network access is needed.
-async fn maintain_job_cache(state_dir: &std::path::Path, db: &crate::db::Db, cursor: &mut usize) -> ApiResult<()> {
+async fn maintain_job_cache(
+    state_dir: &std::path::Path,
+    db: &crate::db::Db,
+    cursor: &mut usize,
+) -> ApiResult<()> {
     let root = state_dir.join(JOBS_DIR);
     let paths = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<PathBuf>> {
         let mut paths = Vec::new();
@@ -2239,8 +2245,15 @@ async fn maintain_job_cache(state_dir: &std::path::Path, db: &crate::db::Db, cur
     let Ok(lifetime) = locks.lifetime.clone().try_write_owned() else {
         return Ok(());
     };
-    let project = path.parent().unwrap().parent().unwrap().file_name().unwrap()
-        .to_string_lossy().into_owned();
+    let project = path
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let name = path.file_stem().unwrap().to_string_lossy().into_owned();
     let (repo, busy) = db.read(move |c| {
         let busy: bool = c.query_row(
@@ -2256,20 +2269,31 @@ async fn maintain_job_cache(state_dir: &std::path::Path, db: &crate::db::Db, cur
         let (_prepare, _lifetime) = (prepare, lifetime);
         if let Some(repo) = repo {
             let checkout = git::Checkout {
-                url: repo.url, dest: path, branch: None, depth: None,
-                secret: None, store, deny_local_under: Vec::new(),
+                url: repo.url,
+                dest: path,
+                branch: None,
+                depth: None,
+                secret: None,
+                store,
+                deny_local_under: Vec::new(),
                 timeout: Duration::from_secs(STEP_TIMEOUT),
-                hooks: git::Hooks::default(), origin: git::Origin::default(), fetch_from: None,
+                hooks: git::Hooks::default(),
+                origin: git::Origin::default(),
+                fetch_from: None,
             };
-            if let Some(repo) = git::JobRepo::open(checkout)
-                .map_err(|e| ApiError::internal(e.to_string()))? {
-                repo.maintain().map_err(|e| ApiError::internal(e.to_string()))?;
+            if let Some(repo) =
+                git::JobRepo::open(checkout).map_err(|e| ApiError::internal(e.to_string()))?
+            {
+                repo.maintain()
+                    .map_err(|e| ApiError::internal(e.to_string()))?;
             }
         } else {
             std::fs::remove_dir_all(path).map_err(|e| ApiError::internal(e.to_string()))?;
         }
         Ok(())
-    }).await.map_err(|e| ApiError::internal(e.to_string()))?
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
 }
 
 /// Before starting jobs, remove pre-cache per-job repositories and all
@@ -5102,6 +5126,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cache_maintenance_preserves_recorded_merge_until_jobs_finish() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::new(
+            crate::db::open(&tmp.path().join("state.db")).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        let cache = tmp.path().join("jobs/p/repos/app.git");
+        std::fs::create_dir_all(&cache).unwrap();
+        git_in(&cache, &["init", "--bare", "--template="]);
+        let tree = git_in(&cache, &["mktree"]);
+        let head = git_in(&cache, &["commit-tree", &tree, "-m", "recorded merge"]);
+        git_in(&cache, &["update-ref", "refs/job/merge", &head]);
+        let recorded = head.clone();
+        db.write("system", move |t| {
+            t.execute_batch("INSERT INTO projects(name, created_at, updated_at) VALUES ('p', 'x', 'x');
+                INSERT INTO repos(id, project, name, url, created_at) VALUES ('R', 'p', 'app', 'https://example.org/repo', 'x');")?;
+            t.execute("INSERT INTO jobs(id, project, card, kind, repo, branch, state, head, created_by, created_at)
+                VALUES ('J', 'p', 'C', 'merge', 'app', 'next', 'queued', ?1, 'system', 'x')", [recorded])?;
+            Ok(())
+        }).await.unwrap();
+        let mut cursor = 0;
+        for state in ["queued", "running"] {
+            db.write("system", move |t| {
+                t.execute("UPDATE jobs SET state = ?1 WHERE id = 'J'", [state])?;
+                Ok(())
+            }).await.unwrap();
+            maintain_job_cache(tmp.path(), &db, &mut cursor).await.unwrap();
+            assert_eq!(git_in(&cache, &["rev-parse", "refs/job/merge"]), head);
+            git_in(&cache, &["cat-file", "-e", &head]);
+        }
+        db.write("system", |t| {
+            t.execute("UPDATE jobs SET state = 'passed' WHERE id = 'J'", [])?;
+            Ok(())
+        }).await.unwrap();
+        let locks = repo_lock(&cache);
+        let reader = locks.lifetime.clone().read_owned().await;
+        maintain_job_cache(tmp.path(), &db, &mut cursor).await.unwrap();
+        git_in(&cache, &["cat-file", "-e", &head]);
+        drop(reader);
+        maintain_job_cache(tmp.path(), &db, &mut cursor).await.unwrap();
+        assert!(git_in(&cache, &["for-each-ref"]).is_empty());
+        assert!(!std::process::Command::new("git").current_dir(&cache)
+            .args(["cat-file", "-e", &head]).output().unwrap().status.success());
+    }
+
+    #[tokio::test]
     async fn cache_maintenance_skips_readers_and_removes_unregistered_cache() {
         let tmp = tempfile::tempdir().unwrap();
         let db = crate::db::Db::new(
@@ -5114,10 +5184,14 @@ mod tests {
         let locks = repo_lock(&cache);
         let reader = locks.lifetime.clone().read_owned().await;
         let mut cursor = 0;
-        maintain_job_cache(tmp.path(), &db, &mut cursor).await.unwrap();
+        maintain_job_cache(tmp.path(), &db, &mut cursor)
+            .await
+            .unwrap();
         assert!(cache.join("recorded-commit").exists());
         drop(reader);
-        maintain_job_cache(tmp.path(), &db, &mut cursor).await.unwrap();
+        maintain_job_cache(tmp.path(), &db, &mut cursor)
+            .await
+            .unwrap();
         assert!(!cache.exists());
     }
 
