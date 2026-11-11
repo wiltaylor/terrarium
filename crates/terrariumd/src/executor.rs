@@ -3136,7 +3136,9 @@ pub async fn recreate(state: &Shared, def: &TargetDef, opts: &RecreateOpts) -> A
             ));
         }
         preserved = rt.attached;
-        let container_id = inspected.result.as_ref()
+        let container_id = inspected
+            .result
+            .as_ref()
             .and_then(|r| r["id"].as_str())
             .filter(|id| !id.is_empty())
             .ok_or_else(|| ApiError::conflict("recreate refused: missing container identity"))?

@@ -4775,10 +4775,21 @@ async fn docker_recreate_exact_discard_consent_and_force() {
     assert!(!lab.log().contains("docker rm"));
     // The volume set changes between the consent inspect and final recheck.
     std::fs::write(lab.bins.path().join("docker.mounts.race"), "0").unwrap();
-    std::fs::write(lab.bins.path().join("docker.mounts.next"), json!([
-        {"Type":"volume","Name":"surprise","Destination":"/data"}
-    ]).to_string()).unwrap();
-    lab.td.post("/api/targets/terra-dbox/recreate", json!({"discard_volumes":["data","cache"]})).await.err(409,"conflict");
+    std::fs::write(
+        lab.bins.path().join("docker.mounts.next"),
+        json!([
+            {"Type":"volume","Name":"surprise","Destination":"/data"}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    lab.td
+        .post(
+            "/api/targets/terra-dbox/recreate",
+            json!({"discard_volumes":["data","cache"]}),
+        )
+        .await
+        .err(409, "conflict");
     assert!(!lab.log().contains("docker rm"));
     std::fs::remove_file(lab.bins.path().join("docker.mounts.race")).unwrap();
     std::fs::write(lab.bins.path().join("docker.mounts"), mounts.to_string()).unwrap();
@@ -4977,13 +4988,17 @@ async fn docker_absent_edits_need_only_up_and_attach_holder_workspaces() {
 async fn docker_legacy_edit_refuses_missing_offline_baseline() {
     let lab = Lab::start().await;
     let host = lab.host("lab1").await;
-    lab.target(json!({"name":"dbox","kind":"docker","host":"lab1","image":"alpine:3"})).await;
+    lab.target(json!({"name":"dbox","kind":"docker","host":"lab1","image":"alpine:3"}))
+        .await;
     // Legacy container: no runtime baseline, with a state that is not running
     // or stopped. Offline edits must not silently adopt the new definition.
     host.abort();
     lab.wait_online("lab1", false).await;
     let before = lab.td.get("/api/targets/dbox").await.ok().clone();
-    lab.td.patch("/api/targets/dbox", json!({"image":"alpine:latest"})).await.err(409,"conflict");
+    lab.td
+        .patch("/api/targets/dbox", json!({"image":"alpine:latest"}))
+        .await
+        .err(409, "conflict");
     let after = lab.td.get("/api/targets/dbox").await.ok().clone();
     assert_eq!(before["image"], after["image"]);
     assert_eq!(before["runtime"], after["runtime"]);
