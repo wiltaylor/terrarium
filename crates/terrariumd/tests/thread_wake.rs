@@ -237,29 +237,50 @@ async fn ops_monitor_gates_ready_and_wakes_on_green_and_red() {
         lab.post_as(&agent, &ops, "Watching health.").await;
         lab.parked(&agent).await;
         let mid = monitor.clone();
-        state(&lab.td).db.write("system", move |t| {
-            if delete {
-                monitors::delete(t, &mid)?;
-            } else {
-                let m = monitors::get(t, &mid)?;
-                let mut def = m.def.clone();
-                def.name = "renamed".into();
-                monitors::update(t, &mid, &def, m.owner, None, chrono::Utc::now())?;
-            }
-            Ok(())
-        }).await.unwrap();
+        state(&lab.td)
+            .db
+            .write("system", move |t| {
+                if delete {
+                    monitors::delete(t, &mid)?;
+                } else {
+                    let m = monitors::get(t, &mid)?;
+                    let mut def = m.def.clone();
+                    def.name = "renamed".into();
+                    monitors::update(t, &mid, &def, m.owner, None, chrono::Utc::now())?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
         let th = lab.thread(&ops).await;
         assert_eq!(th["status"], "waiting_agent");
-        assert!(th["messages"].as_array().unwrap().iter().any(|m|
-            m["text"].as_str().is_some_and(|s| s.contains("missing (unknown)"))));
+        assert!(th["messages"].as_array().unwrap().iter().any(|m| {
+            m["text"]
+                .as_str()
+                .is_some_and(|s| s.contains("missing (unknown)"))
+        }));
         assert_eq!(lab.wakes(&ops).await.last().unwrap(), "monitor_missing");
         lab.td.wait_status(&agent, "idle").await;
-        let r = lab.td.post_as(&agent, &format!("/api/threads/{ops}/track"), json!({"monitor": ""})).await;
+        let r = lab
+            .td
+            .post_as(
+                &agent,
+                &format!("/api/threads/{ops}/track"),
+                json!({"monitor": ""}),
+            )
+            .await;
         assert_eq!(r.status, 200, "{}", r.body);
         assert!(r.body["monitor"].is_null());
         lab.parked(&agent).await;
         if !delete {
-            let r = lab.td.post_as(&agent, &format!("/api/threads/{ops}/track"), json!({"monitor": "p:renamed"})).await;
+            let r = lab
+                .td
+                .post_as(
+                    &agent,
+                    &format!("/api/threads/{ops}/track"),
+                    json!({"monitor": "p:renamed"}),
+                )
+                .await;
             assert_eq!(r.status, 200, "{}", r.body);
         }
     }

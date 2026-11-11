@@ -652,7 +652,10 @@ fn all_review_or_later(conn: &Connection, thread: &str) -> ApiResult<bool> {
 pub fn link_monitor(t: &mut Tx<'_>, actor: &Actor, id: &str, key: &str) -> ApiResult<()> {
     // An explicit empty reference unlinks even a renamed/deleted monitor.
     if key.is_empty() {
-        t.execute("UPDATE threads SET monitor = NULL, monitor_done = 0 WHERE id = ?1", [id])?;
+        t.execute(
+            "UPDATE threads SET monitor = NULL, monitor_done = 0 WHERE id = ?1",
+            [id],
+        )?;
         return Ok(());
     }
     let (project, name) = key
@@ -673,12 +676,21 @@ pub fn link_monitor(t: &mut Tx<'_>, actor: &Actor, id: &str, key: &str) -> ApiRe
 pub fn on_monitor_missing(t: &mut Tx<'_>, project: &str, name: &str) -> ApiResult<()> {
     let key = format!("{project}:{name}");
     let ids: Vec<String> = {
-        let mut st = t.prepare("SELECT id FROM threads WHERE monitor = ?1 AND status != 'closed'")?;
-        st.query_map([&key], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?
+        let mut st =
+            t.prepare("SELECT id FROM threads WHERE monitor = ?1 AND status != 'closed'")?;
+        st.query_map([&key], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
     };
     for id in ids {
         t.execute("UPDATE threads SET monitor_done = 0 WHERE id = ?1", [&id])?;
-        insert_message(t, &id, "system", "message", "The linked monitor is missing (unknown). Replace it or unlink it with thread track --monitor ''.", &now())?;
+        insert_message(
+            t,
+            &id,
+            "system",
+            "message",
+            "The linked monitor is missing (unknown). Replace it or unlink it with thread track --monitor ''.",
+            &now(),
+        )?;
         if get_bare(t, &id)?.tracking_at.is_some() {
             wake(t, &id, "monitor_missing")?;
         }
