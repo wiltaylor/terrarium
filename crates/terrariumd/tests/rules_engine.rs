@@ -830,6 +830,7 @@ const FEW: &str = r#"rule "few" {
 
 const MANY: &str = r#"rule "many" {
   on = ["test.ping"]
+  max_per_hour = 100
   card_comment { text = "many {{event.data.n}}" }
 }
 "#;
@@ -867,8 +868,7 @@ async fn the_rate_limits_stop_a_rule_per_hour_and_per_card() {
         "{reason}"
     );
 
-    // The default limit (30) holds, but one card takes at most 10 runs of
-    // a rule in an hour.
+    // A user rule's explicit limit above 10 does not raise its per-card cap.
     td.project("many").await;
     put_rules(&td, "many", MANY).await;
     let card = new_card(&td, "many", json!({"title": "busy"})).await;

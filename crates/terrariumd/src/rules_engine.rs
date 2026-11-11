@@ -17,7 +17,7 @@
 //!   counted over rule and trigger runs) starts no run; a rule runs at most
 //!   `max_per_hour` times in an hour (default [`DEFAULT_MAX_PER_HOUR`]),
 //!   and at most [`MAX_PER_CARD_PER_HOUR`] times for one card unless
-//!   `max_per_hour` explicitly sets both limits. A guard
+//!   a built-in pack rule's `max_per_hour` explicitly sets both limits. A guard
 //!   writes a `skipped` row with the reason.
 //! - **Per-card order.** [`pass`] runs the pending rows in event
 //!   order, then rule order. The rows of one card (its lane) run one after
@@ -471,7 +471,11 @@ pub fn decide(
     }
     let hour_ago = schedules::stamp(now - chrono::Duration::hours(1));
     let max = i64::from(rule.max_per_hour.unwrap_or(DEFAULT_MAX_PER_HOUR));
-    let card_max = rule.max_per_hour.map_or(MAX_PER_CARD_PER_HOUR, i64::from);
+    let card_max = if rules_file::default_pack().rules.iter().any(|r| r == rule) {
+        rule.max_per_hour.map_or(MAX_PER_CARD_PER_HOUR, i64::from)
+    } else {
+        MAX_PER_CARD_PER_HOUR
+    };
     let mut out = Vec::new();
     for card in cards {
         let skip = if count_since(conn, project, &rule.name, None, &hour_ago, max)? >= max {
