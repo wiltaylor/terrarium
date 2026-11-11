@@ -120,6 +120,80 @@ impl Docker {
         Ok(serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
+    async fn compose_config(&self, container: &Value, reference: &str) -> Res<(Value, String)> {
+        let me = std::env::var("HOSTNAME")
+            .map_err(|_| "cannot inspect updater deployment mounts (values hidden)".to_owned())?;
+        let own = self.inspect(&me).await?;
+        let mounts = &own["Mounts"];
+        for required in ["/compose", "/deployment"] {
+            if !mounts
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|m| m["Destination"] == required && m["RW"] == false)
+            {
+                return Err("read-only deployment mounts are missing; recreate the updater with the current compose.yaml; differing keys unavailable (values hidden)".into());
+            }
+        }
+        let labels = &container["Config"]["Labels"];
+        let work = labels["com.docker.compose.project.working_dir"]
+            .as_str()
+            .ok_or_else(|| "missing Compose working directory (values hidden)".to_owned())?;
+        let directory = mounted_path(work, mounts)?;
+        let files = labels["com.docker.compose.project.config_files"]
+            .as_str()
+            .ok_or_else(|| "missing Compose configuration paths (values hidden)".to_owned())?;
+        let project = labels[LABEL_PROJECT]
+            .as_str()
+            .ok_or_else(|| "missing Compose project (values hidden)".to_owned())?;
+        let service = labels[LABEL_SERVICE]
+            .as_str()
+            .ok_or_else(|| "missing Compose service (values hidden)".to_owned())?;
+        let mut cmd = compose_command();
+        cmd.args(["compose", "--project-name", project, "--project-directory"])
+            .arg(&directory)
+            .current_dir(&directory);
+        for file in files.split(',') {
+            cmd.arg("--file").arg(mounted_path(file, mounts)?);
+        }
+        // Compose records explicit --env-file paths. With no explicit
+        // override, the project .env is the source (source checkouts).
+        if let Some(files) = labels["com.docker.compose.project.environment_file"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            for file in files.split(',') {
+                cmd.arg("--env-file").arg(mounted_path(file, mounts)?);
+            }
+        } else {
+            cmd.arg("--env-file").arg(directory.join(".env"));
+        }
+        // The deploy wrapper supplies these independently of .env.
+        if let Some(root) = mounts
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|m| m["Destination"] == "/deployment")
+            .and_then(|m| m["Source"].as_str())
+        {
+            cmd.env("TERRARIUM_DATA_DIR", root);
+        }
+        cmd.env("TERRARIUM_IMAGE", reference);
+        cmd.args(["config", "--format", "json"]);
+        let output = tokio::time::timeout(Duration::from_secs(60), cmd.kill_on_drop(true).output())
+            .await
+            .map_err(|_| "Compose environment resolution timed out (values hidden)".to_owned())?
+            .map_err(|_| "cannot run Compose environment resolution (values hidden)".to_owned())?;
+        // Compose diagnostics and parse errors can contain secrets. Do not
+        // include stdout, stderr, or serde's error in logs or run history.
+        if !output.status.success() {
+            return Err("Compose environment resolution failed; update stopped before swap; differing keys unavailable (values hidden)".into());
+        }
+        let config: Value = serde_json::from_slice(&output.stdout)
+            .map_err(|_| "invalid Compose configuration (values hidden)".to_owned())?;
+        Ok((config, service.to_owned()))
+    }
+
     async fn inspect(&self, id: &str) -> Res<Value> {
         self.ok(Method::GET, &format!("/containers/{}/json", enc(id)), None)
             .await
@@ -429,6 +503,11 @@ fn stop_grace_seconds(value: &str) -> Option<u64> {
 }
 
 fn with_stop_grace(mut spec: Container, config: &Value, service: &str) -> Res<Container> {
+    spec.spec["compose_stop_timeout"] = json!(compose_stop_timeout(config, service)?);
+    Ok(spec)
+}
+
+fn compose_stop_timeout(config: &Value, service: &str) -> Res<u64> {
     let value = &config["services"][service]["stop_grace_period"];
     let seconds = if value.is_null() {
         DEFAULT_STOP_TIMEOUT
@@ -438,8 +517,12 @@ fn with_stop_grace(mut spec: Container, config: &Value, service: &str) -> Res<Co
             .and_then(stop_grace_seconds)
             .ok_or_else(|| "invalid Compose stop grace period (values hidden)".to_owned())?
     };
-    spec.spec["compose_stop_timeout"] = json!(seconds);
-    Ok(spec)
+    Ok(seconds)
+}
+
+fn stop_timeout(container: &Value, config: &Value, service: &str) -> Res<u64> {
+    Ok(compose_stop_timeout(config, service)?
+        .max(container["Config"]["StopTimeout"].as_u64().unwrap_or(0)))
 }
 
 fn with_environment(spec: &Container, env: Vec<String>, image_config: &Value) -> Container {
@@ -659,82 +742,9 @@ impl Engine for Docker {
 
     fn prepare<'a>(&'a self, spec: &'a Container, image: &'a Image) -> BoxFut<'a, Res<Container>> {
         Box::pin(async move {
-            let me = std::env::var("HOSTNAME").map_err(|_| {
-                "cannot inspect updater deployment mounts (values hidden)".to_owned()
-            })?;
-            let own = self.inspect(&me).await?;
-            let mounts = &own["Mounts"];
-            for required in ["/compose", "/deployment"] {
-                if !mounts
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|m| m["Destination"] == required && m["RW"] == false)
-                {
-                    return Err("read-only deployment mounts are missing; recreate the updater with the current compose.yaml; differing keys unavailable (values hidden)".into());
-                }
-            }
-            let labels = &spec.spec["container"]["Config"]["Labels"];
-            let work = labels["com.docker.compose.project.working_dir"]
-                .as_str()
-                .ok_or_else(|| "missing Compose working directory (values hidden)".to_owned())?;
-            let directory = mounted_path(work, mounts)?;
-            let files = labels["com.docker.compose.project.config_files"]
-                .as_str()
-                .ok_or_else(|| "missing Compose configuration paths (values hidden)".to_owned())?;
-            let project = labels[LABEL_PROJECT]
-                .as_str()
-                .ok_or_else(|| "missing Compose project (values hidden)".to_owned())?;
-            let service = labels[LABEL_SERVICE]
-                .as_str()
-                .ok_or_else(|| "missing Compose service (values hidden)".to_owned())?;
-            let mut cmd = compose_command();
-            cmd.args(["compose", "--project-name", project, "--project-directory"])
-                .arg(&directory)
-                .current_dir(&directory);
-            for file in files.split(',') {
-                cmd.arg("--file").arg(mounted_path(file, mounts)?);
-            }
-            // Compose records explicit --env-file paths. With no explicit
-            // override, the project .env is the source (source checkouts).
-            if let Some(files) = labels["com.docker.compose.project.environment_file"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-            {
-                for file in files.split(',') {
-                    cmd.arg("--env-file").arg(mounted_path(file, mounts)?);
-                }
-            } else {
-                cmd.arg("--env-file").arg(directory.join(".env"));
-            }
-            // The deploy wrapper supplies these independently of .env.
-            if let Some(root) = mounts
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|m| m["Destination"] == "/deployment")
-                .and_then(|m| m["Source"].as_str())
-            {
-                cmd.env("TERRARIUM_DATA_DIR", root);
-            }
-            cmd.env("TERRARIUM_IMAGE", &spec.image.reference);
-            cmd.args(["config", "--format", "json"]);
-            let output =
-                tokio::time::timeout(Duration::from_secs(60), cmd.kill_on_drop(true).output())
-                    .await
-                    .map_err(|_| {
-                        "Compose environment resolution timed out (values hidden)".to_owned()
-                    })?
-                    .map_err(|_| {
-                        "cannot run Compose environment resolution (values hidden)".to_owned()
-                    })?;
-            // Compose diagnostics and parse errors can contain secrets. Do not
-            // include stdout, stderr, or serde's error in logs or run history.
-            if !output.status.success() {
-                return Err("Compose environment resolution failed; update stopped before swap; differing keys unavailable (values hidden)".into());
-            }
-            let config: Value = serde_json::from_slice(&output.stdout)
-                .map_err(|_| "invalid Compose configuration (values hidden)".to_owned())?;
+            let (config, service) = self
+                .compose_config(&spec.spec["container"], &spec.image.reference)
+                .await?;
             let destination = self
                 .inspect_image(&image.reference)
                 .await
@@ -745,11 +755,11 @@ impl Engine for Docker {
             with_stop_grace(
                 with_environment(
                     spec,
-                    resolved_env(&config, service)?,
+                    resolved_env(&config, &service)?,
                     &destination["Config"],
                 ),
                 &config,
-                service,
+                &service,
             )
         })
     }
@@ -827,9 +837,20 @@ impl Engine for Docker {
     fn stop<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
         Box::pin(async move {
             let c = self.inspect(id).await?;
-            let t = c["Config"]["StopTimeout"]
-                .as_u64()
-                .unwrap_or(DEFAULT_STOP_TIMEOUT);
+            let reference = c["Config"]["Image"].as_str().unwrap_or_default();
+            let resolved = match self.compose_config(&c, reference).await {
+                Ok((config, service)) => stop_timeout(&c, &config, &service),
+                Err(error) => Err(error),
+            };
+            let t = resolved.unwrap_or_else(|_| {
+                tracing::warn!(
+                    "cannot resolve Compose stop grace period (values hidden); using default"
+                );
+                c["Config"]["StopTimeout"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .max(DEFAULT_STOP_TIMEOUT)
+            });
             self.ok(
                 Method::POST,
                 &format!("/containers/{}/stop?t={t}", enc(id)),
@@ -1053,6 +1074,85 @@ mod tests {
             let config = json!({"services": {SERVICE: {"stop_grace_period": grace}}});
             let prepared = with_stop_grace(original, &config, SERVICE).unwrap();
             assert_eq!(create_body(&prepared.spec, "new")["StopTimeout"], expected);
+        }
+    }
+
+    #[test]
+    fn every_stop_uses_the_larger_container_or_compose_grace() {
+        for (grace, old, expected) in [
+            (json!("650s"), json!(40), 650),
+            (json!("650s"), json!(900), 900),
+            (Value::Null, json!(40), 650),
+            (Value::Null, json!(900), 900),
+            (Value::Null, Value::Null, 650),
+            (json!("10m50s"), json!(40), 650),
+            (json!("1m0.5s"), json!(40), 61),
+        ] {
+            let container = json!({"Config": {"StopTimeout": old}});
+            let config = json!({"services": {SERVICE: {"stop_grace_period": grace}}});
+            assert_eq!(
+                stop_timeout(&container, &config, SERVICE).unwrap(),
+                expected
+            );
+        }
+        assert!(
+            stop_timeout(
+                &json!({"Config": {"StopTimeout": 40}}),
+                &json!({"services": {SERVICE: {"stop_grace_period": "invalid"}}}),
+                SERVICE,
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_deployment_mounts_do_not_block_stop() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for (old, expected) in [(40, 650), (900, 900)] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("docker.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).await.unwrap();
+                        request.push(byte[0]);
+                    }
+                    let request = String::from_utf8(request).unwrap();
+                    let stopping = request.starts_with("POST ");
+                    if stopping {
+                        assert!(request.starts_with(&format!(
+                            "POST /containers/daemon/stop?t={expected} HTTP/1.1\r\n"
+                        )));
+                    }
+                    let body = if request.starts_with("GET /containers/daemon/json ") {
+                        json!({"Config": {"StopTimeout": old, "Image": "old:1"}})
+                    } else {
+                        json!({})
+                    }
+                    .to_string();
+                    stream.write_all(format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ).as_bytes()).await.unwrap();
+                    if stopping {
+                        break;
+                    }
+                }
+            });
+            let docker = Docker {
+                socket,
+                target: None,
+            };
+            tokio::time::timeout(Duration::from_secs(5), docker.stop("daemon"))
+                .await
+                .unwrap()
+                .unwrap();
+            server.await.unwrap();
         }
     }
 
