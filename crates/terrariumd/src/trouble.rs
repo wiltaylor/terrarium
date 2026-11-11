@@ -1347,7 +1347,7 @@ mod tests {
                 commit_sha, file_name, raw_size, raw_gz, created_by, created_at)
             SELECT x, 'run-'||x, 'p', 'check', 'libtest-json', 1, 0, 0, 0, 1,
                 'sha', 'test.json', 0, X'', 'worker', '2026-11-01T00:00:00Z' FROM n;
-            INSERT INTO test_run_cards SELECT pk, CASE WHEN pk%1000=0 THEN 'P-1' ELSE 'other-'||(pk%999) END FROM test_runs;
+            INSERT INTO test_run_cards SELECT pk, CASE WHEN pk%1000=0 THEN 'P-1' ELSE 'other-'||(pk%999) END, 'worker', '2026-11-01T00:00:00Z' FROM test_runs;
             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000)
             INSERT INTO project_trouble SELECT 'project-'||x, '{}' FROM n;
             INSERT INTO project_trouble VALUES ('p', '{}');
