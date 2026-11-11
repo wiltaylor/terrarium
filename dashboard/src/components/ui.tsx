@@ -2,6 +2,7 @@
 
 import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
+import { useInstance } from "../instance";
 import { describeError } from "../lib/errors";
 import { isSelfHostedKind, PROVIDER_COLORS, providerLabel, providerMark } from "./providerLogos";
 
@@ -62,6 +63,8 @@ export function LoadMore(props: { hasMore: boolean; loading?: boolean; onMore: (
 
 /** A delete button that asks once, inline. Browsers in the viewer may block confirm(). */
 export function ConfirmButton(props: { label: string; confirmLabel?: string; onConfirm: () => void | Promise<void>; class?: string; disabled?: boolean }) {
+  const { key } = useInstance();
+  const scope = () => key === "local" ? "" : ` on ${key.slice(7)}`;
   const [asking, setAsking] = createSignal(false);
   return (
     <Show
@@ -73,7 +76,7 @@ export function ConfirmButton(props: { label: string; confirmLabel?: string; onC
       }
     >
       <span class="row confirm">
-        <span class="small">Are you sure?</span>
+        <span class="small">Are you sure{scope()}?</span>
         <button
           class="danger"
           onClick={async () => {
@@ -81,7 +84,7 @@ export function ConfirmButton(props: { label: string; confirmLabel?: string; onC
             await props.onConfirm();
           }}
         >
-          {props.confirmLabel ?? `Yes, ${props.label.toLowerCase()}`}
+          {props.confirmLabel ?? `Yes, ${props.label.toLowerCase()}`}{scope()}
         </button>
         <button onClick={() => setAsking(false)}>Cancel</button>
       </span>
@@ -133,13 +136,15 @@ function useEscape(fn: () => void) {
 
 /** A dialog over the page. `class` adds classes to the dialog box, such as `modal-full` (full screen on a phone). */
 export function Modal(props: { title: string; onClose: () => void; children: JSX.Element; class?: string }) {
+  const { key } = useInstance();
+  const title = () => key === "local" ? props.title : `${props.title} on ${key.slice(7)}`;
   useEscape(() => props.onClose());
   return (
     <Portal>
       <div class="modal-scrim" onClick={() => props.onClose()} />
-      <div class={`modal${props.class ? ` ${props.class}` : ""}`} role="dialog" aria-modal="true" aria-label={props.title}>
+      <div class={`modal${props.class ? ` ${props.class}` : ""}`} role="dialog" aria-modal="true" aria-label={title()}>
         <div class="spread">
-          <h2 style={{ margin: 0 }}>{props.title}</h2>
+          <h2 style={{ margin: 0 }}>{title()}</h2>
           <button class="ghost" onClick={() => props.onClose()} aria-label="Close">
             ✕
           </button>
