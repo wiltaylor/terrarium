@@ -879,18 +879,43 @@ fn checkbox_bundle_cli_preserves_item_types_and_answers() {
         } else { json!({"id": "B1", "kind": "bundle", "items": [{}, {}]}) }})
     });
     let mut c = bin();
-    let o = c.env("TERRARIUM_AGENT", "01AGENT").env("TERRARIUM_SOCKET", &socket)
-        .args(["question", "bundle", "Together", "--card", "TER-1", "--items-file"]).arg(&items_path).output().unwrap();
+    let o = c
+        .env("TERRARIUM_AGENT", "01AGENT")
+        .env("TERRARIUM_SOCKET", &socket)
+        .args([
+            "question",
+            "bundle",
+            "Together",
+            "--card",
+            "TER-1",
+            "--items-file",
+        ])
+        .arg(&items_path)
+        .output()
+        .unwrap();
     assert!(o.status.success(), "{}", text(&o.stderr));
     for selected in [json!([]), json!(["B"]), json!([1, 3])] {
         let answers_path = dir.join("answers.json");
-        std::fs::write(&answers_path, json!([{"options": selected}, {}]).to_string()).unwrap();
-        let o = bin().env("TERRARIUM_AGENT", "01AGENT").env("TERRARIUM_SOCKET", &socket)
-            .args(["admin", "question", "answer", "B1", "--answers-file"]).arg(&answers_path).output().unwrap();
+        std::fs::write(
+            &answers_path,
+            json!([{"options": selected}, {}]).to_string(),
+        )
+        .unwrap();
+        let o = bin()
+            .env("TERRARIUM_AGENT", "01AGENT")
+            .env("TERRARIUM_SOCKET", &socket)
+            .args(["admin", "question", "answer", "B1", "--answers-file"])
+            .arg(&answers_path)
+            .output()
+            .unwrap();
         assert!(o.status.success(), "{}", text(&o.stderr));
     }
     let requests = seen.lock().unwrap();
-    let sent: Vec<_> = requests.iter().filter(|r| r["method"] == "http" && r["params"]["method"] == "POST").map(|r| &r["params"]["body"]).collect();
+    let sent: Vec<_> = requests
+        .iter()
+        .filter(|r| r["method"] == "http" && r["params"]["method"] == "POST")
+        .map(|r| &r["params"]["body"])
+        .collect();
     assert_eq!(sent[0]["items"], items);
     assert_eq!(sent[1]["items"][0]["options"], json!([]));
     assert_eq!(sent[2]["items"][0]["options"], json!(["B"]));
