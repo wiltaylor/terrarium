@@ -665,9 +665,14 @@ mod tests {
             n_old - PRUNE_BATCH
         );
         assert_eq!(answer_rows(&db, "old").await, n_old);
-        let payloads: i64 = db.read(|c| Ok(c.query_row(
+        let payloads: i64 = db
+            .read(|c| {
+                Ok(c.query_row(
             "SELECT count(*) FROM agent_rpc_answers WHERE agent = 'old' AND answer IS NOT NULL",
-            [], |r| r.get(0))?)).await.unwrap();
+            [], |r| r.get(0))?)
+            })
+            .await
+            .unwrap();
         assert_eq!(payloads, 0);
         assert_eq!(answer_rows(&db, "fresh").await, 1);
         assert_eq!(prune_answers(&db, now).await.unwrap(), 0);
@@ -693,10 +698,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(answer_rows(&db, agent).await, 1);
-        assert_eq!(prune_answers(&db, chrono::Utc::now() + ANSWER_MAX_AGE + chrono::Duration::seconds(2)).await.unwrap(), 1);
-        let replay = journaled(&db, &crash_context(), "kept".into(), &crash_params(), async {
-            panic!("compacted request must never execute")
-        }).await.unwrap_err();
+        assert_eq!(
+            prune_answers(
+                &db,
+                chrono::Utc::now() + ANSWER_MAX_AGE + chrono::Duration::seconds(2)
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        let replay = journaled(
+            &db,
+            &crash_context(),
+            "kept".into(),
+            &crash_params(),
+            async { panic!("compacted request must never execute") },
+        )
+        .await
+        .unwrap_err();
         assert_eq!(replay.code, "indeterminate");
     }
 
