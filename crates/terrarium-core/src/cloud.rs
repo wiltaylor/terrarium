@@ -130,7 +130,9 @@ pub fn foundry_models() -> BTreeMap<String, String> {
 /// A single Azure resource DNS label, never a host or URL.
 pub fn foundry_resource_ok(resource: &str) -> bool {
     (2..=64).contains(&resource.len())
-        && resource.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && resource
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
         && resource.starts_with(|c: char| c.is_ascii_alphanumeric())
         && resource.ends_with(|c: char| c.is_ascii_alphanumeric())
 }
@@ -660,7 +662,11 @@ mod tests {
         assert_eq!(get(&env.vars, "ANTHROPIC_FOUNDRY_API_KEY"), Some("fk"));
         assert_eq!(get(&env.vars, "ANTHROPIC_FOUNDRY_BASE_URL"), None);
         assert_eq!(s.models.len(), 3);
-        for (tier, id) in [("opus", "claude-opus-5-5"), ("sonnet", "claude-sonnet-4-6"), ("haiku", "claude-haiku-4-5")] {
+        for (tier, id) in [
+            ("opus", "claude-opus-5-5"),
+            ("sonnet", "claude-sonnet-4-6"),
+            ("haiku", "claude-haiku-4-5"),
+        ] {
             assert_eq!(model_for(&s.models, Some(tier)).as_deref(), Some(id));
         }
         for pair in tier_env(&s.models) {

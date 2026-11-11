@@ -2358,25 +2358,41 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let state = state_at(dir.path());
             let path = crate::login_session::key_path(dir.path(), "foundry-route");
-            let old: crate::login_session::ApiKey = serde_json::from_value(serde_json::json!({"provider": "foundry", "key": "E2E-old-foundry"})).unwrap();
+            let old: crate::login_session::ApiKey = serde_json::from_value(
+                serde_json::json!({"provider": "foundry", "key": "E2E-old-foundry"}),
+            )
+            .unwrap();
             crate::login_session::store_key(dir.path(), "foundry-route", &old).unwrap();
             let calls = Arc::new(AtomicUsize::new(0));
             let seen = calls.clone();
             let unsaved = path.clone();
-            let mock = Router::new().route("/", axum::routing::post(move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
-                let seen = seen.clone();
-                let unsaved = unsaved.clone();
-                async move {
-                    seen.fetch_add(1, Ordering::SeqCst);
-                    assert!(!std::fs::read_to_string(unsaved).unwrap().contains("E2E-new-foundry"));
-                    assert_eq!(headers["x-api-key"], "E2E-new-foundry");
-                    assert_eq!(headers["anthropic-version"], "2023-06-01");
-                    let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                    assert_eq!(request["model"], "custom-haiku");
-                    assert_eq!(request["max_tokens"], 1);
-                    (StatusCode::from_u16(status).unwrap(), [("location", "http://127.0.0.1:1/secret")], "E2E-new-foundry upstream secret")
-                }
-            }));
+            let mock = Router::new().route(
+                "/",
+                axum::routing::post(
+                    move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                        let seen = seen.clone();
+                        let unsaved = unsaved.clone();
+                        async move {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                            assert!(
+                                !std::fs::read_to_string(unsaved)
+                                    .unwrap()
+                                    .contains("E2E-new-foundry")
+                            );
+                            assert_eq!(headers["x-api-key"], "E2E-new-foundry");
+                            assert_eq!(headers["anthropic-version"], "2023-06-01");
+                            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            assert_eq!(request["model"], "custom-haiku");
+                            assert_eq!(request["max_tokens"], 1);
+                            (
+                                StatusCode::from_u16(status).unwrap(),
+                                [("location", "http://127.0.0.1:1/secret")],
+                                "E2E-new-foundry upstream secret",
+                            )
+                        }
+                    },
+                ),
+            );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}/", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
