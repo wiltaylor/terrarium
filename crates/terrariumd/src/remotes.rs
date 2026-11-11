@@ -56,9 +56,13 @@ pub fn check_image_path(method: &Method, path: &str) -> ApiResult<()> {
     }
     // Only the file-serving /a/{artifact-ULID}/{path} route, never JSON APIs.
     // Reuse the strict ambiguity checks before validating the whole route.
-    let rest = path.strip_prefix("/a/").ok_or_else(|| ApiError::bad_request("not an image endpoint"))?;
+    let rest = path
+        .strip_prefix("/a/")
+        .ok_or_else(|| ApiError::bad_request("not an image endpoint"))?;
     check_path(method, &format!("/api/{rest}"), false, true)?;
-    let (id, file) = rest.split_once('/').ok_or_else(|| ApiError::bad_request("missing artifact file"))?;
+    let (id, file) = rest
+        .split_once('/')
+        .ok_or_else(|| ApiError::bad_request("missing artifact file"))?;
     if id.len() != 26 || id.parse::<ulid::Ulid>().is_err() || file.is_empty() {
         return Err(ApiError::bad_request("invalid artifact path"));
     }

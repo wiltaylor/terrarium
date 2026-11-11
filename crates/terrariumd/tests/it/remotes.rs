@@ -857,24 +857,58 @@ async fn image_proxy_rejects_active_types_redirects_and_oversized_bodies() {
         );
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
-    let app = app.route("/api/agents", get(move || { seen.fetch_add(1, Ordering::SeqCst); async { Json(json!([])) } }))
-        .route("/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/fake-svg", get(|| async { ([("content-type", "image/png")], "<svg/>") }))
-        .route("/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/fake-html", get(|| async { ([("content-type", "image/png")], "<html/>") }))
-        .route("/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/fake-bytes", get(|| async { ([("content-type", "image/png")], "png") }))
-        .route("/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/mismatch", get(|| async { ([("content-type", "image/png")], "GIF89a") }));
+    let app = app
+        .route(
+            "/api/agents",
+            get(move || {
+                seen.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!([])) }
+            }),
+        )
+        .route(
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/fake-svg",
+            get(|| async { ([("content-type", "image/png")], "<svg/>") }),
+        )
+        .route(
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/fake-html",
+            get(|| async { ([("content-type", "image/png")], "<html/>") }),
+        )
+        .route(
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/fake-bytes",
+            get(|| async { ([("content-type", "image/png")], "png") }),
+        )
+        .route(
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/mismatch",
+            get(|| async { ([("content-type", "image/png")], "GIF89a") }),
+        );
     let _server = fake(&home, app, &id).await;
-    home.get("/api/remotes/lab/proxy/image/api/agents").await.err(400, "bad_request");
+    home.get("/api/remotes/lab/proxy/image/api/agents")
+        .await
+        .err(400, "bad_request");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    let good = home.get("/api/remotes/lab/proxy/image/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/good").await;
+    let good = home
+        .get("/api/remotes/lab/proxy/image/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/good")
+        .await;
     assert_eq!(good.status, StatusCode::OK);
     assert_eq!(good.headers["content-type"], "image/png");
     assert_eq!(good.headers["x-content-type-options"], "nosniff");
     assert_eq!(good.headers["cache-control"], "no-store");
     assert!(!good.headers.contains_key("set-cookie"));
-    for path in ["svg", "html", "redirect", "large", "fake-svg", "fake-html", "fake-bytes", "mismatch"] {
-        home.get(&format!("/api/remotes/lab/proxy/image/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/{path}"))
-            .await
-            .err(502, "remote_unreachable");
+    for path in [
+        "svg",
+        "html",
+        "redirect",
+        "large",
+        "fake-svg",
+        "fake-html",
+        "fake-bytes",
+        "mismatch",
+    ] {
+        home.get(&format!(
+            "/api/remotes/lab/proxy/image/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/{path}"
+        ))
+        .await
+        .err(502, "remote_unreachable");
     }
     assert!(net::check_image_path(&Method::POST, "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/good").is_err());
     for path in [
@@ -892,9 +926,17 @@ async fn image_proxy_rejects_active_types_redirects_and_oversized_bodies() {
         h.insert(header::CONTENT_TYPE, ct.parse().unwrap());
         assert_eq!(net::image_content_type(&h).unwrap(), ct);
     }
-    for (body, expected) in [(b"\x89PNG\r\n\x1a\n".as_slice(), "image/png"), (b"\xff\xd8\xff".as_slice(), "image/jpeg"), (b"GIF87a".as_slice(), "image/gif"), (b"GIF89a".as_slice(), "image/gif"), (b"RIFF1234WEBP".as_slice(), "image/webp")] {
+    for (body, expected) in [
+        (b"\x89PNG\r\n\x1a\n".as_slice(), "image/png"),
+        (b"\xff\xd8\xff".as_slice(), "image/jpeg"),
+        (b"GIF87a".as_slice(), "image/gif"),
+        (b"GIF89a".as_slice(), "image/gif"),
+        (b"RIFF1234WEBP".as_slice(), "image/webp"),
+    ] {
         assert_eq!(net::image_body_type(body).unwrap(), expected);
-        for end in 0..body.len() { assert!(net::image_body_type(&body[..end]).is_err()); }
+        for end in 0..body.len() {
+            assert!(net::image_body_type(&body[..end]).is_err());
+        }
     }
 }
 
