@@ -12,6 +12,9 @@ use crate::error::{ApiError, ApiResult};
 use crate::store::board;
 use tracing::{debug, warn};
 
+const MERGE_JOB_ENDED_SQL: &str = "SELECT EXISTS(SELECT 1 FROM jobs
+    WHERE id = ?1 AND project = ?2 AND state IN ('passed', 'failed', 'cancelled'))";
+
 fn event(t: &mut Tx<'_>, id: &str, change: &str) -> ApiResult<()> {
     let project = board::project_of(t, id)?;
     t.emit(
@@ -677,9 +680,9 @@ pub fn reconcile_merge_groups(
         }
         let g = get(t, &id)?;
         let job_ended = t.query_row(
-            "SELECT EXISTS(SELECT 1 FROM jobs WHERE 'merge:' || id = ?1
-             AND state IN ('passed', 'failed', 'cancelled'))",
-            [&g.key], |r| r.get::<_, bool>(0),
+            MERGE_JOB_ENDED_SQL,
+            params![g.key.strip_prefix("merge:").unwrap_or_default(), board::project_of(t, &id)?],
+            |r| r.get::<_, bool>(0),
         )?;
         for member in &g.members {
             let card = board::get_card(t, member)?;
@@ -713,4 +716,21 @@ pub fn reconcile_merge_groups(
         }
     }
     Ok(still)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_job_ended_looks_up_the_primary_key() {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {MERGE_JOB_ENDED_SQL}")).unwrap();
+        let plan = q.query_map(params!["job-id", "p"], |r| r.get::<_, String>(3)).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(plan.iter().any(|s| s.contains("SEARCH jobs USING INDEX sqlite_autoindex_jobs_1 (id=?)")), "{plan:?}");
+        assert!(plan.iter().all(|s| !s.starts_with("SCAN jobs")), "{plan:?}");
+    }
 }
