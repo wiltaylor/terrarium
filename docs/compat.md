@@ -1493,7 +1493,7 @@ Claude Max (OAuth), ChatGPT Pro (Codex OAuth), GitHub Copilot Individual
 token was printed or stored, and no login or logout ran against a real
 home. The code is in `crates/terrariumd/src/probes/`; the sanitised answers
 are in `crates/terrariumd/tests/fixtures/probes/`. Run them again with
-`cargo test -p terrariumd --test subscriptions -- --ignored live_probes`
+`cargo test -p terrariumd --test it subscriptions::live_probes -- --ignored`
 (set `GH_TOKEN` for Copilot). All three endpoints are undocumented. Treat
 each as best-effort (PLAN §21).
 

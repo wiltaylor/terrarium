@@ -127,6 +127,8 @@ class Plan:
     # terrariumd test targets, when terrariumd is not tested whole. None:
     # terrariumd is not in the plan.
     daemon_targets: set[str] | None = None
+    # Target -> libtest module filters. Missing target means run it whole.
+    daemon_filters: dict[str, set[str]] = field(default_factory=dict)
     scripts: bool = False
     dashboard: bool = False
 
@@ -143,6 +145,7 @@ class Plan:
             "whole": sorted(self.whole),
             "daemon_targets": None if self.daemon_targets is None else sorted(self.daemon_targets),
             "clippy": self.clippy(),
+            "daemon_filters": {t: sorted(f) for t, f in sorted(self.daemon_filters.items())},
             "scripts": self.scripts,
             "dashboard": self.dashboard,
         }
@@ -263,7 +266,11 @@ def test_sources(path: str, read) -> dict[str, str]:
         except OSError:
             text = ""
         sources[p] = text
-        for child in re.findall(r'#\[path\s*=\s*"([^"]+)"\]\s*mod\s+\w+\s*;', text):
+        for explicit, module in re.findall(
+                r'(?:#\[path\s*=\s*"([^"]+)"\]\s*)?\bmod\s+(\w+)\s*;', text):
+            if not explicit and Path(p).name != "main.rs":
+                continue
+            child = explicit or module + ".rs"
             pending.append(posixpath.normpath(posixpath.join(posixpath.dirname(p), child)))
     return sources
 
@@ -299,6 +306,7 @@ def plan(changed: list[str] | None, crates: dict[str, Crate],
     guard = False
     refs: dict[str, set[str]] | None = None
     sources: dict[str, dict[str, str]] = {}
+    unfiltered: set[str] = set()
     shared: set[str] = set()
     dc = crates.get(DAEMON)
     if embedded is None:
@@ -329,6 +337,23 @@ def plan(changed: list[str] | None, crates: dict[str, Crate],
             # `terrariumd::start` is in lib.rs.
             shared = DAEMON_SHARED | (names - {"api", "store", "start"})
         return refs
+
+    def select(target, paths):
+        # Only direct children have a known, safe libtest module prefix.
+        entry = dc.tests[target]
+        declarations = re.findall(
+            r'(?:#\[path\s*=\s*"([^"]+)"\]\s*)?\bmod\s+(\w+)\s*;',
+            sources[target][entry])
+        scopes = {posixpath.normpath(posixpath.join(posixpath.dirname(entry),
+                  explicit or module + ".rs")): module + "::"
+                  for explicit, module in declarations if module != "common"}
+        if target in unfiltered:
+            return
+        if not paths or any(p not in scopes for p in paths):
+            unfiltered.add(target)
+            pl.daemon_filters.pop(target, None)
+        else:
+            pl.daemon_filters.setdefault(target, set()).update(scopes[p] for p in paths)
 
     for path in paths:
         if not path:
@@ -380,6 +405,10 @@ def plan(changed: list[str] | None, crates: dict[str, Crate],
                 daemon_all = True
             else:
                 daemon = (daemon or set()) | got
+                for t in got:
+                    select(t, [p for p, text in sources[t].items()
+                               if Path(p).stem in (m, m + "s")
+                               or {m, m + "s"} & daemon_refs(text)])
         elif rel.startswith(("tests/common/", "tests/fixtures/")):
             daemon_all = True
         elif rel.startswith("tests/") and rel.endswith(".rs"):
@@ -387,6 +416,8 @@ def plan(changed: list[str] | None, crates: dict[str, Crate],
             targets = {t for t, files in sources.items() if path in files}
             if targets:
                 daemon = (daemon or set()) | targets
+                for t in targets:
+                    select(t, [path])
             else:
                 daemon_all = True
         else:
@@ -437,8 +468,14 @@ def commands(pl: Plan) -> list[list[str]]:
     if pl.daemon_targets is not None:
         cmd = ["cargo", "test", "-p", DAEMON, "--lib", "--bins"]
         for t in sorted(pl.daemon_targets):
+            if t in pl.daemon_filters:
+                continue
             cmd += ["--test", t]
         cmds.append(cmd + ["--no-fail-fast"])
+        for t in sorted(pl.daemon_targets):
+            if t in pl.daemon_filters:
+                cmds.append(["cargo", "test", "-p", DAEMON, "--test", t,
+                             "--no-fail-fast", "--", *sorted(pl.daemon_filters[t])])
     if pl.scripts:
         cmds.append(["just", "ci::scripts-test"])
     if pl.dashboard:
