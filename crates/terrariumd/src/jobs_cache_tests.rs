@@ -7,7 +7,7 @@ fn prepare_faults() -> &'static Mutex<HashMap<PathBuf, PrepareFault>> {
     FAULTS.get_or_init(Mutex::default)
 }
 
-fn prepare_fault(repo: &git::JobRepo) {
+pub(super) fn prepare_fault(repo: &git::JobRepo) {
     let fault = prepare_faults().lock().unwrap().get(repo.path()).cloned();
     if let Some(fault) = fault {
         fault(repo);
@@ -19,7 +19,7 @@ fn cleanup_faults() -> &'static Mutex<HashMap<PathBuf, std::io::ErrorKind>> {
     FAULTS.get_or_init(Mutex::default)
 }
 
-fn cleanup_fault(path: &std::path::Path) -> std::io::Result<()> {
+pub(super) fn cleanup_fault(path: &std::path::Path) -> std::io::Result<()> {
     match cleanup_faults().lock().unwrap().remove(path) {
         Some(kind) => Err(std::io::Error::new(kind, "injected cleanup failure")),
         None => Ok(()),

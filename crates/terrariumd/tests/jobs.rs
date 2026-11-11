@@ -4645,7 +4645,7 @@ async fn ter275_two_ordinary_recipes_overlap_in_the_same_cached_repo() {
     let jobs = lab.until_idle().await;
     assert_eq!(jobs.len(), 2, "{jobs:#?}");
     assert!(jobs.iter().all(|j| j["state"] == "passed"), "{jobs:#?}");
-    fixtures.assert_none_left();
+    fixtures.assert_none_left().await;
 }
 
 /// A crash can leave a lock or broken ref in the daemon's persistent
