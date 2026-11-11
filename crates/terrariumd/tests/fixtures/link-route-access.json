@@ -825,6 +825,12 @@
     },
     {
       "source": "api/jobs.rs",
+      "registration": "\"/projects/{name}/jobs/cleanup\",post(cleanup_logs)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
       "registration": "\"/jobs/{id}\",get(show).delete(cancel)",
       "access": "other",
       "cases": []
