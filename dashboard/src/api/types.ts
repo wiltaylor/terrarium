@@ -298,6 +298,7 @@ export interface HarnessReport {
 
 /** docs/api.md §5. */
 export interface Project {
+  home_board_columns?: import("./home").HomeBoardColumns;
   name: string;
   description?: string;
   card_prefix: string;
@@ -2570,6 +2571,9 @@ export interface StartLogin {
 export interface ApiKeyInput {
   provider: string;
   key: string;
+  key_id?: string;
+  cloud?: { region?: string; models?: Record<string, string> };
+  test_connection?: boolean;
   /**
    * `zai`: `coding` (GLM Coding Plan, the default) or `api` (pay as you go).
    * `moonshot` (pi only): `coding` (Kimi Code, the default), `coding-cn`, `api` (Open Platform), or `api-cn`.
