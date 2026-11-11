@@ -7361,7 +7361,13 @@ The default is false. Install `rsync` on the target. The daemon image includes
 it. This uses the same SSH credential, port and host-key policy as exec.
 
 Before exec, run or cp, Terrarium mirrors the caller's workspace to the same
-absolute path on the target, creating it if needed. An operator must select
+absolute path on the target, creating it if needed.
+On exe.dev the mirror is `<work_root>/<project>/<agent>`, or
+`<remote home>/<project>/<agent>` when no `work_root` is set. Workspace
+paths in cwd, command arguments, environment values and copy paths are
+translated to that mirror for exec, run and checkout. Remote error text
+contains remote paths, which differ from the sandbox paths. On SSH targets
+the mirror remains at the same absolute path. An operator must select
 an agent. After a normally exited command (including nonzero exit) or a
 completed copy, it stages the remote tree locally and pulls changes and
 deletions before reporting the session done. Killed or lost commands leave
