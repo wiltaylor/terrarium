@@ -7034,7 +7034,13 @@ async fn questions_ask_list_update_and_answer() {
     // --timeout needs --wait.
     assert!(Cli::try_parse_from(["terrarium", "question", "ask", "x", "--timeout", "2h"]).is_err());
     // The operator does not ask.
-    let r = exec(false, &["question", "ask", "x", "--card", "TER-1"], vec![], None).await;
+    let r = exec(
+        false,
+        &["question", "ask", "x", "--card", "TER-1"],
+        vec![],
+        None,
+    )
+    .await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
 
     let out = ok(
@@ -7267,8 +7273,10 @@ async fn question_bundles_ask_show_update_and_answer() {
             Post,
             mine(),
             vec![],
-            Some(json!({"kind": "bundle", "text": "Release plan", "card": "TER-1",
-                        "items": [{"text": "Ship?"}, {"text": "Region?"}]})),
+            Some(
+                json!({"kind": "bundle", "text": "Release plan", "card": "TER-1",
+                        "items": [{"text": "Ship?"}, {"text": "Region?"}]}),
+            ),
         )],
     )
     .await;
@@ -7333,7 +7341,15 @@ async fn question_bundles_ask_show_update_and_answer() {
     }
     let r = exec(
         true,
-        &["question", "bundle", "-", "--items-file", "-", "--card", "TER-1"],
+        &[
+            "question",
+            "bundle",
+            "-",
+            "--items-file",
+            "-",
+            "--card",
+            "TER-1",
+        ],
         vec![],
         Some("x"),
     )
@@ -7341,7 +7357,15 @@ async fn question_bundles_ask_show_update_and_answer() {
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
     let r = exec(
         true,
-        &["question", "bundle", "x", "--items-file", "-", "--card", "TER-1"],
+        &[
+            "question",
+            "bundle",
+            "x",
+            "--items-file",
+            "-",
+            "--card",
+            "TER-1",
+        ],
         vec![],
         Some("{"),
     )
@@ -7608,7 +7632,14 @@ async fn notify_and_the_admin_inbox() {
     assert!(Cli::try_parse_from(["terrarium", "notify", "x", "--urgent", "--critical"]).is_err());
     let out = ok(
         true,
-        &["question", "ask", "Roll back?", "--critical", "--card", "TER-1"],
+        &[
+            "question",
+            "ask",
+            "Roll back?",
+            "--critical",
+            "--card",
+            "TER-1",
+        ],
         vec![(201, crit)],
         vec![(
             Post,
