@@ -276,6 +276,28 @@ fn close_stale(t: &mut Tx<'_>, id: &str, before: &str, after: Duration) -> ApiRe
 /// One pass: the stale closes first, then the reminders. Errors are
 /// logged.
 pub async fn sweep(state: &Shared) {
+    // Requests with an answer-only close proposal need no further operator
+    // action after 24 hours. Recheck in the write transaction so a reply wins.
+    if let Some(cut) = before(Duration::from_secs(86_400)) {
+        let read_cut = cut.clone();
+        let ids = state.db.read(move |c| {
+            let mut st = c.prepare("SELECT id FROM threads WHERE request = 1 AND status = 'waiting_operator' AND close_proposal IS NOT NULL AND updated_at < ?1")?;
+            Ok(st.query_map([read_cut], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
+        }).await;
+        match ids {
+            Ok(ids) => for id in ids {
+                let cut = cut.clone();
+                if let Err(e) = state.db.write("system", move |t| {
+                    let th = threads::get_bare(t, &id)?;
+                    if th.request && th.status == ThreadStatus::WaitingOperator && th.close_proposal.is_some() && th.updated_at < cut {
+                        threads::confirm_close(t, &id)?;
+                    }
+                    Ok(())
+                }).await { warn!("cannot auto-confirm a request close: {e}"); }
+            },
+            Err(e) => warn!("cannot read proposed request closes: {e}"),
+        }
+    }
     let tuning = state.lifecycle.threads.tuning();
     if let Some(cut) = before(tuning.stale_after) {
         let c2 = cut.clone();

@@ -146,6 +146,14 @@ fn print_thread(c: &Ctx, v: &Value) {
 
 pub async fn thread(ctx: &Ctx, cmd: &ThreadCmd) -> anyhow::Result<()> {
     match cmd {
+        ThreadCmd::Reopen { id, reason } => {
+            let v = ctx.api.post(&format!("{}/reopen", path(id)), Some(json!({"reason": reason}))).await?;
+            ctx.emit(&v, print_thread)
+        }
+        ThreadCmd::Swap { id, template, reason } => {
+            let v = ctx.api.post(&format!("{}/swap", path(id)), Some(json!({"reason": reason, "template": template}))).await?;
+            ctx.emit(&v, print_thread)
+        }
         ThreadCmd::New {
             template,
             topic,

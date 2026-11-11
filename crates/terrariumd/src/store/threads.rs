@@ -164,6 +164,9 @@ pub struct Handoff {
 /// A thread, as the API shows it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Thread {
+    /// A request mediated by a request agent, rather than direct mail.
+    #[serde(default)]
+    pub request: bool,
     pub id: String,
     /// The outcome of an agent that ended while this thread was open.
     #[serde(default)]
@@ -308,6 +311,7 @@ fn row_named(r: &Row<'_>, mut name: impl FnMut(&str) -> String) -> rusqlite::Res
     let agent: Option<String> = r.get("agent")?;
     let report_to: Option<String> = r.get("report_to")?;
     Ok(Thread {
+        request: r.get("request")?,
         id: r.get("id")?,
         agent_end_outcome: r.get("agent_end_outcome")?,
         topic: r.get("topic")?,
@@ -1089,6 +1093,29 @@ fn insert_message(
         params![id, thread, author, kind, text, at],
     )?;
     Ok(id)
+}
+
+/// Replace an ended request agent. Keep every message and linked card.
+pub fn restart_request(t: &mut Tx<'_>, id: &str, by: &str, reason: &str, template: &str, reopening: bool) -> ApiResult<Thread> {
+    let th = get_bare(t, id)?;
+    if !th.request || (th.status == ThreadStatus::Closed) != reopening {
+        return Err(ApiError::conflict("the request status changed"));
+    }
+    let reason = check_text("reason", reason, MAX_MESSAGE)?;
+    let reason = t.redact_string(reason);
+    let at = now();
+    let verb = if reopening { "Reopened" } else { "Agent replaced" };
+    insert_message(t, id, by, "message", &format!("{verb}: {reason}"), &at)?;
+    t.execute(
+        "UPDATE threads SET status = 'waiting_agent', template = ?2, agent = NULL,
+         agent_end_outcome = NULL, close_proposal = NULL, handoff = NULL, closed_at = NULL,
+         closed_by = NULL, close_reason = NULL, reminded_at = NULL, updated_at = ?3 WHERE id = ?1",
+        params![id, template, at],
+    )?;
+    let th = get(t, id)?;
+    t.audit("thread.restart", id, th.project(), json!({"by": by, "reopening": reopening, "template": template}))?;
+    emit(t, &th, "restarted")?;
+    Ok(th)
 }
 
 /// One message of thread `thread` by its ID.
