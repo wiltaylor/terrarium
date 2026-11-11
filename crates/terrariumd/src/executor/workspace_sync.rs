@@ -869,7 +869,8 @@ mod tests {
             );
         }
         let config = fixture.path().join("sshd_config");
-        std::fs::write(&config, format!("Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nAuthorizedKeysFile {}.pub\nStrictModes no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nPermitRootLogin yes\nPidFile {}/pid\n", key.display(), key.display(), fixture.path().display())).unwrap();
+        let pam = if std::env::var_os("TERRARIUM_TEST_SSH_USER").is_some() { "yes" } else { "no" };
+        std::fs::write(&config, format!("Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nAuthorizedKeysFile {}.pub\nStrictModes no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM {pam}\nPermitRootLogin yes\nPidFile {}/pid\n", key.display(), key.display(), fixture.path().display())).unwrap();
         let mut server = tokio::process::Command::new(sshd)
             .args(["-D", "-e", "-f"])
             .arg(config)
@@ -977,6 +978,9 @@ mod tests {
             ],
             ..RemoteCmd::default()
         };
+        if std::env::var_os("TERRARIUM_TEST_SSH_USER").is_some() {
+            cmd.argv[2] = format!("test \"$(id -u)\" != 0 && test ! -w /work && {}", cmd.argv[2]);
+        }
         sync.translate_cmd(&mut cmd);
         assert_eq!(cmd.cwd.as_deref(), remote.to_str());
         assert_eq!(
