@@ -3285,7 +3285,7 @@ in `answer_options`. The answer mail and CLI show both choices and text.
 The dashboard renders checkboxes and a text box in every question view.
 CLI answers use repeatable `--select <label|number-from-1>` or `options`
 arrays in `--answers-file` (numbers there are also from 1). With no text or
-`--select`, `admin question answer <id>` submits an empty checkbox answer.
+`--select`, `admin question answer <id> --select-none` submits an empty checkbox answer.
 
 ```json
 {"id":"01JQ...","agent":"01M5...","agent_name":"demo/lead","project":"demo",

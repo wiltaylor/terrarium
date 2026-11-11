@@ -321,7 +321,9 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
             }
             let me = ctx.me().await?;
             let mut body = json!({"text": ctx.text(text)?});
-            body["multi_select"] = json!(multi_select);
+            if *multi_select {
+                body["multi_select"] = json!(true);
+            }
             super::set_list(&mut body, "options", options);
             super::set_opt(&mut body, "context", context_value(ctx, context)?);
             super::set_opt(&mut body, "card", card.clone());
@@ -612,6 +614,7 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
             text,
             option,
             selected,
+            select_none,
             answers_file,
         } => {
             if let Some(f) = answers_file {
@@ -632,19 +635,23 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
                     ));
                 });
             }
-            let q = ctx.api.get(&path(id), vec![]).await?;
             if text.is_none()
                 && option.is_none()
                 && selected.is_empty()
-                && q["multi_select"] != true
+                && !select_none
             {
                 return Err(CliError::usage(
                     "give the answer as text, --option <label|n>, or both; answer a bundle \
                      with --answers-file",
                 ));
             }
+            let q = if !selected.is_empty() {
+                ctx.api.get(&path(id), vec![]).await?
+            } else {
+                Value::Null
+            };
             let mut body = json!({});
-            if q["multi_select"] == true || !selected.is_empty() {
+            if *select_none || !selected.is_empty() {
                 body["options"] = json!(
                     selected
                         .iter()

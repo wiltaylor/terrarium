@@ -910,6 +910,9 @@ fn checkbox_cli_answers_send_zero_one_and_several_selections() {
         c.env("TERRARIUM_AGENT", "01AGENT")
             .env("TERRARIUM_SOCKET", &socket)
             .args(["admin", "question", "answer", "Q1"]);
+        if selected.is_empty() {
+            c.arg("--select-none");
+        }
         for label in selected {
             c.args(["--select", label]);
         }

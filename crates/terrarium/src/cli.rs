@@ -3040,10 +3040,13 @@ pub enum AdminQuestionCmd {
         /// A checked option, label or number from 1. Repeat for multi-select
         #[arg(long = "select", conflicts_with = "option")]
         selected: Vec<String>,
+        /// Submit a checkbox answer with no checked options
+        #[arg(long, conflicts_with_all = ["option", "selected"])]
+        select_none: bool,
         /// The answers of a bundle as JSON (`-` reads stdin), one for each
         /// item, in order: `[{"option": "<label or number from 1>",
         /// "answer": "<text>"}, ...]`; a plain string is a text answer
-        #[arg(long, conflicts_with_all = ["text", "option", "selected"])]
+        #[arg(long, conflicts_with_all = ["text", "option", "selected", "select_none"])]
         answers_file: Option<String>,
     },
     /// Link a question, a bundle, or a notice to a card of its project, or
