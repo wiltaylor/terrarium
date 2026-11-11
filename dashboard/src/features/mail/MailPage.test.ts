@@ -32,7 +32,7 @@ it("opens mail in time order with an unread boundary, quotes and previews the re
   expect([...root.querySelectorAll(".thread-post-body strong")].map((e) => e.textContent)).toEqual(["earlier", "later"]);
   await waitFor(() => expect(root.querySelectorAll('[role="separator"]')).toHaveLength(1));
   const posts = root.querySelectorAll(".thread-post");
-  expect(posts[1]!.previousElementSibling?.getAttribute("role")).toBe("separator");
+  expect(posts[1]!.parentElement!.previousElementSibling?.getAttribute("role")).toBe("separator");
   [...posts[0]!.querySelectorAll("button")].find((b) => b.textContent === "Quote")!.click();
   expect(root.querySelector<HTMLTextAreaElement>('[aria-label="Reply"]')!.value).toBe("> **earlier**\n\n");
   [...root.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Preview")!.click();
