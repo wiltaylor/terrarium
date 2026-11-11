@@ -2,8 +2,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
 
-use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::body::{Body, Bytes};
+use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::Response;
 use axum::{Json, Router, routing::get};
 use common::TestDaemon;
@@ -197,25 +197,50 @@ async fn read_only_and_sysadmin_home_are_refused() {
     home.post_as(id, "/api/remotes", json!({"name":"no"}))
         .await
         .err(403, "forbidden");
-    assert_eq!(home.delete("/api/remotes/lab").await.ok()["revoked"],true);
-    assert_eq!(remote.get("/api/links?revoked=true").await.ok()[0]["status"],"revoked");
+    assert_eq!(home.delete("/api/remotes/lab").await.ok()["revoked"], true);
+    assert_eq!(
+        remote.get("/api/links?revoked=true").await.ok()[0]["status"],
+        "revoked"
+    );
 }
 
 #[tokio::test]
 async fn json_body_cap_and_read_timeout_are_enforced() {
-    let app = Router::new().route("/body",get(|| async { "123456789" }))
-        .route("/slow",get(|| async {
-            let first = futures_util::stream::iter([Ok::<Bytes,std::io::Error>(Bytes::from_static(b"x"))]);
-            Response::new(Body::from_stream(first.chain(futures_util::stream::pending())))
-        }));
+    let app = Router::new()
+        .route("/body", get(|| async { "123456789" }))
+        .route(
+            "/slow",
+            get(|| async {
+                let first = futures_util::stream::iter([Ok::<Bytes, std::io::Error>(
+                    Bytes::from_static(b"x"),
+                )]);
+                Response::new(Body::from_stream(
+                    first.chain(futures_util::stream::pending()),
+                ))
+            }),
+        );
     let server = serve(app).await;
     let c = reqwest::Client::new();
-    let response = c.get(format!("{}/body",server.url)).send().await.unwrap();
-    assert!(net::limited(response,8,Duration::from_secs(1)).await.is_err());
-    let response = c.get(format!("{}/body",server.url)).send().await.unwrap();
-    assert_eq!(net::limited(response,9,Duration::from_secs(1)).await.unwrap().len(),9);
-    let response = c.get(format!("{}/slow",server.url)).send().await.unwrap();
-    assert!(net::limited(response,9,Duration::from_millis(5)).await.is_err());
+    let response = c.get(format!("{}/body", server.url)).send().await.unwrap();
+    assert!(
+        net::limited(response, 8, Duration::from_secs(1))
+            .await
+            .is_err()
+    );
+    let response = c.get(format!("{}/body", server.url)).send().await.unwrap();
+    assert_eq!(
+        net::limited(response, 9, Duration::from_secs(1))
+            .await
+            .unwrap()
+            .len(),
+        9
+    );
+    let response = c.get(format!("{}/slow", server.url)).send().await.unwrap();
+    assert!(
+        net::limited(response, 9, Duration::from_millis(5))
+            .await
+            .is_err()
+    );
 }
 
 #[test]
@@ -468,10 +493,22 @@ async fn event_websocket_and_sse_stream_and_removal() {
         .post("/api/projects", json!({"name":"ws-event"}))
         .await
         .ok();
-    remote.daemon.as_ref().unwrap().state.db.write("operator",|t| {
-        t.emit(terrariumd::events::EventDraft::new("test","remote test event",json!({})))?;
-        Ok(())
-    }).await.unwrap();
+    remote
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("operator", |t| {
+            t.emit(terrariumd::events::EventDraft::new(
+                "test",
+                "remote test event",
+                json!({}),
+            ))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let frame = tokio::time::timeout(Duration::from_secs(10), ws.next())
         .await
         .unwrap()

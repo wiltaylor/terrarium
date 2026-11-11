@@ -363,8 +363,14 @@ async fn proxy(
     if let Err(e) = &result {
         mark(&s, &r, failure_status(e)).await?;
     }
-    let mut response = match result { Ok(response) => response, Err(error) => error.into_response() };
-    response.headers_mut().insert("x-terrarium-remote", r.name.parse().map_err(|_| net::unreachable())?);
+    let mut response = match result {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    };
+    response.headers_mut().insert(
+        "x-terrarium-remote",
+        r.name.parse().map_err(|_| net::unreachable())?,
+    );
     Ok(response)
 }
 
