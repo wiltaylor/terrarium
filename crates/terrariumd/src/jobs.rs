@@ -3072,7 +3072,10 @@ fn check_release_owner(
     let fields = [
         ("release_target", old.release_target != def.release_target),
         ("release_recipe", old.release_recipe != def.release_recipe),
-        ("release_secrets", old.release_secrets != def.release_secrets),
+        (
+            "release_secrets",
+            old.release_secrets != def.release_secrets,
+        ),
         ("docker_release", old.docker_release != def.docker_release),
     ];
     let changed: Vec<&str> = fields.iter().filter(|(_, c)| *c).map(|(f, _)| *f).collect();
@@ -4338,7 +4341,10 @@ mod tests {
         std::fs::create_dir(&left).unwrap();
         let status = recipe_sh()
             .env("HOME", dir.path())
-            .env("PATH", format!("{}/bin:/usr/bin:/bin", dir.path().display()))
+            .env(
+                "PATH",
+                format!("{}/bin:/usr/bin:/bin", dir.path().display()),
+            )
             .env("DOCKER_CONFIG", dir.path())
             .env("TMPDIR", dir.path())
             .args(["-c", &release_home(&recipe)])

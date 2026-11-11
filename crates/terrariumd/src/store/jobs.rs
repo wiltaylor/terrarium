@@ -1946,7 +1946,12 @@ pub fn machine_key(conn: &Connection, def: &TargetDef) -> String {
             .map_or_else(|| h.to_owned(), |x| x.id);
         return format!("host:{id}");
     }
-    if let Some(a) = def.address.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+    if let Some(a) = def
+        .address
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
         return format!("ssh:{}:{}", address_key(a), def.port.unwrap_or(22));
     }
     format!("name:{}", def.name)
