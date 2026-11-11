@@ -28,8 +28,8 @@ it("shows each condition, target, action and resolved wake recipient", () => {
   const root = mount(fixture());
   expect(root.textContent).toContain("All conditions");
   expect(root.querySelectorAll("li")).toHaveLength(2);
-  expect(root.querySelectorAll("li")[0].textContent).toContain("met");
-  expect(root.querySelectorAll("li")[1].textContent).toContain("not met");
+  expect(root.querySelectorAll("li")[0]!.textContent).toContain("met");
+  expect(root.querySelectorAll("li")[1]!.textContent).toContain("not met");
   expect(root.textContent).toContain("Target: review · current: working");
   expect(root.textContent).toContain("ready");
   expect(root.querySelector("strong")?.textContent).toBe("ready");
