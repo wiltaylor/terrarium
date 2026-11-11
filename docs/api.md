@@ -3421,6 +3421,13 @@ Cards:
   updates too. A `PATCH` with the same card changes nothing.
 - The ask (`POST /api/agents/{id}/questions`) and a `PATCH` give `422
   invalid` for a card of another project, or an unknown card.
+- Changing the card in a `PATCH` gives `409 conflict` if another open
+  question or bundle of the asking agent shares the new card or Inbox
+  thread. The operator and sysadmins may relink despite this conflict.
+  Missing required work context gives `422 invalid`. Text-only edits and
+  unchanged cards do not recheck legacy context or duplicate questions.
+  A notice losing its card must be critical (`422 invalid` otherwise),
+  including when its priority changes.
 
 Bundles:
 
