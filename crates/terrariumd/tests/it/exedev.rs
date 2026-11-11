@@ -388,6 +388,33 @@ fn state(td: &TestDaemon) -> terrariumd::api::Shared {
 }
 
 #[tokio::test]
+async fn workspace_sync_uses_exedev_work_root_and_pulls_output() {
+    let (td, _, _, _, _) = daemon().await;
+    let base = td.dir.path().join("remote-work");
+    let mut definition = target("sync", 3600);
+    definition["sync_workspace"] = json!(true);
+    definition["work_root"] = json!(base);
+    td.post("/api/targets", definition).await.ok();
+    td.post_empty("/api/targets/sync/up").await.ok();
+    td.project("p").await;
+    let agent = td.agent("p", "worker", json!({})).await;
+    let id = agent["id"].as_str().unwrap();
+    let local = state(&td).work_dir.join("p/worker");
+    std::fs::create_dir_all(local.join("repo")).unwrap();
+    std::fs::write(local.join("repo/input"), "source").unwrap();
+    let response = td.post("/api/targets/sync/exec", json!({
+        "agent": id,
+        "cwd": local.join("repo"),
+        "cmd": ["sh", "-c", format!("cat input > {}/repo/output; pwd", local.display())]
+    })).await;
+    let session = response.ok()["session_id"].as_str().unwrap();
+    let (stdout, end) = output(&td, "sync", session).await;
+    assert_eq!(end["code"], 0, "{end}");
+    assert_eq!(stdout.trim(), base.join("p/worker/repo").to_str().unwrap());
+    assert_eq!(std::fs::read_to_string(local.join("repo/output")).unwrap(), "source");
+}
+
+#[tokio::test]
 async fn workspace_sync_reports_mirror_creation_failure() {
     let (td, _, _, _, ssh) = daemon().await;
     let mut definition = target("sync", 3600);

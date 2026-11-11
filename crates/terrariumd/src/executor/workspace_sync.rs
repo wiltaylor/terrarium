@@ -342,18 +342,28 @@ pub(super) async fn prepare(
         let base = if let Some(base) = &def.work_root {
             base.clone()
         } else {
-            let home = start_cmd(state, def, &RemoteCmd {
-                argv: vec!["sh".into(), "-c".into(), "printf '%s' \"$HOME\"".into()],
-                timeout_secs: Some(30),
-                ..RemoteCmd::default()
-            })?.collect(4096).await;
+            let home = start_cmd(
+                state,
+                def,
+                &RemoteCmd {
+                    argv: vec!["sh".into(), "-c".into(), "printf '%s' \"$HOME\"".into()],
+                    timeout_secs: Some(30),
+                    ..RemoteCmd::default()
+                },
+            )?
+            .collect(4096)
+            .await;
             if !home.end().success() {
-                return Err(ApiError::invalid("could not discover remote workspace home"));
+                return Err(ApiError::invalid(
+                    "could not discover remote workspace home",
+                ));
             }
             String::from_utf8(home.stdout)
                 .map_err(|_| ApiError::invalid("remote workspace home is not UTF-8"))?
         };
-        let (project, agent) = info.name.split_once('/')
+        let (project, agent) = info
+            .name
+            .split_once('/')
             .ok_or_else(|| ApiError::invalid("invalid workspace holder"))?;
         crate::target_roots::check_base(&base)?;
         crate::store::check_name("project", project)?;
@@ -415,7 +425,11 @@ impl Sync {
         while let Some(pos) = rest.find(local.as_ref()) {
             let end = pos + local.len();
             result.push_str(&rest[..pos]);
-            if rest[end..].chars().next().is_none_or(|c| c == '/' || c.is_whitespace() || "'\";:)=|&".contains(c)) {
+            if rest[end..]
+                .chars()
+                .next()
+                .is_none_or(|c| c == '/' || c.is_whitespace() || "'\";:)=|&".contains(c))
+            {
                 result.push_str(&remote);
             } else {
                 result.push_str(&local);
@@ -840,13 +854,19 @@ mod tests {
             .arg("-un")
             .output()
             .unwrap();
-        let user = std::env::var("TERRARIUM_TEST_SSH_USER").unwrap_or_else(|_| {
-            String::from_utf8(user.stdout).unwrap().trim().to_owned()
-        });
+        let user = std::env::var("TERRARIUM_TEST_SSH_USER")
+            .unwrap_or_else(|_| String::from_utf8(user.stdout).unwrap().trim().to_owned());
         if std::env::var_os("TERRARIUM_TEST_SSH_USER").is_some() {
-            std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-            assert!(std::process::Command::new("chown")
-                .arg(&user).arg(&remote).status().unwrap().success());
+            std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            assert!(
+                std::process::Command::new("chown")
+                    .arg(&user)
+                    .arg(&remote)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
         }
         let config = fixture.path().join("sshd_config");
         std::fs::write(&config, format!("Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nAuthorizedKeysFile {}.pub\nStrictModes no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nPermitRootLogin yes\nPidFile {}/pid\n", key.display(), key.display(), fixture.path().display())).unwrap();
@@ -950,19 +970,40 @@ mod tests {
         };
         let mut cmd = RemoteCmd {
             cwd: Some(local.display().to_string()),
-            argv: vec!["sh".into(), "-c".into(), format!("pwd > {}/mapped", local.display())],
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                format!("pwd > {}/mapped", local.display()),
+            ],
             ..RemoteCmd::default()
         };
         sync.translate_cmd(&mut cmd);
         assert_eq!(cmd.cwd.as_deref(), remote.to_str());
-        assert_eq!(sync.translate(&format!("{}-other/file", local.display())), format!("{}-other/file", local.display()));
-        let plan = ssh_plan("ssh", &def, Some(&key), &fixture.path().join("known_hosts"), &cmd).unwrap();
+        assert_eq!(
+            sync.translate(&format!("{}-other/file", local.display())),
+            format!("{}-other/file", local.display())
+        );
+        let plan = ssh_plan(
+            "ssh",
+            &def,
+            Some(&key),
+            &fixture.path().join("known_hosts"),
+            &cmd,
+        )
+        .unwrap();
         let mut command = tokio::process::Command::new(plan.program);
         command.args(plan.args);
-        let mapped = pump_process(command, None, Some(Duration::from_secs(30)), None).collect(4096).await;
+        let mapped = pump_process(command, None, Some(Duration::from_secs(30)), None)
+            .collect(4096)
+            .await;
         assert!(mapped.end().success(), "{:?}", mapped.end());
         sync.pull().await.unwrap();
-        assert_eq!(std::fs::read_to_string(local.join("mapped")).unwrap().trim(), remote.to_str().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(local.join("mapped"))
+                .unwrap()
+                .trim(),
+            remote.to_str().unwrap()
+        );
         let stage = tempfile::tempdir().unwrap();
         let stats = sync.download(stage.path()).await.unwrap();
         assert!(
