@@ -2742,7 +2742,7 @@ while True:
         .await
         .ok();
     for kind in ["merge", "validate"] {
-        lab.branch(kind, "next", &[("ordinary", "yes\n")]);
+        lab.branch(kind, "next", &[(kind, "yes\n")]);
         let card = lab.card(kind, kind).await;
         lab.td
             .post_as(&lab.lead, &format!("/api/cards/{card}/{kind}"), json!({}))
