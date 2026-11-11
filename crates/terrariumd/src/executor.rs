@@ -5507,7 +5507,9 @@ mod tests {
         let v = c.env["TERRARIUM_GIT_SSH_KEY"].clone();
         assert!(!v.contains(['\n', '\r']), "{v}");
         assert_eq!(
-            base64::engine::general_purpose::STANDARD.decode(&v).unwrap(),
+            base64::engine::general_purpose::STANDARD
+                .decode(&v)
+                .unwrap(),
             key.as_bytes()
         );
         assert_eq!(
