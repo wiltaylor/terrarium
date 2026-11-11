@@ -585,7 +585,7 @@ fn deps(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {
 /// Dependencies that are neither done nor archived.
 fn unmet(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {
     let mut stmt = conn.prepare(
-        "SELECT depends_on FROM card_dependency_unmet WHERE card = ?1 ORDER BY depends_on",
+        "SELECT depends_on FROM card_dependency_unmet WHERE card = ?1 ORDER BY depends_on LIMIT 129",
     )?;
     let rows = stmt
         .query_map([id], |r| r.get(0))?

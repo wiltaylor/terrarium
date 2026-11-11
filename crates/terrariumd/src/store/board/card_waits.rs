@@ -249,16 +249,16 @@ pub fn act(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiResu
                 }
             }
         } else if let Some(comment) = action.comment {
-            insert_comment(t, id, &author_of(t, actor), &comment)?;
+            add_comment(t, actor, id, &comment)?;
         }
     }
     if action.wake || broken || refused {
-        let target = row
-            .assignee
-            .as_deref()
+        let target = [row.assignee.as_deref(), Some(setter.as_str())]
+            .into_iter()
+            .flatten()
             .filter(|a| *a != "operator")
-            .or((setter != "operator").then_some(setter.as_str()));
-        let to = match target.and_then(|a| mail::resolve(t, a, None).ok()) {
+            .find_map(|a| mail::resolve(t, a, None).ok());
+        let to = match target {
             Some(to) => to,
             None => Address::Project(row.project.clone()),
         };
