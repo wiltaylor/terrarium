@@ -1,6 +1,6 @@
 //! TER-62: two daemons and hostile upstreams, without external network access.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-mod common;
+use crate::common;
 
 use axum::body::{Body, Bytes};
 use axum::extract::FromRequestParts;
