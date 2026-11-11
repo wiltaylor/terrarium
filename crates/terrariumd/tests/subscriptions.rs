@@ -61,7 +61,10 @@ async fn litellm_is_claude_only_and_keeps_the_key_private() {
         .await;
     assert_eq!(r.status, 422);
     let r = td.get("/api/subscriptions/lite").await;
-    assert_eq!(r.ok()["selfhosted"]["base_url"], "https://proxy.example.com");
+    assert_eq!(
+        r.ok()["selfhosted"]["base_url"],
+        "https://proxy.example.com"
+    );
     // Rotating the key without supplying a URL validates the stored endpoint.
     td.post(
         "/api/subscriptions/lite/api-key",
