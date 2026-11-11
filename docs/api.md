@@ -4900,8 +4900,11 @@ Concurrent changes are not a snapshot. Archived cards are excluded.
 Card items have `id`, `title`, `labels`, `project`, `column`, `home_column`,
 `assignee`, `assignee_name`, `assignee_status`, and `eta_at`. Nullable fields
 are `null` when unset. Labels include type labels unchanged. In the `blocked`
-Home column, `blocked_reason` is the first line of the latest blocked move's
-comment, falling back to the newest comment. The full card can be opened with
+Home column, `blocked_reason` is the first line of the card's newest move's
+comment, only when that move targets its current board column. Otherwise it is
+`null`, including cards created in blocked without a move. No earlier move or
+unrelated comment is used. This also applies to custom Home column selectors.
+The full card can be opened with
 `GET /api/cards/{id}`. No bodies or comment histories are loaded in this list.
 
 Monitor and pipeline items have `id`, `project`, `name`, `status`, and `link`

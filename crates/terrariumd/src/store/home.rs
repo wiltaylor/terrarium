@@ -1,6 +1,6 @@
 //! Home projections. Each page examines at most 100 indexed candidates.
 //! The continuation cursor advances over candidates, including filtered rows.
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -118,8 +118,23 @@ const MONITOR_SQL: &str = "SELECT m.id, m.project, m.name,
 const PIPELINE_SQL: &str = "SELECT p.id, p.project, p.name,
  (SELECT status FROM pipeline_runs WHERE pipeline = p.id ORDER BY sort_at DESC, ord ASC, pk DESC LIMIT 1)
  FROM pipelines p WHERE p.id = ?1";
-const COMMENT_SQL: &str =
-    "SELECT body FROM card_comments WHERE card = ?1 ORDER BY created_at DESC LIMIT 1";
+const LATEST_MOVE_SQL: &str = "SELECT json_extract(payload, '$.to'), json_extract(payload, '$.comment')
+ FROM events INDEXED BY events_home_card_moves WHERE card = ?1 AND kind = 'card'
+ AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'moved'
+ ORDER BY seq DESC LIMIT 1";
+
+fn blocked_reason(conn: &Connection, id: &str, column: &str) -> ApiResult<Option<String>> {
+    let moved: Option<(Option<String>, Option<String>)> = conn
+        .query_row(LATEST_MOVE_SQL, [id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    Ok(moved.and_then(|(target, comment)| {
+        if target.as_deref() == Some(column) {
+            comment.and_then(|s| s.lines().next().map(str::to_owned))
+        } else {
+            None
+        }
+    }))
+}
 
 /// `project` has already been restricted to the caller's readable scope.
 pub fn list(
@@ -175,17 +190,7 @@ pub fn list(
                 continue;
             }
             if column == "blocked" {
-                let moved: Option<Option<String>> = conn
-                    .query_row(board::BLOCKED_INFO_SQL, params![id, board::BLOCKED], |r| {
-                        r.get(1)
-                    })
-                    .optional()?;
-                let reason = moved.flatten().filter(|s| !s.trim().is_empty()).or(conn
-                    .query_row(COMMENT_SQL, [&id], |r| r.get::<_, String>(0))
-                    .optional()?);
-                item["blocked_reason"] = reason
-                    .and_then(|s| s.lines().next().map(str::to_owned))
-                    .into();
+                item["blocked_reason"] = blocked_reason(conn, &id, item["column"].as_str().unwrap_or_default())?.into();
             }
             items.push(item);
         } else {
@@ -214,6 +219,7 @@ pub fn list(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use rusqlite::params;
 
     fn conn() -> Connection {
         let mut c = Connection::open_in_memory().unwrap();
@@ -255,6 +261,46 @@ mod tests {
             );
         }
         assert!(settings.selectors("bad").is_err());
+    }
+
+    #[test]
+    fn newest_move_lookup_is_bounded_with_long_nonmatching_history() {
+        let c = conn();
+        for n in 0..10_000 {
+            c.execute("INSERT INTO events(id,card,kind,payload,at) VALUES (?1,'card','card',?2,'x')",
+                params![format!("event-{n}"), json!({"change": "edited", "comment": "not a move"}).to_string()]).unwrap();
+        }
+        // A malformed payload must not enter or break the partial index.
+        c.execute("INSERT INTO events(id,card,kind,payload,at) VALUES ('bad','card','card','bad JSON','x')", []).unwrap();
+        assert_eq!(blocked_reason(&c, "card", "blocked").unwrap(), None);
+        c.execute("INSERT INTO events(id,card,kind,payload,at) VALUES ('move','card','card',?1,'x')",
+            [json!({"change": "moved", "to": "ready", "comment": "old placement"}).to_string()]).unwrap();
+        assert_eq!(blocked_reason(&c, "card", "blocked").unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn custom_home_blocked_uses_the_newest_current_column_move() {
+        let db = crate::db::Db::new(conn(), crate::events::EventHub::default());
+        db.write("operator", |t| {
+            projects::create(t, &projects::NewProject { name: "alpha".into(), ..Default::default() }, projects::SOURCE_API)?;
+            let actor = crate::actor::Actor::Operator;
+            let card = board::create_card(t, &actor, "alpha", board::NewCard {
+                title: Some("custom blocked card".into()), column: Some("ready".into()), ..Default::default()
+            })?;
+            board::move_card(t, &actor, &card.id, "blocked", None, Some("Old blocked reason"))?;
+            board::move_card(t, &actor, &card.id, "research", None, Some("Current custom reason\nDetails"))?;
+            let patch = serde_json::from_value(json!({"home_board_columns": {
+                "in_progress": [], "review": [], "accepted": [], "blocked": ["research"]
+            }})).unwrap();
+            projects::update(t, "alpha", &patch)?;
+            Ok(())
+        }).await.unwrap();
+        db.read(|c| {
+            let page = list(c, "cards", "blocked", Some("alpha"), &Page::default())?;
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0]["blocked_reason"], "Current custom reason");
+            Ok(())
+        }).await.unwrap();
     }
 
     #[tokio::test]
@@ -305,7 +351,8 @@ mod tests {
             assert_eq!(alpha.items[0]["title"], "alpha ready");
             let blocked = list(c, "cards", "blocked", None, &Page::default())?;
             assert_eq!(blocked.items.len(), 2);
-            assert_eq!(blocked.items[0]["blocked_reason"], "Need a lease");
+            // Creation in blocked is not a move. No older comment is a reason.
+            assert!(blocked.items[0]["blocked_reason"].is_null());
             let mut cursor = None;
             let mut count = 0;
             let mut pages = 0;
@@ -429,7 +476,7 @@ mod tests {
                 );
             }
         }
-        for sql in [CARD_SQL, MONITOR_SQL, PIPELINE_SQL, COMMENT_SQL] {
+        for sql in [CARD_SQL, MONITOR_SQL, PIPELINE_SQL, LATEST_MOVE_SQL] {
             let plan = c
                 .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
                 .unwrap()
@@ -439,6 +486,10 @@ mod tests {
                 .unwrap()
                 .join("\n");
             assert!(plan.contains("SEARCH"), "{plan}");
+            if sql == LATEST_MOVE_SQL {
+                assert!(plan.contains("events_home_card_moves"), "{plan}");
+                assert!(sql.ends_with("ORDER BY seq DESC LIMIT 1"));
+            }
             assert!(
                 !plan.contains("SCAN ") && !plan.contains("TEMP B-TREE"),
                 "{plan}"
