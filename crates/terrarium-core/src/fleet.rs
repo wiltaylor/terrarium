@@ -98,6 +98,10 @@ const DELIVERY_KEYS: &[&str] = &[
     "next_repos",
     "work_dir",
     "timeout_secs",
+    "release_target",
+    "release_recipe",
+    "release_secrets",
+    "docker_release",
 ];
 /// The project key of the GitHub author gate (TER-85). A fleet file
 /// cannot set it.
@@ -1686,6 +1690,7 @@ name = "beta"
                 next_repos: vec!["app".into()],
                 work_dir: Some("/srv/jobs".into()),
                 timeout_secs: Some(5400),
+                ..DeliveryDef::default()
             }
         );
         assert!(f.projects[1].delivery.is_none());

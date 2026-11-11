@@ -164,16 +164,6 @@ pub async fn check(state: &Shared, name: &str) -> ApiResult<()> {
 /// spend months that are too old ([`cloud_spend::prune`]). Errors are
 /// logged.
 pub async fn check_all(state: &Shared) {
-    let oldest = cloud_spend::oldest_kept(Utc::now());
-    match state
-        .db
-        .write("system", move |t| cloud_spend::prune(t, &oldest))
-        .await
-    {
-        Ok(0) => {}
-        Ok(n) => tracing::info!(rows = n, "cloud budget: pruned old months of spend"),
-        Err(e) => warn!("cloud budget: cannot prune old spend: {e}"),
-    }
     let names = match state.db.read(subs::list).await {
         Ok(all) => all
             .into_iter()
@@ -185,6 +175,21 @@ pub async fn check_all(state: &Shared) {
             return;
         }
     };
+    // Most installations have no cloud subscriptions. Avoid a write and
+    // a scan of the spend table on every policy tick in that case.
+    if names.is_empty() {
+        return;
+    }
+    let oldest = cloud_spend::oldest_kept(Utc::now());
+    match state
+        .db
+        .write("system", move |t| cloud_spend::prune(t, &oldest))
+        .await
+    {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(rows = n, "cloud budget: pruned old months of spend"),
+        Err(e) => warn!("cloud budget: cannot prune old spend: {e}"),
+    }
     for n in names {
         if let Err(e) = check(state, &n).await {
             warn!(subscription = %n, "cloud budget: check failed: {e}");
