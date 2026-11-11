@@ -13,8 +13,8 @@ pub mod card_files;
 mod config;
 mod event_sources;
 mod fleet;
-mod hosts;
 mod home;
+mod hosts;
 mod inbox;
 pub mod install;
 pub(crate) mod jobs;
@@ -1317,7 +1317,8 @@ mod tests {
                     Path::new("/state"),
                     "api",
                 )?
-                .agent.id)
+                .agent
+                .id)
             })
             .await
             .unwrap();
