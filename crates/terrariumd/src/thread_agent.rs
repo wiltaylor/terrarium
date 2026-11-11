@@ -288,6 +288,8 @@ pub fn cards_turn(
         "The monitor that this thread tracks turned red after the work was ready.".to_owned()
     } else if reason == "monitor_green" {
         "The linked cards are ready and the monitor that this thread tracks is green.".to_owned()
+    } else if reason == "monitor_missing" {
+        "The linked monitor is missing (unknown). Replace it or unlink it with thread track --monitor ''.".to_owned()
     } else {
         "All cards that this thread tracks are in review or later.".to_owned()
     };
@@ -327,7 +329,7 @@ pub fn cards_turn(
             "\n- {hidden} more linked card(s) in projects that you cannot read"
         ));
     }
-    if reason == threads::WAKE_BLOCKED || reason == "monitor_red" {
+    if reason == threads::WAKE_BLOCKED || reason == "monitor_red" || reason == "monitor_missing" {
         text.push_str(&format!(
             "\n\nTell the operator in the thread what is stuck and what happens next \
              (`terrarium thread post {thread} -m -`). Ask your report-to lead by mail when you \
