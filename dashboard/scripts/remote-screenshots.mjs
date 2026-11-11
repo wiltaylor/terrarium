@@ -20,6 +20,7 @@ try {
     await page.addInitScript((theme) => localStorage.setItem("terrarium.theme", theme), theme);
     await page.route("**/api/**", async (route) => {
       const path = new URL(route.request().url()).pathname;
+      if (!path.startsWith("/api/")) return route.continue();
       let body = [];
       if (path === "/api/session") body = { csrf: "fixture-only", password_set: true };
       else if (path === "/api/remotes/lab") body = { name: "lab", url: "https://lab.example.com", label: "Lab", status: "version_skew", read_only: true };
@@ -28,8 +29,6 @@ try {
       await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
     });
     await page.goto(`${origin}/remote/lab/projects`);
-    await page.screenshot({ path: `/tmp/ter-64-screenshots/debug-${theme}.png`, fullPage: true });
-    console.log(await page.locator("body").innerText());
     await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
     await page.getByText("Remote: lab", { exact: true }).first().waitFor();
     await page.screenshot({ path: `/tmp/ter-64-screenshots/remote-${theme}.png`, fullPage: true });
