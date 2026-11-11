@@ -181,10 +181,22 @@ async fn dispatch(state: &Shared, r: Request) -> ApiResult<()> {
 /// The request is committed with the job verdict. A lost effect or daemon
 /// restart cannot lose it. Atomic bound checks arbitrate with dispatchers.
 pub async fn pass(state: &Shared) {
-    let requests = state.db.read(|c| {
-        let mut q = c.prepare(PENDING)?;
-        Ok(q.query_map([], |row| Ok(Request { job: row.get(0)?, card: row.get(1)?, project: row.get(2)?, template: row.get(3)?, task: row.get(4)? }))?.collect::<Result<Vec<_>, _>>()?)
-    }).await;
+    let requests = state
+        .db
+        .read(|c| {
+            let mut q = c.prepare(PENDING)?;
+            Ok(q.query_map([], |row| {
+                Ok(Request {
+                    job: row.get(0)?,
+                    card: row.get(1)?,
+                    project: row.get(2)?,
+                    template: row.get(3)?,
+                    task: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?)
+        })
+        .await;
     let Ok(requests) = requests else { return };
     for r in requests {
         if let Err(error) = dispatch(state, r.clone()).await {
