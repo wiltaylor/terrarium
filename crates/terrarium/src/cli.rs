@@ -3316,6 +3316,11 @@ pub struct SnapshotOn {
 
 #[derive(Debug, Subcommand)]
 pub enum AdminCmd {
+    /// Operator-only job maintenance
+    Job {
+        #[command(subcommand)]
+        command: AdminJobCmd,
+    },
     /// Agent commands, as `terrarium agent`
     Agent {
         #[command(subcommand)]
@@ -3402,6 +3407,22 @@ pub enum AdminCmd {
     Password {
         #[command(subcommand)]
         command: PasswordCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AdminJobCmd {
+    /// Inspect old untracked logs. --confirm explicitly attests ownership and deletes the listing.
+    LegacyLogs {
+        target: String,
+        #[arg(long, default_value = "30d")]
+        older_than: String,
+        /// Continue the indexed job page from the previous next cursor
+        #[arg(long, default_value = "")]
+        after: String,
+        /// A dry-run digest, valid for 15 minutes and one confirmation
+        #[arg(long)]
+        confirm: Option<String>,
     },
 }
 

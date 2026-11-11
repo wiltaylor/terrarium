@@ -1,4 +1,4 @@
-//! Only newly recorded daemon logs participate in retention. No directory scans.
+//! Ledger-owned logs participate in retention. Legacy ownership needs operator confirmation.
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use terrarium_core::config::DeliveryDef;
@@ -28,6 +28,7 @@ pub struct Log {
     pub expired: bool,
     pub cleanup_state: String,
     pub quarantine: String,
+    pub legacy_size: Option<i64>,
 }
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Log> {
@@ -47,11 +48,12 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Log> {
         target_identity: r.get(12)?,
         cleanup_state: r.get(13)?,
         quarantine: r.get(14)?,
+        legacy_size: r.get(15)?,
     })
 }
 
-const FIELDS: &str = "id, job, attempt, target, path, written_at, expires_at, bytes, expired, root, root_identity, file_identity, target_identity, cleanup_state, quarantine";
-const CANDIDATES: &str = "SELECT id, job, attempt, target, path, written_at, expires_at, bytes, expired, root, root_identity, file_identity, target_identity, cleanup_state, quarantine FROM job_logs INDEXED BY job_logs_cleanup WHERE project=? AND cleanup_state=? AND id>? ORDER BY id LIMIT ?";
+const FIELDS: &str = "id, job, attempt, target, path, written_at, expires_at, bytes, expired, root, root_identity, file_identity, target_identity, cleanup_state, quarantine, legacy_size";
+const CANDIDATES: &str = "SELECT id, job, attempt, target, path, written_at, expires_at, bytes, expired, root, root_identity, file_identity, target_identity, cleanup_state, quarantine, legacy_size FROM job_logs INDEXED BY job_logs_cleanup WHERE project=? AND cleanup_state=? AND id>? ORDER BY id LIMIT ?";
 
 pub fn target_identity(row: &targets::TargetRow) -> String {
     // Name is the target primary key. Creation time distinguishes remove/recreate,
@@ -196,6 +198,17 @@ pub(crate) fn remove_script(
     file_identity: &str,
     quarantine: &str,
 ) -> String {
+    remove_script_checked(path, root, root_identity, file_identity, quarantine, None)
+}
+
+fn remove_script_checked(
+    path: &str,
+    root: &str,
+    root_identity: &str,
+    file_identity: &str,
+    quarantine: &str,
+    expected_size: Option<i64>,
+) -> String {
     let Some(name) = std::path::Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())
@@ -239,6 +252,7 @@ reconcile() {{
     flock -n 9 || return 1
     [ "$trash/log" -ef /proc/self/fd/9 ] && [ ! -L "$trash/log" ] || return 1
     [ "$(stat -Lc '%d:%i' /proc/self/fd/9)" = {file_identity} ] || return 1
+    {check_size}
     rm -- "$trash/log" || return 1
     rmdir -- "$trash" 2>/dev/null || :
     printf 'expired\n'
@@ -264,6 +278,7 @@ exec 9<"$name" || exit 1
 flock -n 9 || exit 1
 [ "$name" -ef /proc/self/fd/9 ] && [ ! -L "$name" ] || exit 1
 if [ "$(stat -Lc '%d:%i' /proc/self/fd/9)" != {file_identity} ]; then printf 'expired\n'; exit 0; fi
+{check_size}
 [ -d "$trash" ] || (umask 077 && mkdir -- "$trash") || exit 1
 mv -- "$name" "$trash/log" || exit 1
 # AFTER_MOVE: persisted quarantining state makes this boundary recoverable.
@@ -276,6 +291,7 @@ reconcile
         root_identity = sh_quote(root_identity),
         file_identity = sh_quote(file_identity),
         trash = sh_quote(trash),
+        check_size = expected_size.map(|size| format!("[ \"$(stat -Lc '%s' /proc/self/fd/9)\" = '{size}' ] || {{ printf 'conflict\\n'; exit 0; }}")).unwrap_or_default(),
     )
 }
 
@@ -301,6 +317,10 @@ pub(crate) fn test_remove_script(path: &std::path::Path) -> String {
 /// A page is bounded before checking job states. The caller carries `after`
 /// across pages, so active or unreachable logs cannot starve later records.
 pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<serde_json::Value> {
+    cleanup_selected(state, project, after, None).await
+}
+
+pub(crate) async fn cleanup_selected(state: &Shared, project: String, after: i64, only: Option<Vec<i64>>) -> ApiResult<serde_json::Value> {
     let _guard = state
         .job_queue
         .log_cleanup
@@ -319,6 +339,15 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
                 )
                 .optional()?
                 .unwrap_or((0, 0));
+            if let Some(ids) = only {
+                let mut logs = Vec::new();
+                for id in ids {
+                    if let Some(log) = c.query_row(&format!("SELECT {FIELDS} FROM job_logs WHERE id=? AND project=? AND cleanup_state='quarantining'"),params![id,p],row).optional()? {
+                        logs.push(log);
+                    }
+                }
+                return Ok((logs, jobs::delivery(c, &p)?, total, 0));
+            }
             // Reconcile first, independently paginated so inaccessible attempts
             // cannot starve later quarantines. Both seeks are indexed and bounded.
             let mut recovery = c
@@ -404,12 +433,13 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
             argv: vec![
                 "sh".into(),
                 "-c".into(),
-                remove_script(
+                remove_script_checked(
                     &log.path,
                     &log.root,
                     &log.root_identity,
                     &log.file_identity,
                     &quarantine,
+                    log.legacy_size,
                 ),
             ],
             timeout_secs: Some(10),
@@ -439,6 +469,8 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
         let id = log.id;
         let p = project.clone();
         let bytes = log.bytes;
+        let legacy = log.legacy_size.is_some();
+        let path = log.path.clone();
         state
             .db
             .write("system", move |t| {
@@ -451,6 +483,9 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
                         "UPDATE job_log_budgets SET bytes=MAX(0,bytes-?) WHERE project=?",
                         params![bytes, p],
                     )?;
+                    if legacy {
+                        t.audit("job.legacy_log_deleted", &path, Some(&p), serde_json::json!({"ledger_id":id,"bytes":bytes}))?;
+                    }
                 }
                 Ok(())
             })
@@ -522,6 +557,7 @@ mod tests {
             expired: false,
             cleanup_state: "retained".into(),
             quarantine: String::new(),
+            legacy_size: None,
         };
         assert!(!due(&log, "a", 10, 10));
         assert!(due(&log, "b", 10, 10));

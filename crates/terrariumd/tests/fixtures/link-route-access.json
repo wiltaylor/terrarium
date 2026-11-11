@@ -836,6 +836,12 @@
     },
     {
       "source": "api/jobs.rs",
+      "registration": "\"/projects/{name}/jobs/legacy-logs\",post(legacy_logs)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/jobs.rs",
       "registration": "\"/jobs/{id}\",get(show).delete(cancel)",
       "access": "other",
       "cases": []

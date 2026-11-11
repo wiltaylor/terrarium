@@ -77,6 +77,7 @@ pub fn routes() -> Router<Shared> {
         .route("/projects/{name}/jobs", get(list))
         .route("/projects/{name}/jobs/stats", get(stats))
         .route("/projects/{name}/jobs/cleanup", post(cleanup_logs))
+        .route("/projects/{name}/jobs/legacy-logs", post(legacy_logs))
         .route("/jobs/{id}", get(show).delete(cancel))
         .route("/cards/{id}/validate", post(validate))
         .route("/cards/{id}/merge", post(merge))
@@ -369,6 +370,33 @@ async fn show(
 struct CleanupLogs {
     #[serde(default)]
     after: i64,
+}
+
+#[derive(Deserialize)]
+struct LegacyLogs {
+    target: String,
+    #[serde(default)]
+    after: String,
+    #[serde(default = "legacy_default_age")]
+    older_than_secs: u64,
+    confirm: Option<String>,
+}
+
+fn legacy_default_age() -> u64 { 30 * 86400 }
+
+async fn legacy_logs(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiJson(body): ApiJson<LegacyLogs>,
+) -> ApiResult<Json<Value>> {
+    policy::operator_only(&actor, "attesting ownership of legacy job logs")?;
+    let result = if let Some(digest) = body.confirm {
+        crate::legacy_job_logs::confirm(&state,name,body.target,digest).await?
+    } else {
+        crate::legacy_job_logs::list(&state,name,body.target,body.after,body.older_than_secs).await?
+    };
+    Ok(Json(result))
 }
 
 async fn cleanup_logs(
