@@ -31,14 +31,14 @@ import {
   loadDraft,
   progressText,
   saveDraft,
-  sessionDraftStorage,
 } from "./bundle";
 import { cardHref, statusChip } from "./questions";
 
 export function BundleCard(props: { question: Question; now: number; showAgent?: boolean; showKind?: boolean; hideCard?: boolean; actions?: JSX.Element; onChange: (q: Question) => void }) {
+  const instanceCardPeek = useInstance().cardPeek;
   const { api } = useInstance();
   const q = () => props.question;
-  const store = sessionDraftStorage();
+  const store = useInstance().session;
   const [draft, setDraft] = createSignal<BundleDraft>(loadDraft(store, q()) ?? emptyDraft(q()));
   const [reason, setReason] = createSignal("");
   const [busy, setBusy] = createSignal(false);
@@ -158,7 +158,7 @@ export function BundleCard(props: { question: Question; now: number; showAgent?:
         <LinkText text={q().text} project={q().project} />
       </p>
 
-      <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project, { cardKeys: readerCardKeys() })} onClick={openCardLink} />}</Show>
+      <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project, { cardKeys: readerCardKeys() })} onClick={(e) => openCardLink(e, instanceCardPeek)} />}</Show>
 
       <Show when={open()}>
         <form class="stack" style={{ gap: "10px" }} onSubmit={send} aria-label="Answer all items">
@@ -186,7 +186,7 @@ export function BundleCard(props: { question: Question; now: number; showAgent?:
                           <span class="chip ok small bundle-check">answered</span>
                         </Show>
                       </legend>
-                      <Show when={item.context}>{(c) => <SafeHtml class="prose question-context small" html={renderMarkdown(c(), q().project, { cardKeys: readerCardKeys() })} onClick={openCardLink} />}</Show>
+                      <Show when={item.context}>{(c) => <SafeHtml class="prose question-context small" html={renderMarkdown(c(), q().project, { cardKeys: readerCardKeys() })} onClick={(e) => openCardLink(e, instanceCardPeek)} />}</Show>
                       <Show when={item.options.length}>
                         <div class="row" style={{ "flex-wrap": "wrap", gap: "6px" }} role="group" aria-label={`${label()} options`}>
                           <For each={item.options}>

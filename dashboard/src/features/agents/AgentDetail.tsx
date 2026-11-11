@@ -40,9 +40,7 @@ import { spawnedTabLabel, spawnRightsText } from "./spawn";
 import { AgentTools } from "../tools/AgentTools";
 
 /** The API call of a lifecycle button. Resume clears the pause (`unpause`). */
-const lifecycleCall = (kind: LifecycleAction["kind"], id: string) =>
-  {
-  const { api } = useInstance();
+const lifecycleCall = (api: ReturnType<typeof useInstance>["api"], kind: LifecycleAction["kind"], id: string) => {
   return kind === "pause" ? api.agents.pause(id) : kind === "resume" ? api.agents.unpause(id) : api.agents.restart(id);
 };
 
@@ -203,7 +201,7 @@ export default function AgentDetail() {
             {/* An ephemeral agent has no pause: Cancel closes it (docs/api.md §6.10). */}
             <For each={lifecycleActions(a()).filter((b) => !a().ephemeral || b.kind === "restart")}>
               {(b) => (
-                <button onClick={() => act(b.label, () => lifecycleCall(b.kind, a().id))} disabled={b.disabled} title={b.title}>
+                <button onClick={() => act(b.label, () => lifecycleCall(api, b.kind, a().id))} disabled={b.disabled} title={b.title}>
                   {b.label}
                 </button>
               )}

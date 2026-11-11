@@ -62,6 +62,7 @@ export function createInstance(options: {
     const expanded = createExpandedStore(storage);
     return {
       key, api, storage, session, expanded,
+      apiHref: (path: string) => `${name === undefined ? import.meta.env.VITE_API_BASE ?? "" : `/api/remotes/${name}/proxy`}${path}`,
       href: (path: string) => instanceHref(name, path),
       path: (path: string) => name === undefined ? path : path.replace(new RegExp(`^/remote/${name}(?=/|$)`), "") || "/",
       bookmarks, events, projects, projectFolders, agents, repos, subscriptions, quota, leases, inbox, pins, cardPeek,

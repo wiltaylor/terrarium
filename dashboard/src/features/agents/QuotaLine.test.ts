@@ -9,11 +9,11 @@ import type { Agent, QuotaHold, UsageMe } from "../../api/types";
 
 const me = vi.fn();
 let holds: QuotaHold[] = [];
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api: { usage: { me } },
   events: { on: () => () => {} },
   quota: { seedHolds: vi.fn(), holdsFor: () => holds },
-}));
+})); });
 vi.mock("../../stores/quota", () => ({ describeCause: (c: string) => `cause ${c}` }));
 
 const { QuotaLine } = await import("./QuotaLine");

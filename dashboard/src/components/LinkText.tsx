@@ -17,8 +17,7 @@ const plainClick = (e: MouseEvent) => e.button === 0 && !e.metaKey && !e.ctrlKey
  * on a `wikilink-card` link opens the card in the side panel. Other links keep
  * their action.
  */
-export function openCardLink(e: MouseEvent) {
-  const { cardPeek } = useInstance();
+export function openCardLink(e: MouseEvent, cardPeek = useInstance().cardPeek) {
   if (!plainClick(e) || !(e.target instanceof Element)) return;
   const a = e.target.closest("a.wikilink-card");
   const card = a ? cardOfHref(a.getAttribute("href") ?? "") : null;

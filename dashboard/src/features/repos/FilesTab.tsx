@@ -33,9 +33,9 @@ const DEFAULT_W = 300;
 const NARROW = "(max-width: 760px)";
 const narrow = () => typeof matchMedia === "function" && matchMedia(NARROW).matches;
 
-function storedWidth(): number {
+function storedWidth(storage: ReturnType<typeof useInstance>["storage"]): number {
   try {
-    const n = Number(localStorage.getItem(WIDTH_KEY));
+    const n = Number(storage?.getItem(WIDTH_KEY));
     return n >= MIN_W && n <= MAX_W ? n : DEFAULT_W;
   } catch {
     return DEFAULT_W;
@@ -47,18 +47,18 @@ function storedWidth(): number {
  * bytes as an attachment, both with `nosniff`, so a new tab does not run them.
  * Only a cookie session can open it: a bearer token is not in a link.
  */
-function rawUrl(repo: string, tree: string, path: string): string | null {
-  const { auth } = useInstance();
+function rawUrl(instance: ReturnType<typeof useInstance>, repo: string, tree: string, path: string): string | null {
+  const { auth } = instance;
   if (isMock || auth.mode() !== "session") return null;
-  return `${import.meta.env.VITE_API_BASE ?? ""}/api/repos/${seg(repo)}/trees/${seg(tree)}/file${buildQuery({ path })}`;
+  return instance.apiHref(`/api/repos/${seg(repo)}/trees/${seg(tree)}/file${buildQuery({ path })}`);
 }
 
 export function FilesTab(props: { repo: Repo; tree: string; head?: string | null; reload: string; path: string; onPath: (p: string) => void }) {
-  const { api } = useInstance();
+  const { api, key, storage } = useInstance();
   const ft = createMemo(() => {
     const id = props.repo.id;
     const tree = props.tree;
-    return treeCache(`${id}|${tree}|${props.head ?? ""}|${props.reload}`, (dir) => api.repos.files(id, tree, dir));
+    return treeCache(`${key}|${id}|${tree}|${props.head ?? ""}|${props.reload}`, (dir) => api.repos.files(id, tree, dir));
   });
   // Open the folders above the selection (a deep link loads each level), and a selected folder.
   createEffect(
@@ -69,12 +69,12 @@ export function FilesTab(props: { repo: Repo; tree: string; head?: string | null
     }),
   );
 
-  const [width, setWidth] = createSignal(storedWidth());
+  const [width, setWidth] = createSignal(storedWidth(storage));
   const keepWidth = (w: number) => {
     const n = Math.round(Math.min(MAX_W, Math.max(MIN_W, w)));
     setWidth(n);
     try {
-      localStorage.setItem(WIDTH_KEY, String(n));
+      storage?.setItem(WIDTH_KEY, String(n));
     } catch {
       // No storage: the width lasts for this page only.
     }
@@ -470,7 +470,8 @@ function FileView(props: { repo: Repo; tree: string; reload: string; path: strin
     if (l.length > 1 && l[l.length - 1] === "") l.pop();
     return l;
   });
-  const raw = () => rawUrl(props.repo.id, props.tree, props.path);
+  const instance = useInstance();
+  const raw = () => rawUrl(instance, props.repo.id, props.tree, props.path);
   return (
     <div class="card-box stack file-view" style={{ gap: "8px" }}>
       <div class="file-head">

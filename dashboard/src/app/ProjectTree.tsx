@@ -34,7 +34,7 @@ import {
 } from "../features/projectFolders/model";
 import { projectHealth, projectHealthLabel } from "../lib/projectHealth";
 
-import { expanded, ROOT_KEY, TreeRoot, type DropTarget } from "./TreeRoot";
+import { ROOT_KEY, TreeRoot, type DropTarget } from "./TreeRoot";
 import { filterProjects, FILTER_THRESHOLD, agentFromPath, projectFromPath, projectKey, PROJECTS_ROOT, projectTreeKeys } from "./treeModel";
 import { createRovingTree } from "./treeNav";
 import { Bookmarks, BOOKMARKS_KEY, bookmarkKey } from "./Bookmarks";
@@ -57,7 +57,7 @@ const DRAG_TYPE = "application/x-terrarium-tree";
 const entryKey = (e: TreeEntry) => (e.kind === "folder" ? folderKey(e.folder.id) : projectKey(e.name));
 
 export function ProjectTree() {
-  const { agents, projectFolders, projects, bookmarks } = useInstance();
+  const { agents, projectFolders, projects, bookmarks, expanded } = useInstance();
   const location = useLocation();
   const navigate = useNavigate();
   const [query, setQuery] = createSignal("");

@@ -10,11 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { waitFor } from "../test/wait";
 
 vi.mock("../stores", async () => {
+  const { instanceTestStores } = await import("../test/instance");
   const { createMockApi } = await import("../api/mock");
   const { createProjectFoldersStore } = await import("../stores/projectFolders");
   const { createBookmarksStore } = await import("../stores/bookmarks");
   const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
-  return {
+  return instanceTestStores({
     api,
     bookmarks: createBookmarksStore(null, window.location.origin),
     projectFolders: createProjectFoldersStore(api),
@@ -26,7 +27,7 @@ vi.mock("../stores", async () => {
     agents: { byId: () => undefined, inProject: () => [] },
     repos: { load: () => {}, loaded: () => true, inProject: () => [], added: () => {} },
     pins: { toggle: async () => {} },
-  };
+  });
 });
 
 const stores = (await import("../stores")) as unknown as {

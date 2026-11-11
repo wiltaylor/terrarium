@@ -48,7 +48,7 @@ export default function ThreadsPage() {
   const reloadBoards = async (rows: Thread[]) => {
     const mine = ++boardGen;
     const ps = projectsOf(rows);
-    const b = ps.length ? await loadBoards(ps, rows.flatMap((t) => t.cards ?? [])) : {};
+    const b = ps.length ? await loadBoards(ps, rows.flatMap((t) => t.cards ?? []), api) : {};
     if (mine === boardGen) setBoards(b);
   };
   let gen = 0;

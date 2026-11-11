@@ -9,9 +9,9 @@ import type { AgentEvent } from "../../api/types";
 
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const listeners = new Set<(e: AgentEvent) => void>();
-vi.mock("../../stores", () => ({ api, events: {
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({ api, events: {
   on: (fn: (e: AgentEvent) => void) => { listeners.add(fn); return () => listeners.delete(fn); },
-} }));
+} })); });
 const { default: DashboardPage } = await import("./DashboardPage");
 
 it("loads accuracy once and does not reload it with monitor results", async () => {

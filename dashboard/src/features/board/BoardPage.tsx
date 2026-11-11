@@ -88,7 +88,8 @@ export function BoardPage(props: { done?: boolean }) {
   // `version:<name>` (`none`: the cards with no version label); `?group=version` shows a lane for each version
   // label. Both are in the URL, so a reload and a link keep them. An old `?rows=` in the URL has no effect.
   // localStorage keeps the collapsed lanes of each project.
-  const storage = (): Storage | undefined => (typeof localStorage === "undefined" ? undefined : localStorage);
+  const instanceStorage = useInstance().storage;
+  const storage = () => instanceStorage;
   const [laneState, setLaneState] = createSignal(readLaneState(null));
   createEffect(on(() => params.project, (p) => setLaneState(readLaneState(storage()?.getItem(laneStateKey(p)) ?? null))));
   const saveLaneState = (next: ReturnType<typeof readLaneState>) => {

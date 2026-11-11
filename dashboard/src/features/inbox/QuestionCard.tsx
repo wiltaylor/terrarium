@@ -28,6 +28,7 @@ import { threadHref } from "./threads";
  * and opens it. "Show mail" opens the mail thread of the question.
  */
 export function QuestionCard(props: { question: Question; now: number; showAgent?: boolean; showKind?: boolean; hideCard?: boolean; inThread?: boolean; actions?: JSX.Element; prefill?: { text: string }; onChange: (q: Question) => void }) {
+  const instanceCardPeek = useInstance().cardPeek;
   const { api } = useInstance();
   const navigate = useNavigate();
   const q = () => props.question;
@@ -128,7 +129,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
         <LinkText text={q().text} project={q().project} />
       </p>
 
-      <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project, { cardKeys: readerCardKeys() })} onClick={openCardLink} />}</Show>
+      <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project, { cardKeys: readerCardKeys() })} onClick={(e) => openCardLink(e, instanceCardPeek)} />}</Show>
 
       <Show when={!props.inThread && q().thread}>
         {(t) => (

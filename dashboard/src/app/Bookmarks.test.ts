@@ -4,8 +4,9 @@ import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 vi.mock("../stores", async () => {
+  const { instanceTestStores } = await import("../test/instance");
   const { createBookmarksStore } = await import("../stores/bookmarks");
-  return { bookmarks: createBookmarksStore(null, window.location.origin) };
+  return instanceTestStores({ bookmarks: createBookmarksStore(null, window.location.origin) });
 });
 import { bookmarks } from "../stores";
 import { expanded } from "./TreeRoot";

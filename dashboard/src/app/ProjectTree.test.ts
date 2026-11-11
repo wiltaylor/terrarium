@@ -12,7 +12,7 @@ const bookmarks = createBookmarksStore(null, window.location.origin);
 // The agents, in a signal: a change is a live status update.
 const [agentList, setAgentList] = createSignal<{ id: string; project: string; name: string; status: string }[]>([]);
 
-vi.mock("../stores", () => ({
+vi.mock("../stores", async () => { const { instanceTestStores } = await import("../test/instance"); return instanceTestStores(({
   bookmarks,
   // No folders: the caller is not the operator or a sysadmin (TER-48).
   projectFolders: {
@@ -32,7 +32,7 @@ vi.mock("../stores", () => ({
     byId: (id: string) => agentList().find((a) => a.id === id || `${a.project}/${a.name}` === id),
     inProject: (p: string) => agentList().filter((a) => a.project === p),
   },
-}));
+})); });
 
 const { ProjectTree } = await import("./ProjectTree");
 const { expanded } = await import("./TreeRoot");

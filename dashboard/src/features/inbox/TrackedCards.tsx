@@ -18,8 +18,7 @@ import { cardHref } from "./questions";
 import { cardProgress, kanbanRows, linkedProjects, progressChip } from "./trackedCards";
 
 /** The boards of `projects`; a board that does not load is absent (no read right, or an error). */
-export async function loadBoards(projects: readonly string[], links: readonly ThreadCard[] = []): Promise<Record<string, Board | undefined>> {
-  const { api } = useInstance();
+export async function loadBoards(projects: readonly string[], links: readonly ThreadCard[] = [], api = useInstance().api): Promise<Record<string, Board | undefined>> {
   const got = await Promise.allSettled(projects.map((p) => api.board.get(p)));
   const out: Record<string, Board | undefined> = {};
   projects.forEach((p, i) => {
@@ -54,7 +53,7 @@ export function ProgressChip(props: { thread: Thread; boards: Record<string, Boa
 
 /** The mini kanban of the linked cards; nothing when the thread links no card. */
 export function TrackedCards(props: { thread: Thread; now: number }) {
-  const { events } = useInstance();
+  const { events, api } = useInstance();
   const links = () => props.thread.cards ?? [];
   const projects = () => linkedProjects(links());
   const [boards, setBoards] = createSignal<Record<string, Board | undefined>>({});
@@ -64,7 +63,7 @@ export function TrackedCards(props: { thread: Thread; now: number }) {
     const mine = ++gen;
     const ps = projects();
     if (!ps.length) return;
-    const b = await loadBoards(ps, links());
+    const b = await loadBoards(ps, links(), api);
     if (mine !== gen) return;
     setBoards(b);
     setLoaded(true);

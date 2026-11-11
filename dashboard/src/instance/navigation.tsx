@@ -1,5 +1,6 @@
 import { A as RouterLink, Navigate as RouterNavigate, useLocation as routerLocation, useNavigate as routerNavigate } from "@solidjs/router";
 import type { ComponentProps } from "solid-js";
+import type { NavigateOptions } from "@solidjs/router";
 import { useInstance } from ".";
 
 export function A(props: ComponentProps<typeof RouterLink>) {
@@ -16,7 +17,7 @@ export function Navigate(props: ComponentProps<typeof RouterNavigate>) {
 export function useNavigate(): ReturnType<typeof routerNavigate> {
   const navigate = routerNavigate();
   const instance = useInstance();
-  return ((to: string | number, options?: Parameters<typeof navigate>[1]) => {
+  return ((to: string | number, options?: Partial<NavigateOptions>) => {
     if (typeof to === "number") navigate(to);
     else navigate(instance.href(to), options);
   }) as ReturnType<typeof routerNavigate>;
