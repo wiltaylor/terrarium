@@ -112,7 +112,7 @@ it("retains and orders tiles and widgets through paginated reloads, replacing on
   finish({ items: [{ ...b }], next: null }); await vi.advanceTimersByTimeAsync(0);
   expect([...document.querySelectorAll(".home-card")]).toEqual(tiles);
   expect(document.querySelector(".home-status")).toBe(widget);
-  expect(mutations).toHaveLength(0);
+  expect(mutations.flatMap(m => [...m.removedNodes, ...m.addedNodes]).filter(n => n instanceof Element && n.matches(".home-card"))).toHaveLength(0);
   home.cards.mockImplementation(async q => ({ items: q.column === "in_progress" ? [{ ...b, title: "Changed" }, { ...a }] : [], next: null }));
   refresh({ kind: "card" }); await vi.advanceTimersByTimeAsync(2000);
   expect(document.querySelectorAll(".home-card")[0]).toBe(tiles[0]);

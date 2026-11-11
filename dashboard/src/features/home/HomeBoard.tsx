@@ -21,14 +21,24 @@ function stableRows<T extends { id: string; project: string }>(rows: T[], previo
 export function HomeBoard(props: { now: number; children?: JSX.Element }) {
   const [project, setProject] = createSignal("");
   const [tick, setTick] = createSignal(0);
+  const [attentionError, setAttentionError] = createSignal<unknown>();
+  const [cardsError, setCardsError] = createSignal<unknown>();
   const [attention] = createResource<(HomeAttention & { kind: string })[], number>(tick, async (_, { value }) => {
+    try {
     const [monitors, pipelines] = await Promise.all([
       allHome(cursor => api.home.monitors({ cursor })), allHome(cursor => api.home.pipelines({ cursor })),
     ]);
+    setAttentionError(undefined);
     return stableRows([...monitors.map(m => ({ ...m, kind: "Monitor" })), ...pipelines.map(p => ({ ...p, kind: "Pipeline" }))], value);
+    } catch (error) { setAttentionError(error); return value ?? []; }
   });
-  const [cards] = createResource<HomeCard[], readonly [string, number]>(() => [project(), tick()] as const, async ([project], { value }) =>
-    stableRows((await Promise.all(columns.map(c => allHome(cursor => api.home.cards({ column: c.id, project: project || undefined, cursor }))))).flat(), value));
+  const [cards] = createResource<HomeCard[], readonly [string, number]>(() => [project(), tick()] as const, async ([project], { value }) => {
+    try {
+      const rows = (await Promise.all(columns.map(c => allHome(cursor => api.home.cards({ column: c.id, project: project || undefined, cursor }))))).flat();
+      setCardsError(undefined);
+      return stableRows(rows, value);
+    } catch (error) { setCardsError(error); return value ?? []; }
+  });
   onMount(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const off = events.on(e => {
@@ -40,9 +50,9 @@ export function HomeBoard(props: { now: number; children?: JSX.Element }) {
   });
   return <>
     <section aria-label="System status" class="home-status-area">
-      <ErrorBanner error={attention.error} />
+      <ErrorBanner error={attentionError()} />
       <Show when={attention.loading && attention.latest === undefined}><p class="muted">Loading status…</p></Show>
-      <Show when={attention.latest?.length === 0}>
+      <Show when={!attentionError() && attention.latest?.length === 0}>
         <p class="nominal">All Systems Nominal</p>
       </Show>
       <div class="home-attention">
@@ -62,7 +72,7 @@ export function HomeBoard(props: { now: number; children?: JSX.Element }) {
           <For each={projects.projects()}>{p => <option value={p.name}>{p.name}</option>}</For>
         </select></label>
       </div>
-      <ErrorBanner error={cards.error} />
+      <ErrorBanner error={cardsError()} />
       <Show when={cards.loading && cards.latest === undefined}><p class="muted">Loading cards…</p></Show>
       <div class="home-kanban">
         <For each={columns}>{column => <section class="home-lane" aria-label={column.title}>
