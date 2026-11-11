@@ -3098,14 +3098,20 @@ pub async fn recreate(state: &Shared, def: &TargetDef, opts: &RecreateOpts) -> A
                 let name = mount["Name"].as_str().filter(|s| !s.is_empty());
                 let destination = mount["Destination"].as_str().filter(|s| s.starts_with('/'));
                 let (Some(name), Some(destination)) = (name, destination) else {
-                    return Err(ApiError::conflict("recreate refused: incomplete volume metadata"));
+                    return Err(ApiError::conflict(
+                        "recreate refused: incomplete volume metadata",
+                    ));
                 };
-                dropped.entry(name.to_owned()).or_insert_with(Vec::new).push(destination.to_owned());
+                dropped
+                    .entry(name.to_owned())
+                    .or_insert_with(Vec::new)
+                    .push(destination.to_owned());
             } else {
                 retained.push(mount.clone());
             }
         }
-        let requested: std::collections::BTreeSet<_> = opts.discard_volumes.iter().cloned().collect();
+        let requested: std::collections::BTreeSet<_> =
+            opts.discard_volumes.iter().cloned().collect();
         let actual: std::collections::BTreeSet<_> = dropped.keys().cloned().collect();
         if requested != actual || requested.len() != opts.discard_volumes.len() {
             return Err(ApiError::conflict(format!(
@@ -3130,6 +3136,11 @@ pub async fn recreate(state: &Shared, def: &TargetDef, opts: &RecreateOpts) -> A
             ));
         }
         preserved = rt.attached;
+        let container_id = inspected.result.as_ref()
+            .and_then(|r| r["id"].as_str())
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| ApiError::conflict("recreate refused: missing container identity"))?
+            .to_owned();
         // Recheck immediately before removal. A changed container or mount set
         // needs fresh consent. Never trust mount sources supplied by a caller.
         let check_container = container.clone();
@@ -3139,21 +3150,27 @@ pub async fn recreate(state: &Shared, def: &TargetDef, opts: &RecreateOpts) -> A
                 container: check_container,
                 timeout_secs: Some(60),
             })
-        }).await?;
+        })
+        .await?;
         let before = inspected.result.as_ref().unwrap();
         let after = checked.result.as_ref();
         if !after.is_some_and(|after| {
-            before["id"] == after["id"] && before["mounts"] == after["mounts"]
+            before["id"] == after["id"]
+                && before["mounts"] == after["mounts"]
                 && before["workspace_mounts"] == after["workspace_mounts"]
                 && before["state"] == after["state"]
-        }) || (!opts.force && state.executor.live_on(&def.name) > 0) {
-            return Err(ApiError::conflict("recreate refused: container changed during inspection; retry"));
+        }) || (!opts.force && state.executor.live_on(&def.name) > 0)
+        {
+            return Err(ApiError::conflict(
+                "recreate refused: container changed during inspection; retry",
+            ));
         }
         let force = opts.force;
         verb_ok(state, def, "docker.rm", move |session| {
             DaemonFrame::DockerRm(DockerRm {
                 session,
-                container,
+                // Pin removal to the inspected container, not a reusable name.
+                container: container_id,
                 force,
                 volumes: false,
                 timeout_secs: Some(120),

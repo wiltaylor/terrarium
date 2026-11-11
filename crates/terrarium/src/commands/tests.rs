@@ -4205,9 +4205,13 @@ async fn target_recreate_overrides_and_pending_output() {
     let out = ok(
         false,
         &["targets", "ls"],
-        vec![(200, json!([{"name":"dbox", "runtime":{"recreate_required":true}}]))],
+        vec![(
+            200,
+            json!([{"name":"dbox", "runtime":{"recreate_required":true}}]),
+        )],
         vec![req(Get, "/api/targets")],
-    ).await;
+    )
+    .await;
     assert!(out.contains("RECREATE") && out.contains("pending"), "{out}");
     let out = ok(
         false,
@@ -4215,14 +4219,40 @@ async fn target_recreate_overrides_and_pending_output() {
         vec![(200, json!({"name":"dbox", "runtime":{"recreate_required":true}, "recreate_note":"writable layer is lost"}))],
         vec![req(Get, "/api/targets/dbox")],
     ).await;
-    assert!(out.contains("pending") && out.contains("writable layer is lost"), "{out}");
+    assert!(
+        out.contains("pending") && out.contains("writable layer is lost"),
+        "{out}"
+    );
     ok(
         false,
-        &["admin", "target", "verb", "dbox", "recreate", "--force", "--discard-volumes", "data", "--discard-volumes", "cache"],
+        &[
+            "admin",
+            "target",
+            "verb",
+            "dbox",
+            "recreate",
+            "--force",
+            "--discard-volumes",
+            "data",
+            "--discard-volumes",
+            "cache",
+        ],
         vec![(200, json!({"state":"running"}))],
-        vec![(Post, "/api/targets/dbox/recreate", vec![], Some(json!({"force":true,"discard_volumes":["data","cache"]})))],
-    ).await;
-    let r = exec(false, &["admin", "target", "verb", "dbox", "up", "--force"], vec![], None).await;
+        vec![(
+            Post,
+            "/api/targets/dbox/recreate",
+            vec![],
+            Some(json!({"force":true,"discard_volumes":["data","cache"]})),
+        )],
+    )
+    .await;
+    let r = exec(
+        false,
+        &["admin", "target", "verb", "dbox", "up", "--force"],
+        vec![],
+        None,
+    )
+    .await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
     assert!(r.reqs.is_empty());
 }

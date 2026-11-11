@@ -386,10 +386,18 @@ pub async fn admin_targets(ctx: &Ctx) -> anyhow::Result<()> {
 }
 
 fn with_recreate_pending(items: Vec<Value>) -> Vec<Value> {
-    items.into_iter().map(|mut t| {
-        t["recreate_pending"] = if t["runtime"]["recreate_required"] == true { "pending" } else { "-" }.into();
-        t
-    }).collect()
+    items
+        .into_iter()
+        .map(|mut t| {
+            t["recreate_pending"] = if t["runtime"]["recreate_required"] == true {
+                "pending"
+            } else {
+                "-"
+            }
+            .into();
+            t
+        })
+        .collect()
 }
 
 const LEASE_COLS: &[(&str, &str)] = &[
@@ -734,7 +742,9 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             discard_volumes,
         } => {
             if (*force || !discard_volumes.is_empty()) && verb != "recreate" {
-                return Err(crate::api::CliError::usage("--force and --discard-volumes require recreate"));
+                return Err(crate::api::CliError::usage(
+                    "--force and --discard-volumes require recreate",
+                ));
             }
             if !["up", "down", "snapshot", "restore", "status", "recreate"].contains(&verb.as_str())
             {

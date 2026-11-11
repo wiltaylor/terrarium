@@ -6826,6 +6826,7 @@ recreation pending. Use normal `up` to create it with the holder workspaces.
 `recreate` refuses an absent container with `no container yet; up creates it`.
 For a legacy container without a saved baseline, the first edit reads its
 actual image and limits from Docker inspect rather than the definition.
+If the host is offline, that edit refuses until the baseline can be read.
 Run `terrarium admin target verb NAME recreate` (`POST
 /api/targets/{name}/recreate`) explicitly to apply the settings. This requires
 the rights to define the target (project admin or global sysadmin), refuses
@@ -6836,6 +6837,25 @@ binds recorded for the container and verified against the host's work root.
 Foreign binds and named or anonymous volumes refuse recreation. Older host
 agents that cannot verify mounts also refuse mounted containers. Existing-container targets (`container`)
 cannot be recreated. Ephemeral targets keep their existing behavior.
+
+`targets ls` marks `RECREATE` as `pending` when settings need recreation,
+and `targets show` prints the pending state and writable-layer warning.
+Only the operator may override recreation safeguards:
+
+- `--force` (`{"force":true}`) permits removal of a running container, including
+  other holders' live exec sessions. Those processes are stopped by Docker.
+- Repeat `--discard-volumes NAME` (`{"discard_volumes":["NAME",...]}`) for each
+  volume attachment that may be lost. The names must equal the full set of
+  volume mounts not named by the definition, without missing, extra or duplicate
+  names. Currently the definition declares workspace binds, not volumes, so this
+  covers every volume mount. A refusal lists volume names and mount points.
+
+Neither override authorizes a foreign bind, unknown mount metadata, or a mount
+source in the request. Agents, including project admins, receive 403 for either
+override. Recreation rechecks the inspected identity and mounts before removal,
+and audits the discarded volume names. **Discard means detach, not delete**:
+no volume contents are inspected and no volumes are deleted. Old volume data
+remains on the host, but the replacement container does not attach it.
 
 An `ephemeral` target must be `docker` (with `image`) or `vmlab`. Values
 that go onto a command line (`host`, `address`, `image`, `container`,
