@@ -61,6 +61,42 @@ Both binaries also get a GitHub build provenance attestation.
 
 ## How to make a release
 
+### Version branch e2e at the cut
+
+After pushing `release/X.Y.Z`, the project admin queues the cut-time gate
+on the open version group's header card (not a member card):
+
+```text
+POST /api/cards/TER-<header>/e2e
+{"branch":"release/X.Y.Z","repo":"terrarium","eta":"20m"}
+```
+
+The daemon pins the remote branch head and runs
+`TERRARIUM_DOCKER_CI=1 python3 scripts/docker_ci.py` on that tree. The job
+shares the merge lane, so it cannot reset the Docker VM under a merge job.
+It does not merge or push a branch, move the header or change membership.
+It records the job and tested commit on the group's `version branch e2e`
+step, marking it done only on success, failed on failure or cancellation.
+Do not pre-release until this step is done on the final release commit.
+After a blocker fix, queue it again on the same group and release branch.
+
+The gate runs the full validation suite, then the two ignored live Docker
+tests named in `scripts/docker_ci.py`. It rejects skipped or unmatched live
+tests. Results are written under `results/` in the job slot. Upload
+`results/docker.json` and the suite's result files with
+`terrarium test push --card <header> --label version:X.Y.Z`.
+Device-IO and Claude live tests still need their separate hardware or
+credentials. If applicable, run them on the same release commit and record
+their evidence on the group before publishing. They are not silently
+enabled by the Docker job.
+
+The delivery principal needs the existing Docker CI tunnel and reset run
+grants and pinned endpoints. Both keys stay inside the daemon. Branch code
+gets only a job-scoped Unix relay endpoint. Never fetch a VM key or run the
+gate manually against the real VM. Card validation remains ineligible.
+
+### Publishing
+
 A release occurs only for a push to `main` when the head commit has a
 trailer:
 

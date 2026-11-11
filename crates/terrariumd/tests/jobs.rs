@@ -27,6 +27,27 @@ use terrarium_host::{Client, ClientOptions};
 /// only: each poll returns as soon as its state is there.
 const DEADLINE: Duration = Duration::from_secs(300);
 
+#[tokio::test]
+async fn release_e2e_rejects_card_branches_members_and_missing_docker_config() {
+    use terrariumd::store::groups;
+    let lab = lab(1).await;
+    let card = lab.card("ordinary", "ordinary").await;
+    let path = format!("/api/cards/{card}/e2e");
+    let response = lab.td.post_as(&lab.lead, &path, json!({"branch":"ter-719"})).await;
+    assert_eq!(response.status, 400, "{}", response.body);
+    let response = lab.td.post_as(&lab.lead, &path, json!({"branch":"release/1.2.3"})).await;
+    assert!(!response.status.is_success(), "{}", response.body);
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let header = state.db.write("system", |t| {
+        groups::open(t, groups::Open { project: "p", rule: "version-cut", key: "version:test",
+            title: "Version test", column: "accepted", done_when: "done", eta: None, close_after: None })?;
+        Ok(groups::by_key(t, "p", "version:test")?.unwrap().id)
+    }).await.unwrap();
+    let response = lab.td.post_as(&lab.lead, &format!("/api/cards/{header}/e2e"), json!({"branch":"release/1.2.3"})).await;
+    assert_eq!(response.status, 400, "{}", response.body);
+    assert!(response.body.to_string().contains("Docker CI"));
+}
+
 /// A wait on the queue or a card that fails after [`DEADLINE`] without
 /// progress, or after two of them in all. Under merge-job load (load 39,
 /// IO pressure 40%) a queue that still moved took longer than

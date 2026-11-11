@@ -1038,10 +1038,10 @@ pub fn pick(
             *on_host.entry(h).or_default() += 1;
         }
         match j.kind {
-            JobKind::Merge => {
+            JobKind::Merge | JobKind::E2e => {
                 merging.insert(j.project.clone());
             }
-            JobKind::Validate | JobKind::E2e => {
+            JobKind::Validate => {
                 *validating.entry(j.project.clone()).or_default() += 1;
                 if let Some(s) = j.slot {
                     held.entry(j.project.clone()).or_default().insert(s);
@@ -1054,7 +1054,8 @@ pub fn pick(
         let Some(q) = queues.get(&j.project) else {
             continue;
         };
-        let merge = j.kind == JobKind::Merge;
+        // Both kinds own the project's Docker VM and must never overlap.
+        let merge = matches!(j.kind, JobKind::Merge | JobKind::E2e);
         if merge && !merging.insert(j.project.clone()) {
             // A merge of the project runs, or an older one comes first,
             // whether it starts now or not.
@@ -2282,6 +2283,18 @@ mod tests {
         let queued = vec![job("1", "a", JobKind::Validate, "app", "t1")];
         let p = pick(queued, &run, &q, &none);
         assert_eq!(p[0].0.slot, Some(1));
+    }
+
+    #[test]
+    fn release_e2e_and_merge_share_one_lane() {
+        let q = queues(&[("a", 3, "h")]);
+        for kind in [JobKind::Merge, JobKind::E2e] {
+            let run = [running(job("0", "a", kind, "app", "release/1.2.3"), "h")];
+            let queued = vec![job("1", "a", JobKind::E2e, "app", "release/1.2.3"), job("2", "a", JobKind::Merge, "app", "t2")];
+            assert!(pick(queued, &run, &q, &HashMap::new()).is_empty());
+        }
+        let picked = pick(vec![job("1", "a", JobKind::E2e, "app", "release/1.2.3")], &[], &q, &HashMap::new());
+        assert_eq!(picked[0].0.slot, Some(MERGE_SLOT));
     }
 
     #[test]

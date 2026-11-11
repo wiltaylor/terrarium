@@ -597,50 +597,73 @@ async fn e2e(
     rt::check_ref(&b.branch)?;
     let version = b.branch.strip_prefix("release/").unwrap_or("");
     let parts: Vec<_> = version.split('.').collect();
-    if parts.len() != 3 || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|c| c.is_ascii_digit())) {
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || !p.bytes().all(|c| c.is_ascii_digit()))
+    {
         return Err(ApiError::invalid("e2e requires release/X.Y.Z"));
     }
     let planned_secs = planned(b.eta.as_deref())?;
     let card_id = board::normalise_id(&id);
     let a = actor.clone();
     let given_repo = b.repo.clone();
-    let (card, repo) = state.db.read(move |c| {
-        let card = board::get_card(c, &card_id)?;
-        policy::admin_project(&a, &card.project, "queueing release e2e")?;
-        not_held(&card)?;
-        let group = crate::store::groups::get(c, &card.id)?;
-        if !group.key.starts_with("version:") || group.closed_at.is_some() {
-            return Err(ApiError::invalid("e2e requires an open version group"));
-        }
-        let def = jobs::delivery(c, &card.project)?;
-        enabled(&def, &card.project)?;
-        if def.merge_secrets.is_empty() || def.docker_ci.is_none() {
-            return Err(ApiError::invalid("release e2e requires Docker CI delivery configuration"));
-        }
-        let repo = repo_of(c, &card, given_repo)?;
-        Ok((card, repo))
-    }).await?;
-    let commit = rt::remote_head(&state, &card.project, &repo, &b.branch).await?
+    let (card, repo) = state
+        .db
+        .read(move |c| {
+            let card = board::get_card(c, &card_id)?;
+            policy::admin_project(&a, &card.project, "queueing release e2e")?;
+            not_held(&card)?;
+            let group = crate::store::groups::get(c, &card.id)?;
+            if !group.key.starts_with("version:") || group.closed_at.is_some() {
+                return Err(ApiError::invalid("e2e requires an open version group"));
+            }
+            let def = jobs::delivery(c, &card.project)?;
+            enabled(&def, &card.project)?;
+            if def.merge_secrets.is_empty() || def.docker_ci.is_none() {
+                return Err(ApiError::invalid(
+                    "release e2e requires Docker CI delivery configuration",
+                ));
+            }
+            let repo = repo_of(c, &card, given_repo)?;
+            Ok((card, repo))
+        })
+        .await?;
+    let commit = rt::remote_head(&state, &card.project, &repo, &b.branch)
+        .await?
         .ok_or_else(|| ApiError::invalid("release branch is not on the remote"))?;
-    let job = state.db.write(actor.label(), move |t| {
-        let group = crate::store::groups::get(t, &card.id)?;
-        if group.closed_at.is_some() {
-            return Err(ApiError::conflict("version group is closed"));
-        }
-        let job = jobs::create(t, NewJob {
-            project: card.project,
-            card: card.id,
-            kind: JobKind::E2e,
-            repo,
-            branch: b.branch,
-            commit: Some(commit),
-            by_agent: None,
-            batch: Vec::new(),
-            planned_secs,
-        })?;
-        crate::store::groups::step(t, &group, "version branch e2e", Some("running"), Some(&format!("Job {} queued", job.id)), b.eta.as_deref())?;
-        Ok(job)
-    }).await?;
+    let job = state
+        .db
+        .write(actor.label(), move |t| {
+            let group = crate::store::groups::get(t, &card.id)?;
+            if group.closed_at.is_some() {
+                return Err(ApiError::conflict("version group is closed"));
+            }
+            let job = jobs::create(
+                t,
+                NewJob {
+                    project: card.project,
+                    card: card.id,
+                    kind: JobKind::E2e,
+                    repo,
+                    branch: b.branch,
+                    commit: Some(commit),
+                    by_agent: None,
+                    batch: Vec::new(),
+                    planned_secs,
+                },
+            )?;
+            crate::store::groups::step(
+                t,
+                &group,
+                "version branch e2e",
+                Some("running"),
+                Some(&format!("Job {} queued", job.id)),
+                b.eta.as_deref(),
+            )?;
+            Ok(job)
+        })
+        .await?;
     rt::kick(&state);
     Ok((StatusCode::CREATED, Json(json!({"job": job}))).into_response())
 }

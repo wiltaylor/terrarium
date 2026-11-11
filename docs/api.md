@@ -12790,6 +12790,18 @@ start with `Job queue:`.
 
 ### 35.4 Endpoints
 
+`POST /api/cards/{id}/e2e` is project-admin-only. Its body is
+`{branch:"release/X.Y.Z", repo?, eta?}`. The card must be an open version
+group header. Docker CI delivery configuration and run grants are required.
+It returns `201 {job}` with kind `e2e`, pinned to the remote branch head.
+The job shares the merge lane but never merges or pushes. It runs
+`TERRARIUM_DOCKER_CI=1 python3 scripts/docker_ci.py`, using the same
+daemon-owned reset/tunnel handling as a merge. No key reaches recipe code.
+The group's `version branch e2e` step records the job and its outcome.
+Failure or cancellation marks the step failed without changing membership
+or moving the header. Queue it again after a release fix. A card validate
+job still cannot enter the Docker gate. See [release.md](release.md).
+
 | method and path                    | who                                   | what |
 |------------------------------------|---------------------------------------|------|
 | `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?, eta?}`. `eta` is the planned duration (§35.5). The commit must be the head of the branch on the remote, read with `git ls-remote` in the daemon. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
