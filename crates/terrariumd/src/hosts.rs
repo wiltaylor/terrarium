@@ -421,8 +421,11 @@ impl HostRegistry {
             let host_key = format!("host/{host}");
             if let Some(mut saved) = journal.load::<SavedHost>(&host_key)? {
                 saved.sessions.remove(session);
-                values.push((host_key, serde_json::to_value(saved)
-                    .map_err(|_| ApiError::internal("cannot encode host cleanup"))?));
+                values.push((
+                    host_key,
+                    serde_json::to_value(saved)
+                        .map_err(|_| ApiError::internal("cannot encode host cleanup"))?,
+                ));
             }
             prefixes.push(format!("event/{host}/{session}/"));
         }
@@ -432,7 +435,9 @@ impl HostRegistry {
         {
             entry.sessions.remove(&session);
             if let Some(conn) = &entry.conn {
-                let _ = conn.tx.send(Outgoing::frame(DaemonFrame::Release { session }));
+                let _ = conn
+                    .tx
+                    .send(Outgoing::frame(DaemonFrame::Release { session }));
             }
         }
         Ok(())
@@ -1986,18 +1991,43 @@ mod tests {
         crate::secrets::ensure_key(&db, dir.path()).unwrap();
         let reg = Arc::new(registry("lab1", true));
         reg.restore(dir.path()).unwrap();
-        let first = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
-        let second = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let first = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
+        let second = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
         let (first_id, second_id) = (first.id(), second.id());
         let journal = resume::Journal::new(dir.path());
-        journal.save("exec/closed", &json!({"host_session": ["lab1", first_id]})).unwrap();
+        journal
+            .save("exec/closed", &json!({"host_session": ["lab1", first_id]}))
+            .unwrap();
         for id in [first_id, second_id] {
-            reg.on_data("lab1", DataFrame::new(id, StreamTag::Stdout, b"retained".to_vec()));
+            reg.on_data(
+                "lab1",
+                DataFrame::new(id, StreamTag::Stdout, b"retained".to_vec()),
+            );
         }
         reg.forget_exec("closed").unwrap();
-        assert!(journal.load::<serde_json::Value>("exec/closed").unwrap().is_none());
-        assert!(journal.scan::<SessionEvent>(&format!("event/lab1/{first_id}/")).unwrap().is_empty());
-        assert_eq!(journal.scan::<SessionEvent>(&format!("event/lab1/{second_id}/")).unwrap().len(), 1);
+        assert!(
+            journal
+                .load::<serde_json::Value>("exec/closed")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            journal
+                .scan::<SessionEvent>(&format!("event/lab1/{first_id}/"))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            journal
+                .scan::<SessionEvent>(&format!("event/lab1/{second_id}/"))
+                .unwrap()
+                .len(),
+            1
+        );
         drop(first);
         drop(second);
         drop(reg);
