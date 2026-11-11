@@ -1552,7 +1552,9 @@ async fn remove_queued(
         && (agent.project != a.agent.project
             || !agent.roles.contains(&terrarium_core::Role::ProjectAdmin))
     {
-        return Err(ApiError::forbidden("removing a queued turn needs the operator or the agent's project lead"));
+        return Err(ApiError::forbidden(
+            "removing a queued turn needs the operator or the agent's project lead",
+        ));
     }
     let lock = state.lifecycle.turn_lock(agent_id(&a));
     let _held = lock.lock().await;

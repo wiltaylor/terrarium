@@ -2287,6 +2287,8 @@ Held turns backed by store rows appear once, with source `hold` and their
 durable row ID. Removing one deletes its row, so it cannot be delivered
 after release or a daemon restart. Budget holds are mail-only and add no
 turns here. Only vendor-refusal holds (`limit:<subscription>`) remain.
+Removing queued turns requires the operator or a project_admin of the
+agent's own project, not a sysadmin alone. Link keys may not remove turns.
 
 All need project_admin; an agent may `compact` and `new-session`
 itself. The work happens in the background. A `send` writes a row to the
