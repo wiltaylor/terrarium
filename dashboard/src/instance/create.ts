@@ -1,5 +1,6 @@
 import { createRoot, createSignal } from "solid-js";
 import { createHttpApi, type Api } from "../api/client";
+import { createApi } from "../api";
 import { createHttpTransport } from "../api/http";
 import type { AuthStore } from "../stores/auth";
 import { createExpandedStore } from "../app/treeModel";
@@ -22,6 +23,10 @@ export type InstanceKey = "local" | `remote:${string}`;
 /** Only same-origin dashboard paths are rebased. External and fragment links stay unchanged. */
 export function instanceHref(name: string | undefined, path: string): string {
   if (!name || !path.startsWith("/") || path.startsWith("//")) return path;
+  // Normalize before prefixing, so dot segments cannot leave the instance subtree.
+  const target = new URL(path, "https://dashboard.invalid");
+  if (target.origin !== "https://dashboard.invalid") return path;
+  path = target.pathname + target.search + target.hash;
   const prefix = `/remote/${name}`;
   if (path === prefix || path.startsWith(prefix + "/") || path.startsWith(prefix + "?") || path.startsWith(prefix + "#")) return path;
   return prefix + path;
@@ -40,11 +45,11 @@ export function createInstance(options: {
   const storage = scopeStorage(options.storage === undefined ? browserStorage("localStorage") : options.storage, key);
   const session = scopeStorage(options.session === undefined ? browserStorage("sessionStorage") : options.session, key);
   // These are HOME credentials, never a remote token. A remote 401 must not sign out the home.
-  const api = options.api ?? createHttpApi(createHttpTransport({
-    baseUrl: name === undefined ? "" : `/api/remotes/${name}/proxy`,
+  const api = options.api ?? (name === undefined ? createApi(auth) : createHttpApi(createHttpTransport({
+    baseUrl: `/api/remotes/${name}/proxy`,
     getToken: auth.token,
     getCsrf: auth.csrf,
-  }));
+  })));
   return createRoot((dispose) => {
     const bookmarks = createBookmarksStore(storage, window.location.origin, api.bookmarks);
     const events = createEventsStore(api, { ready: () => auth.mode() === "session" || auth.mode() === "bearer" });
