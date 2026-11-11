@@ -3167,8 +3167,7 @@ const FIX_ONLY_RED: &str = r#"rule "fix" {
 }
 "#;
 
-/// Minor 2: `job.fix` opens a card for a red merge only, not for a
-/// conflict or a job that could not run.
+/// A conflict queues a per-card repair, not a new red-group card.
 #[tokio::test]
 async fn job_fix_acts_on_a_red_merge_only() {
     let td = TestDaemon::start().await;
@@ -3187,11 +3186,46 @@ async fn job_fix_acts_on_a_red_merge_only() {
     verdict(&td, &error, &c, "error").await;
     settle(&td).await;
     let r = runs_of(&td, "p", "fix").await;
-    assert_eq!(states(&r), vec!["noop", "noop"], "{r:?}");
-    for run in &r {
-        let why = run["steps"][0]["detail"]["reason"].as_str().unwrap();
-        assert!(why.contains("not a red merge"), "{why}");
-    }
+    assert_eq!(states(&r), vec!["done", "noop"], "{r:?}");
+    let count = state(&td).db.read(|c| Ok(c.query_row("SELECT count(*) FROM conflict_fixes", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn job_fix_conflict_spawns_once_and_returns_conflicts_to_live_worker() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let template = td.post("/api/templates", json!({"name": "card-impl", "project": "p", "spec": {"harness": "claude"}})).await;
+    assert_eq!(template.status, 201, "{}", template.body);
+    td.agent("p", "lead", json!({"roles": ["project_admin"], "policy": {"spawn": {"templates": ["project:*"], "max_concurrent": 2, "max_lifetime": "1h", "bound": true}}})).await;
+    put_rules(&td, "p", FIX_ONLY_RED).await;
+    let a = new_card(&td, "p", json!({"title": "a", "column": "ready"})).await;
+    let job = store_job(&td, JobKind::Merge, &[&a]).await;
+    let job = fail_job(&td, &job, "conflict").await;
+    verdict(&td, &job, &a, "conflict").await;
+    verdict(&td, &job, &a, "conflict").await;
+    settle(&td).await;
+    // No effect is required: reconciliation alone recovers the request.
+    terrariumd::conflict_fixes::pass(&state(&td)).await;
+    terrariumd::conflict_fixes::pass(&state(&td)).await;
+    let bound = a.clone();
+    let sp = state(&td).db.read(move |c| Ok(terrariumd::store::spawns::open_bound(c, &terrariumd::store::spawns::Bound::new("card", &bound))?.unwrap())).await.unwrap();
+    assert_eq!(sp.template, "card-impl");
+    assert!(sp.task.contains("Merge origin/next"));
+    assert!(sp.task.contains("Do not rebase or force push"));
+    let count = state(&td).db.read(|c| Ok(c.query_row("SELECT count(*) FROM spawns", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    assert_eq!(count, 1);
+    td.wait_status(&sp.id, "idle").await;
+    // A later conflict must go to the same worker, not spawn another.
+    let next = store_job(&td, JobKind::Merge, &[&a]).await;
+    let next = fail_job(&td, &next, "conflict").await;
+    verdict(&td, &next, &a, "conflict").await;
+    settle(&td).await;
+    terrariumd::conflict_fixes::pass(&state(&td)).await;
+    let count = state(&td).db.read(|c| Ok(c.query_row("SELECT count(*) FROM spawns", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    assert_eq!(count, 1);
+    let done = state(&td).db.read(|c| Ok(c.query_row("SELECT count(*) FROM conflict_fixes WHERE done = 1", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    assert_eq!(done, 2);
 }
 
 const BUSY_RERUN: &str = r#"rule "again" {

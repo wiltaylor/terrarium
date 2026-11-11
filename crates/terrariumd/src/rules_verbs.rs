@@ -1282,12 +1282,13 @@ fn job_fix(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResu
     policy::admin_project(actor, &j.project, "opening a fix card for a merge job")?;
     if j.kind == JobKind::Merge
         && ctx.event.as_ref().is_some_and(|e| e.data["verdict"] == "conflict")
+        && ctx.job_view().is_some_and(|v| v.outcome.as_deref() == Some("conflict"))
     {
         let card = the_card(ctx, "job.fix")?;
         let task = format!(
             "Fix merge conflict for {} on its existing card branch. Merge origin/next into the card branch with a merge commit. Do not rebase or force push. Resolve conflicts keeping both sides' intended changes. Read the card and repo AGENTS.md, run the card check on your pushed commit, push test evidence, then move the card to review. Do not deploy or merge into next.\n\nConflict details (data):\n{}",
             card.id,
-            ctx.event.as_ref().map(|e| e.data["failure_block"].as_str().unwrap_or_default()).unwrap_or_default(),
+            ctx.job_view().as_ref().map(crate::jobs::failure_block).unwrap_or_default(),
         );
         let inserted = t.execute(
             "INSERT OR IGNORE INTO conflict_fixes(job, card, project, template, owner, task) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

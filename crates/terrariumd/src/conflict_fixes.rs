@@ -22,6 +22,13 @@ async fn dispatch(state: &Shared, r: Request) -> ApiResult<()> {
     let request = r.clone();
     let live = state.db.write("system", move |t| {
         let r = request;
+        let pending: bool = t.query_row("SELECT done = 0 FROM conflict_fixes WHERE job = ?1 AND card = ?2", params![r.job, r.card], |row| row.get(0))?;
+        if !pending {
+            return Ok(Some(None));
+        }
+        if board::is_held(t, &r.card)? {
+            return Err(ApiError::forbidden("conflict repair card is held"));
+        }
         // A card may have been archived or completed while this waited.
         let card = board::get_card(t, &r.card)?;
         let terminal: bool = t.query_row(
