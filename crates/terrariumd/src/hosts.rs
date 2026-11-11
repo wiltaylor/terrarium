@@ -447,7 +447,8 @@ impl HostRegistry {
             ));
         }
         if let Some((key, id)) = binding {
-            self.ownership_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.ownership_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             values.push((format!("bound/{key}"), json!((host, id))));
         }
         let removed: Vec<_> = event
@@ -527,15 +528,15 @@ impl HostRegistry {
         }
         let mut hosts = HashMap::<String, SavedHost>::new();
         for (host, id) in &removed {
-                if !hosts.contains_key(host)
-                    && let Some(saved) = journal.load::<SavedHost>(&format!("host/{host}"))?
-                {
-                    hosts.insert(host.clone(), saved);
-                }
-                if let Some(saved) = hosts.get_mut(host) {
-                    saved.sessions.remove(id);
-                }
-                prefixes.push(format!("event/{host}/{id}/"));
+            if !hosts.contains_key(host)
+                && let Some(saved) = journal.load::<SavedHost>(&format!("host/{host}"))?
+            {
+                hosts.insert(host.clone(), saved);
+            }
+            if let Some(saved) = hosts.get_mut(host) {
+                saved.sessions.remove(id);
+            }
+            prefixes.push(format!("event/{host}/{id}/"));
         }
         let mut values = Vec::new();
         for (host, saved) in hosts {
@@ -617,7 +618,9 @@ impl HostRegistry {
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
-        let epoch = self.ownership_epoch.load(std::sync::atomic::Ordering::SeqCst);
+        let epoch = self
+            .ownership_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
         #[derive(Deserialize)]
         struct Binding {
             host_session: Option<(String, SessionId)>,
@@ -636,7 +639,11 @@ impl HostRegistry {
         let mut entries = self.lock();
         // A new owner may have appeared while the scan ran without this lock.
         // Leave cleanup to the next tick rather than deleting its replay.
-        if epoch != self.ownership_epoch.load(std::sync::atomic::Ordering::SeqCst) {
+        if epoch
+            != self
+                .ownership_epoch
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
             return Ok(());
         }
         if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
@@ -683,7 +690,8 @@ impl HostRegistry {
         if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
             return Err(ApiError::internal("host registry is stopping"));
         }
-        self.ownership_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.ownership_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some(journal) = self.journal.get() {
             journal.save(&format!("exec/{id}"), value)?;
         }

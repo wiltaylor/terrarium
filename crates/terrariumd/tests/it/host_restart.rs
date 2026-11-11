@@ -20,7 +20,9 @@ pub(crate) async fn wait_pid_gone(pid: &str) {
         while std::path::Path::new(&format!("/proc/{}", pid.trim())).exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 async fn online(td: &TestDaemon) {
@@ -142,16 +144,22 @@ async fn process_restart(offline: bool) {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let mail = td.get(&format!("/api/mail?to={aid}&from=system")).await;
-            let count = mail.ok().as_array().unwrap().iter().filter(|m| {
-                m["body"].as_str().unwrap_or("").contains(&wid)
-            }).count();
+            let count = mail
+                .ok()
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|m| m["body"].as_str().unwrap_or("").contains(&wid))
+                .count();
             if count > 0 {
                 assert_eq!(count, 1, "{}", mail.body);
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     td.delete(&format!("/api/targets/p-box/sessions/{sid}"))
         .await
         .ok();

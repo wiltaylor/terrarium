@@ -593,14 +593,20 @@ impl Client {
                 while self.session_count() > 0 {
                     tokio::time::sleep(su.idle_poll).await;
                 }
-            }).await;
+            })
+            .await;
             if drained.is_ok() {
                 return;
             }
             let _admission = self.shared.admission.lock().await;
-            self.shared.draining.store(false, std::sync::atomic::Ordering::SeqCst);
+            self.shared
+                .draining
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             drop(_admission);
-            tracing::info!(sessions = self.session_count(), "self-update: drain expired; admission reopened, staged update will retry");
+            tracing::info!(
+                sessions = self.session_count(),
+                "self-update: drain expired; admission reopened, staged update will retry"
+            );
             tokio::time::sleep(su.idle_poll).await;
         }
     }
@@ -1697,32 +1703,69 @@ pub(crate) mod tests {
         let client = Client::new(ClientOptions::new("ws://localhost", "test", "test"));
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("host");
-        let staged = crate::selfupdate::stage(&binary, b"#!/bin/sh\necho 'terrarium-host 0.3.0+bbbbbbb'\n", "0.3.0+bbbbbbb").await.unwrap();
+        let staged = crate::selfupdate::stage(
+            &binary,
+            b"#!/bin/sh\necho 'terrarium-host 0.3.0+bbbbbbb'\n",
+            "0.3.0+bbbbbbb",
+        )
+        .await
+        .unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
-        client.sessions().insert(1, Entry {
-            outbox: client.new_outbox(1, &tx), input: None, push: None, detached_since: None,
-        });
+        client.sessions().insert(
+            1,
+            Entry {
+                outbox: client.new_outbox(1, &tx),
+                input: None,
+                push: None,
+                detached_since: None,
+            },
+        );
         let su = SelfUpdateOptions {
-            binary, enabled: true, supervised: true,
-            idle_poll: Duration::from_millis(50), drain_timeout: Duration::from_millis(20),
+            binary,
+            enabled: true,
+            supervised: true,
+            idle_poll: Duration::from_millis(50),
+            drain_timeout: Duration::from_millis(20),
         };
         let worker = client.clone();
         let task = tokio::spawn(async move { worker.drain_for_update(&su).await });
         tokio::time::timeout(Duration::from_secs(2), async {
-            while !client.shared.draining.load(std::sync::atomic::Ordering::SeqCst) {
+            while !client
+                .shared
+                .draining
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 tokio::task::yield_now().await;
             }
-            while client.shared.draining.load(std::sync::atomic::Ordering::SeqCst) {
+            while client
+                .shared
+                .draining
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 tokio::task::yield_now().await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(client.admit(2, &tx));
-        assert_eq!(client.session_count(), 1, "drain expiry must not kill sessions");
+        assert_eq!(
+            client.session_count(),
+            1,
+            "drain expiry must not kill sessions"
+        );
         assert!(!task.is_finished());
         assert!(staged.exists(), "staged binary retained");
         client.sessions().remove(&1);
-        tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap();
-        assert!(client.shared.draining.load(std::sync::atomic::Ordering::SeqCst));
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            client
+                .shared
+                .draining
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
     }
 
     #[tokio::test]

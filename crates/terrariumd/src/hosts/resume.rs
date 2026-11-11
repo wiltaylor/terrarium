@@ -123,7 +123,8 @@ impl Journal {
                 let mut stmt = tx.prepare(SCAN_PAGE)?;
                 stmt.query_map(params![prefix, end, cursor], |r| {
                     Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
-                })?.collect::<Result<Vec<_>, _>>()?
+                })?
+                .collect::<Result<Vec<_>, _>>()?
             };
             tx.commit()?;
             let count = rows.len();
@@ -171,22 +172,42 @@ mod tests {
         let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
         crate::secrets::ensure_key(&conn, dir.path()).unwrap();
         let journal = Journal::new(dir.path());
-        let rows: Vec<_> = (0..32).flat_map(|host| {
-            (0..600).map(move |seq| (
-                format!("event/host-{host:03}/1/{seq:020}"), serde_json::json!(seq)
-            ))
-        }).collect();
+        let rows: Vec<_> = (0..32)
+            .flat_map(|host| {
+                (0..600).map(move |seq| {
+                    (
+                        format!("event/host-{host:03}/1/{seq:020}"),
+                        serde_json::json!(seq),
+                    )
+                })
+            })
+            .collect();
         journal.save_many(&rows).unwrap();
-        let plan: Vec<String> = conn.prepare(&format!("EXPLAIN QUERY PLAN {SCAN_PAGE}"))
-            .unwrap().query_map(params!["event/host-016/", "event/host-0160", ""], |r| r.get(3))
-            .unwrap().collect::<Result<_, _>>().unwrap();
-        assert!(plan.iter().any(|s| s.contains("SEARCH host_resume") && s.contains("id>?") && s.contains("id<?")), "{plan:?}");
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {SCAN_PAGE}"))
+            .unwrap()
+            .query_map(params!["event/host-016/", "event/host-0160", ""], |r| {
+                r.get(3)
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|s| s.contains("SEARCH host_resume")
+                && s.contains("id>?")
+                && s.contains("id<?")),
+            "{plan:?}"
+        );
         for host in 0..32 {
-            let found = journal.scan::<u32>(&format!("event/host-{host:03}/")).unwrap();
+            let found = journal
+                .scan::<u32>(&format!("event/host-{host:03}/"))
+                .unwrap();
             assert_eq!(found.len(), 600);
             assert_eq!(found[599].1, 599);
         }
-        journal.replace(&[], &[], &["event/host-016/".into()]).unwrap();
+        journal
+            .replace(&[], &[], &["event/host-016/".into()])
+            .unwrap();
         assert!(journal.scan::<u32>("event/host-016/").unwrap().is_empty());
         assert_eq!(journal.scan::<u32>("event/host-017/").unwrap().len(), 600);
     }

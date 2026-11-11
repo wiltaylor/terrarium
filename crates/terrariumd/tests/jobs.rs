@@ -2665,10 +2665,15 @@ pub(super) async fn native_merge_restart_keeps_recipe_exit_tail_and_junit(offlin
     assert!(tail.contains("after-restart"), "{tail}");
     assert_eq!(ended["attempt"], original["attempt"]);
     let finished_card = lab.td.get(&format!("/api/cards/{card}")).await;
-    let notifications = finished_card.ok()["comments"].as_array().unwrap().iter().filter(|c| {
-        let body = c["body"].as_str().unwrap_or("");
-        body.contains(&jid) && body.contains("attempt 1") && body.contains("failed")
-    }).count();
+    let notifications = finished_card.ok()["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| {
+            let body = c["body"].as_str().unwrap_or("");
+            body.contains(&jid) && body.contains("attempt 1") && body.contains("failed")
+        })
+        .count();
     assert_eq!(notifications, 1, "{}", finished_card.body);
     assert_eq!(std::fs::read_to_string(xml).unwrap(), original_xml);
     let parsed = lab
