@@ -47,7 +47,8 @@ pub(super) async fn test(key: &ApiKey, settings: &CloudSettings) -> ApiResult<()
     let response = client.post(url)
         .header("x-api-key", key.key.trim())
         .header("anthropic-version", "2023-06-01")
-        .json(&json!({"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "Hi"}]}))
+        .header("content-type", "application/json")
+        .body(json!({"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "Hi"}]}).to_string())
         .send().await.map_err(|_| failure("Cannot reach Foundry. Check the resource name and network access."))?;
     if response.status().is_success() {
         return Ok(());
