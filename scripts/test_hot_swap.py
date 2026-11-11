@@ -245,6 +245,12 @@ class HotSwapTests(unittest.TestCase):
         # rollback must retain it, unlike manual restore of the earlier ZIP.
         with sqlite3.connect(db) as conn:
             conn.execute("INSERT INTO journal VALUES ('after-backup-before-pause')")
+        state_mib = int(os.environ.get("TERRARIUM_HOT_SWAP_STATE_MIB", "0"))
+        data = b'x' * 1048576
+        for n in range(state_mib):
+            directory = self.state / ("agents/A1/logs" if n % 2 else "archive")
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / f"{n}.log").write_bytes(data)
         started = time.monotonic()
         (self.run / "upgrade-pause").touch()
         process.send_signal(signal.SIGUSR1)
@@ -267,10 +273,12 @@ class HotSwapTests(unittest.TestCase):
         (self.run / "upgrade-pause").unlink()
         wait(lambda: len(log.read_text().splitlines()) == 2)
         pause_seconds = time.monotonic() - started
-        print(f"hot-swap seed_bytes={db.stat().st_size} snapshot_seconds={copy_seconds:.3f} "
+        print(f"hot-swap seed_bytes={db.stat().st_size} state_file_bytes={state_mib * 1048576} "
+              f"snapshot_seconds={copy_seconds:.3f} "
               f"restore_seconds={restore_seconds:.3f} pause_including_rollback_seconds={pause_seconds:.3f}")
         self.assertLess(pause_seconds, 30, "paused snapshot and rollback exceeded 30 seconds")
         self.assertNotEqual(*log.read_text().splitlines())
+        HOT.main(["commit", backup])
 
         # Force a timeout after SIGUSR1. Cleanup must request a restart rather
         # than letting the later clean daemon exit stop the whole container.
