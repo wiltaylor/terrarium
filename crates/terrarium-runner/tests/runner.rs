@@ -1121,11 +1121,15 @@ async fn claude_turn_waits_for_the_startup_hook() {
 }
 
 async fn check_turn_waits_for_startup(adapter: Option<Arc<dyn Adapter>>) {
+    let claude = adapter.is_some();
     let dir = tempfile::tempdir().expect("tempdir");
     let gate = dir.path().join("startup");
     let mut h = start_with_adapter(
         Opts {
-            env: vec![("FAKE_TUI_STARTUP_GATE", gate.display().to_string())],
+            env: vec![
+                ("FAKE_TUI_STARTUP_GATE", gate.display().to_string()),
+                ("FAKE_TUI_CLAUDE_PROMPT", if claude { "1" } else { "0" }.into()),
+            ],
             startup_hook: true,
             session: Some("s1"),
             ..Opts::default()
@@ -1137,7 +1141,11 @@ async fn check_turn_waits_for_startup(adapter: Option<Arc<dyn Adapter>>) {
     let delivery = h.runner.type_turn("hello");
     // The snapshot text has no trailing spaces: the prompt reads as `>`.
     until("the prompt on the screen", || {
-        h.runner.screen().text().lines().any(|l| l == ">")
+        h.runner
+            .screen()
+            .text()
+            .lines()
+            .any(|l| l == if claude { "❯" } else { ">" })
     })
     .await;
     // The prompt is on the screen and the PTY is quiet for longer than the
