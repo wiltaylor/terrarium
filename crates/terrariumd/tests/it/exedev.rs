@@ -172,7 +172,7 @@ async fn fake_api() -> (String, FakeRef) {
 
 /// A fake `ssh`: it logs the destination and runs the remote command here.
 /// While the file `ssh-slow` is in `dir`, it waits before it runs.
-fn fake_ssh(dir: &std::path::Path) -> (String, std::path::PathBuf) {
+pub(crate) fn fake_ssh(dir: &std::path::Path) -> (String, std::path::PathBuf) {
     let log = dir.join("ssh.log");
     let bin = dir.join("fake-ssh");
     std::fs::write(
@@ -275,6 +275,8 @@ async fn durable_exedev_finishes_offline_once_with_real_exit() {
         .path();
     super::ssh_restart::wait_file(&spool.join("exit")).await;
     assert_eq!(std::fs::read_to_string(spool.join("exit")).unwrap(), "23\n");
+    reboot(&mut td, &url, &ssh).await;
+    super::ssh_restart::completed(&td, &aid, &wid, &root).await;
     reboot(&mut td, &url, &ssh).await;
     super::ssh_restart::completed(&td, &aid, &wid, &root).await;
     super::ssh_restart::cleanup(&root);

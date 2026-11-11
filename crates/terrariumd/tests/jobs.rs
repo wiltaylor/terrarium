@@ -3086,6 +3086,46 @@ pub(super) async fn native_merge_restart_keeps_recipe_exit_tail_and_junit(offlin
     assert_eq!(parsed.ok()["counts"]["passed"], 1);
 }
 
+#[tokio::test]
+async fn durable_ssh_queue_recipe_finishes_offline_once() {
+    let marks = tempfile::tempdir().unwrap();
+    let (ssh, _) = crate::exedev::fake_ssh(marks.path());
+    let mut lab = lab_impl_ssh(1, None, "code", Some(&ssh)).await;
+    let spool_root = marks.path().join("spool");
+    lab.td.post("/api/targets", json!({"name":"queue-ssh","kind":"ssh","address":"ci@127.0.0.1","project":"p","work_root":spool_root})).await.ok();
+    let go = marks.path().join("go");
+    let started = marks.path().join("started");
+    let xml = marks.path().join("junit.xml");
+    let recipe = format!("echo started >> '{}'; printf '<testsuite tests=\"1\"><testcase name=\"kept\"/></testsuite>' > '{}'; while [ ! -e '{}' ]; do sleep 0.02; done; echo offline-queue-tail; exit 7", started.display(), xml.display(), go.display());
+    lab.td.put("/api/projects/p/delivery", json!({"target":"queue-ssh","recipe":recipe,"slots":1,"next_repos":["app"],"work_dir":lab._dirs.path().join("jobs")})).await.ok();
+    lab.branch("ter-ssh-restart", "next", &[("OK", "yes\n")]);
+    let card = lab.card("ssh-restart", "ter-ssh-restart").await;
+    let queued = lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({})).await;
+    let jid = queued.ok()["job"]["id"].as_str().unwrap().to_owned();
+    crate::ssh_restart::wait_file(&xml).await;
+    let original = lab.td.get(&format!("/api/jobs/{jid}")).await.body;
+    lab.td.daemon.take().unwrap().shutdown_and_wait().await;
+    std::fs::write(&go, "go").unwrap();
+    let spool = std::fs::read_dir(spool_root.join(".terrarium-runs")).unwrap().next().unwrap().unwrap().path();
+    crate::ssh_restart::wait_file(&spool.join("exit")).await;
+    assert_eq!(std::fs::read_to_string(spool.join("exit")).unwrap(), "7\n");
+    lab.td.boot_with_ssh(None,None,Some(&ssh)).await;
+    let jobs = lab.until_idle().await;
+    let ended = jobs.iter().find(|j| j["id"] == jid).unwrap();
+    assert_eq!(ended["exit_code"], 7, "{ended}");
+    assert!(ended["tail"].as_str().unwrap().contains("offline-queue-tail"));
+    for field in ["attempt", "slot", "started_at"] { assert_eq!(ended[field], original[field], "{field}"); }
+    assert_eq!(std::fs::read_to_string(started).unwrap(), "started\n");
+    let card = lab.td.get(&format!("/api/cards/{card}")).await;
+    let notifications = card.ok()["comments"].as_array().unwrap().iter().filter(|c| {
+        let body = c["body"].as_str().unwrap_or("");
+        body.contains(&jid) && body.contains("attempt 1") && body.contains("failed")
+    }).count();
+    assert_eq!(notifications, 1, "{}", card.body);
+    assert!(std::fs::read_to_string(xml).unwrap().contains("kept"));
+    crate::ssh_restart::cleanup(&spool_root);
+}
+
 async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
     lab.td
         .put(

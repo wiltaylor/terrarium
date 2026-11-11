@@ -561,9 +561,9 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                 // a running one that gets a cancel meanwhile keeps its
                 // slot as a draining job (TER-123 review 2, major 1).
                 let live = LiveRun::new(&job.id);
-                if running && !other_host && checkpoints.contains(&job.id)
+                if running && !other_host
                     && def.as_ref().is_some_and(|d|
-                        matches!(d.kind, TargetKind::Host | TargetKind::Docker | TargetKind::Vmlab)
+                        (matches!(d.kind, TargetKind::Host | TargetKind::Docker | TargetKind::Vmlab) && checkpoints.contains(&job.id))
                         || (matches!(d.kind, TargetKind::Ssh | TargetKind::Exedev) && remote_checkpoints.contains(&job.id)))
                 {
                     resumed.push((job, delivery, live));
