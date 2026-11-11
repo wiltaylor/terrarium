@@ -1,6 +1,6 @@
 //! Operator-only home proxy. The browser never receives a link key.
-mod event_feed;
 pub(super) mod artifacts;
+mod event_feed;
 use std::sync::Arc;
 use std::time::Instant;
 
