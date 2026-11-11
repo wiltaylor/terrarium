@@ -3244,7 +3244,7 @@ except for the differences in "Bundles" below.
 | `options` | Short choice labels: at most 10, each at most 200 characters, no two the same. `[]` for a free answer. A notice and a bundle have none: options on a notice or a bundle are `422 invalid`. |
 | `items` | A bundle only: the questions, 2 to 20, each `{text, options, context?, answer?, answer_option?}`. Absent for a question and a notice. See "Bundles". |
 | `context` | Optional background as Markdown, at most 16 KiB. The dashboard shows it through the DOMPurify sink only. |
-| `card` | Optional. A card of the agent's project. The question then shows on that card on the board (§8) and in the Inbox. Link or unlink later with `PATCH` (see "Cards"). |
+| `card` | A card of the agent's project. Required for a question or bundle unless asked inside an Inbox thread, even at urgent or critical priority. The question shows on that card on the board (§8) and in the Inbox. Answers are also saved as system comments on the card. Link or unlink later with `PATCH` (see "Cards"). |
 | `priority` | `normal`, `urgent`, or `critical`. Lists put the critical open questions first, then the urgent ones. Use `critical` only when the operator must act now: production is down, data is lost, a security problem, or a spent budget that stops all work. While a critical item is open, the dashboard shows a banner on each page and flashes its browser tab (§6.9). |
 | `status` | A question: `open`, `in_thread`, `answered`, or `retracted`. A notice: `open`, `in_thread`, `acknowledged`, or `retracted`. Only `open` and `in_thread` change. `in_thread`: the operator moved it into an Inbox thread with its agent (see "To thread"). |
 | `answer`, `answer_option` | The answer text, and the 0-based index of the chosen option. An answer with an option and no text has the label as `answer`. For an acknowledged notice, `answer` is the reply of the operator, if any. |
@@ -3261,7 +3261,7 @@ The rights:
 | Ask, update | The agent itself, when it is a leader: project_admin of its project, or sysadmin. A member gets `403` with "workers send questions to their lead: terrarium mail send <lead> ...". The operator does not ask. |
 | Read | The agent itself, a project_admin of its project, a sysadmin, the operator. Another caller gets `404` for one question and `403` for a list. |
 | Answer, acknowledge | The operator. A sysadmin agent, for the question or notice of another agent. Never the asking agent (`403`). |
-| Retract | The asking leader, or the operator. |
+| Retract | The asking leader, the attached thread agent for its own thread question, or the operator. |
 | To thread | The operator. Another caller that reads the question gets `403`. |
 | Link to a card, unlink | The asking leader while the question is open. The operator, and a sysadmin agent for the question of another agent, at each status. |
 
@@ -3339,6 +3339,8 @@ Cards:
   card, or unlinks it with `"card": null`. The revision stays, so an answer
   in progress stays valid. The asking leader changes the card of an open
   question only. The operator and a sysadmin change it at each status.
+  A question or bundle without an Inbox thread cannot be unlinked, at any
+  priority or status (`422 invalid`). A full update enforces the same rule.
 - A change of the card writes the audit row `question.update` with
   `changed: ["card"]`, `card`, and `previous_card`, and an `updated`
   event with `previous_card_id` (the old card), so that the old card
@@ -4674,7 +4676,7 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 | `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards in board order: by column, then by place in the column (the top first), then by number. Each card has its `position` in its column, from 0. Cursor: opaque |
 | `POST /api/projects/{name}/cards` | new card | `201` card |
 | `GET /api/cards?columns=working,research` | | `200` the active cards of every board the caller may read (below) |
-| `GET /api/cards/{id}` | | `200` card |
+| `GET /api/cards/{id}` | | `200` card, with `questions` (all linked questions, including closed ones) |
 | `PATCH /api/cards/{id}` | card patch | `200` card |
 | `DELETE /api/cards/{id}` | | `204`; the card is archived |
 | `POST /api/cards/{id}/move` | `{"column", "position"?, "comment"?}` | `200` card |
@@ -12798,6 +12800,51 @@ A batch merge:
   merged card and red follows the rule of one card.
 - Any other failure (`error`) runs the batch once more with the merged
   cards, then fails each of them.
+
+The failed tests of the full suite run once more in a release validation
+(TER-683), in the recipe, so the run stays one run. The daemon takes no
+part in it: it reads nothing of it from the job log, and files no card.
+
+- The switch: `TERRARIUM_VALIDATE_CONTEXT=release` (the full suite at the
+  version cut, [release.md](release.md)), or `TERRARIUM_JOB_KIND=merge` (a
+  merge job). Either one makes `ci::validate` run the uid 1001 pass
+  (`ci::test-unprivileged`) after `ci::test`, and makes both passes rerun.
+  Without either (a card check, a validate job) nothing reruns.
+- When `ci::test` (the root pass) or `ci::test-unprivileged` (the uid 1001
+  pass) fails, `scripts/rerun_tests.py` takes the names of the failed tests
+  from the libtest output (the console output, or the libtest JSON when
+  `RESULTS_DIR` is set) and runs exactly those tests once more: the same
+  cargo command with the test names and `--exact` (and `--tests`, so no
+  doctest), or for uid 1001 the same test binary as the same uid, from the
+  same directory, with the same env and a new private HOME. With
+  `RESULTS_DIR` the rerun writes `rust-rerun.json` and
+  `rust-unprivileged-rerun.json`; `rust.json` keeps the first run.
+- Every rerun test passes: the step passes, and the suite goes on. One
+  fails again, does not run, or the rerun ends otherwise: the step fails.
+- No rerun, the step fails at once, unless every failure is a failed test.
+  The script counts each test run that cargo starts (`Running`,
+  `Doc-tests` on its stderr) or that it starts itself (uid 1001), and each
+  end: cargo itself ending with a status other than 101 (a signal or any
+  other code), a build error or any other cargo `error` line, a test run that ended
+  with a signal or an exit code other than 101, a run that has no test
+  result (a crash or a panic before `running`), a failed run with no failed
+  test result, a failed doctest, or more than 5 failed tests in the step.
+- With `RESULTS_DIR`, each step that failed writes its entry to
+  `$RESULTS_DIR/reruns.json`: `{version: 1, context, steps: [{step,
+  outcome, reason?, tests: [{name, first, rerun, tail}]}]}`, `step` `test`
+  or `test-unprivileged`, `outcome` `green`, `red` or `no_rerun` (with the
+  `reason`), `first` `failed`, `rerun` `ok`, `failed`, `missing`, or `null`
+  with no rerun, `tail` the end (1500 bytes) of the first failure's output.
+  The names and the results come from the script's own count of the runs
+  it started, never from a line that a test prints. `ci::validate` removes
+  the file when it starts.
+- The flaky-test cards come from that file:
+  `just ci::flaky-cards "$RESULTS_DIR/reruns.json" "<the run>"`
+  (`scripts/flaky_cards.py`) prints, for each test with `rerun: ok`, the
+  `terrarium` commands for its card: a comment on the open card with the
+  label `flaky-test:<hash of the name>` (not in `done`), or a new card
+  `Flaky test: <name>` in `backlog` with the labels `flaky`,
+  `flaky-test:<hash>`, `version:vnext` and `type:small`. It runs nothing.
 
 The card writes of the queue are made as the operator. Their comments
 start with `Job queue:`.

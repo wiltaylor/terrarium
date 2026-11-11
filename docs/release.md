@@ -234,6 +234,26 @@ checks the release hash ([host-protocol.md, "Self-update"](host-protocol.md#self
 The host agent does not verify the attestation itself: the image that
 holds the binary is the item to verify.
 
+## The full suite at the version cut
+
+Merge jobs run no tests: the full suite runs once at the version cut, on
+the version branch, as a release validation (TER-683):
+
+```sh
+mkdir -p /src/<cut>-results
+TERRARIUM_VALIDATE_CONTEXT=release RESULTS_DIR=/src/<cut>-results just ci::validate
+just ci::flaky-cards /src/<cut>-results/reruns.json "the <X.Y.Z> cut"   # read it, then run it with | sh
+```
+
+`TERRARIUM_VALIDATE_CONTEXT=release` runs the uid 1001 pass after
+`ci::test` (as root; the host needs uid 1001, see AGENTS.md) and lets both
+test passes rerun their failed tests once. A test that passes on the rerun
+keeps the run green and is listed in `reruns.json`; one that fails again is
+red. A build error, a crash, a failed doctest, or more than 5 failed tests
+gets no rerun ([api.md](api.md) 35.3). `ci::flaky-cards` prints the
+`terrarium` commands that file or comment on the `flaky` card of each test
+that passed on the rerun; it runs nothing itself.
+
 ## The local release build
 
 `just release::publish` runs `scripts/release.py` on a clean checkout of the

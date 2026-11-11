@@ -36,7 +36,7 @@ describe("card question badges", () => {
     ]);
     expect([...b.keys()].sort()).toEqual(["P-1", "P-2"]);
     expect(b.get("P-1")!.count).toBe(3);
-    expect(b.get("P-1")!.label).toBe("? 3");
+    expect(b.get("P-1")!.label).toBe("waits on you (3)");
     expect(b.get("P-2")!.count).toBe(1);
     expect(b.get("P-1")!.title).toContain("bundle (2 items): question b");
     expect(b.get("P-1")!.title.split("\n")).toHaveLength(4);
