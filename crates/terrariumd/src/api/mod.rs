@@ -1322,6 +1322,7 @@ mod tests {
             })
             .await
             .unwrap();
+        let member = member.to_string();
         let headers = [(crate::actor::AGENT_HEADER, member.as_str())];
         let r = send(
             unix_router(s.clone()),
