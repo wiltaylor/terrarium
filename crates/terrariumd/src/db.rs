@@ -2597,22 +2597,27 @@ impl Db {
         F: FnOnce(&Connection) -> ApiResult<T> + Send + 'static,
     {
         let conn = self.conn.clone();
-        let queued = std::time::Instant::now();
+        let queued = tracing::enabled!(target: "terrariumd::db_timing", tracing::Level::DEBUG)
+            .then(std::time::Instant::now);
         crate::links::spawn_blocking(move || {
-            let started = std::time::Instant::now();
+            let started = queued.map(|_| std::time::Instant::now());
             let guard = match conn.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let acquired = std::time::Instant::now();
+            let acquired = queued.map(|_| std::time::Instant::now());
             let result = f(&guard);
-            let finished = std::time::Instant::now();
+            let finished = queued.map(|_| std::time::Instant::now());
             drop(guard);
-            tracing::debug!(target: "terrariumd::db_timing", operation = "read",
-                scheduling_us = started.duration_since(queued).as_micros() as u64,
-                mutex_wait_us = acquired.duration_since(started).as_micros() as u64,
-                sql_us = finished.duration_since(acquired).as_micros() as u64,
-                "database access");
+            if let (Some(queued), Some(started), Some(acquired), Some(finished)) =
+                (queued, started, acquired, finished)
+            {
+                tracing::debug!(target: "terrariumd::db_timing", operation = "read",
+                    scheduling_us = started.duration_since(queued).as_micros() as u64,
+                    mutex_wait_us = acquired.duration_since(started).as_micros() as u64,
+                    sql_us = finished.duration_since(acquired).as_micros() as u64,
+                    "database access");
+            }
             result
         })
         .await
@@ -2645,14 +2650,15 @@ impl Db {
         let link = crate::links::current_link_id()
             .or_else(|| actor.strip_prefix("link:").map(str::to_owned));
         let handle = self.redactor.clone();
-        let queued = std::time::Instant::now();
+        let queued = tracing::enabled!(target: "terrariumd::db_timing", tracing::Level::DEBUG)
+            .then(std::time::Instant::now);
         let (value, events, audits) = crate::links::spawn_blocking(move || {
-            let started = std::time::Instant::now();
+            let started = queued.map(|_| std::time::Instant::now());
             let mut guard = match conn.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let acquired = std::time::Instant::now();
+            let acquired = queued.map(|_| std::time::Instant::now());
             // The snapshot comes after the lock: a write that changed a
             // secret swapped its matcher in before it let the lock go.
             let result = {
@@ -2707,13 +2713,17 @@ impl Db {
                 }
                 (value, events, audits.into_inner())
             };
-            let finished = std::time::Instant::now();
+            let finished = queued.map(|_| std::time::Instant::now());
             drop(guard);
-            tracing::debug!(target: "terrariumd::db_timing", operation = "write",
-                scheduling_us = started.duration_since(queued).as_micros() as u64,
-                mutex_wait_us = acquired.duration_since(started).as_micros() as u64,
-                sql_us = finished.duration_since(acquired).as_micros() as u64,
-                "database access");
+            if let (Some(queued), Some(started), Some(acquired), Some(finished)) =
+                (queued, started, acquired, finished)
+            {
+                tracing::debug!(target: "terrariumd::db_timing", operation = "write",
+                    scheduling_us = started.duration_since(queued).as_micros() as u64,
+                    mutex_wait_us = acquired.duration_since(started).as_micros() as u64,
+                    sql_us = finished.duration_since(acquired).as_micros() as u64,
+                    "database access");
+            }
             Ok::<_, ApiError>(result)
         })
         .await
