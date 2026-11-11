@@ -36,27 +36,33 @@ impl Journal {
         crate::secrets::migrate::finish_rotation(&tx, &self.state_dir)
             .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;
         let sealed: Option<Vec<u8>> = tx
-            .query_row("SELECT sealed FROM host_resume WHERE id=?1", [id], |r| r.get(0))
+            .query_row("SELECT sealed FROM host_resume WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
             .optional()?;
-        let value = match sealed {
-            None => None,
-            Some(sealed) => {
-                let key = crate::secrets::key(&self.state_dir)?;
-                let plain = key
-                    .open(&sealed, &super::resume_aad(id))
-                    .ok_or_else(|| ApiError::internal("cannot decrypt the host reconnect journal"))?;
-                Some(serde_json::from_slice(&plain).map_err(|_| {
-                    ApiError::internal("cannot decode the host reconnect journal")
-                })?)
-            }
-        };
+        let value =
+            match sealed {
+                None => None,
+                Some(sealed) => {
+                    let key = crate::secrets::key(&self.state_dir)?;
+                    let plain = key.open(&sealed, &super::resume_aad(id)).ok_or_else(|| {
+                        ApiError::internal("cannot decrypt the host reconnect journal")
+                    })?;
+                    Some(serde_json::from_slice(&plain).map_err(|_| {
+                        ApiError::internal("cannot decode the host reconnect journal")
+                    })?)
+                }
+            };
         tx.commit()?;
         Ok(value)
     }
 
     pub fn save(&self, id: &str, value: &impl Serialize) -> ApiResult<()> {
-        self.save_many(&[(id.to_owned(), serde_json::to_value(value)
-            .map_err(|_| ApiError::internal("cannot encode the host reconnect journal"))?)])
+        self.save_many(&[(
+            id.to_owned(),
+            serde_json::to_value(value)
+                .map_err(|_| ApiError::internal("cannot encode the host reconnect journal"))?,
+        )])
     }
 
     /// Commit a session's event and received offset together.
@@ -67,16 +73,16 @@ impl Journal {
             .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;
         let key = crate::secrets::key(&self.state_dir)?;
         for (id, value) in values {
-        let plain = zeroize::Zeroizing::new(
-            serde_json::to_vec(value)
-                .map_err(|_| ApiError::internal("cannot encode the host reconnect journal"))?,
-        );
-        let sealed = key.seal(&plain, &super::resume_aad(id))?;
-        tx.execute(
-            "INSERT INTO host_resume(id,sealed) VALUES (?1,?2)
+            let plain = zeroize::Zeroizing::new(
+                serde_json::to_vec(value)
+                    .map_err(|_| ApiError::internal("cannot encode the host reconnect journal"))?,
+            );
+            let sealed = key.seal(&plain, &super::resume_aad(id))?;
+            tx.execute(
+                "INSERT INTO host_resume(id,sealed) VALUES (?1,?2)
              ON CONFLICT(id) DO UPDATE SET sealed=excluded.sealed",
-            params![id, sealed],
-        )?;
+                params![id, sealed],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -98,8 +104,9 @@ impl Journal {
             })?;
             for row in rows {
                 let (id, sealed) = row?;
-                let plain = key.open(&sealed, &super::resume_aad(&id))
-                    .ok_or_else(|| ApiError::internal("cannot decrypt the host reconnect journal"))?;
+                let plain = key.open(&sealed, &super::resume_aad(&id)).ok_or_else(|| {
+                    ApiError::internal("cannot decrypt the host reconnect journal")
+                })?;
                 let value = serde_json::from_slice(&plain)
                     .map_err(|_| ApiError::internal("cannot decode the host reconnect journal"))?;
                 out.push((id, value));
@@ -128,8 +135,18 @@ mod tests {
         crate::secrets::migrate::rotate_key(&mut conn, dir.path()).unwrap();
         let restored: serde_json::Value = Journal::new(dir.path()).load("host-a").unwrap().unwrap();
         assert_eq!(restored, value);
-        assert!(Journal::new(dir.path()).load::<serde_json::Value>("missing").unwrap().is_none());
-        conn.execute("UPDATE host_resume SET id='host-b'", []).unwrap();
-        assert!(Journal::new(dir.path()).load::<serde_json::Value>("host-b").is_err());
+        assert!(
+            Journal::new(dir.path())
+                .load::<serde_json::Value>("missing")
+                .unwrap()
+                .is_none()
+        );
+        conn.execute("UPDATE host_resume SET id='host-b'", [])
+            .unwrap();
+        assert!(
+            Journal::new(dir.path())
+                .load::<serde_json::Value>("host-b")
+                .is_err()
+        );
     }
 }

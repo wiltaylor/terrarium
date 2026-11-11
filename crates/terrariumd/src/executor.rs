@@ -855,18 +855,33 @@ pub fn restore_sessions(state: &Shared) -> ApiResult<()> {
     for (_, saved) in journal.scan::<SavedExec>("exec/")? {
         let kind = if saved.shell { "shell" } else { "exec" };
         let (mut session, ctl) = ExecSession::new(
-            &saved.target, saved.owner, kind, state.executor.buffer_limit,
+            &saved.target,
+            saved.owner,
+            kind,
+            state.executor.buffer_limit,
         );
         Arc::get_mut(&mut session).unwrap().id = saved.id;
         if let Some((host, id)) = saved.host_session {
-            let hs = state.executor.hosts.reattach(&host, id)
+            let hs = state
+                .executor
+                .hosts
+                .reattach(&host, id)
                 .ok_or_else(|| ApiError::internal("saved exec has no host replay channel"))?;
-            let secrets: Vec<_> = saved.secrets.into_iter()
-                .map(|(name, value)| (name, zeroize::Zeroizing::new(value))).collect();
+            let secrets: Vec<_> = saved
+                .secrets
+                .into_iter()
+                .map(|(name, value)| (name, zeroize::Zeroizing::new(value)))
+                .collect();
             let view = saved.project.map_or(
-                terrarium_core::redact::View::All, terrarium_core::redact::View::Scope,
+                terrarium_core::redact::View::All,
+                terrarium_core::redact::View::Scope,
             );
-            let run = redact_run(pump_host(hs), own_redactor(&secrets), state.db.redactor().get(), view);
+            let run = redact_run(
+                pump_host(hs),
+                own_redactor(&secrets),
+                state.db.redactor().get(),
+                view,
+            );
             tokio::spawn(attach(run, session.clone(), ctl, false, false));
         } else {
             session.finish(End::error("interrupted", "interrupted (ssh transport)"));
@@ -1778,7 +1793,11 @@ pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<
             }
         }
     });
-    Ok(Running { events, ctl, host_session: None })
+    Ok(Running {
+        events,
+        ctl,
+        host_session: None,
+    })
 }
 
 /// Internal jobs and probes must participate in reservation admission and
@@ -1844,7 +1863,11 @@ pub(crate) fn track_resource_run(
             executor.table().remove(&session.id);
         }
     });
-    Ok(Running { events, ctl, host_session })
+    Ok(Running {
+        events,
+        ctl,
+        host_session,
+    })
 }
 
 /// The caller holds resource_lock through session registration.
@@ -2169,11 +2192,16 @@ async fn start_exec_secrets(
     );
     sess.set_kill_report(report);
     let saved = SavedExec {
-        id: sess.id.clone(), target: sess.target.clone(), owner: sess.owner.clone(),
+        id: sess.id.clone(),
+        target: sess.target.clone(),
+        owner: sess.owner.clone(),
         shell: cmd.shell,
         project: actor.agent().map(|a| a.project.clone()),
         host_session: run.host_session.clone(),
-        secrets: secrets.iter().map(|(label, value)| (label.clone(), value.to_string())).collect(),
+        secrets: secrets
+            .iter()
+            .map(|(label, value)| (label.clone(), value.to_string()))
+            .collect(),
     };
     crate::hosts::resume::Journal::new(&state.state_dir)
         .save(&format!("exec/{}", sess.id), &saved)?;
@@ -2502,7 +2530,11 @@ pub(crate) fn redact_run(
     if redactor.is_empty() && own.is_none() {
         return run;
     }
-    let Running { mut events, ctl, host_session } = run;
+    let Running {
+        mut events,
+        ctl,
+        host_session,
+    } = run;
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(async move {
         let mut out = ExecRedact::new(own.as_ref(), &redactor, &view);
@@ -2566,7 +2598,11 @@ pub(crate) fn redact_run(
             }
         }
     });
-    Running { events: rx, ctl, host_session }
+    Running {
+        events: rx,
+        ctl,
+        host_session,
+    }
 }
 
 /// The body of `POST /api/targets/{name}/cp`.

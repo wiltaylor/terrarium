@@ -506,7 +506,9 @@ where
     let (ctx, mut crx) = mpsc::unbounded_channel::<Control>();
     let host_session = inner.host_session.clone();
     tokio::spawn(async move {
-        let Running { mut events, ctl, .. } = inner;
+        let Running {
+            mut events, ctl, ..
+        } = inner;
         let stop = loop {
             tokio::select! {
                 ev = events.recv() => {

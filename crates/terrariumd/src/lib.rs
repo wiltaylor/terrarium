@@ -469,12 +469,14 @@ async fn activate(
         })
         .map_err(|e| anyhow::anyhow!("secret store: {e}"))?;
     secrets::migrate::run_at_start(&state).await;
-    state.executor.hosts.restore(&state.state_dir)
+    state
+        .executor
+        .hosts
+        .restore(&state.state_dir)
         .map_err(|e| anyhow::anyhow!("host reconnect journal: {e}"))?;
     // The redaction matcher (PLAN §16b.6), from the store as it is now.
     secrets::redact::rebuild(&state).await;
-    executor::restore_sessions(&state)
-        .map_err(|e| anyhow::anyhow!("exec session restore: {e}"))?;
+    executor::restore_sessions(&state).map_err(|e| anyhow::anyhow!("exec session restore: {e}"))?;
     // A project named `global` from before the name was reserved (S7): it
     // stays, but it has no secrets of its own.
     if let Ok(true) = state.db.read_now(store::projects::has_reserved_name) {
