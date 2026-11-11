@@ -154,6 +154,15 @@ pub fn denied(
             Some("writing the board rules")
         }
         ["projects", _, "rules", _, "enable" | "disable"] => Some("writing the board rules"),
+        // The shared text that agents load at start (TER-61 review round 4,
+        // F8): the system prompt library (also the personas), the skill
+        // library, and the agent templates. A sysadmin agent with no own
+        // prompt loads the library entry `leader`, so a write there would
+        // become its system prompt. Reads stay open.
+        ["system-prompts", ..] if !get => Some("writing the system prompt library"),
+        ["skills", ..] if !get => Some("writing the skill library"),
+        ["templates", ..] if !get => Some("writing the agent templates"),
+        ["config", "defaults", "accept" | "keep"] => Some("writing the system prompt library"),
         _ => None,
     }
 }
@@ -426,6 +435,18 @@ mod tests {
             (Method::POST, "/api/projects/p/rules/migrate"),
             (Method::POST, "/api/projects/p/rules/card-flow/enable"),
             (Method::POST, "/api/projects/p/rules/card-flow/disable"),
+            (Method::PUT, "/api/system-prompts/leader"),
+            (Method::POST, "/api/system-prompts"),
+            (Method::DELETE, "/api/system-prompts/terse"),
+            (Method::POST, "/api/skills"),
+            (Method::PUT, "/api/skills/review"),
+            (Method::DELETE, "/api/skills/review"),
+            (Method::POST, "/api/templates"),
+            (Method::PATCH, "/api/templates/T1"),
+            (Method::DELETE, "/api/templates/T1"),
+            (Method::POST, "/api/templates/from-agent/A1"),
+            (Method::POST, "/api/config/defaults/accept"),
+            (Method::POST, "/api/config/defaults/keep"),
         ];
         for (m, p) in cases {
             assert!(deny(m.clone(), p), "{m} {p} passed");
@@ -456,6 +477,12 @@ mod tests {
             (Method::POST, "/api/projects/p/rules/check"),
             (Method::POST, "/api/projects/p/rules/dry-run"),
             (Method::POST, "/api/projects/p/rules/lint"),
+            (Method::GET, "/api/system-prompts"),
+            (Method::GET, "/api/system-prompts/leader"),
+            (Method::GET, "/api/skills/review"),
+            (Method::GET, "/api/skills/review/usage"),
+            (Method::GET, "/api/templates/T1/resolve"),
+            (Method::GET, "/api/config/defaults"),
             (Method::GET, "/api/sessions/S1/transcript"),
         ];
         for (m, p) in cases {

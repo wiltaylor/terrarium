@@ -1772,6 +1772,16 @@ code; the lead's security review is still to do.
   writes, runs, tests, redeliveries, and enables of schedules, and the writes
   and enables of board rules. Reads, a delete, and a disable stay open. Test:
   `a_link_cannot_make_or_run_schedules_or_write_rules`.
+- **No shared launch text from a link** (review round 4, F8). An agent's
+  system prompt comes from the system prompt library: its persona, or for a
+  sysadmin with none the entry `leader` (`prompt.rs`, loaded by
+  `runner_supervisor` at each start). A write there, followed by an allowed
+  restart, would make link text the system prompt of a sysadmin. The deny
+  list refuses a link every write of the system prompt library (also a
+  create that shadows an entry, and `replace: true`), of the skill library,
+  of the agent templates, and the accept or keep of the packaged defaults.
+  Reads stay open. Test: `a_link_cannot_write_shared_launch_text` (the
+  library text stays as it was, and the operator still writes it).
 - **Read-only links** (Q2) pass `GET` and `HEAD` only, and a WebSocket only
   on an `.../events` route: no PTY, no target shell, no turn. Tests:
   `read_only_reads_and_opens_only_the_event_socket`,

@@ -12500,6 +12500,12 @@ The deny list (`403 link_forbidden`):
   (`PUT`, `DELETE`), `.../rules/migrate`, and `.../rules/{rule}/enable` and
   `/disable`. Reads, `DELETE /api/schedules/{id}`, `.../disable`, and the
   rule `check`, `dry-run`, and `lint` stay open.
+- The shared text that agents load at start: every write (`POST`, `PUT`,
+  `PATCH`, `DELETE`) of `/api/system-prompts...` (the system prompt
+  library and its personas; also `replace: true`), `/api/skills...`, and
+  `/api/templates...` (also `.../from-agent/{agent}`), and
+  `POST /api/config/defaults/accept` and `/keep`. A sysadmin agent with no
+  own prompt loads the library entry `leader` at start. Reads stay open.
 - Any path outside `/api` (`/install/...`, `/hosts/connect`, `/a/...`).
 
 A link also may not reach the denied routes through a sysadmin agent
