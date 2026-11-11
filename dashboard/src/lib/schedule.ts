@@ -8,6 +8,22 @@ import type { DayStartMark, DayStartSpec, MatchRule, Schedule, ScheduleAction, S
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
+/** The daemon's parse_every grammar, including zero durations. */
+export function parseDaemonEvery(raw: string): number | null {
+  const s = raw.trim();
+  if (!/^(?:[0-9]+[smhd])+$/.test(s)) return null;
+  let total = 0n;
+  const max = 9223372036854775807n;
+  const units: Record<string, bigint> = { s: 1n, m: 60n, h: 3600n, d: 86400n };
+  for (const match of s.matchAll(/([0-9]+)([smhd])/g)) {
+    const n = BigInt(match[1]!);
+    if (n > max) return null;
+    total += n * units[match[2]!]!;
+    if (total > max) total = max;
+  }
+  return Number(total);
+}
+
 /**
  * An interval as seconds: `15m`, `1h30m`, `90s`, `2d`, `15 min`, `1 h`, or a
  * plain number of seconds. Null when it does not read.

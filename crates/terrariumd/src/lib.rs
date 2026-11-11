@@ -171,6 +171,8 @@ impl Daemon {
     /// connects to them again; in-process harnesses end, and the next start
     /// launches them again.
     pub fn shutdown(self) {
+        self.state.executor.hosts.shutdown();
+        self.state.job_queue.stop();
         for t in &self.tasks {
             t.abort();
         }
@@ -186,6 +188,10 @@ impl Daemon {
     /// an aborted task ends at its next await, but a database call that it
     /// started runs on to its end on the blocking pool (TER-646).
     pub async fn shutdown_and_wait(mut self) {
+        self.state.executor.hosts.shutdown();
+        for task in self.state.job_queue.stop() {
+            let _ = task.await;
+        }
         let tasks = std::mem::take(&mut self.tasks);
         for t in &tasks {
             t.abort();
@@ -471,8 +477,14 @@ async fn activate(
         })
         .map_err(|e| anyhow::anyhow!("secret store: {e}"))?;
     secrets::migrate::run_at_start(&state).await;
+    state
+        .executor
+        .hosts
+        .restore(&state.state_dir)
+        .map_err(|e| anyhow::anyhow!("host reconnect journal: {e}"))?;
     // The redaction matcher (PLAN §16b.6), from the store as it is now.
     secrets::redact::rebuild(&state).await;
+    executor::restore_sessions(&state).map_err(|e| anyhow::anyhow!("exec session restore: {e}"))?;
     // A project named `global` from before the name was reserved (S7): it
     // stays, but it has no secrets of its own.
     if let Ok(true) = state.db.read_now(store::projects::has_reserved_name) {
@@ -485,6 +497,7 @@ async fn activate(
 
     let mut owned = ActivationTasks(Vec::new());
     let tasks = &mut owned.0;
+    tasks.push(state.executor.hosts.spawn_resume_grace());
     tasks.push(spawn_pump(state.clone()));
     tasks.push(git_identity::spawn_refresh(state.clone()));
     tasks.push(usage_collector::spawn(state.clone()));

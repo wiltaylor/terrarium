@@ -593,6 +593,7 @@ export interface Api {
    * Kept on the daemon, so they follow the operator to each browser. Operator only. `agent` is a ULID or `project/name`.
    * Each call answers with the new list.
    */
+  readPositions: { visit(kind: "thread" | "mail" | "card", item: string, through: string): Promise<{ previous: string | null; read_at: string }> };
   pins: {
     // Conversation pins are independent of sidebar bookmarks.
     list(): Promise<Pin[]>;
@@ -1409,6 +1410,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
         put(`/api/projects/${seg(project)}/folder`, position === undefined ? { folder_id: folderId } : { folder_id: folderId, position }),
     },
 
+    readPositions: { visit: (kind, item, through) => post(`/api/read-positions/${kind}/${seg(item)}`, { through }) },
     pins: {
       list: () => get("/api/pins"),
       pin: (agent) => put(`/api/pins/${seg(agent)}`, {}),

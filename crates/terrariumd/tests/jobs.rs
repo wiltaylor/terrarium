@@ -1334,6 +1334,7 @@ struct Lab {
     client: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// The host listener of the daemon.
     hosts_addr: std::net::SocketAddr,
+    hosts_listener: Option<tokio::task::JoinHandle<()>>,
     /// The board flow of project `p`: `code` or `rules` (TER-170).
     flow: &'static str,
 }
@@ -1412,7 +1413,7 @@ async fn lab_impl_ssh(
         td.boot_with_ssh(None, None, ssh).await;
     }
     let state = td.daemon.as_ref().unwrap().state.clone();
-    let (_task, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
+    let (hosts_listener, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
         .await
         .unwrap();
     let r = td.post("/api/hosts", json!({"name": "lab1"})).await;
@@ -1525,6 +1526,7 @@ async fn lab_impl_ssh(
         client_opts: o,
         client: std::sync::Mutex::new(Some(client)),
         hosts_addr: addr,
+        hosts_listener: Some(hosts_listener),
         flow,
     }
 }
@@ -2986,6 +2988,100 @@ exit 101"#;
 
 /// Queue a merge of a new card on `branch` with `recipe`, wait for the
 /// end, and return the job.
+pub(super) async fn native_merge_restart_keeps_recipe_exit_tail_and_junit(offline: bool) {
+    let mut lab = lab(1).await;
+    let marks = tempfile::tempdir().unwrap();
+    let pid = marks.path().join("pid");
+    let go = marks.path().join("go");
+    let xml = marks.path().join("junit.xml");
+    let recipe = format!(
+        "echo $$ > '{}'; echo before-restart; printf '<testsuite tests=\"1\"><testcase name=\"kept\"/></testsuite>' > '{}'; while [ ! -e '{}' ]; do sleep 0.02; done; echo after-restart; exit 7",
+        pid.display(),
+        xml.display(),
+        go.display()
+    );
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": recipe, "slots": 1,
+        "next_repos": ["app"], "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    lab.branch("ter-restart", "next", &[("OK", "yes\n")]);
+    let card = lab.card("restart", "ter-restart").await;
+    let queued = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    let jid = queued.ok()["job"]["id"].as_str().unwrap().to_owned();
+    tokio::time::timeout(DEADLINE, async {
+        while !xml.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let original = lab.td.get(&format!("/api/jobs/{jid}")).await.body;
+    let original_pid = std::fs::read_to_string(&pid).unwrap();
+    let original_xml = std::fs::read_to_string(&xml).unwrap();
+    let listener = lab.hosts_listener.take().unwrap();
+    listener.abort();
+    let _ = listener.await;
+    // Keep the same host client alive. Only the daemon is replaced.
+    if offline {
+        lab.td.daemon.take().unwrap().shutdown_and_wait().await;
+        std::fs::write(&go, b"go").unwrap();
+        crate::host_restart::wait_pid_gone(&original_pid).await;
+    }
+    lab.td.boot(None, None).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let (listener, _) = terrariumd::hosts::serve(state, &lab.hosts_addr.to_string())
+        .await
+        .unwrap();
+    lab.hosts_listener = Some(listener);
+    lab.until_online(true).await;
+    wait_admission(&lab.td, "lab1").await;
+    let resumed = lab.td.get(&format!("/api/jobs/{jid}")).await.body;
+    if !offline {
+        assert_eq!(resumed["state"], "running", "{resumed}");
+    }
+    assert_eq!(resumed["attempt"], original["attempt"]);
+    assert_eq!(resumed["slot"], original["slot"]);
+    assert_eq!(resumed["started_at"], original["started_at"]);
+    assert_eq!(std::fs::read_to_string(&pid).unwrap(), original_pid);
+    if !offline {
+        std::fs::write(go, b"go").unwrap();
+    }
+    let jobs = lab.until_idle().await;
+    let ended = jobs.iter().find(|j| j["id"] == jid).unwrap();
+    assert_eq!(ended["exit_code"], 7, "{ended}");
+    let tail = ended["tail"].as_str().unwrap();
+    assert!(tail.contains("before-restart"), "{tail}");
+    assert!(tail.contains("after-restart"), "{tail}");
+    assert_eq!(ended["attempt"], original["attempt"]);
+    let finished_card = lab.td.get(&format!("/api/cards/{card}")).await;
+    let notifications = finished_card.ok()["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| {
+            let body = c["body"].as_str().unwrap_or("");
+            body.contains(&jid) && body.contains("attempt 1") && body.contains("failed")
+        })
+        .count();
+    assert_eq!(notifications, 1, "{}", finished_card.body);
+    assert_eq!(std::fs::read_to_string(xml).unwrap(), original_xml);
+    let parsed = lab
+        .td
+        .post(
+            "/api/projects/p/test-runs",
+            json!({"content": original_xml, "file_name": "junit.xml", "cards": [card]}),
+        )
+        .await;
+    assert_eq!(parsed.ok()["counts"]["passed"], 1);
+}
+
 async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
     lab.td
         .put(

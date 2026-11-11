@@ -1843,7 +1843,29 @@ a.chip.card-link:hover {
 .text-markdown { min-width: 0; max-width: 100%; contain: inline-size; overflow-wrap: anywhere; white-space: normal; }
 .text-markdown .prose > :first-child { margin-top: 0; }
 .text-markdown .prose > :last-child { margin-bottom: 0; }
-.text-markdown pre { max-width: 100%; overflow-x: auto; padding: 10px; background: var(--bg); white-space: pre; }
+.comm-block { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin: 12px 0; }
+.comm-title { font-weight: 600; margin-bottom: 12px; }
+.comm-item { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 8px 0; min-width: 0; }
+.comm-meta { color: var(--muted); font-size: 0.85em; overflow-wrap: anywhere; }
+.comm-chat { display: flex; flex-direction: column; }
+.comm-chat > .comm-item { max-width: 90%; align-self: flex-start; }
+.comm-chat > .comm-sent, .comm-chat > .comm-draft { align-self: flex-end; }
+.comm-draft { border-style: dashed; }
+.prose pre { max-width: 100%; overflow-x: auto; padding: 10px; background: var(--bg); white-space: pre; }
+.prose pre code { font-family: var(--font-mono, monospace); white-space: pre; overflow-wrap: normal; }
+.prose .code-block { min-width: 0; max-width: 100%; }
+.prose .code-copy { display: block; margin-left: auto; font-size: 0.8rem; }
+.prose .hljs-keyword, .prose .hljs-selector-tag, .prose .hljs-literal { color: #9440a0; }
+.prose .hljs-string, .prose .hljs-attr, .prose .hljs-addition { color: #246c34; }
+.prose .hljs-number, .prose .hljs-built_in, .prose .hljs-type { color: #97500d; }
+.prose .hljs-title, .prose .hljs-name, .prose .hljs-tag { color: #245eb2; }
+.prose .hljs-comment, .prose .hljs-meta { color: var(--muted); }
+@media (prefers-color-scheme: dark) {
+  .prose .hljs-keyword, .prose .hljs-selector-tag, .prose .hljs-literal { color: #dca0e7; }
+  .prose .hljs-string, .prose .hljs-attr, .prose .hljs-addition { color: #98d9a5; }
+  .prose .hljs-number, .prose .hljs-built_in, .prose .hljs-type { color: #e9b580; }
+  .prose .hljs-title, .prose .hljs-name, .prose .hljs-tag { color: #9dc5ff; }
+}
 .text-markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 .text-markdown th, .text-markdown td { padding: 6px 10px; border: 1px solid var(--border); }
 .prose img {
@@ -2255,7 +2277,7 @@ a.chip.card-link:hover {
 .post-response { border-color: var(--info); }
 .post-close-proposal { border-color: var(--st-restarting); }
 .post-handoff { border-color: var(--accent); }
-.thread-page textarea { width: 100%; box-sizing: border-box; }
+.thread-page textarea, .post-editor textarea { width: 100%; box-sizing: border-box; }
 /* The linked cards of a thread (TER-147): a mini kanban, one row per project with its board columns. An empty column is narrow. */
 .tracked-cards > summary {
   cursor: pointer;

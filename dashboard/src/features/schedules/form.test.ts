@@ -369,6 +369,10 @@ describe("a day_start schedule (TER-458)", () => {
     expect("body" in all && all.body.spec).toEqual({ kind: "day_start", tz: "UTC" });
   });
   it("checks the window and the delay as the daemon does", () => {
+    for (const delay of ["15", "5 min", "1 hour", "1H", "1h 30m"]) {
+      expect(scheduleBody({ ...base, delay })).toMatchObject({ field: "delay" });
+    }
+    expect(scheduleBody({ ...base, delay: "0m" })).toHaveProperty("body");
     expect(scheduleBody({ ...base, notBefore: "7:30" })).toMatchObject({ field: "notBefore" });
     expect(scheduleBody({ ...base, notBefore: "09:00", notAfter: "08:00" })).toMatchObject({ field: "notAfter" });
     expect(scheduleBody({ ...base, delay: "soon" })).toMatchObject({ field: "delay" });
@@ -389,6 +393,9 @@ describe("a day_start schedule (TER-458)", () => {
     const s = await d.submit();
     expect(s).toMatchObject({ spec: { kind: "day_start", tz: "UTC", not_before: "07:30", weekdays: ["mon"] }, next_run_at: null });
     await expect(api.schedules.create({ name: "bad", project: "terrarium", spec: { kind: "day_start", weekdays: ["someday"] }, action: { type: "mail", to: "operator", subject: "x", body: "" } })).rejects.toMatchObject({ status: 422 });
-    await expect(api.schedules.create({ name: "bad2", project: "terrarium", spec: { kind: "day_start", delay: "13h" }, action: { type: "mail", to: "operator", subject: "x", body: "" } })).rejects.toMatchObject({ status: 422 });
+    for (const delay of ["13h", "15", "5 min", "1 hour", "9223372036854775808s"]) {
+      await expect(api.schedules.create({ name: "bad2", project: "terrarium", spec: { kind: "day_start", delay }, action: { type: "mail", to: "operator", subject: "x", body: "" } })).rejects.toMatchObject({ status: 422 });
+    }
+    await expect(api.schedules.create({ name: "zero", project: "terrarium", spec: { kind: "day_start", delay: "0m" }, action: { type: "mail", to: "operator", subject: "x", body: "" } })).resolves.toMatchObject({ spec: { delay: "0m" } });
   });
 });

@@ -8,6 +8,83 @@ const ctx = { project: "terrarium", pages: new Set(["index"]) };
 const tags = new Set<string>(ALLOWED_TAGS);
 const attrs = new Set<string>(ALLOWED_ATTR);
 
+describe("communication blocks", () => {
+  const render = (body: string) => {
+    const root = document.createElement("div");
+    setSafeHtml(root, renderWiki(body, ctx));
+    return root;
+  };
+  it("renders the operator's SMS example", () => {
+    const root = render("> [!CHAT] SMS with Sam Lee\n> **Sam Lee** · 2026-11-10 14:02\n> Are you free at 3?\n>\n> **Wil** · 14:05 · sent\n> Yes.\n>\n> **Wil** · draft\n> I will call you then. Is the **office number** right?");
+    expect(root.querySelector(".comm-title")?.textContent).toBe("SMS with Sam Lee");
+    expect(root.querySelectorAll(".comm-item")).toHaveLength(3);
+    expect(root.querySelector(".comm-received")?.textContent).toContain("2026-11-10 14:02");
+    expect(root.querySelector(".comm-sent")?.textContent).toContain("Yes.");
+    expect(root.querySelector(".comm-draft p strong")?.textContent).toBe("office number");
+  });
+  it("renders the operator's invoice example", () => {
+    const root = render("> [!EMAIL] Invoice 1042\n> From: Sam Lee <sam@example.com>\n> To: wil@example.com\n> Subject: Invoice 1042\n> Date: 2026-11-10 14:02\n> Status: received\n>\n> Hi Wil,\n> the invoice is attached.\n>\n> ---\n> From: wil@example.com\n> To: Sam Lee <sam@example.com>\n> Subject: Re: Invoice 1042\n> Status: draft\n>\n> Hi Sam,\n> I paid it today.");
+    expect(root.querySelectorAll(".comm-item")).toHaveLength(2);
+    expect(root.querySelector(".comm-received")?.textContent).toContain("Sam Lee <sam@example.com>");
+    expect(root.querySelector(".comm-received p br")).not.toBeNull();
+    expect(root.querySelector(".comm-draft")?.textContent).toContain("Draft, not sent");
+    expect(root.querySelector(".comm-draft p")?.textContent).toContain("I paid it today.");
+  });
+  it("renders a chat with received, sent, draft and implicit received messages", () => {
+    const root = render("> [!CHAT] Release discussion\n> **Sam** · 10:00 · received\n> Hello **team**\n>\n> **Lee** · 10:01 · sent\n> [Plan](https://example.com)\n> **Lee** · draft\n> Not ready\n> **Sam**\n> Thanks");
+    expect(root.querySelector(".comm-title")?.textContent).toBe("Release discussion");
+    expect(root.querySelectorAll(".comm-item")).toHaveLength(4);
+    expect(root.querySelectorAll(".comm-received")).toHaveLength(2);
+    expect(root.querySelector(".comm-sent a")?.getAttribute("href")).toBe("https://example.com");
+    expect(root.querySelector(".comm-draft")?.textContent).toContain("Draft, not sent");
+    expect(root.querySelector(".comm-received strong")?.textContent).toBe("Sam");
+  });
+  it("renders multiple mails, literal addresses and Markdown bodies", () => {
+    const root = render("> [!EMAIL] Release mail\n> From: Sam Lee <sam@example.com>\n> To: Team\n> Cc: Jo\n> Subject: Release\n> Date: Today\n> Status: sent\n>\n> **Ready**\n>\n> ---\n> From: Jo\n> Status: draft\n>\n> Still `checking`\n>\n> ***\n>\n> More\n> ---\n> From: Team\n> Status: received\n>\n> Received\n> ---\n> From: Pat\n>\n> No status");
+    expect(root.querySelectorAll(".comm-item")).toHaveLength(4);
+    expect(root.querySelector(".comm-sent")?.textContent).toContain("Sam Lee <sam@example.com>");
+    expect(root.querySelector(".comm-sent p strong")?.textContent).toBe("Ready");
+    expect(root.querySelector(".comm-draft code")?.textContent).toBe("checking");
+    expect(root.querySelector(".comm-draft hr")).not.toBeNull();
+    expect(root.querySelectorAll(".comm-received")).toHaveLength(2);
+  });
+  it("preserves ordinary quotes and does not interpret fenced examples", () => {
+    expect(render("> Ordinary quote").querySelector("blockquote")).not.toBeNull();
+    expect(render("```\n> [!CHAT] Example\n> **Sam**\n```").querySelector(".comm-block")).toBeNull();
+  });
+  it("allows only the communication class names", () => {
+    const html = sanitizeHtml('<div class="comm-block comm-chat comm-email comm-title comm-item comm-meta comm-draft comm-sent comm-received comm-evil"></div>');
+    expect(html).toContain("comm-received");
+    expect(html).not.toContain("comm-evil");
+  });
+  for (const payload of XSS_PAYLOADS) {
+    it(`escapes communication fields and bodies: ${payload.name}`, () => {
+      const value = payload.src.replace(/\n/g, " ");
+      const root = render(`> [!EMAIL] ${value}\n> From: ${value}\n> Subject: ${value}\n>\n> ${value}\n\n> [!CHAT] ${value}\n> **${value}** · ${value} · draft\n> ${value}`);
+      expect(root.querySelector("script, iframe, svg, math, object")).toBeNull();
+      for (const el of root.querySelectorAll("*")) {
+        for (const attr of el.attributes) expect(attr.name).not.toMatch(/^on/i);
+      }
+    });
+  }
+});
+
+it("keeps syntax colors through the sanitizer and leaves unknown languages as text", () => {
+  const root = document.createElement("div");
+  setSafeHtml(root, renderWiki('```rust\nfn main() { println!("<script>"); }\n```', ctx));
+  expect(root.querySelector(".hljs-keyword")?.textContent).toBe("fn");
+  expect(root.querySelector("code")?.textContent).toBe('fn main() { println!("<script>"); }');
+  setSafeHtml(root, renderWiki('```unknown\n<img src=x onerror=alert(1)>\n```', ctx));
+  expect(root.querySelector("code")?.textContent).toBe("<img src=x onerror=alert(1)>");
+  expect(root.querySelector("img")).toBeNull();
+});
+
+it("keeps hostile code inert when a registered grammar highlights it", () => {
+  for (const payload of XSS_PAYLOADS) {
+    expectInert(renderWiki(`\`\`\`html\n${payload.src}\n\`\`\``, ctx));
+  }
+});
+
 /** Fail with a reason when anything in `root` could run script or leave the page. */
 function inertProblems(root: ParentNode): string[] {
   const out: string[] = [];

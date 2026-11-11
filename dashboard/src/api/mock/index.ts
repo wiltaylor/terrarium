@@ -4213,6 +4213,16 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     })(),
 
     // docs/api.md §6.11: operator only; each call answers with the list.
+    readPositions: (() => {
+      const positions = new Map<string, string>();
+      return { visit: async (kind, item, through) => {
+        const key = `${kind}:${item}`;
+        const previous = positions.get(key) ?? null;
+        const read_at = previous && previous > through ? previous : through;
+        positions.set(key, read_at);
+        return { previous, read_at };
+      } };
+    })(),
     pins: (() => {
       const pinList = (): Pin[] =>
         w.pins.flatMap((p) => {

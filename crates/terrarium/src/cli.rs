@@ -4684,6 +4684,14 @@ pub enum RemoteCmd {
         #[arg(long)]
         ca_file: Option<std::path::PathBuf>,
     },
+    /// Confirm the separate artifact origin's leaf fingerprint (operator only)
+    ArtifactRepin {
+        name: String,
+        #[arg(long)]
+        origin: String,
+        #[arg(long)]
+        pin_sha256: String,
+    },
     /// Replace a rotated link key. Read the pairing code from stdin
     Pair { name: String },
 }

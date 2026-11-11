@@ -17,6 +17,8 @@ import { createStore, reconcile } from "solid-js/store";
 import { ApiError } from "../../api/http";
 import type { Question, Thread } from "../../api/types";
 import { SafeHtml } from "../../components/SafeHtml";
+import { ReadBoundary, useReadBoundary } from "../../components/ReadBoundary";
+import { ForumPost } from "../../components/ForumPost";
 import { Empty, ErrorBanner, Modal, PageHead, useNow } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
@@ -55,6 +57,7 @@ export default function ThreadPage() {
   // entry, and so the DOM and the local state of each question card that
   // stays (a chosen option, a typed answer, the focus).
   const [log, setLog] = createStore<{ entries: TimelineEntry[] }>({ entries: [] });
+  const read = useReadBoundary("thread", () => params.id, () => log.entries.map((e) => e.at));
   createEffect(() => {
     const t = thread();
     setLog("entries", reconcile(t ? timeline(t) : [], { key: "id", merge: true }));
@@ -117,6 +120,7 @@ export default function ThreadPage() {
         ← Threads
       </A>
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+      <ErrorBanner error={read.error()} />
       <Show when={thread()} fallback={<Empty>{loading() ? "Loading…" : "No such thread."}</Empty>}>
         {(t) => (
           <>
@@ -133,23 +137,14 @@ export default function ThreadPage() {
               <Show when={log.entries.length} fallback={<Empty>No messages yet.</Empty>}>
                 <For each={log.entries}>
                   {(entry, index) => {
-                    let post!: HTMLElement;
                     const author = () => entry.kind === "message" ? entry.message.author_name : entry.kind === "question" ? entry.question.agent_name : whoName(t(), entry.kind === "response" ? t().response?.by ?? null : entry.kind === "proposal" ? t().close_proposal?.by ?? null : t().closed_by);
                     const operator = () => entry.kind === "message" ? byOperator(entry.message) : entry.kind === "response" || (entry.kind === "handoff" && t().closed_by === "operator");
                     const label = () => entry.kind === "message" ? (entry.message.kind === "response" ? "Response" : "Message") : entry.kind === "question" ? (entry.question.kind === "bundle" ? "Question bundle" : "Question") : entry.kind === "proposal" ? "Close proposal" : entry.kind === "handoff" ? "Handoff" : "Response";
                     const text = () => entry.kind === "message" ? entry.message.text : entry.kind === "question" ? entry.question.text : entry.kind === "response" ? t().response?.text ?? "" : entry.kind === "proposal" ? t().close_proposal?.summary ?? "" : t().handoff?.summary ?? "";
                     return (
-                    <article ref={post} id={`post-${index() + 1}`} class={`thread-post post-${label().toLowerCase().replaceAll(" ", "-")}`}>
-                      <header class="thread-post-header">
-                        <ThreadIcon icon={operator() ? "you" : "agent"} />
-                        <strong>{operator() ? "You" : author()}</strong>
-                        <span class="chip">{label()}</span>
-                        <Show when={entry.kind === "question" && (entry.question.status === "open" || entry.question.status === "in_thread")}><span class="chip warn">Waiting on you</span></Show>
-                        <time class="muted" dateTime={entry.at} title={entry.at}>{ago(entry.at, now())}</time>
-                        <A href={`/threads/${encodeURIComponent(t().id)}#post-${index() + 1}`} aria-label={`Permalink to post ${index() + 1}`}>#{index() + 1}</A>
-                        <Show when={!closed()}><button type="button" onClick={() => quote(text(), post)}>Quote</button></Show>
-                      </header>
-                      <div class="thread-post-body">
+                    <>
+                    <Show when={index() === read.first()}><ReadBoundary /></Show>
+                    <ForumPost id={`post-${index() + 1}`} number={index() + 1} href={`/threads/${encodeURIComponent(t().id)}#post-${index() + 1}`} author={operator() ? "You" : author()} label={label()} at={entry.at} now={now()} icon={<ThreadIcon icon={operator() ? "you" : "agent"} />} onQuote={closed() ? undefined : (post) => quote(text(), post)} badges={<Show when={entry.kind === "question" && (entry.question.status === "open" || entry.question.status === "in_thread")}><span class="chip warn">Waiting on you</span></Show>}>
                     <Switch>
                       <Match when={entry.kind === "message" && entry.message}>
                         {(m) => (
@@ -171,8 +166,8 @@ export default function ThreadPage() {
                       <Match when={entry.kind === "proposal"}><CloseProposal thread={t()} now={now()} onChanged={changed} onError={conflict} /></Match>
                       <Match when={entry.kind === "handoff"}><Handoff thread={t()} now={now()} /></Match>
                     </Switch>
-                      </div>
-                    </article>
+                    </ForumPost>
+                    </>
                   ); }}
                 </For>
               </Show>

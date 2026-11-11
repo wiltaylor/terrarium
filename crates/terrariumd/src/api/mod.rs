@@ -18,6 +18,7 @@ mod hosts;
 mod inbox;
 pub mod install;
 pub(crate) mod jobs;
+pub mod link_registry;
 mod links;
 mod longpoll;
 pub(crate) mod mail;
@@ -29,6 +30,7 @@ mod preferences;
 mod project_folders;
 mod projects;
 mod questions;
+mod read_positions;
 mod records;
 mod remotes;
 pub(crate) mod repo_trees;
@@ -285,25 +287,84 @@ pub fn router_with(state: Shared, serve_artifacts: bool) -> Router {
 /// (`TERRARIUM_HOST_LISTEN`, `crate::hosts::router`) only
 /// (`docs/security-review.md`, F2).
 fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
-    let api = Router::new()
-        .route("/health", get(system::health))
-        .route("/system/version", get(system::version))
+    routes_with_registry(state, serve_artifacts, host_connect).0
+}
+
+fn routes_with_registry(
+    state: Shared,
+    serve_artifacts: bool,
+    host_connect: bool,
+) -> (Router, Arc<link_registry::Registry>) {
+    let api = link_registry::RegisteredRouter::new()
+        .route(
+            "/health",
+            get(system::health),
+            &[(axum::http::Method::GET, link_registry::Access::Link)],
+        )
+        .route(
+            "/system/version",
+            get(system::version),
+            &[(axum::http::Method::GET, link_registry::Access::Link)],
+        )
         .merge(system_update::routes())
-        .route("/harnesses", get(system::harnesses))
-        .route("/harnesses/update", post(system::harness_update_all))
-        .route("/harnesses/{name}/update", post(system::harness_update))
-        .route("/harnesses/check", post(system::harness_check))
-        .route("/harnesses/{name}/pin", post(system::harness_pin))
-        .route("/harnesses/{name}/unpin", post(system::harness_unpin))
+        .route(
+            "/harnesses",
+            get(system::harnesses),
+            &[(axum::http::Method::GET, link_registry::Access::Link)],
+        )
+        .route(
+            "/harnesses/update",
+            post(system::harness_update_all),
+            &[(axum::http::Method::POST, link_registry::Access::Link)],
+        )
+        .route(
+            "/harnesses/{name}/update",
+            post(system::harness_update),
+            &[(axum::http::Method::POST, link_registry::Access::Link)],
+        )
+        .route(
+            "/harnesses/check",
+            post(system::harness_check),
+            &[(axum::http::Method::POST, link_registry::Access::Link)],
+        )
+        .route(
+            "/harnesses/{name}/pin",
+            post(system::harness_pin),
+            &[(axum::http::Method::POST, link_registry::Access::Link)],
+        )
+        .route(
+            "/harnesses/{name}/unpin",
+            post(system::harness_unpin),
+            &[(axum::http::Method::POST, link_registry::Access::Link)],
+        )
         .merge(hosts::routes())
         .merge(reservations::routes())
         .merge(targets::routes())
         .merge(tools::routes())
-        .route("/reload", post(system::reload))
-        .route("/audit", get(system::audit))
+        .route(
+            "/reload",
+            post(system::reload),
+            &[(axum::http::Method::POST, link_registry::Access::Link)],
+        )
+        .route(
+            "/audit",
+            get(system::audit),
+            &[(axum::http::Method::GET, link_registry::Access::Link)],
+        )
         .merge(backups::routes())
-        .route("/events", get(streams::firehose).post(event_sources::emit))
-        .route("/events/latest", get(streams::latest))
+        .route(
+            "/events",
+            get(streams::firehose).post(event_sources::emit),
+            &[
+                (axum::http::Method::GET, link_registry::Access::Link),
+                (axum::http::Method::POST, link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/events/latest",
+            get(streams::latest),
+            &[(axum::http::Method::GET, link_registry::Access::Link)],
+        )
         .merge(projects::routes())
         .merge(home::routes())
         .merge(project_folders::routes())
@@ -330,6 +391,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(pipelines::routes())
         .merge(calendar::routes())
         .merge(pins::routes())
+        .merge(read_positions::routes())
         .merge(preferences::routes())
         .merge(bookmarks::routes())
         .merge(subscriptions::routes())
@@ -356,29 +418,56 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
             get(session::current)
                 .post(session::create)
                 .delete(session::delete),
+            &[
+                (axum::http::Method::GET, link_registry::Access::Conditional),
+                (axum::http::Method::POST, link_registry::Access::Conditional),
+                (
+                    axum::http::Method::DELETE,
+                    link_registry::Access::Conditional,
+                ),
+            ],
         )
-        .route("/sessions", axum::routing::delete(session::delete_all))
-        .route("/auth/password", axum::routing::put(session::set_password))
-        .fallback(api_not_found)
-        .method_not_allowed_fallback(api_method_not_allowed)
-        .layer(middleware::from_fn_with_state(state.clone(), resolve_actor));
+        .route(
+            "/sessions",
+            axum::routing::delete(session::delete_all),
+            &[(
+                axum::http::Method::DELETE,
+                link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/auth/password",
+            axum::routing::put(session::set_password),
+            &[(axum::http::Method::PUT, link_registry::Access::OperatorOnly)],
+        )
+        .map_router(|router| {
+            router
+                .fallback(api_not_found)
+                .method_not_allowed_fallback(api_method_not_allowed)
+                .layer(middleware::from_fn_with_state(state.clone(), resolve_actor))
+        });
     // The host installer: outside /api, so no token (docs/api.md §17.9).
-    let mut app = Router::new().nest("/api", api).merge(install::routes());
+    let mut app = link_registry::RegisteredRouter::new()
+        .nest("/api", api)
+        .merge(install::registered_routes());
     if serve_artifacts {
-        app = app.merge(artifacts::serving_routes(&state));
+        app = app.merge(artifacts::registered_serving_routes(&state));
     }
     if host_connect {
         app = app.route(
             terrarium_host::protocol::CONNECT_PATH,
             get(crate::hosts::connect),
+            &[(axum::http::Method::GET, link_registry::Access::PublicDenied)],
         );
     }
-    app.fallback(crate::assets::serve)
+    let (app, registry) = app.fallback(crate::assets::serve).into_parts();
+    let app = app
         .layer(middleware::from_fn_with_state(
             state.clone(),
             upgrade_probation,
         ))
-        .with_state(state)
+        .with_state(state);
+    (app, Arc::new(registry))
 }
 
 /// A probation daemon serves health/reads, but acknowledges no writes that an
@@ -506,6 +595,7 @@ pub struct TokenAuth {
     warned: std::sync::Mutex<std::collections::HashSet<String>>,
     /// The link keys (`tlk_`, TER-61). `None`: a link key is a wrong token.
     links: Option<LinkAuth>,
+    registry: Arc<link_registry::Registry>,
 }
 
 /// What the TCP auth needs to check a link key.
@@ -524,6 +614,7 @@ impl TokenAuth {
             public_origin: None,
             warned: std::sync::Mutex::default(),
             links: None,
+            registry: Arc::default(),
         }
     }
 
@@ -628,6 +719,33 @@ async fn require_token(
     mut req: Request,
     next: Next,
 ) -> Response {
+    // Select link credentials before the public-path bypass. Public assets
+    // stay anonymous, but a link bearer never becomes an anonymous request.
+    let selected = session::bearer_value(req.headers())
+        .map(|key| (None, key.to_owned()))
+        .or_else(|| {
+            is_websocket(&req)
+                .then(|| protocol_token(&req))
+                .flatten()
+                .map(|(proto, key)| (Some(proto), key))
+        });
+    if let Some((echo, key)) = selected.as_ref()
+        && key.starts_with(crate::store::links::KEY_PREFIX)
+        && !token_matches(key.as_bytes(), auth.token.as_bytes())
+    {
+        return match &auth.links {
+            Some(links) => link_request(links, &auth.registry, key, req, next, echo.clone()).await,
+            None => unauthorized("missing or wrong bearer token"),
+        };
+    }
+    if selected.is_none()
+        && is_websocket(&req)
+        && query_token(&req).is_some_and(|key| key.starts_with(crate::store::links::KEY_PREFIX))
+    {
+        return unauthorized(
+            "a link key uses a bearer header or WebSocket subprotocol, not a query parameter",
+        );
+    }
     if !req.uri().path().starts_with("/api") {
         return next.run(req).await;
     }
@@ -684,7 +802,7 @@ async fn require_token(
             session::AuthVia::Bearer
         } else if given.starts_with(crate::store::links::KEY_PREFIX) {
             return match &auth.links {
-                Some(links) => link_request(links, &given, req, next, echo).await,
+                Some(links) => link_request(links, &auth.registry, &given, req, next, echo).await,
                 None => unauthorized("missing or wrong bearer token"),
             };
         } else {
@@ -809,6 +927,7 @@ async fn require_token(
 /// revoke ends a long poll, a stream, or a WebSocket of the key at once.
 async fn link_request(
     links: &LinkAuth,
+    registry: &link_registry::Registry,
     key: &str,
     mut req: Request,
     next: Next,
@@ -837,7 +956,15 @@ async fn link_request(
     let websocket = is_websocket(&req);
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
-    if let Some(why) = crate::links::denied(&method, &path, websocket, caller.read_only) {
+    let access = registry.access(&method, &path);
+    let registry_denied = matches!(
+        access,
+        None | Some(link_registry::Access::OperatorOnly | link_registry::Access::PublicDenied)
+    )
+    .then_some("an unregistered or operator-only endpoint");
+    if let Some(why) = registry_denied
+        .or_else(|| crate::links::denied(&method, &path, websocket, caller.read_only))
+    {
         if links
             .runtime
             .should_audit_forbidden(&caller.id, &method, &path)
@@ -884,7 +1011,8 @@ async fn link_request(
     req.extensions_mut().insert(caller.clone());
     req.extensions_mut().insert(guard.clone());
     let g = guard.clone();
-    let operator_route = crate::links::operator_route_allowed(&method, &path);
+    let operator_route = access == Some(link_registry::Access::OperatorRead)
+        && crate::links::operator_route_allowed(&method, &path);
     let run = CALLER.scope(
         caller,
         crate::links::OPERATOR_ROUTE.scope(operator_route, async move {
@@ -1033,16 +1161,57 @@ pub fn tcp_router(state: Shared, token: String) -> anyhow::Result<Router> {
 }
 
 /// [`tcp_router`] with the auth given, for tests.
-pub fn tcp_router_with(state: Shared, auth: TokenAuth, serve_artifacts: bool) -> Router {
-    let mut app = router_with(state.clone(), serve_artifacts).layer(Extension(Transport::Tcp));
+pub fn tcp_router_with(state: Shared, mut auth: TokenAuth, serve_artifacts: bool) -> Router {
+    let (app, registry) = routes_with_registry(state.clone(), serve_artifacts, false);
+    auth.registry = registry;
+    authenticated_router(state, app, auth)
+}
+
+fn authenticated_router(state: Shared, app: Router, auth: TokenAuth) -> Router {
+    let mut app = app
+        .layer(middleware::from_fn_with_state(
+            auth.registry.clone(),
+            registered_endpoint,
+        ))
+        .layer(Extension(Transport::Tcp));
     if let Some(s) = &auth.sessions {
         app = app.layer(Extension(s.clone()));
     }
-    app.layer(middleware::from_fn_with_state(
-        Arc::new(auth),
-        require_token,
-    ))
-    .layer(middleware::from_fn_with_state(state, security_headers))
+    // Fallback service keeps authentication and the registry check outside
+    // the API's router, including unknown paths and unsupported methods.
+    Router::new()
+        .fallback_service(app)
+        .layer(middleware::from_fn_with_state(
+            Arc::new(auth),
+            require_token,
+        ))
+        .layer(middleware::from_fn_with_state(state, security_headers))
+}
+
+// Check the actual axum pattern too: a new plain static route must not
+// inherit a registry grant for an existing dynamic path that it shadows.
+async fn registered_endpoint(
+    State(registry): State<Arc<link_registry::Registry>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if crate::links::is_link_call() {
+        let access = req
+            .extensions()
+            .get::<axum::extract::MatchedPath>()
+            .and_then(|path| registry.pattern_access(req.method(), path.as_str()));
+        if matches!(
+            access,
+            None | Some(link_registry::Access::OperatorOnly | link_registry::Access::PublicDenied)
+        ) {
+            return ApiError::new(
+                Code::LinkForbidden,
+                "a link key may not call an unregistered endpoint",
+            )
+            .into_response();
+        }
+    }
+    next.run(req).await
 }
 
 /// Bind the Unix socket and serve on it in the background.

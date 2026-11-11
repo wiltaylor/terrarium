@@ -52,7 +52,7 @@ export const PURIFY_CONFIG: Config = {
 
 const SAFE_IMAGE_DATA = /^data:image\/(?:png|jpeg|gif);base64,[a-z0-9+/=\s]*$/i;
 const SCHEME = /^([a-z][a-z0-9+.-]*):/i;
-const CLASS_TOKEN = /^(?:wikilink|wikilink-(?:page|card|memory|version)|missing|artifact-embed|db-embed|language-[\w+#.-]{1,40})$/;
+const CLASS_TOKEN = /^(?:comm-(?:block|chat|email|title|item|meta|draft|sent|received)|wikilink|wikilink-(?:page|card|memory|version)|missing|artifact-embed|db-embed|language-[\w+#.-]{1,40}|hljs-[a-z][a-z-]{0,40}|function_|class_|inherited__)$/;
 /** The query of a `db` block (lib/markdown DB_QUERY_MAX). Any text: the page reads it with `dataset`, never as HTML. */
 const DB_QUERY_MAX = 2000;
 const ARTIFACT_ID = /^ART-\d+$/;

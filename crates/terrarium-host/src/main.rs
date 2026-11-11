@@ -480,6 +480,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
                 enabled: cfg.auto_update,
                 supervised,
                 idle_poll: Duration::from_secs(10),
+                drain_timeout: Duration::from_secs(cfg.auto_update_drain_secs),
             });
         }
         Err(e) => tracing::warn!(error = %e, "self-update is off: cannot find the running binary"),

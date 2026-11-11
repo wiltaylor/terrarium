@@ -1,4 +1,6 @@
 import { useInstance } from "../../instance";
+import { ReadBoundary, useReadBoundary } from "../../components/ReadBoundary";
+import { PostEditor } from "../../components/PostEditor";
 // The Mail tab of the Logs screen (docs/api.md §7): every message, newest
 // first, with filters (from, to, project, thread, time range, free text)
 // and the live mode of the log tabs (components/Live.tsx). The log is a record: it keeps no unread state for the
@@ -253,7 +255,9 @@ function LogRow(props: {
 function ThreadPanel(props: { thread: string; row: Message; project?: string; feed: MailFeed; onCompose: (to?: string) => void; onError: (e: unknown) => void }) {
   const { api } = useInstance();
   const messages = createMemo(() => threadOf(props.feed.messages(), props.thread));
+  const read = useReadBoundary("mail", () => props.thread, () => messages().map((m) => m.created_at));
   const [text, setText] = createSignal("");
+  let replyInput: HTMLTextAreaElement | undefined;
   const [sending, setSending] = createSignal(false);
   const [made, setMade] = createSignal<Card | null>(null);
   const to = () => counterpart(props.row);
@@ -269,11 +273,18 @@ function ThreadPanel(props: { thread: string; row: Message; project?: string; fe
   };
   return (
     <div class="log-thread stack">
+      <ErrorBanner error={read.error()} />
       <For each={messages()}>
-        {(m) => (
+        {(m, index) => (
+          <>
+          <Show when={index() === read.first()}><ReadBoundary /></Show>
           <div class={m.id === props.row.id ? "current" : undefined}>
-            <MessageView message={m} />
+            <MessageView message={m} number={index() + 1} project={props.project} onQuote={(quote) => {
+              setText((old) => old + (old ? "\n\n" : "") + quote);
+              replyInput?.focus();
+            }} />
           </div>
+          </>
         )}
       </For>
       <Show when={toInbox()}>
@@ -319,12 +330,14 @@ function ThreadPanel(props: { thread: string; row: Message; project?: string; fe
           }
         }}
       >
-        <textarea
+        <PostEditor label="Reply" text={text()} project={props.project ?? ""}>
+        <textarea ref={replyInput}
           placeholder={toInbox() ? `Reply on the thread as project:${props.project}` : "Reply on the thread, to every participant"}
           value={text()}
           onInput={(e) => setText(e.currentTarget.value)}
           aria-label="Reply"
         />
+        </PostEditor>
         <div class="row">
           <button class="primary" type="submit" disabled={!text().trim() || sending()}>
             Reply
