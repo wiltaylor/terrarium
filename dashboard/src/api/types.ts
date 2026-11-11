@@ -1625,6 +1625,8 @@ export type ThreadCloseReason = "confirmed" | "operator" | "stale" | "failed_sta
 
 /** `POST /api/threads`. `agent`: a ULID or `project/name`, until TER-92 spawns it from the template. */
 export interface NewThread {
+  /** Opens a request with global:request, reporting to this project lead. */
+  report_to?: string;
   topic: string;
   scope?: string;
   template?: string;

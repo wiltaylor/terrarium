@@ -1641,9 +1641,10 @@ terrarium admin inbox resume <thread-id> [-m note]
   message in your Inbox thread, or an answered question of yours. An invalid
   reference is rejected. These flags provide context, not permission to send
   routine updates.
-- Only one open question or bundle per agent may use the same card or Inbox
-  thread. A conflict returns the existing question ID. Follow up with
-  `question update` instead of asking again. Updates cannot bypass this rule.
+- Several independent questions and bundles may be open on one card or
+  Inbox thread. Each answer wakes the agent. The thread waits for the
+  operator until every open block is settled. The Inbox groups a card's
+  open questions. Exact duplicate text is still rejected.
 - `notify` sends a notice: `kind: "notice"`, with no options. It prints
   `notice <id> sent (<priority>). The acknowledgement comes as mail on
   thread <thread>.` With `--wait`, it registers a `question` wait on the

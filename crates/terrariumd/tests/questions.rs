@@ -162,7 +162,7 @@ async fn question_and_bundle_updates_cannot_remove_their_only_context() {
 }
 
 #[tokio::test]
-async fn inbox_noise_requires_notice_context_and_one_question_per_card() {
+async fn inbox_noise_requires_notice_context_and_allows_questions_per_card() {
     let World { td, lead, sys, .. } = setup().await;
     let path = format!("/api/agents/{lead}/questions");
     let r = td
@@ -210,14 +210,7 @@ async fn inbox_noise_requires_notice_context_and_one_question_per_card() {
             "items": [{"text": "A?"}, {"text": "B?"}]}),
     ] {
         let r = td.post_as(&lead, &path, body).await;
-        r.err(409, "conflict");
-        assert_eq!(r.body["error"]["details"]["question"], q["id"]);
-        assert!(
-            r.body["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("terrarium question update")
-        );
+        assert_eq!(r.status, 201, "{}", r.body);
     }
     // A different agent may ask on this card. No card remains unrestricted.
     let peer = id(&td
@@ -252,9 +245,7 @@ async fn inbox_noise_requires_notice_context_and_one_question_per_card() {
         "items": [{"text": "C?"}, {"text": "D?"}]}),
     )
     .await;
-    td.post_as(&lead, &path, json!({"text": "Follow up?", "card": card}))
-        .await
-        .err(409, "conflict");
+    ask(&td, &lead, json!({"text": "Follow up?", "card": card})).await;
     let bid = id(&bundle);
     td.post_as(
         &lead,

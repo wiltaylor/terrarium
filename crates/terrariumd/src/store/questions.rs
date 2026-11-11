@@ -768,19 +768,6 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
             ..Filter::default()
         },
     )?;
-    if matches!(n.kind, QuestionKind::Question | QuestionKind::Bundle)
-        && let Some(q) = open.iter().find(|q| {
-            matches!(q.kind, QuestionKind::Question | QuestionKind::Bundle)
-                && ((card.is_some() && q.card == card)
-                    || (in_thread.is_some() && q.thread == in_thread))
-        })
-    {
-        return Err(ApiError::conflict(format!(
-            "question {} is open on this card or Inbox thread. Update it with `terrarium question update {}`",
-            q.id, q.id
-        ))
-        .with_details(json!({"question": q.id})));
-    }
     if open.len() >= MAX_OPEN {
         return Err(ApiError::new(
             Code::RateLimited,

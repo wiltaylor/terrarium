@@ -6880,10 +6880,15 @@ async fn a_lost_run_reruns_only_after_its_slot_lock_is_free() {
     let lab = lab(1).await;
     let marks = tempfile::tempdir().unwrap();
     let (c1, job_id, holder) = lose_a_run_with_a_held_slot(&lab, marks.path(), 6, None).await;
+    let waiting = Instant::now();
     let card = lab
         .until_card(&c1, "accepted", |c| c["column"] == "accepted")
         .await;
     stop_group(holder);
+    assert!(
+        waiting.elapsed() >= Duration::from_secs(3),
+        "the rerun did not wait for the held slot"
+    );
     let text = comments(&card);
     assert!(!text.contains("is held by another job"), "{card}");
     assert!(!text.contains("failed before its tests"), "{card}");
@@ -6927,6 +6932,76 @@ async fn a_lost_run_whose_slot_stays_held_ends_with_the_lock_in_its_tail() {
     assert!(tail.contains("slot-0.lock"), "{tail}");
     let runs = std::fs::read_to_string(marks.path().join("runs")).unwrap();
     assert_eq!(runs.lines().count(), 1, "the job reran: {runs}");
+}
+
+/// As after a restart, only the running DB row remains. Recovery must
+/// retain its slot while waiting, and respect a cancel received then.
+async fn recover_a_lost_run_with_a_held_slot(cancel: bool) {
+    if !flock_waits() {
+        return;
+    }
+    let lab = lab(1).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let head = lab.branch("ter-recover-slot", "next", &[("OK", "yes\n")]);
+    let card = lab.card("recover-slot", "ter-recover-slot").await;
+    let id = ulid::Ulid::new().to_string();
+    let lock = lab._dirs.path().join("jobs/p/slot-0.lock");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    let holder = slot_holder(&lock, 120);
+    // Wait until the independent holder actually owns the lock.
+    let start = Instant::now();
+    loop {
+        let status = std::process::Command::new("flock")
+            .arg("-n")
+            .arg(&lock)
+            .arg("true")
+            .status()
+            .unwrap();
+        if !status.success() {
+            break;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "holder did not acquire the slot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (jid, cid) = (id.clone(), card.clone());
+    state.db.write("operator", move |t| {
+        t.execute("INSERT INTO jobs (id, project, card, kind, repo, branch, commit_sha, state, slot, host, attempt, created_by, created_at, started_at) VALUES (?1, 'p', ?2, 'validate', 'app', 'ter-recover-slot', ?3, 'running', 0, 'lab1', 1, 't', datetime('now'), datetime('now'))", rusqlite::params![jid, cid, head])?;
+        Ok(())
+    }).await.unwrap();
+    let recovery = terrariumd::jobs::recover_lost(&state).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !recovery.is_finished(),
+        "recovery did not wait for the slot"
+    );
+    let j = lab.td.get(&format!("/api/jobs/{id}")).await;
+    assert_eq!(j.ok()["state"], "running");
+    if cancel {
+        let r = lab.td.delete(&format!("/api/jobs/{id}")).await;
+        assert_eq!(r.ok()["state"], "cancelled");
+    }
+    stop_group(holder);
+    tokio::time::timeout(DEADLINE, recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    lab.until_idle().await;
+    let j = lab.td.get(&format!("/api/jobs/{id}")).await;
+    assert_eq!(j.ok()["state"], if cancel { "cancelled" } else { "passed" });
+    assert_eq!(j.ok()["attempt"], 1);
+}
+
+#[tokio::test]
+async fn a_lost_run_recovers_after_restart_with_a_held_slot() {
+    recover_a_lost_run_with_a_held_slot(false).await;
+}
+
+#[tokio::test]
+async fn a_lost_run_cancelled_while_waiting_for_its_slot_does_not_rerun() {
+    recover_a_lost_run_with_a_held_slot(true).await;
 }
 
 /// TER-196 review 2, major 1: a run that the infrastructure lost past

@@ -207,6 +207,9 @@ pub type AfterCreate =
 /// agent of an Inbox thread). Not in the API.
 #[derive(Default)]
 pub struct Internal {
+    /// Narrow daemon delegation for an allowlisted request architect, owned
+    /// by the report-to lead, never by the operator. Not accepted by the API.
+    pub request_architect: bool,
     /// The binding, checked by the caller. It takes the place of
     /// `SpawnBody::bind`, which accepts only the kinds that an agent may
     /// bind ([`crate::bound::check`]).
@@ -254,6 +257,7 @@ pub async fn spawn_with(
     internal: Internal,
 ) -> ApiResult<Spawned> {
     let Internal {
+        request_architect,
         bound: internal_bound,
         source: internal_source,
         check: def_check,
@@ -340,26 +344,38 @@ pub async fn spawn_with(
         crate::links::refuse_sysadmin_agent(&v.agent.roles, "spawn for")?;
     }
     // The owner's spawn policy. The operator spawns with no policy.
-    let rules = match &owner.view {
-        Some(v) => match &v.agent.policy.spawn {
-            Some(sp) => Some(sp.clone()),
-            None if actor.is_operator() => None,
-            None => {
-                let why = if v.ephemeral {
-                    "an ephemeral agent spawns only when the spawn policy of its owner has \
+    let rules = if request_architect {
+        if actor.is_operator()
+            || def_check.is_none()
+            || internal_bound
+                .as_ref()
+                .is_none_or(|b| b.kind != crate::thread_agent::KIND_THREAD)
+        {
+            return Err(ApiError::forbidden("invalid request architect delegation"));
+        }
+        None
+    } else {
+        match &owner.view {
+            Some(v) => match &v.agent.policy.spawn {
+                Some(sp) => Some(sp.clone()),
+                None if actor.is_operator() => None,
+                None => {
+                    let why = if v.ephemeral {
+                        "an ephemeral agent spawns only when the spawn policy of its owner has \
                      may_spawn_children"
-                } else {
-                    "its policy has no `spawn` block; ask a project_admin to set one \
+                    } else {
+                        "its policy has no `spawn` block; ask a project_admin to set one \
                      (`terrarium agent set <agent> --spawn-template <t>`)"
-                };
-                return Err(ApiError::forbidden(format!(
-                    "agent `{}` has no spawn rights: {why}",
-                    owner.name
-                ))
-                .with_details(json!({"spawn_owner_right": "spawn"})));
-            }
-        },
-        None => None,
+                    };
+                    return Err(ApiError::forbidden(format!(
+                        "agent `{}` has no spawn rights: {why}",
+                        owner.name
+                    ))
+                    .with_details(json!({"spawn_owner_right": "spawn"})));
+                }
+            },
+            None => None,
+        }
     };
     // A bound agent lives as long as its object; the cap is only a
     // safety limit (TER-74).
@@ -549,6 +565,14 @@ pub async fn spawn_with(
             .map(|v| (&v.agent.policy, v.agent.roles.as_slice())),
     );
     for role in &def.roles {
+        if request_architect
+            && matches!(
+                role,
+                terrarium_core::Role::Architect | terrarium_core::Role::Member
+            )
+        {
+            continue;
+        }
         policy::change_role(actor, "", &def.project, *role)?;
     }
     crate::skills::check_assignment(skills.as_deref(), &def.skills)?;
@@ -713,6 +737,16 @@ pub async fn spawn_with(
             agents::check_policy(t, &who, &def.project, None, &def.policy)?;
             if let Some(check) = def_check {
                 check(t, &mut def)?;
+            }
+            if request_architect {
+                let fresh = templates::resolve(t, &def.project, &tkey)?;
+                let current = agent_template::to_def(&fresh.spec, &fresh.name, &def.project)
+                    .map_err(|e| ApiError::invalid(e.to_string()))?;
+                crate::thread_agent::check_architect_template(&fresh.use_key(), &current)?;
+                crate::thread_agent::check_architect_template(&tkey, &def)?;
+                if fresh.spec != template.spec {
+                    return Err(ApiError::conflict("architect template changed during spawn"));
+                }
             }
             // The rights from the owner (TER-65): checked against the owner,
             // not by the policy rule above, so a lead passes on a global

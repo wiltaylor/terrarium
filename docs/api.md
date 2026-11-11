@@ -1,5 +1,46 @@
 # Terrarium daemon API
 
+## Request threads
+
+Ask an agent and Message an agent open `POST /api/threads` with
+`{report_to: "project/lead", topic, text}`. Only the operator opens a
+request, and `report_to` must name a project_admin. The scope is that lead's
+project. The daemon spawns `global:request` (META-136), with no named agent
+or alternative template accepted. A missing template fails the start with
+the existing closed-thread error rather than silently sending plain mail.
+Forwarding an existing Inbox question still uses the watched-mail path.
+
+The request agent acknowledges the request, mails the selected lead, links
+and tracks the lead's cards, and reports in the thread. It does not change
+code or perform the work. Existing thread card-link and tracking endpoints
+apply. An answer-only close proposal waits for one-click operator
+confirmation, or is confirmed automatically after 24 hours without activity.
+An operator reply withdraws the proposal. Threads with linked cards retain
+the ordinary close lifecycle. The operator can close a request at any time.
+
+`POST /api/threads/{id}/swap` with `{template, reason}` replaces an open
+request's agent with a new agent from `global:architect` or
+`global:architect-alt`. Project templates and other global templates are
+refused. Only Architect and Member roles are allowed, with the resolved
+definition checked again in the agent creation transaction. The new agent
+is spawned as and owned by the report-to lead, not the operator. The operator
+or report-to lead can do this. `terrarium thread swap <id> --template <key>
+--reason <text>` is the CLI equivalent.
+
+`POST /api/threads/{id}/reopen` with `{reason, card?}` reopens a closed request.
+The optional card ID is linked atomically, so a lead can reopen a request
+by linking new related work from its project, even while the thread is closed.
+The operator, report-to lead, or a project_admin whose project has a card
+linked to the thread can reopen it. `terrarium thread reopen <id> --reason
+<text>` is the CLI equivalent. Reopening creates a new `global:request`
+agent, never restores the previous session. The reason is a visible post.
+Both replacement paths keep the conversation and linked cards and include
+the thread history as quoted data in the new agent's task.
+The replacement epoch is checked during creation and attachment. A stale
+spawn cannot attach or close a newer replacement. Automatic answer-only
+closure reads ordered batches of at most 64 requests, using the last
+`(updated_at, id)` key to continue after releasing the database read lock.
+
 This document is the contract between `terrariumd` and its clients: the CLI,
 the dashboard, and (later) the agent runner. The code is in
 `crates/terrariumd/src/api/`. The integration tests in
@@ -3299,9 +3340,10 @@ The rules:
   operator mail or Inbox-thread message to the sender, or an answered
   question owned by the sender. Invalid references are `422 invalid`.
   The reply reference is recorded in the ask audit event.
-- A question or bundle is `409 conflict` while the same agent has an open
-  question or bundle on the same card or Inbox thread. `details.question`
-  names it and the error points to `terrarium question update <id>`.
+- Several independent questions and bundles may be open on the same card
+  or Inbox thread. Each answer wakes the agent, while the thread waits for
+  the operator until its last open block is settled. The Inbox groups the
+  open questions of a card.
 - An agent has at most 50 open questions (`429 rate_limited`). A question
   whose text is the same as an open question of the agent (case and
   spaces do not count) is `409 conflict`; `details.question` names the

@@ -2706,6 +2706,23 @@ pub enum ThreadCmd {
         #[arg(long = "test")]
         test: String,
     },
+    /// Reopen a closed request with a new request agent and its history
+    Reopen {
+        id: String,
+        #[arg(long)]
+        reason: String,
+        /// A related card ID to link atomically while reopening
+        #[arg(long)]
+        card: Option<String>,
+    },
+    /// Replace a request agent with an architect in the same thread
+    Swap {
+        id: String,
+        #[arg(long)]
+        template: String,
+        #[arg(long)]
+        reason: String,
+    },
     /// Open a thread. An agent needs the right thread:open and a template
     /// whose rights do not exceed its own; the operator opens any thread
     New {

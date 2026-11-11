@@ -47,6 +47,25 @@ function mount(url: string) {
 }
 
 describe("the Inbox keeps the card in work (TER-40)", () => {
+  it("groups a card's question blocks and keeps its draft when a sibling is added", async () => {
+    const q = api.world.questions!.find((x) => x.kind === "question" && x.status === "open")!;
+    q.card = "TER-703";
+    api.world.questions!.push({ ...q, id: "sibling-703", text: "Another decision?" });
+    const el = mount("/inbox");
+    const selector = `article[aria-label='Question ${q.id}']`;
+    await waitFor(() => expect(el.querySelector(selector)).not.toBeNull());
+    const group = el.querySelector("section[aria-label='Questions for TER-703']")!;
+    expect(group.querySelectorAll("article").length).toBe(2);
+    const first = el.querySelector(selector)!;
+    const box = first.querySelector("textarea")!;
+    box.value = "Unfinished answer";
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+    api.world.questions!.push({ ...q, id: "third-703", text: "Third decision?" });
+    [...el.querySelectorAll("button")].find(b => b.textContent === "Refresh")!.click();
+    await waitFor(() => expect(group.querySelectorAll("article").length).toBe(3));
+    expect(el.querySelector(selector)).toBe(first);
+    expect(box.value).toBe("Unfinished answer");
+  });
   it("keeps the draft, the chosen option, the focus, and the card's DOM when new items come", async () => {
     const q = api.world.questions!.find((x) => x.kind === "question" && x.status === "open" && x.options.length >= 2)!;
     const el = mount("/inbox");

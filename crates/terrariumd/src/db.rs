@@ -3292,6 +3292,31 @@ mod tests {
     }
 
     #[test]
+    fn request_close_migration_indexes_the_complete_batch_order() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        // Keep this identical to the auto-close batch query in thread_close.
+        let sql = "SELECT updated_at, id FROM threads WHERE request = 1 AND status = 'waiting_operator' AND close_proposal IS NOT NULL AND updated_at < ?1 AND (updated_at, id) > (?2, ?3) AND NOT EXISTS (SELECT 1 FROM thread_cards WHERE thread = threads.id) ORDER BY updated_at, id LIMIT ?4";
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let plan = statement
+            .query_map(
+                rusqlite::params![
+                    "2026-11-11T00:00:00.000Z",
+                    "2020-01-01T00:00:00.000Z",
+                    "cursor",
+                    64
+                ],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(plan.contains("threads_request_close"), "{plan}");
+        assert!(!plan.contains("USE TEMP B-TREE"), "{plan}");
+    }
+
+    #[test]
     fn card_move_index_tolerates_malformed_events_and_serves_history() {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate(&mut conn).unwrap();

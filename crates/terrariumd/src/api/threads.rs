@@ -56,6 +56,8 @@ pub fn routes() -> Router<Shared> {
             "/projects/{project}/version-thread/messages",
             post(post_version),
         )
+        .route("/threads/{id}/reopen", post(reopen))
+        .route("/threads/{id}/swap", post(swap))
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +87,9 @@ async fn post_version(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenBody {
+    /// A request reports to the operator's selected project lead.
+    #[serde(default)]
+    report_to: Option<String>,
     topic: String,
     #[serde(default)]
     scope: Option<String>,
@@ -113,6 +118,9 @@ async fn open(
         },
     };
     policy::open_thread(&actor, &scope)?;
+    if b.report_to.is_some() && !actor.is_operator() {
+        return Err(ApiError::forbidden("only the operator opens a request"));
+    }
     let opener = actor.agent().cloned();
     if opener.is_some() {
         crate::template_files::refresh_quiet(&state).await;
@@ -120,6 +128,23 @@ async fn open(
     let th = state
         .db
         .write(actor.label(), move |t| {
+            let lead = b
+                .report_to
+                .as_deref()
+                .map(|key| {
+                    let a = agents::find(t, key, None)?.agent;
+                    if !a.roles.contains(&terrarium_core::Role::ProjectAdmin) {
+                        return Err(ApiError::invalid("report_to must be a project lead"));
+                    }
+                    Ok(a)
+                })
+                .transpose()?;
+            let scope = lead.as_ref().map_or(scope, |a| a.project.clone());
+            if lead.is_some() && (b.agent.is_some() || b.template.is_some()) {
+                return Err(ApiError::invalid(
+                    "a request uses global:request and no named agent",
+                ));
+            }
             let project = (scope != threads::GLOBAL).then_some(scope.as_str());
             let agent = match b.agent.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
                 Some(key) => Some(agents::find(t, key, project)?.agent),
@@ -128,17 +153,28 @@ async fn open(
             if let Some(a) = &opener {
                 check_rights(t, a, &scope, b.template.as_deref(), agent.as_ref())?;
             }
-            threads::open(
+            let th = threads::open(
                 t,
                 NewThread {
                     topic: b.topic,
                     scope,
-                    template: b.template,
+                    template: if lead.is_some() {
+                        Some("global:request".into())
+                    } else {
+                        b.template
+                    },
                     opened_by: opener.map_or_else(|| "operator".into(), |a| a.id),
                     agent: agent.map(|a| a.id.to_string()),
                     text: b.text,
                 },
-            )
+            )?;
+            if let Some(lead) = lead {
+                t.execute(
+                    "UPDATE threads SET report_to = ?2, request = 1 WHERE id = ?1",
+                    rusqlite::params![th.id, lead.id.to_string()],
+                )?;
+            }
+            threads::get(t, &th.id)
         })
         .await?;
     // A template and no named agent: the daemon spawns the thread's agent
@@ -544,4 +580,131 @@ async fn link_card(
             })
             .await?,
     ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestartBody {
+    reason: String,
+    /// Atomically link a new related card when reopening.
+    #[serde(default)]
+    card: Option<String>,
+    #[serde(default)]
+    template: Option<String>,
+}
+
+async fn reopen(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(b): ApiJson<RestartBody>,
+) -> ApiResult<Json<Thread>> {
+    if b.template.is_some() {
+        return Err(ApiError::invalid("reopen uses a new global:request agent"));
+    }
+    restart(&state, actor, id, b, true).await.map(Json)
+}
+
+async fn swap(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(b): ApiJson<RestartBody>,
+) -> ApiResult<Json<Thread>> {
+    restart(&state, actor, id, b, false).await.map(Json)
+}
+
+async fn restart(
+    state: &Shared,
+    actor: Actor,
+    id: String,
+    b: RestartBody,
+    reopening: bool,
+) -> ApiResult<Thread> {
+    if !reopening && b.card.is_some() {
+        return Err(ApiError::invalid("card is only accepted when reopening"));
+    }
+    if b.reason.trim().is_empty()
+        || b.reason.chars().count() > threads::MAX_MESSAGE
+        || b.reason.contains('\0')
+    {
+        return Err(ApiError::invalid(
+            "reason is required and must fit a thread message",
+        ));
+    }
+    let template = if reopening {
+        "global:request".to_owned()
+    } else {
+        b.template
+            .ok_or_else(|| ApiError::invalid("swap requires an architect template"))?
+    };
+    crate::template_files::refresh_quiet(state).await;
+    let card = b.card.as_deref().map(crate::store::board::normalise_id);
+    let (key, who, tp, linked) = (id.clone(), actor.clone(), template.clone(), card.clone());
+    let (old, epoch) = state.db.read(move |c| {
+        let th = threads::get(c, &key)?;
+        if !th.request || (th.status == ThreadStatus::Closed) != reopening {
+            return Err(ApiError::conflict("only a closed request reopens, and only an open request swaps"));
+        }
+        let new_card_project = linked.as_deref().map(|id| {
+            let card = crate::store::board::get_card(c, id)?;
+            policy::read_project(&who, &card.project)?;
+            if card.archived { return Err(ApiError::invalid("an archived card cannot reopen a request")); }
+            Ok(card.project)
+        }).transpose()?;
+        let allowed = match &who {
+            Actor::Operator => true,
+            Actor::Agent(a) => {
+                a.roles.contains(&terrarium_core::Role::ProjectAdmin) &&
+                (th.report_to.as_deref() == Some(a.id.as_str()) || (reopening &&
+                    (new_card_project.as_deref() == Some(a.project.as_str()) || th.cards.as_deref().unwrap_or_default().iter().any(|card| card.project == a.project))))
+            }
+        };
+        if !allowed { return Err(ApiError::forbidden("only the report-to lead or a lead with a linked card reopens a request; only the report-to lead swaps it")); }
+        let project = crate::thread_agent::project_of(&th);
+        let resolved = templates::resolve(c, project, &tp)?;
+        if !reopening {
+            let def = agent_template::to_def(&resolved.spec, &resolved.name, project).map_err(|e| ApiError::invalid(e.to_string()))?;
+            crate::thread_agent::check_architect_template(&resolved.use_key(), &def)?;
+        }
+        let epoch = c.query_row("SELECT request_epoch FROM threads WHERE id = ?1", [&key], |r| r.get::<_, i64>(0))?;
+        Ok((th.agent, epoch))
+    }).await?;
+    // Finish the previous bound spawn before making the new one. A delayed
+    // close event must only close its original agent, never this replacement.
+    if let Some(old) = old {
+        let key = old.clone();
+        let running = state
+            .db
+            .read(move |c| Ok(crate::store::spawns::get(c, &key).is_ok_and(|s| s.running())))
+            .await?;
+        if running {
+            crate::spawn::close(
+                state,
+                &old,
+                crate::store::spawns::DONE,
+                Some("request agent replaced".into()),
+                false,
+            )
+            .await?;
+        }
+    }
+    let by = actor.address();
+    let th = state
+        .db
+        .write(actor.label(), move |t| {
+            threads::restart_request(
+                t,
+                &id,
+                &by,
+                &b.reason,
+                &template,
+                reopening,
+                (epoch, card.as_deref()),
+            )
+        })
+        .await?;
+    crate::thread_agent::start(state, th, super::skills::library_opt(state))
+        .await
+        .map(|th| threads::visible(&actor, th))
 }

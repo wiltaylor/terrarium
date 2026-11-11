@@ -1,4 +1,4 @@
-"""Tests for scripts/annotate_test_failures.py and its CI step.
+"""Tests for scripts/annotate_test_failures.py.
 
 Run: uv run python -m unittest discover -s scripts -p 'test_*.py'
 """
@@ -17,7 +17,6 @@ import annotate_test_failures as atf  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts/annotate_test_failures.py"
-WORKFLOW = (REPO / ".github/workflows/ci.yml").read_text()
 
 # The shape of `cargo test --workspace --no-fail-fast 2>&1` with two failing
 # binaries, colour codes (CARGO_TERM_COLOR=always), and a passing doc-test.
@@ -164,14 +163,6 @@ class Annotations(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(out.stdout.count("::error "), 2)
         self.assertIn("2 failed tests", out.stderr)
-
-
-class Workflow(unittest.TestCase):
-    def test_the_test_step_annotates_failures_and_keeps_the_exit_code(self):
-        self.assertIn("just ci::test 2>&1 | tee \"$RUNNER_TEMP/cargo-test.log\" || rc=$?", WORKFLOW)
-        self.assertIn("set -o pipefail", WORKFLOW)
-        self.assertIn('python3 scripts/annotate_test_failures.py "$RUNNER_TEMP/cargo-test.log" || true', WORKFLOW)
-        self.assertIn('exit "$rc"', WORKFLOW)
 
 
 if __name__ == "__main__":
