@@ -1882,24 +1882,54 @@ mod tests {
         let reg = Arc::new(registry("lab1", true));
         reg.restore(dir.path()).unwrap();
         reg.lock().get_mut("lab1").unwrap().resume_token = Some("kept-token".into());
-        let session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let session = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
         let id = session.id();
-        reg.on_session_frame("lab1", HostFrame::Started { session: id, pid: Some(42) });
-        reg.on_data("lab1", DataFrame::new(id, StreamTag::Stdout, b"kept output\n".to_vec()));
-        reg.on_session_frame("lab1", HostFrame::Exit {
-            session: id, code: Some(23), signal: None, reason: ExitReason::Exited,
-        });
+        reg.on_session_frame(
+            "lab1",
+            HostFrame::Started {
+                session: id,
+                pid: Some(42),
+            },
+        );
+        reg.on_data(
+            "lab1",
+            DataFrame::new(id, StreamTag::Stdout, b"kept output\n".to_vec()),
+        );
+        reg.on_session_frame(
+            "lab1",
+            HostFrame::Exit {
+                session: id,
+                code: Some(23),
+                signal: None,
+                reason: ExitReason::Exited,
+            },
+        );
         drop(session);
         drop(reg);
         let restored = Arc::new(HostRegistry::default());
         restored.restore(dir.path()).unwrap();
-        assert_eq!(restored.lock()["lab1"].resume_token.as_deref(), Some("kept-token"));
+        assert_eq!(
+            restored.lock()["lab1"].resume_token.as_deref(),
+            Some("kept-token")
+        );
         let mut session = restored.reattach("lab1", id).unwrap();
-        assert!(matches!(session.recv().await, Some(SessionEvent::Started { pid: Some(42) })));
-        assert_eq!(session.recv().await, Some(SessionEvent::Data {
-            stream: StreamTag::Stdout, bytes: b"kept output\n".to_vec(),
-        }));
-        assert!(matches!(session.recv().await, Some(SessionEvent::Exit { code: Some(23), .. })));
+        assert!(matches!(
+            session.recv().await,
+            Some(SessionEvent::Started { pid: Some(42) })
+        ));
+        assert_eq!(
+            session.recv().await,
+            Some(SessionEvent::Data {
+                stream: StreamTag::Stdout,
+                bytes: b"kept output\n".to_vec(),
+            })
+        );
+        assert!(matches!(
+            session.recv().await,
+            Some(SessionEvent::Exit { code: Some(23), .. })
+        ));
         assert!(session.recv().await.is_none());
         assert!(restored.reattach("lab1", id).is_none());
     }
@@ -1911,9 +1941,14 @@ mod tests {
         crate::secrets::ensure_key(&conn, dir.path()).unwrap();
         let reg = Arc::new(registry("lab1", true));
         reg.restore(dir.path()).unwrap();
-        let mut session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let mut session = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
         conn.execute("DROP TABLE host_resume", []).unwrap();
-        reg.on_data("lab1", DataFrame::new(session.id(), StreamTag::Stdout, b"not saved".to_vec()));
+        reg.on_data(
+            "lab1",
+            DataFrame::new(session.id(), StreamTag::Stdout, b"not saved".to_vec()),
+        );
         assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 0);
         assert!(session.rx.try_recv().is_err());
     }
