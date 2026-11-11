@@ -740,7 +740,14 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
             }
         }
         if let Some(d) = decoded.as_deref() {
-            scan_decoded_soft(path, header.as_deref(), candidate.is_some(), marked, d, &mut hit);
+            scan_decoded_soft(
+                path,
+                header.as_deref(),
+                candidate.is_some(),
+                marked,
+                d,
+                &mut hit,
+            );
         }
     }
     out
