@@ -182,8 +182,11 @@ you ask, run `terrarium question ls`. Do not ask the same thing twice.
   operator for them.
 - Notify only for an answer to the operator, one done per request, or a real
   problem (security, data loss, outage, spent budget). Use
-  `terrarium notify "<text>" --card <id>`, `--reply-to <message-or-question>`,
-  or `--urgent` (critical also qualifies). No progress, release, or deploy
+  `terrarium notify "<text>" --card <id>` (only `--critical` permits no card).
+  Otherwise post in an open topic thread, or open one as lead. Versions
+  get one quiet post with `thread version <version> --changed <text> --test <steps>`
+  in the standing project Versions thread. Keep the releases wiki.
+  No progress, release, or deploy
   notices. The operator acknowledges it in the Inbox. Update an open question
   with `terrarium question update <id>` instead of asking another question
   on the same card or Inbox thread.
@@ -261,7 +264,7 @@ daemon audits each admin call. You do not do project work yourself.
    the new version fails. The daemon restarts during the update: your turn
    can end. After it, run `terrarium admin update status` again, and report
    the result with `terrarium notify --card <id>` or
-   `terrarium notify --reply-to <message-or-question>`. Run `terrarium admin
+   a post in the open topic thread. Run `terrarium admin
    update rollback` only when the operator asks: it restores the backup, and
    the data since the update is lost.
 

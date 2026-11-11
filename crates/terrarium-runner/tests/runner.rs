@@ -864,6 +864,76 @@ async fn text_typed_by_a_person_is_not_flagged() {
     );
 }
 
+/// TER-247 F1: a dialog is not evidence that a person's draft was cleared.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dialog_preserves_the_person_mark() {
+    let mut h = start(Opts {
+        env: env(&[("FAKE_TUI_PASTE_NEEDS_PAUSE", "1")]),
+        submit: ms(500),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    h.runner
+        .write_person(b"\x1b[200~a draft\nfor later\x1b[201~")
+        .await
+        .expect("paste");
+    until_screen(&h, "[Pasted text #1 +2 lines]").await;
+    h.runner.write(b"\x12").await.expect("show dialog");
+    until_status(&mut h.events, AgentStatus::Blocked).await;
+    until_screen(&h, "Allow the tool?").await;
+    // Cover both PERSON_INPUT_SLACK and INPUT_CLEAR_DEBOUNCE.
+    tokio::time::sleep(ms(4_000)).await;
+    h.runner.write(b"\x14").await.expect("restore draft");
+    until_screen(&h, "[Pasted text #1 +2 lines]").await;
+    h.runner
+        .answer("dialog", &Answer::Deny)
+        .await
+        .expect("answer");
+    tokio::time::sleep(ms(2_000)).await;
+    assert_eq!(h.runner.status(), AgentStatus::Idle);
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+    assert!(
+        !blocked_reasons(h.runner.events_path())
+            .iter()
+            .any(|r| { r.as_deref() == Some(terrarium_core::adapter::INPUT_PENDING_REASON) })
+    );
+}
+
+/// TER-247 F2: a runner turn replaces the ownership of a recently cleared draft.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_turn_ends_the_person_mark() {
+    let mut h = start(Opts {
+        env: env(&[("FAKE_TUI_PASTE_NEEDS_PAUSE", "1")]),
+        submit: ms(500),
+        submit_pause: ms(300),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    h.runner
+        .write_person(b"\x1b[200~a draft\nfor later\x1b[201~")
+        .await
+        .expect("paste");
+    until_screen(&h, "[Pasted text #1 +2 lines]").await;
+    let turn = h.runner.type_turn("/leave-blink");
+    h.runner.write(b"\x15").await.expect("clear draft");
+    timeout(wait(), turn.wait())
+        .await
+        .expect("time")
+        .expect("turn");
+    until_status(&mut h.events, AgentStatus::Blocked).await;
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+    assert_eq!(
+        blocked_reasons(h.runner.events_path()),
+        vec![Some(
+            terrarium_core::adapter::INPUT_PENDING_REASON.to_owned()
+        )]
+    );
+}
+
 /// TER-224, review round 2: a draft that a person types while the agent
 /// works (the fake TUI reads it after the turn) is still that person's
 /// when the agent goes idle, more than `PERSON_INPUT_SLACK` after the

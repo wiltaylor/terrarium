@@ -594,6 +594,27 @@ class Release(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("--no-gate is for the dry run only", proc.stderr)
 
+    def test_a_clone_without_tags_fetches_them_before_the_version(self):
+        # The release job's clone comes from a bundle with no tags (TER-754).
+        remote = self.tmp / "remote.git"
+        git(self.tmp, "clone", "-q", "--bare", str(self.repo), str(remote))
+        git(self.repo, "tag", "-d", "v0.5.0")
+        proc = self.run_release("dry-run", "--no-gate", secrets=False,
+                                env={"TERRARIUM_RELEASE_TAG_REMOTE": str(remote)})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self.summary()["version"]["version"], self.VERSION)
+        self.assertEqual(self.summary()["version"]["last_tag"], "v0.5.0")
+
+    def test_no_tag_anywhere_refuses_to_number_the_release(self):
+        remote = self.tmp / "empty.git"
+        git(self.tmp, "init", "-q", "--bare", str(remote))
+        git(self.repo, "tag", "-d", "v0.5.0")
+        proc = self.run_release("dry-run", "--no-gate", secrets=False,
+                                env={"TERRARIUM_RELEASE_TAG_REMOTE": str(remote)})
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("refusing to number the release from 0", proc.stderr)
+        self.assertEqual(self.tools(), [])
+
     def test_a_red_gate_publishes_nothing(self):
         proc = self.run_release("publish", fake={"FAKE_GATE_RC": "1"})
         self.assertEqual(proc.returncode, 1)

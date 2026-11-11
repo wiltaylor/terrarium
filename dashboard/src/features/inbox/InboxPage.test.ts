@@ -71,7 +71,7 @@ describe("Inbox load (TER-302)", () => {
         return sorted.slice(start, start + (q.limit ?? 200));
       });
       try {
-        const el = mount("/inbox");
+        const el = mount("/inbox?tab=mail");
         await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBeGreaterThan(0), 10000);
         // Bound work, not wall time on a shared build host. A 10x regression
         // in mounted cards or fetched pages must fail at either fixture size.
@@ -107,7 +107,7 @@ describe("Inbox load (TER-302)", () => {
         // on the 1x fixture only, not by mounting 2570 rich cards in jsdom.
         if (scale === 1) {
           vi.spyOn(window, "requestAnimationFrame").mockImplementation(() => 0);
-          const deep = mount(`/inbox?item=${encodeURIComponent(rows[0]!.id)}`);
+          const deep = mount(`/inbox?tab=mail&item=${encodeURIComponent(rows[0]!.id)}`);
           await waitFor(() => expect(deep.querySelectorAll("article[aria-label^='Mail ']").length).toBe(rows.length), 10000);
         }
       } finally {
@@ -119,7 +119,7 @@ describe("Inbox load (TER-302)", () => {
 });
 
 describe("the Asked status tab (TER-42)", () => {
-  it("shows a waiting ask only under Asked, and its reply on Open when the agent answers", async () => {
+  it("shows a waiting ask under Asked, and its reply in the explicit Mail view", async () => {
     const r = await api.inbox.ask({ to: "terrarium/lead", text: "Why did the runner fail?" });
     const thread = r.message.thread_id;
     // The status tabs: Open, Done, Asked; no Asked kind tab.
@@ -138,7 +138,7 @@ describe("the Asked status tab (TER-42)", () => {
     await waitFor(() => expect(watchCards(el).length).toBe(1));
     // The agent answers.
     await api.mail.send({ from: "terrarium/lead", to: "operator", thread_id: thread, body: "A flaky test." });
-    el = mount("/inbox");
+    el = mount("/inbox?tab=mail");
     await waitFor(() => expect(el.querySelector("[data-testid=watch-answer]")).not.toBeNull());
     expect(el.textContent).toContain("answer to your question");
     expect(watchCards(el).length).toBe(0);
@@ -158,7 +158,7 @@ describe("the ack of a mail that closed outside the Inbox (GitHub #25)", () => {
     const ack = vi.spyOn(api.inbox, "ackMail").mockImplementation(async () => {
       throw new ApiError(409, "mail is acknowledged already (read)", undefined, "conflict");
     });
-    const item = (await api.inbox.list()).find((i) => i.message?.subject === "0.1.0 ready for review")!;
+    const item = (await api.inbox.list({ kind: "mail" })).find((i) => i.message?.subject === "0.1.0 ready for review")!;
     // The fetched message is the mail as it is now, not the stale card one.
     const get = vi.spyOn(api.mail, "get").mockImplementation(async (id) => ({ ...item.message!, id, state: "read" }));
     try {

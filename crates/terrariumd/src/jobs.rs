@@ -1146,7 +1146,7 @@ fn note_long_waits(t: &mut Tx<'_>) -> ApiResult<()> {
 /// projects, so the host counts hold. A job whose host agent is offline,
 /// or whose ssh target waits for its next try, stays queued (TER-160).
 pub async fn tick(state: &Shared) -> ApiResult<()> {
-    prepare_hosts(&state.db, None).await?;
+    prepare_hosts_mode(&state.db, None, true).await?;
     // A deploy drains the daemon first: no job starts, and the running
     // ones go on (TER-123, P5). The end of the drain kicks the queue. A
     // drain of the job slots only (TER-614 R4) does the same for jobs.
@@ -1254,10 +1254,21 @@ async fn finish_job(state: &Shared, id: &str, end: JobEnd) {
     }
 }
 
-/// Resolve only unpinned names, on the blocking pool and outside DB closures.
-/// The persisted first answer (including failures) keeps counts and caps stable.
+pub(crate) type HostRetries = std::collections::HashMap<String, (Instant, Duration)>;
+
+/// Resolve new names outside DB closures. API calls neither retry failed pins
+/// nor wait behind scheduler DNS work. Successful pins stay fixed. The scheduler
+/// retries failures after one minute, doubling up to fifteen minutes.
 pub async fn prepare_hosts(db: &crate::db::Db, extra: Option<String>) -> ApiResult<()> {
-    prepare_hosts_with(db, extra, |hostname| {
+    prepare_hosts_mode(db, extra, false).await
+}
+
+async fn prepare_hosts_mode(
+    db: &crate::db::Db,
+    extra: Option<String>,
+    retry: bool,
+) -> ApiResult<()> {
+    prepare_hosts_with(db, extra, retry, |hostname| {
         use std::net::ToSocketAddrs;
         let mut ips: Vec<_> = (hostname, 22)
             .to_socket_addrs()
@@ -1274,10 +1285,49 @@ pub async fn prepare_hosts(db: &crate::db::Db, extra: Option<String>) -> ApiResu
 async fn prepare_hosts_with(
     db: &crate::db::Db,
     extra: Option<String>,
+    retry: bool,
     resolve: impl Fn(&str) -> String + Send + Sync + 'static,
 ) -> ApiResult<()> {
-    let _prepare = db.host_pins().lock().await;
-    let names = db.read(move |c| jobs::unresolved_hosts(c, extra)).await?;
+    let mut retries = if retry {
+        db.host_pins().lock().await
+    } else {
+        let Ok(guard) = db.host_pins().try_lock() else {
+            return Ok(());
+        };
+        guard
+    };
+    let names = db
+        .read(move |c| {
+            let names = jobs::unresolved_hosts(c, extra)?;
+            let mut selected = Vec::new();
+            for name in names {
+                if !retry {
+                    // An indexed point lookup, not a scan of historical pins.
+                    let exists: bool = c.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1)",
+                        [&name],
+                        |r| r.get(0),
+                    )?;
+                    if exists {
+                        continue;
+                    }
+                }
+                selected.push(name);
+            }
+            Ok(selected)
+        })
+        .await?;
+    if retry {
+        retries.retain(|name, _| names.binary_search(name).is_ok());
+    }
+    let names: Vec<_> = names
+        .into_iter()
+        .filter(|name| {
+            retries
+                .get(name)
+                .is_none_or(|(deadline, _)| Instant::now() >= *deadline)
+        })
+        .collect();
     if names.is_empty() {
         return Ok(());
     }
@@ -1305,6 +1355,12 @@ async fn prepare_hosts_with(
             continue;
         }
         let guard = Lookup(name.clone());
+        let delay = retries
+            .get(&name)
+            .map_or(Duration::from_secs(60), |(_, delay)| {
+                (*delay * 2).min(Duration::from_secs(15 * 60))
+            });
+        retries.insert(name.clone(), (Instant::now() + delay, delay));
         let resolve = resolve.clone();
         let task = tokio::task::spawn_blocking(move || {
             let key = resolve(&guard.0);
@@ -1319,6 +1375,9 @@ async fn prepare_hosts_with(
         });
     }
     let keys = futures_util::future::join_all(pending).await;
+    if keys.is_empty() {
+        return Ok(());
+    }
     db.write("system", move |t| jobs::pin_hosts(t, keys)).await
 }
 
@@ -1999,7 +2058,9 @@ async fn run_inner(
     // The daemon's repo of the job (TER-103): the credential steps run
     // there, never on the target.
     let local = job_repo_dir(state, &job.project, &job.repo);
-    let guard = repo_lock(&local).lock_owned().await;
+    let locks = repo_lock(&local);
+    let guard = locks.prepare.clone().lock_owned().await;
+    let lifetime = locks.lifetime.clone().read_owned().await;
     let checkout = git::Checkout {
         url: repo.url.clone(),
         dest: local.clone(),
@@ -2013,13 +2074,24 @@ async fn run_inner(
         origin: git::Origin::default(),
         fetch_from: None,
     };
+    let recovery = checkout.clone();
     let made = tokio::task::spawn_blocking(move || {
-        git::JobRepo::create(checkout).map(|repo| (repo, guard))
+        git::JobRepo::open(checkout).map(|repo| (repo, guard, lifetime))
     })
     .await
     .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))?;
-    let (job_repo, guard) = match made {
-        Ok((r, guard)) => (Arc::new(r), guard),
+    let (job_repo, guard, lifetime) = match made {
+        Ok((Some(r), guard, lifetime)) => (Arc::new(r), guard, lifetime),
+        Ok((None, guard, lifetime)) => {
+            drop(lifetime);
+            let lifetime = locks.lifetime.clone().write_owned().await;
+            tokio::task::spawn_blocking(move || {
+                git::JobRepo::create(recovery).map(|r| (Arc::new(r), guard, lifetime.downgrade()))
+            })
+            .await
+            .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))?
+            .map_err(|e| ApiError::conflict(format!("cannot rebuild the job repo: {e}")))?
+        }
         Err(e) => {
             return Err(ApiError::conflict(format!(
                 "cannot make the job repo in the daemon: {e}"
@@ -2033,12 +2105,14 @@ async fn run_inner(
         .db
         .read(move |c| jobs::slot_wipe_pending(c, &project, slot))
         .await?;
-    let ctx = StepCtx {
+    let mut ctx = StepCtx {
         state,
         job,
         def: &row.def,
         dir: &dir,
         repo: job_repo,
+        lifetime: Some(Arc::new(lifetime)),
+        repo_locks: locks,
         bundle: local.with_file_name(format!("{}.bundle", job.id)),
         holder,
         ionice,
@@ -2057,7 +2131,7 @@ async fn run_inner(
     // The slot's tree stays on the target for the next job of the slot
     // (TER-190): no delete of the tree and its build output per job.
     let bundle = ctx.bundle.clone();
-    let result = steps(&ctx, recipe, def, guard).await;
+    let result = steps(&mut ctx, recipe, def, guard).await;
     drop(ctx);
     let _ = tokio::fs::remove_file(bundle).await;
     result
@@ -2087,12 +2161,18 @@ fn job_repo_dir(state: &Shared, project: &str, repo: &str) -> PathBuf {
         .join(format!("{repo}.git"))
 }
 
-/// Serialize creation, health checks and prepare, whose scratch refs are
-/// shared. The guard moves into blocking prepare so cancellation cannot
-/// unlock a fetch that is still running. Recipes use independent bundles,
-/// and pushes use recorded commit IDs, never these shared scratch refs.
-fn repo_lock(path: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+/// Serialize preparation, whose scratch refs are shared. A separate lifetime
+/// lock permits concurrent recipes but excludes rebuilds until all jobs and
+/// blocking git tasks have stopped using the cache. Both guards move into
+/// blocking mutations so cancellation cannot unlock a task still running.
+#[derive(Default)]
+struct RepoLocks {
+    prepare: Arc<tokio::sync::Mutex<()>>,
+    lifetime: Arc<tokio::sync::RwLock<()>>,
+}
+
+fn repo_lock(path: &std::path::Path) -> Arc<RepoLocks> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<RepoLocks>>>> = OnceLock::new();
     LOCKS
         .get_or_init(Mutex::default)
         .lock()
@@ -2105,37 +2185,45 @@ fn repo_lock(path: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
 /// Before starting jobs, remove pre-cache per-job repositories and all
 /// interrupted bundles. Preserve `repos/*.git` and never follow symlinks.
 fn cleanup_job_files(root: &std::path::Path) -> std::io::Result<()> {
-    let projects = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
-    };
-    for project in projects {
-        let project = project?;
-        if !project.file_type()?.is_dir() {
-            continue;
-        }
-        for entry in std::fs::read_dir(project.path())? {
-            let entry = entry?;
-            let path = entry.path();
-            let kind = entry.file_type()?;
-            if path.extension().is_some_and(|e| e == "git") && kind.is_dir() {
-                std::fs::remove_dir_all(path)?;
-            } else if path.extension().is_some_and(|e| e == "bundle") && kind.is_file() {
-                std::fs::remove_file(path)?;
-            } else if entry.file_name() == "repos" && kind.is_dir() {
-                for bundle in std::fs::read_dir(path)? {
-                    let bundle = bundle?;
-                    if bundle.path().extension().is_some_and(|e| e == "bundle")
-                        && bundle.file_type()?.is_file()
-                    {
-                        std::fs::remove_file(bundle.path())?;
-                    }
+    fn visit(root: &std::path::Path, depth: usize, error: &mut Option<std::io::Error>) {
+        let entries = match std::fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(e) if depth == 0 && e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                error.get_or_insert(e);
+                return;
+            }
+        };
+        for entry in entries {
+            let result = (|| {
+                let entry = entry?;
+                let path = entry.path();
+                let kind = entry.file_type()?;
+                #[cfg(test)]
+                tests::cleanup_fault(&path)?;
+                if kind.is_dir() && (depth == 0 || (depth == 1 && entry.file_name() == "repos")) {
+                    visit(&path, depth + 1, error);
+                } else if depth == 1
+                    && kind.is_dir()
+                    && path.extension().is_some_and(|e| e == "git")
+                {
+                    std::fs::remove_dir_all(path)?;
+                } else if depth > 0
+                    && kind.is_file()
+                    && path.extension().is_some_and(|e| e == "bundle")
+                {
+                    std::fs::remove_file(path)?;
                 }
+                Ok::<_, std::io::Error>(())
+            })();
+            if let Err(e) = result {
+                error.get_or_insert(e);
             }
         }
     }
-    Ok(())
+    let mut error = None;
+    visit(root, 0, &mut error);
+    error.map_or(Ok(()), Err)
 }
 
 /// The command that the steps of a job run under (TER-97): the idle IO
@@ -2216,6 +2304,8 @@ struct StepCtx<'a> {
     /// The daemon's repo of the job: the only place that gets the repo
     /// credential (TER-103).
     repo: Arc<git::JobRepo>,
+    lifetime: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
+    repo_locks: Arc<RepoLocks>,
     /// Where the daemon writes the bundle for the target.
     bundle: PathBuf,
     holder: Option<String>,
@@ -2299,9 +2389,13 @@ impl StepCtx<'_> {
             return Err(ApiError::conflict("the job was cancelled"));
         }
         let repo = self.repo.clone();
-        tokio::task::spawn_blocking(move || f(&repo))
-            .await
-            .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))
+        let lifetime = self.lifetime.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lifetime = lifetime;
+            f(&repo)
+        })
+        .await
+        .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))
     }
 }
 
@@ -2756,7 +2850,7 @@ fn bundle_ready(
 /// Prepare in the daemon, clone on the target from the bundle, run the
 /// recipe there, and push `next` from the daemon for a merge.
 async fn steps(
-    x: &StepCtx<'_>,
+    x: &mut StepCtx<'_>,
     recipe: String,
     delivery: &DeliveryDef,
     guard: tokio::sync::OwnedMutexGuard<()>,
@@ -2773,17 +2867,46 @@ async fn steps(
         }
     }
     x.at(STEP_PREPARE);
-    let (j, bundle) = (job.clone(), x.bundle.clone());
-    let (head, batch, base) = match x
-        .daemon(move |r| {
-            let _guard = guard;
-            prepare(r, &j, &bundle)
+    let guard = Arc::new(guard);
+    let mut prepared = None;
+    for attempt in 0..2 {
+        let (j, bundle, prepare_guard) = (job.clone(), x.bundle.clone(), guard.clone());
+        let (result, damaged) = x
+            .daemon(move |r| {
+                let _guard = prepare_guard;
+                #[cfg(test)]
+                tests::prepare_fault(r);
+                let result = prepare(r, &j, &bundle);
+                let damaged = matches!(result, Prepared::End(_)) && r.needs_rebuild();
+                (result, damaged)
+            })
+            .await?;
+        if !damaged || attempt == 1 {
+            prepared = Some(result);
+            break;
+        }
+        // No blocking user remains here. New users cannot prepare while we
+        // retain the mutex. Existing jobs can finish before the rebuild.
+        x.lifetime.take();
+        let lifetime = x.repo_locks.lifetime.clone().write_owned().await;
+        let repo = x.repo.clone();
+        let prepare_guard = guard.clone();
+        let (repo, lifetime) = tokio::task::spawn_blocking(move || {
+            let _guard = prepare_guard;
+            repo.rebuild().map(|r| (Arc::new(r), lifetime.downgrade()))
         })
-        .await?
-    {
-        Prepared::Ready { head, batch, base } => (head, batch, base),
-        Prepared::End(end) => return Ok(end),
-    };
+        .await
+        .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))?
+        .map_err(|e| ApiError::conflict(format!("cannot rebuild the job repo: {e}")))?;
+        x.repo = repo;
+        x.lifetime = Some(Arc::new(lifetime));
+    }
+    drop(guard);
+    let (head, batch, base) =
+        match prepared.ok_or_else(|| ApiError::internal("the prepare loop did not run"))? {
+            Prepared::Ready { head, batch, base } => (head, batch, base),
+            Prepared::End(end) => return Ok(end),
+        };
     check_commit(&head)?;
     // The tree that the slot's work tree must have (TER-190 review,
     // finding 1), from the daemon's repo, not from the slot.
@@ -3045,12 +3168,13 @@ async fn steps(
     x.at(STEP_PUSH);
     // Step 3, in the daemon, with the credential: push the recorded merge
     // commit from the daemon's repo. The recipe never had that repo, so
-    // nothing it did to its clone reaches the push.
+    // nothing it did to its clone reaches the push. The shared scratch ref
+    // may belong to a newer prepare, so check the recorded commit itself.
     let h = head.clone();
     let onto = job.onto().to_owned();
     let to = onto.clone();
     let pushed = x
-        .daemon(move |r| match r.commit_of("refs/job/merge") {
+        .daemon(move |r| match r.commit_of(&h) {
             Ok(Some(c)) if c == h => r.push(&h, &to),
             Ok(_) => Err(git::GitError::Refused(format!(
                 "the job repo does not hold the merge commit {h}"
@@ -4643,6 +4767,8 @@ printf 'TERRARIUM_JOB\toutcome=ok\thead=%s\tbase=%s\n' "$sha" "$base"
 mod tests {
     use super::*;
 
+    include!("jobs_cache_tests.rs");
+
     #[tokio::test]
     async fn lost_slot_retries_offline_and_busy_probes() {
         use crate::error::Code;
@@ -4880,6 +5006,46 @@ mod tests {
                 & 0o777,
             0o644
         );
+    }
+
+    #[tokio::test]
+    async fn repo_lifetime_allows_readers_but_blocks_rebuild_after_cancellation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let locks = repo_lock(tmp.path());
+        let first = Arc::new(locks.lifetime.clone().read_owned().await);
+        let second = locks.lifetime.clone().try_read_owned().unwrap();
+        drop(second);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let reader = first.clone();
+        let prepare = locks.prepare.clone().lock_owned().await;
+        let task = tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                let _reader = reader;
+                let _prepare = prepare;
+                started.send(()).unwrap();
+                released.recv().unwrap();
+            })
+            .await
+            .unwrap();
+        });
+        ready.await.unwrap();
+        task.abort();
+        let _ = task.await;
+        drop(first);
+        let rebuild_blocked = locks.lifetime.clone().try_write_owned().is_err();
+        let prepare_blocked = locks.prepare.clone().try_lock_owned().is_err();
+        release.send(()).unwrap();
+        let writer = tokio::time::timeout(
+            Duration::from_secs(10),
+            locks.lifetime.clone().write_owned(),
+        )
+        .await
+        .unwrap();
+        assert!(rebuild_blocked);
+        assert!(prepare_blocked);
+        drop(writer);
+        assert!(locks.prepare.clone().try_lock_owned().is_ok());
     }
 
     #[test]
@@ -5959,6 +6125,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_resolution_backoff_doubles_and_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::new(
+            crate::db::open(&dir.path().join("state.db")).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        for seconds in [60, 120, 240, 480, 900, 900] {
+            prepare_hosts_with(&db, Some("backoff.invalid".into()), true, str::to_owned)
+                .await
+                .unwrap();
+            prepare_hosts_with(&db, Some("backoff.invalid".into()), true, |_| {
+                panic!("not due yet")
+            })
+            .await
+            .unwrap();
+            let mut retries = db.host_pins().lock().await;
+            let (deadline, delay) = retries.get_mut("backoff.invalid").unwrap();
+            assert_eq!(*delay, Duration::from_secs(seconds));
+            *deadline = Instant::now();
+        }
+    }
+
+    #[tokio::test]
     async fn host_resolution_timeout_pins_once_and_address_reset_clears_it() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::Db::new(
@@ -5981,7 +6170,7 @@ mod tests {
         let ready = started.clone();
         let other = db.clone();
         let first = tokio::spawn(async move {
-            prepare_hosts_with(&other, None, move |_| {
+            prepare_hosts_with(&other, None, false, move |_| {
                 ready.notify_one();
                 wait.lock().unwrap().recv().unwrap();
                 "192.0.2.2".into()
@@ -5990,7 +6179,7 @@ mod tests {
             .unwrap();
         });
         started.notified().await;
-        prepare_hosts_with(&db, Some("slow.invalid".into()), |_| {
+        prepare_hosts_with(&db, Some("slow.invalid".into()), false, |_| {
             panic!("parallel kick must not look up the name twice")
         })
         .await
@@ -6018,7 +6207,7 @@ mod tests {
         })
         .await
         .unwrap();
-        prepare_hosts_with(&db, None, |_| {
+        prepare_hosts_with(&db, None, false, |_| {
             panic!("timed out libc lookup is still in flight")
         })
         .await
@@ -6043,6 +6232,7 @@ mod tests {
             prepare_hosts_with(
                 &resolver_db,
                 Some("round-robin.invalid".into()),
+                false,
                 move |_| {
                     ready.notify_one();
                     wait.lock().unwrap().recv().unwrap();
@@ -6067,9 +6257,12 @@ mod tests {
             crate::db::open(&path).unwrap(),
             crate::events::EventHub::default(),
         );
-        prepare_hosts_with(&reopened, Some("ROUND-ROBIN.INVALID:2222".into()), |_| {
-            panic!("must not resolve again")
-        })
+        prepare_hosts_with(
+            &reopened,
+            Some("ROUND-ROBIN.INVALID:2222".into()),
+            false,
+            |_| panic!("must not resolve again"),
+        )
         .await
         .unwrap();
         let key: String = reopened
@@ -6083,10 +6276,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(key, "192.0.2.1");
-        prepare_hosts_with(&reopened, Some("failed.invalid".into()), str::to_owned)
-            .await
-            .unwrap();
-        prepare_hosts_with(&reopened, Some("FAILED.INVALID".into()), |_| {
+        prepare_hosts_with(
+            &reopened,
+            Some("failed.invalid".into()),
+            false,
+            str::to_owned,
+        )
+        .await
+        .unwrap();
+        prepare_hosts_with(&reopened, Some("FAILED.INVALID".into()), false, |_| {
+            panic!("API calls must not retry failed pins")
+        })
+        .await
+        .unwrap();
+        prepare_hosts_with(&reopened, Some("failed.invalid".into()), true, |_| {
+            panic!("scheduler must respect backoff")
+        })
+        .await
+        .unwrap();
+        {
+            let mut retries = reopened.host_pins().lock().await;
+            let (deadline, delay) = retries.get_mut("failed.invalid").unwrap();
+            assert_eq!(*delay, Duration::from_secs(60));
+            *deadline = Instant::now();
+        }
+        prepare_hosts_with(&reopened, Some("FAILED.INVALID".into()), true, |_| {
             "192.0.2.3".into()
         })
         .await

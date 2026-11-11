@@ -1601,6 +1601,15 @@ terrarium admin inbox release <message-id>
 terrarium admin inbox resume <thread-id> [-m note]
 ```
 
+- `notify` requires `--card` unless `--critical`. Neither `--urgent` nor
+  `--reply-to` exempts it. Otherwise use `thread post` in the open topic
+  thread, or a lead opens one. The default Inbox shows only open questions
+  and critical notices. Explicit kind and history queries remain available.
+  At each pre-release publish, the lead runs
+  `thread version <version> --changed <text|-> --test <text|->` to post one
+  quiet update in the project's standing Versions thread without raising
+  the Threads badge. Only one argument may read stdin. Repeating a version
+  is refused. Keep the releases wiki row. `group built` posts nothing.
 - `ask` prints `question <id> asked (<priority>). The answer comes as mail
   on thread <thread>.` With `--wait`, it also registers a `question` wait,
   prints `wait <id> registered: question <text>`, and "End your turn now".

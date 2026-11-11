@@ -24,7 +24,8 @@ describe("the inbox in the mock", () => {
     const api = mock();
     const open = await api.inbox.list();
     // Without the Inbox thread that waits for the operator (./threads.ts): only `kind=thread` lists it (TER-466).
-    expect(open.length).toBe(8);
+    expect(open.length).toBe(3);
+    expect(open.every((i) => i.kind === "question" || (i.kind === "notice" && i.critical))).toBe(true);
     expect(open.some((i) => i.kind === "thread")).toBe(false);
     expect((await api.inbox.list({ kind: "thread" })).map((i) => i.kind)).toEqual(["thread"]);
     expect(open[0]).toMatchObject({ kind: "question", urgent: true, open: true });
@@ -37,13 +38,13 @@ describe("the inbox in the mock", () => {
       expect(!!i.message).toBe(i.kind === "mail");
       expect(!!i.system).toBe(i.kind === "system");
     }
-    const sys = open.find((i) => i.kind === "system")!;
+    const sys = (await api.inbox.list({ kind: "system" }))[0]!;
     expect(sys).toMatchObject({ id: `thread:${loop}`, project: "terrarium" });
     expect(sys.system).toMatchObject({ kind: "paused_thread", thread_id: loop, subject: "Re: Flaky runner test", paused: true, agent_run: 7, limit: 6 });
     expect(sys.system!.participants.sort()).toEqual(["terrarium/lead", "terrarium/runner-dev"]);
     expect(sys.system!.held.map((m) => m.id)).toEqual([fakeUlid("msg", 11)]);
     // Mail to the operator, but not the "needs a human" notice: the thread item stands for it.
-    expect(open.filter((i) => i.kind === "mail").map((i) => i.message!.id).sort()).toEqual([3, 13, 16].map((n) => fakeUlid("msg", n)));
+    expect((await api.inbox.list({ kind: "mail" })).map((i) => i.message!.id).sort()).toEqual([3, 13, 16].map((n) => fakeUlid("msg", n)));
     const b = open.find((i) => i.question?.kind === "bundle")!;
     expect(b).toMatchObject({ id: `bundle:${b.question!.id}`, kind: "question", project: "terrarium" });
     expect(b.question!.items).toHaveLength(3);
@@ -68,7 +69,7 @@ describe("the inbox in the mock", () => {
     const api = mock();
     // The bundle counts once, as a question.
     // The questions of a thread count in its thread item, not as questions; the threads count for the Threads badge, not in `open` (TER-466).
-    expect(await api.inbox.counts()).toEqual({ open: 8, urgent: 1, critical: 0, question: 3, notice: 1, mail: 3, system: 1, watch: 0, thread: 1, thread_urgent: 0, thread_critical: 0 });
+    expect(await api.inbox.counts()).toEqual({ open: 3, urgent: 1, critical: 0, question: 3, notice: 0, mail: 3, system: 1, watch: 0, thread: 1, thread_urgent: 0, thread_critical: 0 });
     expect(await api.inbox.counts("webshop")).toEqual({ open: 1, urgent: 0, critical: 0, question: 1, notice: 0, mail: 0, system: 0, watch: 0, thread: 0, thread_urgent: 0, thread_critical: 0 });
   });
 
@@ -94,7 +95,7 @@ describe("the inbox in the mock", () => {
   it("refuses a reply to a system mail that has nobody to reply to", async () => {
     const api = mock();
     await expect(api.inbox.ackMail(fakeUlid("msg", 16), "ok")).rejects.toMatchObject({ status: 422 });
-    expect((await api.inbox.list()).some((i) => i.id === `mail:${fakeUlid("msg", 16)}`)).toBe(true);
+    expect((await api.inbox.list({ kind: "mail" })).some((i) => i.id === `mail:${fakeUlid("msg", 16)}`)).toBe(true);
     await expect(api.inbox.ackMail(fakeUlid("msg", 4))).rejects.toMatchObject({ status: 404 });
   });
 
@@ -156,14 +157,14 @@ describe("the inbox in the mock", () => {
     const store = createInboxStore(api, { on: (fn) => api.events.stream({ since: api.world.seq }).subscribe(fn) }, { debounceMs: 0 });
     await store.refresh();
     expect(store.loaded()).toBe(true);
-    expect(store.counts()).toMatchObject({ open: 8, urgent: 1, thread: 1 });
-    expect(store.open()).toHaveLength(8);
+    expect(store.counts()).toMatchObject({ open: 3, urgent: 1, thread: 1 });
+    expect(store.open()).toHaveLength(3);
     await wait();
     await api.questions.answer(store.open()[0]!.question!.id, { answer: "yes" });
-    await waitFor(() => expect(store.counts()).toMatchObject({ open: 7, urgent: 0, question: 2 }));
+    await waitFor(() => expect(store.counts()).toMatchObject({ open: 2, urgent: 0, question: 2 }));
     await api.inbox.ackMail(fakeUlid("msg", 13));
-    await waitFor(() => expect(store.counts()).toMatchObject({ open: 6, mail: 2 }));
-    expect(store.open()).toHaveLength(6);
+    await waitFor(() => expect(store.counts()).toMatchObject({ open: 2, mail: 2 }));
+    expect(store.open()).toHaveLength(2);
   });
 
   it("shows a critical notice first, counts it, and drops the banner after the acknowledgement", async () => {

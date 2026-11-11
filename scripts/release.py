@@ -160,8 +160,29 @@ def git(ctx: Ctx, *args: str) -> str:
     ).stdout
 
 
+def ensure_tags(ctx: Ctx) -> None:
+    """The release job clones its commit from a bundle with no tags and no
+    remote (TER-754), so the version step would find no last tag and number
+    the release from 0. Fetch the v* tags from the repo's public URL (or
+    TERRARIUM_RELEASE_TAG_REMOTE, for tests) when the clone has none, and
+    refuse to go on when there is still no v* tag."""
+    if git(ctx, "tag", "--list", "v*").strip():
+        return
+    remote = ctx.environ.get("TERRARIUM_RELEASE_TAG_REMOTE") or f"https://github.com/{ctx.gh_repo}.git"
+    proc = subprocess.run(
+        ["git", "fetch", "-q", "--no-recurse-submodules", remote, "+refs/tags/v*:refs/tags/v*"],
+        cwd=ctx.repo_dir, env=ctx.base_env(), capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        raise ReleaseError(f"the clone has no v* tag and the fetch of the tags from {remote} failed: "
+                           + proc.stderr.strip()[-300:])
+    if not git(ctx, "tag", "--list", "v*").strip():
+        raise ReleaseError(f"no v* tag in the clone or on {remote}: refusing to number the release from 0")
+
+
 # 1 ---------------------------------------------------------------------------
 def step_version(ctx: Ctx) -> dict[str, str]:
+    ensure_tags(ctx)
     values = release_version.calc(str(ctx.repo_dir))
     ctx.summary["version"] = values
     ctx.save()
