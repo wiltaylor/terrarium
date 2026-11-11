@@ -53,10 +53,10 @@ it("previews Markdown in new-card and body-edit fields without losing the draft"
   checkPreview("Description");
   [...document.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Cancel")!.click();
   history.set({ value: `/p/terrarium/board?card=${card.id}` });
-  await waitFor(() => expect(host.textContent).toContain("Original body"));
-  [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Edit")!.click();
+  await waitFor(() => expect(document.body.textContent).toContain("Original body"));
+  [...document.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Edit")!.click();
   checkPreview("Body");
-  [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Save")!.click();
+  [...document.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Save")!.click();
   await waitFor(async () => expect((await api.cards.get(card.id)).body).toBe(markdown));
 });
 
