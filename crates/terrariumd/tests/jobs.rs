@@ -74,20 +74,54 @@ async fn release_e2e_rejects_card_branches_members_and_missing_docker_config() {
         .await;
     assert_eq!(response.status, 422, "{}", response.body);
     assert!(response.body.to_string().contains("Docker CI"));
-    let response = lab.td.post_as(&lab.w1, &format!("/api/cards/{header}/e2e"), json!({"branch":"release/1.2.3"})).await;
+    let response = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{header}/e2e"),
+            json!({"branch":"release/1.2.3"}),
+        )
+        .await;
     assert_eq!(response.status, 403, "{}", response.body);
     // Queue without a recipe run to exercise cancellation without a Docker VM.
     let group_id = header.clone();
-    let job = state.db.write("operator", move |t| {
-        use terrariumd::store::jobs::{self, JobKind, NewJob};
-        jobs::create(t, NewJob { project: "p".into(), card: group_id, kind: JobKind::E2e,
-            repo: "app".into(), branch: "release/1.2.3".into(), commit: None, by_agent: None,
-            batch: Vec::new(), planned_secs: None })
-    }).await.unwrap();
+    let job = state
+        .db
+        .write("operator", move |t| {
+            use terrariumd::store::jobs::{self, JobKind, NewJob};
+            jobs::create(
+                t,
+                NewJob {
+                    project: "p".into(),
+                    card: group_id,
+                    kind: JobKind::E2e,
+                    repo: "app".into(),
+                    branch: "release/1.2.3".into(),
+                    commit: None,
+                    by_agent: None,
+                    batch: Vec::new(),
+                    planned_secs: None,
+                },
+            )
+        })
+        .await
+        .unwrap();
     lab.td.delete(&format!("/api/jobs/{}", job.id)).await.ok();
-    let group = state.db.read(move |c| groups::get(c, &header)).await.unwrap();
+    let group = state
+        .db
+        .read(move |c| groups::get(c, &header))
+        .await
+        .unwrap();
     assert_eq!(group.column, "accepted");
-    assert_eq!(group.steps.iter().find(|s| s.name == "version branch e2e").unwrap().state, "failed");
+    assert_eq!(
+        group
+            .steps
+            .iter()
+            .find(|s| s.name == "version branch e2e")
+            .unwrap()
+            .state,
+        "failed"
+    );
 }
 
 /// A wait on the queue or a card that fails after [`DEADLINE`] without
