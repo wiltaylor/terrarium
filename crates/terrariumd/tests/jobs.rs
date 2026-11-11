@@ -1480,11 +1480,21 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str
     lab.settle().await;
     assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
     if flow == "rules" {
-        let g = lab.td.daemon.as_ref().unwrap().state.db.read(move |c| {
-            Ok(terrariumd::store::groups::by_key(c, "p", &group_key)?.unwrap())
-        }).await.unwrap();
+        let g = lab
+            .td
+            .daemon
+            .as_ref()
+            .unwrap()
+            .state
+            .db
+            .read(move |c| Ok(terrariumd::store::groups::by_key(c, "p", &group_key)?.unwrap()))
+            .await
+            .unwrap();
         let recipe = g.steps.iter().find(|s| s.name == "e2e").unwrap();
-        assert!(recipe.started_at.is_some(), "the real jobs.rs recipe boundary started e2e");
+        assert!(
+            recipe.started_at.is_some(),
+            "the real jobs.rs recipe boundary started e2e"
+        );
         assert_eq!(recipe.state, "done");
     }
 }
