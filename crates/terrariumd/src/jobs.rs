@@ -681,27 +681,55 @@ async fn wait_slot_free(state: &Shared, def: &TargetDef, job: &Job, dir: &str) -
     let cap = lost_slot_waits()
         .remove(&job.id)
         .unwrap_or(LOST_SLOT_WAIT_SECS);
-    wait_slot_free_with(&job.id, dir, cap, |wait| {
-        let holder = holder.clone();
-        async move {
-            let probe = RemoteCmd {
-                argv: vec!["sh".into(), "-c".into(), SLOT_FREE.into(), "sh".into(), dir.to_owned(), wait.to_string()],
-                timeout_secs: Some(wait + 30),
-                holder,
-                ..RemoteCmd::default()
-            };
-            let run = crate::executor::start_cmd(state, def, &probe)?;
-            let c = run.collect(4096).await;
-            Ok(String::from_utf8_lossy(&c.stdout).trim().to_owned())
-        }
-    }, || {
-        let holder = holder.clone();
-        async move { crate::run_kill::kill_file(state, def, holder, &crate::run_kill::job_pidfile(&job.id)).await }
-    }).await
+    wait_slot_free_with(
+        &job.id,
+        dir,
+        cap,
+        |wait| {
+            let holder = holder.clone();
+            async move {
+                let probe = RemoteCmd {
+                    argv: vec![
+                        "sh".into(),
+                        "-c".into(),
+                        SLOT_FREE.into(),
+                        "sh".into(),
+                        dir.to_owned(),
+                        wait.to_string(),
+                    ],
+                    timeout_secs: Some(wait + 30),
+                    holder,
+                    ..RemoteCmd::default()
+                };
+                let run = crate::executor::start_cmd(state, def, &probe)?;
+                let c = run.collect(4096).await;
+                Ok(String::from_utf8_lossy(&c.stdout).trim().to_owned())
+            }
+        },
+        || {
+            let holder = holder.clone();
+            async move {
+                crate::run_kill::kill_file(
+                    state,
+                    def,
+                    holder,
+                    &crate::run_kill::job_pidfile(&job.id),
+                )
+                .await
+            }
+        },
+    )
+    .await
 }
 
 /// Keep one deadline around probes, retry delays, and re-kills alike.
-async fn wait_slot_free_with<P, PF, K, KF>(job_id: &str, dir: &str, cap: u64, mut probe: P, mut kill: K) -> Option<String>
+async fn wait_slot_free_with<P, PF, K, KF>(
+    job_id: &str,
+    dir: &str,
+    cap: u64,
+    mut probe: P,
+    mut kill: K,
+) -> Option<String>
 where
     P: FnMut(u64) -> PF,
     PF: std::future::Future<Output = ApiResult<String>>,
@@ -711,51 +739,77 @@ where
     let started = Instant::now();
     let until = started + Duration::from_secs(cap);
     let result = tokio::time::timeout(Duration::from_secs(cap), async {
-    loop {
-        let left = until.saturating_duration_since(Instant::now()).as_secs();
-        let wait = left.clamp(1, LOST_SLOT_PROBE_SECS);
-        let said = match probe(wait).await {
-            Ok(said) => said,
-            Err(e) => {
-                if matches!(e.code, crate::error::Code::Conflict | crate::error::Code::RateLimited) {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
+        loop {
+            let left = until.saturating_duration_since(Instant::now()).as_secs();
+            let wait = left.clamp(1, LOST_SLOT_PROBE_SECS);
+            let said = match probe(wait).await {
+                Ok(said) => said,
+                Err(e) => {
+                    if matches!(
+                        e.code,
+                        crate::error::Code::Conflict | crate::error::Code::RateLimited
+                    ) {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    warn!(
+                        job = job_id,
+                        "cannot check the slot lock of a lost job run: {e}"
+                    );
+                    return None;
                 }
-                warn!(job = job_id, "cannot check the slot lock of a lost job run: {e}");
-                return None;
-            }
-        };
-        match said.as_str() {
-            "free" => {
-                if started.elapsed() >= Duration::from_secs(1) {
-                    info!(job = job_id, secs = started.elapsed().as_secs(),
-                        "the slot of a lost job run is free; the job goes back to the queue");
+            };
+            match said.as_str() {
+                "free" => {
+                    if started.elapsed() >= Duration::from_secs(1) {
+                        info!(
+                            job = job_id,
+                            secs = started.elapsed().as_secs(),
+                            "the slot of a lost job run is free; the job goes back to the queue"
+                        );
+                    }
+                    return None;
                 }
-                return None;
+                "held" => {}
+                other => {
+                    debug!(
+                        job = job_id,
+                        said = other,
+                        "the target cannot tell if the slot of a lost job run is free"
+                    );
+                    return None;
+                }
             }
-            "held" => {}
-            other => {
-                debug!(job = job_id, said = other, "the target cannot tell if the slot of a lost job run is free");
-                return None;
+            if Instant::now() >= until {
+                let lock = format!("{dir}.lock");
+                warn!(
+                    job = job_id,
+                    lock, cap, "the processes of a lost job run still hold its slot"
+                );
+                return Some(format!(
+                    "its processes still held the slot lock {lock} after {} s",
+                    started.elapsed().as_secs()
+                ));
             }
+            warn!(
+                job = job_id,
+                dir, "the slot of a lost job run is still held; its kill runs again"
+            );
+            let r = kill().await;
+            debug!(job = job_id, report = %r, "the kill of a lost job run, again");
         }
-        if Instant::now() >= until {
-            let lock = format!("{dir}.lock");
-            warn!(job = job_id, lock, cap, "the processes of a lost job run still hold its slot");
-            return Some(format!(
-                "its processes still held the slot lock {lock} after {} s",
-                started.elapsed().as_secs()
-            ));
-        }
-        warn!(job = job_id, dir, "the slot of a lost job run is still held; its kill runs again");
-        let r = kill().await;
-        debug!(job = job_id, report = %r, "the kill of a lost job run, again");
-    }
-    }).await;
+    })
+    .await;
     result.unwrap_or_else(|_| {
         let lock = format!("{dir}.lock");
-        warn!(job = job_id, lock, cap, "the processes of a lost job run still hold its slot");
-        Some(format!("its processes still held the slot lock {lock} after {} s", started.elapsed().as_secs()))
+        warn!(
+            job = job_id,
+            lock, cap, "the processes of a lost job run still hold its slot"
+        );
+        Some(format!(
+            "its processes still held the slot lock {lock} after {} s",
+            started.elapsed().as_secs()
+        ))
     })
 }
 
@@ -4074,10 +4128,21 @@ mod tests {
         for code in [Code::Conflict, Code::RateLimited] {
             let mut calls = 0;
             let started = Instant::now();
-            let result = wait_slot_free_with("test", "/slot", 4, |_| {
-                calls += 1;
-                std::future::ready(if calls == 1 { Err(ApiError::new(code, "temporary")) } else { Ok("free".into()) })
-            }, || async { panic!("a failed probe must not re-kill") }).await;
+            let result = wait_slot_free_with(
+                "test",
+                "/slot",
+                4,
+                |_| {
+                    calls += 1;
+                    std::future::ready(if calls == 1 {
+                        Err(ApiError::new(code, "temporary"))
+                    } else {
+                        Ok("free".into())
+                    })
+                },
+                || async { panic!("a failed probe must not re-kill") },
+            )
+            .await;
             assert!(result.is_none());
             assert_eq!(calls, 2);
             assert!(started.elapsed() >= Duration::from_secs(1));
@@ -4089,13 +4154,20 @@ mod tests {
         use crate::error::Code;
         for mode in ["offline", "probe", "kill"] {
             let started = Instant::now();
-            let result = wait_slot_free_with("test", "/slot", 1, |_| async {
-                match mode {
-                    "offline" => Err(ApiError::new(Code::Conflict, "offline")),
-                    "probe" => std::future::pending().await,
-                    _ => Ok("held".into()),
-                }
-            }, || std::future::pending::<Value>()).await;
+            let result = wait_slot_free_with(
+                "test",
+                "/slot",
+                1,
+                |_| async {
+                    match mode {
+                        "offline" => Err(ApiError::new(Code::Conflict, "offline")),
+                        "probe" => std::future::pending().await,
+                        _ => Ok("held".into()),
+                    }
+                },
+                || std::future::pending::<Value>(),
+            )
+            .await;
             assert!(result.unwrap().contains("/slot.lock"));
             assert!(started.elapsed() >= Duration::from_secs(1));
             assert!(started.elapsed() < Duration::from_secs(3), "{mode}");
@@ -4105,14 +4177,24 @@ mod tests {
     #[tokio::test]
     async fn lost_slot_unknown_probe_falls_back_without_rekill() {
         for said in ["noflock", "error", ""] {
-            let result = wait_slot_free_with("test", "/slot", 1,
+            let result = wait_slot_free_with(
+                "test",
+                "/slot",
+                1,
                 |_| std::future::ready(Ok(said.to_owned())),
-                || async { panic!("unknown slot state must fall back") }).await;
+                || async { panic!("unknown slot state must fall back") },
+            )
+            .await;
             assert!(result.is_none(), "{said}");
         }
-        let result = wait_slot_free_with("test", "/slot", 1,
+        let result = wait_slot_free_with(
+            "test",
+            "/slot",
+            1,
             |_| std::future::ready(Err(ApiError::forbidden("denied"))),
-            || async { panic!("permanent error must fall back") }).await;
+            || async { panic!("permanent error must fall back") },
+        )
+        .await;
         assert!(result.is_none());
     }
 
