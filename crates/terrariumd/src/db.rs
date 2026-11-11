@@ -2729,12 +2729,12 @@ impl Db {
                 })();
                 let finished = queued.map(|_| std::time::Instant::now());
                 drop(guard);
-                if let (Some(queued), Some(started), Some(acquired), Some(finished)) =
-                    (queued, started, acquired, finished)
+                if let (Some(queued), Some(started), Some(acquired), Some(finished), Some(caller)) =
+                    (queued, started, acquired, finished, caller)
                 {
                     tracing::debug!(target: "terrariumd::db_timing", operation = "write",
-                    caller_file = caller.unwrap().file(),
-                    caller_line = caller.unwrap().line(),
+                    caller_file = caller.file(),
+                    caller_line = caller.line(),
                     success = result.is_ok(),
                     scheduling_us = started.duration_since(queued).as_micros() as u64,
                     mutex_wait_us = acquired.duration_since(started).as_micros() as u64,
