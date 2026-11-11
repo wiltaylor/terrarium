@@ -5258,7 +5258,8 @@ async fn a_validation_passes_while_a_merge_runs() {
         let validation = jobs.iter().find(|j| j["card"] == cv).unwrap();
         if validation["state"] == "passed" {
             assert!(
-                jobs.iter().any(|j| j["card"] == cm1 && j["state"] == "running"),
+                jobs.iter()
+                    .any(|j| j["card"] == cm1 && j["state"] == "running"),
                 "validation must pass beside the held merge: {jobs:#?}"
             );
             break;
@@ -5268,8 +5269,15 @@ async fn a_validation_passes_while_a_merge_runs() {
             "validation failed beside the held merge: {jobs:#?}"
         );
         if progress.due() {
-            let mark = json!(jobs.iter().map(|j| (&j["id"], &j["state"], &j["tail"])).collect::<Vec<_>>());
-            assert!(progress.moved(mark), "validation stalled ({progress}): {jobs:#?}");
+            let mark = json!(
+                jobs.iter()
+                    .map(|j| (&j["id"], &j["state"], &j["tail"]))
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                progress.moved(mark),
+                "validation stalled ({progress}): {jobs:#?}"
+            );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
