@@ -877,12 +877,15 @@ async fn link_request(
     req.extensions_mut().insert(guard.clone());
     let g = guard.clone();
     let operator_route = crate::links::operator_route_allowed(&method, &path);
-    let run = CALLER.scope(caller, crate::links::OPERATOR_ROUTE.scope(operator_route, async move {
-        tokio::select! {
-            r = next.run(req) => Some(r),
-            () = g.revoked() => None,
-        }
-    }));
+    let run = CALLER.scope(
+        caller,
+        crate::links::OPERATOR_ROUTE.scope(operator_route, async move {
+            tokio::select! {
+                r = next.run(req) => Some(r),
+                () = g.revoked() => None,
+            }
+        }),
+    );
     let Some(mut resp) = run.await else {
         return unauthorized("the link was revoked");
     };
@@ -3052,12 +3055,24 @@ mod tests {
         for (method, path, body) in [
             ("GET", "/api/inbox", empty.clone()),
             ("POST", "/api/inbox/mail/x/ack", empty.clone()),
-            ("POST", "/api/inbox/asks", serde_json::json!({"to":"p/dev", "text":"x"})),
+            (
+                "POST",
+                "/api/inbox/asks",
+                serde_json::json!({"to":"p/dev", "text":"x"}),
+            ),
             ("DELETE", "/api/inbox/watches/x", empty.clone()),
             ("PUT", "/api/pins/x", empty.clone()),
             ("DELETE", "/api/pins/x", empty.clone()),
-            ("PUT", "/api/bookmarks", serde_json::json!({"title":"x", "href":"https://example.com"})),
-            ("DELETE", "/api/bookmarks", serde_json::json!({"href":"https://example.com"})),
+            (
+                "PUT",
+                "/api/bookmarks",
+                serde_json::json!({"title":"x", "href":"https://example.com"}),
+            ),
+            (
+                "DELETE",
+                "/api/bookmarks",
+                serde_json::json!({"href":"https://example.com"}),
+            ),
             ("PUT", "/api/preferences", empty.clone()),
             ("GET", "/api/backups", empty.clone()),
             ("POST", "/api/backups", empty.clone()),
@@ -3067,7 +3082,11 @@ mod tests {
             ("POST", "/api/exedev/sweep", empty.clone()),
             ("POST", "/api/mail/x/release", empty.clone()),
             ("POST", "/api/mail/threads/x/resume", empty.clone()),
-            ("POST", "/api/threads/x/respond", serde_json::json!({"text":"x"})),
+            (
+                "POST",
+                "/api/threads/x/respond",
+                serde_json::json!({"text":"x"}),
+            ),
             ("POST", "/api/questions/x/to-thread", empty.clone()),
             ("GET", "/api/system/update", empty.clone()),
             ("POST", "/api/system/update", empty.clone()),
@@ -3083,9 +3102,17 @@ mod tests {
             ("DELETE", "/api/session", empty.clone()),
             ("DELETE", "/api/sessions", empty.clone()),
             ("POST", "/api/calendar/global/watches", empty.clone()),
-            ("POST", "/api/calendar/global/watches", serde_json::json!({"watcher":"operator"})),
+            (
+                "POST",
+                "/api/calendar/global/watches",
+                serde_json::json!({"watcher":"operator"}),
+            ),
             ("POST", "/api/projects/p/calendar/watches", empty.clone()),
-            ("PATCH", "/api/projects/p", serde_json::json!({"github_authors":[]})),
+            (
+                "PATCH",
+                "/api/projects/p",
+                serde_json::json!({"github_authors":[]}),
+            ),
         ] {
             let r = send_body(link_app(&s), method, path, &h, &body).await;
             let status = r.status();
@@ -3093,15 +3120,24 @@ mod tests {
             assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {v}");
         }
         for path in [
-            "/api/admin/x", "/api/secrets", "/api/audit", "/api/subscriptions",
-            "/api/credentials", "/api/targets", "/api/hosts",
+            "/api/admin/x",
+            "/api/secrets",
+            "/api/audit",
+            "/api/subscriptions",
+            "/api/credentials",
+            "/api/targets",
+            "/api/hosts",
         ] {
             let r = send(link_app(&s), "GET", path, &h).await;
             assert_eq!(r.status(), StatusCode::FORBIDDEN, "{path}");
         }
         for path in [
-            "/api/inbox/counts", "/api/pins", "/api/bookmarks", "/api/preferences",
-            "/api/calendar/global/watches", "/api/projects/p/calendar/watches",
+            "/api/inbox/counts",
+            "/api/pins",
+            "/api/bookmarks",
+            "/api/preferences",
+            "/api/calendar/global/watches",
+            "/api/projects/p/calendar/watches",
         ] {
             for method in ["GET", "HEAD"] {
                 let r = send(link_app(&s), method, path, &h).await;

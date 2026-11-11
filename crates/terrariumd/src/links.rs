@@ -191,9 +191,10 @@ pub fn denied(
     match rest {
         // Private infrastructure, credentials, and audit data never form part
         // of a remote dashboard's operator-route exceptions (TER-791).
-        ["admin" | "secrets" | "audit" | "subscriptions" | "credentials" | "targets" | "hosts", ..] => {
-            Some("private operator infrastructure")
-        }
+        [
+            "admin" | "secrets" | "audit" | "subscriptions" | "credentials" | "targets" | "hosts",
+            ..,
+        ] => Some("private operator infrastructure"),
         // A link cannot make another link; it may only end itself.
         ["links", "self"] if *method == Method::DELETE => None,
         ["links", ..] => Some("the links of this daemon"),
