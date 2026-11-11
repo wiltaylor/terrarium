@@ -431,22 +431,22 @@ async fn forward_image(
     let mut url = url::Url::parse(&r.url).map_err(|_| net::unreachable())?;
     url.set_path(path);
     url.set_query(net::query(query).as_deref());
-    let mut request = c.get(url);
-    // Signed artifact URLs need no link credential. API images use only the link key.
-    if path.starts_with("/api/") {
-        request = request.headers(headers);
-    }
-    let resp = request.send().await.map_err(net::connection_error)?;
+    // Signed artifact URLs never receive the link credential or browser headers.
+    let resp = c.get(url).send().await.map_err(net::connection_error)?;
     if resp.status() != StatusCode::OK {
         return Err(net::unreachable());
     }
     let content_type = net::image_content_type(resp.headers())?;
     let body = net::limited(resp, net::IMAGE_MAX, net::PLAIN).await?;
+    let detected = net::image_body_type(&body)?;
+    if detected != content_type {
+        return Err(net::unreachable());
+    }
     let mut response = Response::new(Body::from(body));
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
-        content_type.parse().map_err(|_| net::unreachable())?,
+        detected.parse().map_err(|_| net::unreachable())?,
     );
     headers.insert(
         header::CACHE_CONTROL,

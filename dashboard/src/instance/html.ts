@@ -11,7 +11,7 @@ export function remoteImagePath(raw: string, page: URL, instance: Pick<Instance,
     if (!/^https?:$/.test(target.protocol) || target.username || target.password) return;
     if (target.origin !== page.origin && target.origin !== instance.remoteOrigin) return;
     const path = instance.path(target.pathname);
-    if (!/^\/(?:api|a)\//.test(path) || /%(?:2f|5c|25|2e|00)/i.test(path)) return;
+    if (!/^\/a\/[0-7][0-9A-HJKMNP-TV-Z]{25}\/(?:[^/]+\/)*[^/]+$/i.test(path) || /%(?:2f|5c|25|2e|00)/i.test(path)) return;
     return `/api/remotes/${name}/proxy/image${path}${target.search}`;
   } catch { return; }
 }

@@ -819,26 +819,26 @@ async fn image_proxy_rejects_active_types_redirects_and_oversized_bodies() {
             }),
         )
         .route(
-            "/a/good",
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/good",
             get(|headers: HeaderMap| async move {
                 assert!(!headers.contains_key("cookie"));
                 assert!(!headers.contains_key("authorization"));
                 (
                     [("content-type", "image/png"), ("set-cookie", "evil=1")],
-                    "png",
+                    b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x04\x00\x00\x00\xb5\x1c\x0c\x02\x00\x00\x00\x0bIDAT\x78\xda\x63\x64\xf8\x0f\x00\x01\x05\x01\x01\x27\x18\xe3\x66\x00\x00\x00\x00IEND\xaeB\x60\x82".as_slice(),
                 )
             }),
         )
         .route(
-            "/a/svg",
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/svg",
             get(|| async { ([("content-type", "image/svg+xml")], "<svg/>") }),
         )
         .route(
-            "/a/html",
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/html",
             get(|| async { ([("content-type", "text/html")], "<html/>") }),
         )
         .route(
-            "/a/redirect",
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/redirect",
             get(|| async {
                 (
                     StatusCode::FOUND,
@@ -847,7 +847,7 @@ async fn image_proxy_rejects_active_types_redirects_and_oversized_bodies() {
             }),
         )
         .route(
-            "/a/large",
+            "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/large",
             get(|| async {
                 (
                     [("content-type", "image/jpeg")],
@@ -855,24 +855,35 @@ async fn image_proxy_rejects_active_types_redirects_and_oversized_bodies() {
                 )
             }),
         );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let app = app.route("/api/agents", get(move || { seen.fetch_add(1, Ordering::SeqCst); async { Json(json!([])) } }))
+        .route("/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/fake-svg", get(|| async { ([("content-type", "image/png")], "<svg/>") }))
+        .route("/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/fake-html", get(|| async { ([("content-type", "image/png")], "<html/>") }))
+        .route("/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/fake-bytes", get(|| async { ([("content-type", "image/png")], "png") }))
+        .route("/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/mismatch", get(|| async { ([("content-type", "image/png")], "GIF89a") }));
     let _server = fake(&home, app, &id).await;
-    let good = home.get("/api/remotes/lab/proxy/image/a/good").await;
+    home.get("/api/remotes/lab/proxy/image/api/agents").await.err(400, "bad_request");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let good = home.get("/api/remotes/lab/proxy/image/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/good").await;
     assert_eq!(good.status, StatusCode::OK);
     assert_eq!(good.headers["content-type"], "image/png");
     assert_eq!(good.headers["x-content-type-options"], "nosniff");
     assert_eq!(good.headers["cache-control"], "no-store");
     assert!(!good.headers.contains_key("set-cookie"));
-    for path in ["svg", "html", "redirect", "large"] {
-        home.get(&format!("/api/remotes/lab/proxy/image/a/{path}"))
+    for path in ["svg", "html", "redirect", "large", "fake-svg", "fake-html", "fake-bytes", "mismatch"] {
+        home.get(&format!("/api/remotes/lab/proxy/image/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/{path}"))
             .await
             .err(502, "remote_unreachable");
     }
-    assert!(net::check_image_path(&Method::POST, "/a/good").is_err());
+    assert!(net::check_image_path(&Method::POST, "/a/01ARZ3NDEKTSV4RRFFQ69G5FAV/good").is_err());
     for path in [
         "/api/%252e/foo",
         "/a/../secret",
         "//evil.example/a/good",
         "/api/remotes",
+        "/api/agents",
+        "/a/not-an-id/file.png",
     ] {
         assert!(net::check_image_path(&Method::GET, path).is_err(), "{path}");
     }
@@ -880,6 +891,10 @@ async fn image_proxy_rejects_active_types_redirects_and_oversized_bodies() {
         let mut h = HeaderMap::new();
         h.insert(header::CONTENT_TYPE, ct.parse().unwrap());
         assert_eq!(net::image_content_type(&h).unwrap(), ct);
+    }
+    for (body, expected) in [(b"\x89PNG\r\n\x1a\n".as_slice(), "image/png"), (b"\xff\xd8\xff".as_slice(), "image/jpeg"), (b"GIF87a".as_slice(), "image/gif"), (b"GIF89a".as_slice(), "image/gif"), (b"RIFF1234WEBP".as_slice(), "image/webp")] {
+        assert_eq!(net::image_body_type(body).unwrap(), expected);
+        for end in 0..body.len() { assert!(net::image_body_type(&body[..end]).is_err()); }
     }
 }
 
