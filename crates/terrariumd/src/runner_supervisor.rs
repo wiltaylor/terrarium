@@ -6299,7 +6299,6 @@ mod tests {
 
     #[tokio::test]
     async fn stale_exit_keeps_the_current_epochs_credentials() {
-        use std::os::unix::process::ExitStatusExt;
         let tmp = tempfile::tempdir().unwrap();
         let mut sandbox = SandboxConfig::default();
         sandbox.mode = SandboxMode::None;
@@ -6324,9 +6323,13 @@ mod tests {
         let file = dir.join("gcp.json");
         std::fs::write(&file, "new epoch").unwrap();
         sup.inner.shutting_down.store(true, Ordering::SeqCst);
-        sup.on_exit(id, 1, ExitStatus::from_raw(0)).await;
+        let status = ExitStatus {
+            code: 0,
+            signal: None,
+        };
+        sup.on_exit(id, 1, status.clone()).await;
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "new epoch");
-        sup.on_exit(id, 2, ExitStatus::from_raw(0)).await;
+        sup.on_exit(id, 2, status).await;
         assert!(!dir.exists());
     }
 
