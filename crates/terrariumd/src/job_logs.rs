@@ -55,9 +55,13 @@ pub fn target_identity(row: &targets::TargetRow) -> String {
     serde_json::json!([row.created_at, row.def, row.state_at, row.runtime.lab]).to_string()
 }
 
-pub async fn begin(state: &Shared, def: &terrarium_core::config::TargetDef, job: &jobs::Job) -> ApiResult<Option<String>> {
+pub async fn begin(
+    state: &Shared,
+    def: &terrarium_core::config::TargetDef,
+    job: &jobs::Job,
+) -> ApiResult<Option<String>> {
     let def = def.clone();
-    let (job,attempt,project) = (job.id.clone(),job.attempt,job.project.clone());
+    let (job, attempt, project) = (job.id.clone(), job.attempt, job.project.clone());
     state.db.write("system", move |t| {
         // A lost attempt may rewrite its log, including on a no-flock host.
         // Revoke its old ownership before any new writer can start.
@@ -68,10 +72,20 @@ pub async fn begin(state: &Shared, def: &terrarium_core::config::TargetDef, job:
     }).await
 }
 
-pub async fn record_output(state: &Shared, job: &jobs::Job, def: &DeliveryDef, path: &str, identity: &str, stdout: &[u8]) -> ApiResult<()> {
+pub async fn record_output(
+    state: &Shared,
+    job: &jobs::Job,
+    def: &DeliveryDef,
+    path: &str,
+    identity: &str,
+    stdout: &[u8],
+) -> ApiResult<()> {
     let stdout = String::from_utf8_lossy(stdout);
-    if let Some(proof) = stdout.lines().find_map(|l|l.strip_prefix("TERRARIUM_LOG_TRACKED ")) {
-        record(state,job,def,path,identity,proof).await?;
+    if let Some(proof) = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("TERRARIUM_LOG_TRACKED "))
+    {
+        record(state, job, def, path, identity, proof).await?;
     }
     Ok(())
 }
@@ -109,9 +123,19 @@ pub async fn record(
         path.to_owned(),
     );
     let secs = def.log_retention_secs.unwrap_or(7 * 86400).min(315_360_000);
-    let root = std::path::Path::new(&path).parent().and_then(|p| p.to_str()).ok_or_else(|| ApiError::invalid("invalid log root"))?.to_owned();
-    let Some((root_identity, file_identity)) = proof.split_once(' ') else { return Err(ApiError::invalid("invalid log ownership proof")); };
-    let (root_identity, file_identity, identity) = (root_identity.to_owned(), file_identity.to_owned(), identity.to_owned());
+    let root = std::path::Path::new(&path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .ok_or_else(|| ApiError::invalid("invalid log root"))?
+        .to_owned();
+    let Some((root_identity, file_identity)) = proof.split_once(' ') else {
+        return Err(ApiError::invalid("invalid log ownership proof"));
+    };
+    let (root_identity, file_identity, identity) = (
+        root_identity.to_owned(),
+        file_identity.to_owned(),
+        identity.to_owned(),
+    );
     let written = chrono::Utc::now();
     let expires = (written + chrono::Duration::seconds(secs as i64)).to_rfc3339();
     let written = written.to_rfc3339();
@@ -158,9 +182,23 @@ cd -P -- "$root" || return 1
 [ "$(pwd -P)" = "$root" ] || return 1
 }"#;
 
-pub(crate) fn remove_script(path: &str, root: &str, root_identity: &str, file_identity: &str) -> String {
-    let Some(name) = std::path::Path::new(path).file_name().and_then(|n| n.to_str()) else { return "exit 1".into(); };
-    if std::path::Path::new(path).parent().and_then(|p|p.to_str()) != Some(root) || name.starts_with('.') { return "exit 1".into(); }
+pub(crate) fn remove_script(
+    path: &str,
+    root: &str,
+    root_identity: &str,
+    file_identity: &str,
+) -> String {
+    let Some(name) = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+    else {
+        return "exit 1".into();
+    };
+    if std::path::Path::new(path).parent().and_then(|p| p.to_str()) != Some(root)
+        || name.starts_with('.')
+    {
+        return "exit 1".into();
+    }
     format!(
         r#"root={root}
 name={name}
@@ -190,8 +228,11 @@ else
   exit 1
 fi
 "#,
-        root=sh_quote(root),name=sh_quote(name),enter=ENTER_ROOT,
-        root_identity=sh_quote(root_identity),file_identity=sh_quote(file_identity),
+        root = sh_quote(root),
+        name = sh_quote(name),
+        enter = ENTER_ROOT,
+        root_identity = sh_quote(root_identity),
+        file_identity = sh_quote(file_identity),
     )
 }
 
@@ -200,8 +241,17 @@ fi
 pub(crate) fn test_remove_script(path: &std::path::Path) -> String {
     use std::os::unix::fs::MetadataExt;
     let root = path.parent().unwrap();
-    let identity = |p| std::fs::metadata(p).map(|m|format!("{}:{}",m.dev(),m.ino())).unwrap_or_default();
-    remove_script(path.to_str().unwrap(),root.to_str().unwrap(),&identity(root),&identity(path))
+    let identity = |p| {
+        std::fs::metadata(p)
+            .map(|m| format!("{}:{}", m.dev(), m.ino()))
+            .unwrap_or_default()
+    };
+    remove_script(
+        path.to_str().unwrap(),
+        root.to_str().unwrap(),
+        &identity(root),
+        &identity(path),
+    )
 }
 
 /// A page is bounded before checking job states. The caller carries `after`
@@ -254,7 +304,9 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
                     return Ok(None);
                 }
                 let row = targets::get(c, &target)?;
-                if target_identity(&row) != expected_target { return Ok(None); }
+                if target_identity(&row) != expected_target {
+                    return Ok(None);
+                }
                 let target = row.def;
                 if target
                     .project
@@ -271,7 +323,11 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
             continue;
         };
         let cmd = RemoteCmd {
-            argv: vec!["sh".into(), "-c".into(), remove_script(&log.path,&log.root,&log.root_identity,&log.file_identity)],
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                remove_script(&log.path, &log.root, &log.root_identity, &log.file_identity),
+            ],
             timeout_secs: Some(10),
             ..RemoteCmd::default()
         };
@@ -353,7 +409,10 @@ mod tests {
             attempt: 1,
             target: "t".into(),
             path: "p".into(),
-            root: "".into(), root_identity: "".into(), file_identity: "".into(), target_identity: "".into(),
+            root: "".into(),
+            root_identity: "".into(),
+            file_identity: "".into(),
+            target_identity: "".into(),
             written_at: "a".into(),
             expires_at: "b".into(),
             bytes: 10,
@@ -439,24 +498,36 @@ mod tests {
     fn cleanup_refuses_symlinked_parent() {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("attempt.log"),"outside").unwrap();
+        std::fs::write(outside.path().join("attempt.log"), "outside").unwrap();
         let root = dir.path().join("logs");
-        std::os::unix::fs::symlink(outside.path(),&root).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &root).unwrap();
         let script = test_remove_script(&root.join("attempt.log"));
-        let result = std::process::Command::new("sh").args(["-c",&script]).output().unwrap();
+        let result = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
         assert!(!result.status.success());
-        assert_eq!(std::fs::read_to_string(outside.path().join("attempt.log")).unwrap(),"outside");
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("attempt.log")).unwrap(),
+            "outside"
+        );
     }
 
     #[test]
     fn replacement_between_inode_check_and_unlink_survives() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("attempt.log");
-        std::fs::write(&log,"owned").unwrap();
+        std::fs::write(&log, "owned").unwrap();
         let script = test_remove_script(&log).replace("mv -- \"$name\" \"$trash/log\"", "mv -- \"$name\" old-log; printf replacement > \"$name\"; mv -- \"$name\" \"$trash/log\"");
-        let result = std::process::Command::new("sh").args(["-c",&script]).output().unwrap();
+        let result = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
         assert!(!result.status.success());
-        assert_eq!(std::fs::read_to_string(&log).unwrap(),"replacement");
-        assert_eq!(std::fs::read_to_string(dir.path().join("old-log")).unwrap(),"owned");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "replacement");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("old-log")).unwrap(),
+            "owned"
+        );
     }
 }

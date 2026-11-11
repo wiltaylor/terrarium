@@ -3200,7 +3200,11 @@ async fn steps(
         ..RemoteCmd::default()
     };
     x.at(STEP_RECIPE);
-    let log_target = if job.kind == JobKind::Release { None } else { crate::job_logs::begin(x.state, x.def, job).await? };
+    let log_target = if job.kind == JobKind::Release {
+        None
+    } else {
+        crate::job_logs::begin(x.state, x.def, job).await?
+    };
     // An error here is a recipe that did not start: no session.
     if killed(&job.id) {
         return Err(ApiError::conflict("the job was cancelled"));
@@ -5942,7 +5946,7 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("TERRARIUM_LOG_TRACKED"));
-        assert_eq!(std::fs::read_to_string(&log).unwrap(),"ran\n");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "ran\n");
     }
 
     #[test]
