@@ -382,20 +382,24 @@ pub async fn run_subscription(state: &Shared, name: &str) -> ApiResult<ProbeOutc
                 return Err(litellm::unavailable());
             }
             let settings = sub.selfhosted.as_ref().ok_or_else(litellm::unavailable)?;
-            let probe = Arc::new(litellm::LiteLlmKeySpend::new(&settings.base_url)?)
-                as Arc<dyn QuotaProbe>;
-            let creds = credentials_for(state, &probe, &sub.name).await
+            let probe =
+                Arc::new(litellm::LiteLlmKeySpend::new(&settings.base_url)?) as Arc<dyn QuotaProbe>;
+            let creds = credentials_for(state, &probe, &sub.name)
+                .await
                 .map_err(|_| litellm::unavailable())?;
             let scoped = litellm::LiteLlmKeySpend::new(&settings.base_url)?;
             litellm::fetch(&scoped, &creds).await
-        }.await
-    } else { match by_name(&probe_name) {
-        None => Err(ProbeError::Unknown(probe_name.clone())),
-        Some(probe) => match credentials_for(state, &probe, &sub.name).await {
-            Err(e) => Err(e),
-            Ok(creds) => probe.run(state.usage.config.http.as_ref(), &creds).await,
-        },
-    }};
+        }
+        .await
+    } else {
+        match by_name(&probe_name) {
+            None => Err(ProbeError::Unknown(probe_name.clone())),
+            Some(probe) => match credentials_for(state, &probe, &sub.name).await {
+                Err(e) => Err(e),
+                Ok(creds) => probe.run(state.usage.config.http.as_ref(), &creds).await,
+            },
+        }
+    };
     let name = sub.name.clone();
     let outcome = match result {
         Ok(windows) => {
@@ -709,6 +713,8 @@ pub(crate) mod tests {
         assert!(by_name("gemini").is_none());
         assert_eq!(for_provider("openai"), Some(openai::NAME));
         assert_eq!(for_provider("google"), None);
+        assert_eq!(for_provider("litellm"), Some(litellm::NAME));
+        assert_eq!(by_name(litellm::NAME).unwrap().name(), litellm::NAME);
         assert_eq!(by_name("zai-usage").unwrap().name(), zai::NAME);
         assert_eq!(by_name("moonshot-balance").unwrap().name(), moonshot::NAME);
         assert_eq!(

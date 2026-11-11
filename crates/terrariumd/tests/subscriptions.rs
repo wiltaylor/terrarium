@@ -45,6 +45,7 @@ async fn litellm_is_claude_only_and_keeps_the_key_private() {
     assert_eq!(sub["selfhosted"]["api"], "anthropic");
     assert_eq!(sub["selfhosted"]["models"], json!(["team-model"]));
     assert_eq!(sub["no_quota"], false);
+    assert_eq!(sub["probe"], "litellm-key-spend");
     assert!(!sub.to_string().contains("E2E-lite-secret"));
     let r = td
         .post(
