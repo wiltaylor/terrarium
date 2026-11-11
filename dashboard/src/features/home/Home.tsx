@@ -66,8 +66,6 @@ export function Home() {
       <Show when={compose() === "message"}><MessageDialog onClose={() => setCompose(null)} onSent={(t) => { setCompose(null); navigate(`/threads/${t.id}`); }} /></Show>
       <Show when={compose() === "thread"}><NewThreadDialog onClose={() => setCompose(null)} onOpened={(t) => { setCompose(null); navigate(threadHref(t.id)); }} /></Show>
 
-      <HomeBoard now={now()} />
-
       <section aria-label="Usage">
         <div class="usage-strip">
           <For
@@ -91,7 +89,7 @@ export function Home() {
         </div>
       </section>
 
-      <HostCards now={now()} />
+      <HomeBoard now={now()}><HostCards now={now()} /></HomeBoard>
 
       <Show when={subscriptions.byName(detail() ?? undefined)}>{(s) => <UsageDetail sub={s()} onClose={() => setDetail(null)} />}</Show>
     </>

@@ -6,11 +6,12 @@ import { allHome, type HomeCard } from "../../api/home";
 
 const home = { cards: vi.fn(), monitors: vi.fn(), pipelines: vi.fn() };
 const open = vi.fn();
-vi.mock("../../stores", () => ({ api: { home }, cardPeek: { open }, projects: { projects: () => [{ name: "one" }, { name: "two" }] }, events: { on: () => () => {} } }));
+let refresh: (e: { kind: string }) => void;
+vi.mock("../../stores", () => ({ api: { home }, cardPeek: { open }, projects: { projects: () => [{ name: "one" }, { name: "two" }] }, events: { on: (fn: typeof refresh) => { refresh = fn; return () => {}; } } }));
 vi.mock("@solidjs/router", () => ({ A: (p: { children: unknown }) => p.children }));
 const { HomeBoard } = await import("./HomeBoard");
 let dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); document.body.replaceChildren(); vi.resetAllMocks(); });
+afterEach(() => { dispose?.(); document.body.replaceChildren(); vi.resetAllMocks(); vi.useRealTimers(); });
 const settle = () => new Promise(r => setTimeout(r, 0));
 function mount() {
   home.cards.mockResolvedValue({ items: [], next: null });
@@ -73,6 +74,51 @@ it("shows status widgets independently of layout membership", async () => {
   expect(document.body.textContent).toContain("unknown");
   expect(document.body.textContent).toContain("failed");
   expect(document.body.textContent).not.toContain("All Systems Nominal");
+  expect(document.body.textContent).not.toContain("Needs attention");
+});
+it("keeps nominal visible during a timer refresh without a heading", async () => {
+  home.monitors.mockResolvedValue({ items: [], next: null });
+  home.pipelines.mockResolvedValue({ items: [], next: null });
+  mount(); await settle();
+  const nominal = document.querySelector(".nominal");
+  home.monitors.mockReturnValue(new Promise(() => {}));
+  vi.useFakeTimers(); await vi.advanceTimersByTimeAsync(60_000);
+  expect(document.querySelector(".nominal")).toBe(nominal);
+  expect(document.body.textContent).not.toContain("Needs attention");
+  expect(document.body.textContent).not.toContain("Loading");
+});
+it("retains and orders tiles and widgets through paginated reloads, replacing only a changed tile", async () => {
+  const a = { id: "ONE-1", project: "one", title: "First", labels: [], home_column: "in_progress" };
+  const b = { ...a, id: "ONE-2", title: "Second" };
+  const m = { id: "m", project: "one", name: "Monitor", status: "warn", link: "/" };
+  home.monitors.mockResolvedValue({ items: [m], next: null });
+  home.pipelines.mockResolvedValue({ items: [], next: null });
+  mount();
+  home.cards.mockImplementation(async q => ({ items: q.column === "in_progress" ? [b, a] : [], next: null }));
+  await settle();
+  vi.useFakeTimers();
+  refresh({ kind: "card" }); await vi.advanceTimersByTimeAsync(2000);
+  const tiles = [...document.querySelectorAll(".home-card")];
+  const widget = document.querySelector(".home-status");
+  expect(tiles.map(t => t.textContent)).toEqual([expect.stringContaining("First"), expect.stringContaining("Second")]);
+  const mutations: MutationRecord[] = [];
+  const observer = new MutationObserver(records => mutations.push(...records));
+  observer.observe(document.querySelector(".home-kanban")!, { childList: true, subtree: true });
+  let finish!: (v: unknown) => void;
+  home.cards.mockImplementation(async q => q.column !== "in_progress" ? { items: [], next: null } : q.cursor ? new Promise(r => { finish = r; }) : { items: [{ ...a }], next: "page2" });
+  home.monitors.mockResolvedValue({ items: [{ ...m }], next: null });
+  refresh({ kind: "card" }); await vi.advanceTimersByTimeAsync(2000);
+  expect([...document.querySelectorAll(".home-card")]).toEqual(tiles);
+  finish({ items: [{ ...b }], next: null }); await vi.advanceTimersByTimeAsync(0);
+  expect([...document.querySelectorAll(".home-card")]).toEqual(tiles);
+  expect(document.querySelector(".home-status")).toBe(widget);
+  expect(mutations).toHaveLength(0);
+  home.cards.mockImplementation(async q => ({ items: q.column === "in_progress" ? [{ ...b, title: "Changed" }, { ...a }] : [], next: null }));
+  refresh({ kind: "card" }); await vi.advanceTimersByTimeAsync(2000);
+  expect(document.querySelectorAll(".home-card")[0]).toBe(tiles[0]);
+  expect(document.querySelectorAll(".home-card")[1]).not.toBe(tiles[1]);
+  expect(document.querySelector(".home-status")).toBe(widget);
+  observer.disconnect();
 });
 it("shows labels, project, agent, ETA and blocked reason, and opens the sidebar", async () => {
   home.monitors.mockResolvedValue({ items: [], next: null }); home.pipelines.mockResolvedValue({ items: [], next: null });
