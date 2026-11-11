@@ -7378,11 +7378,19 @@ mod tests {
                     || built.spec.env["NO_PROXY"].contains("::1")
             );
             assert_eq!(built.spec.env["NO_PROXY"], built.spec.env["no_proxy"]);
-            let settings_arg = built.spec.args.iter().position(|a| a == "--settings").unwrap();
-            let launch_settings: serde_json::Value = serde_json::from_str(&built.spec.args[settings_arg + 1]).unwrap();
+            let settings_arg = built
+                .spec
+                .args
+                .iter()
+                .position(|a| a == "--settings")
+                .unwrap();
+            let launch_settings: serde_json::Value =
+                serde_json::from_str(&built.spec.args[settings_arg + 1]).unwrap();
             let file_settings: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(sup.layout(&agent).harness_dir.join("claude/settings.json")).unwrap()
-            ).unwrap();
+                &std::fs::read(sup.layout(&agent).harness_dir.join("claude/settings.json"))
+                    .unwrap(),
+            )
+            .unwrap();
             for settings in [launch_settings, file_settings] {
                 assert_eq!(settings["env"], serde_json::json!({"KEEP_SETTING": "kept"}));
             }
@@ -7406,9 +7414,18 @@ mod tests {
             s.selfhosted.as_mut().unwrap().base_url = "https://proxy.example".into();
         }
         for resume in [None, Some(HarnessSessionId("resume-test".into()))] {
-            let built = sup.build_spec(&agent, resume.as_ref(), &view, None).await.unwrap();
-            let i = built.spec.args.iter().position(|a| a == "--settings").unwrap();
-            let settings: serde_json::Value = serde_json::from_str(&built.spec.args[i + 1]).unwrap();
+            let built = sup
+                .build_spec(&agent, resume.as_ref(), &view, None)
+                .await
+                .unwrap();
+            let i = built
+                .spec
+                .args
+                .iter()
+                .position(|a| a == "--settings")
+                .unwrap();
+            let settings: serde_json::Value =
+                serde_json::from_str(&built.spec.args[i + 1]).unwrap();
             assert_eq!(settings["env"], conflicts["env"]);
         }
     }
