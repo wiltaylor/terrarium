@@ -587,7 +587,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn basis_refresh_reuses_files_and_removes_replaced_links() {
+    async fn basis_refresh_reuses_files_and_skips_replaced_links() {
         use std::os::unix::fs::MetadataExt;
         if std::process::Command::new("rsync")
             .arg("--version")
@@ -630,7 +630,10 @@ mod tests {
                 .ino(),
             inode
         );
-        assert!(!basis.path().join("replaced").exists());
+        // --no-links can retain the previous regular directory in the basis.
+        // It must never import the symlink or the outside file it points at.
+        assert!(!basis.path().join("replaced").is_symlink());
+        assert!(!basis.path().join("replaced/secret").exists());
         assert_eq!(
             std::fs::read_to_string(outside.path().join("secret")).unwrap(),
             "private"
