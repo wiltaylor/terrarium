@@ -434,8 +434,8 @@ struct Lost {
 /// and a tick follows. A kill that fails is logged, and the job goes on
 /// anyway.
 pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
-    let bindings = crate::hosts::resume::Journal::new(&state.state_dir)
-        .scan::<(String, u32)>("bound/recipe/");
+    let bindings =
+        crate::hosts::resume::Journal::new(&state.state_dir).scan::<(String, u32)>("bound/recipe/");
     let resumable: HashSet<_> = match bindings {
         Ok(bindings) => bindings.into_iter().map(|(key, _)| key).collect(),
         Err(e) => {
@@ -1232,41 +1232,41 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
 
 fn spawn_job(state: Shared, job: Job, def: DeliveryDef, live_run: LiveRun) {
     tokio::spawn(async move {
-            let end = match run(&state, &job, &def).await {
-                // A merge that failed before its tests (TER-614 R3): one
-                // retry after the wait, with no attempt used; the second
-                // such end is an infra end.
-                Ran::End(end) if before_tests(&job, &end) => {
-                    let first = infra_retried().insert(job.id.clone());
-                    if first {
-                        set_control(&job.id, None);
-                        requeue_before_tests(&state, &job, &end).await;
-                        drop(live_run);
-                        return;
-                    }
-                    infra_retried().remove(&job.id);
-                    JobEnd {
-                        outcome: Some(OUTCOME_INFRA.into()),
-                        ..end
-                    }
-                }
-                Ran::End(end) => end,
-                Ran::Wait { why, ssh } => {
+        let end = match run(&state, &job, &def).await {
+            // A merge that failed before its tests (TER-614 R3): one
+            // retry after the wait, with no attempt used; the second
+            // such end is an infra end.
+            Ran::End(end) if before_tests(&job, &end) => {
+                let first = infra_retried().insert(job.id.clone());
+                if first {
                     set_control(&job.id, None);
-                    requeue(&state, &job, why, ssh).await;
+                    requeue_before_tests(&state, &job, &end).await;
                     drop(live_run);
                     return;
                 }
-                Ran::Lost { why, red } => {
-                    set_control(&job.id, None);
-                    rerun_lost(&state, job.clone(), why, red, live_run).await;
-                    return;
+                infra_retried().remove(&job.id);
+                JobEnd {
+                    outcome: Some(OUTCOME_INFRA.into()),
+                    ..end
                 }
-            };
-            set_control(&job.id, None);
-            finish_job(&state, &job.id, end).await;
-            drop(live_run);
-            kick(&state);
+            }
+            Ran::End(end) => end,
+            Ran::Wait { why, ssh } => {
+                set_control(&job.id, None);
+                requeue(&state, &job, why, ssh).await;
+                drop(live_run);
+                return;
+            }
+            Ran::Lost { why, red } => {
+                set_control(&job.id, None);
+                rerun_lost(&state, job.clone(), why, red, live_run).await;
+                return;
+            }
+        };
+        set_control(&job.id, None);
+        finish_job(&state, &job.id, end).await;
+        drop(live_run);
+        kick(&state);
     });
 }
 
@@ -3017,16 +3017,27 @@ async fn steps(
         drop(guard);
         x.at(STEP_RECIPE);
         x.recipe_started.store(true, Ordering::SeqCst);
-        let session = x.state.executor.hosts.reattach(&host, id)
+        let session = x
+            .state
+            .executor
+            .hosts
+            .reattach(&host, id)
             .ok_or_else(|| ApiError::internal("the saved recipe has no replay channel"))?;
-        let own: Vec<_> = saved.own.iter().map(|(label, value)|
-            (label.clone(), zeroize::Zeroizing::new(value.clone()))).collect();
+        let own: Vec<_> = saved
+            .own
+            .iter()
+            .map(|(label, value)| (label.clone(), zeroize::Zeroizing::new(value.clone())))
+            .collect();
         let run = crate::executor::redact_run(
-            crate::executor::pump_host(session), crate::executor::own_redactor(&own),
-            x.state.db.redactor().get(), terrarium_core::redact::View::All,
+            crate::executor::pump_host(session),
+            crate::executor::own_redactor(&own),
+            x.state.db.redactor().get(),
+            terrarium_core::redact::View::All,
         );
         set_control(&job.id, Some(run.ctl.clone()));
-        if killed(&job.id) { let _ = run.ctl.send(Control::Kill); }
+        if killed(&job.id) {
+            let _ = run.ctl.send(Control::Kill);
+        }
         let c = run.collect(RECIPE_MAX).await;
         return finish_recipe(x, delivery, saved, c).await;
     }
@@ -3259,8 +3270,14 @@ async fn steps(
         ..recipe_cmd
     };
     let saved = RecipeResume {
-        head, batch, log, ionice: x.ionice,
-        own: own.iter().map(|(label, value)| (label.clone(), value.to_string())).collect(),
+        head,
+        batch,
+        log,
+        ionice: x.ionice,
+        own: own
+            .iter()
+            .map(|(label, value)| (label.clone(), value.to_string()))
+            .collect(),
     };
     if !matches!(x.def.kind, TargetKind::Ssh | TargetKind::Exedev) {
         journal.save(&resume_key, &saved)?;
@@ -3273,13 +3290,24 @@ async fn steps(
 }
 
 async fn finish_recipe(
-    x: &mut StepCtx<'_>, delivery: &DeliveryDef, saved: RecipeResume, c: Collected,
+    x: &mut StepCtx<'_>,
+    delivery: &DeliveryDef,
+    saved: RecipeResume,
+    c: Collected,
 ) -> ApiResult<JobEnd> {
     let job = x.job;
-    let RecipeResume { head, batch, log, ionice, own } = saved;
+    let RecipeResume {
+        head,
+        batch,
+        log,
+        ionice,
+        own,
+    } = saved;
     x.ionice = ionice;
-    let own: Vec<_> = own.into_iter().map(|(label, value)|
-        (label, zeroize::Zeroizing::new(value))).collect();
+    let own: Vec<_> = own
+        .into_iter()
+        .map(|(label, value)| (label, zeroize::Zeroizing::new(value)))
+        .collect();
     x.recipe_started.store(true, Ordering::SeqCst);
     let ok = c.end.as_ref().is_some_and(End::success);
     // TER-196: a run that the infrastructure lost is no red; [`run`]

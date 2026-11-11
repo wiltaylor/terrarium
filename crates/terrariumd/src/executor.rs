@@ -1946,7 +1946,11 @@ pub(crate) fn start_cmd_locked(
             )?;
             let shell = caps.and_then(|c| c.shell);
             let make = host_frame(def, shell.as_deref(), cmd, limits)?;
-            Ok(pump_host(ex.hosts.open_bound(host, cmd.resume_key.as_deref(), make)?))
+            Ok(pump_host(ex.hosts.open_bound(
+                host,
+                cmd.resume_key.as_deref(),
+                make,
+            )?))
         }
     }
 }

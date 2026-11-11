@@ -421,8 +421,11 @@ impl HostRegistry {
     }
 
     pub fn spawn_resume_grace(self: &Arc<Self>) -> JoinHandle<()> {
-        let hosts: Vec<_> = self.lock().iter()
-            .map(|(host, entry)| (host.clone(), entry.generation)).collect();
+        let hosts: Vec<_> = self
+            .lock()
+            .iter()
+            .map(|(host, entry)| (host.clone(), entry.generation))
+            .collect();
         let registry = Arc::downgrade(self);
         let grace = self.resume_grace;
         tokio::spawn(async move {
@@ -593,7 +596,10 @@ impl HostRegistry {
                 restored: None,
             },
         );
-        if self.persist_bound(host, e, None, binding.map(|key| (key, id))).is_err() {
+        if self
+            .persist_bound(host, e, None, binding.map(|key| (key, id)))
+            .is_err()
+        {
             e.sessions.remove(&id);
             return Err(HostError::Persistence);
         }
