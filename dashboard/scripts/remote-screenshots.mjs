@@ -1,5 +1,5 @@
 // Deterministic UI evidence, not a live-daemon integration test.
-/* global process, fetch, setTimeout, localStorage, URL */
+/* global process, fetch, setTimeout, localStorage, URL, console */
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
