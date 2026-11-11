@@ -887,9 +887,10 @@ terrarium card ls [-c column] [--mine | --assignee a] [--unassigned] [--label l]
 terrarium card show <id>
 terrarium card new <title> [-b body | -] [-c column] [--label l]... [--depends-on id]...
                    [--assignee a] [--repo r] [--branch b] [-m comment] [--eta <minutes>m]
-                   [--github-author login]   the issue author of a GitHub card (api.md §8.3)
+                   [--github-author login]   legacy assertion, not trusted by the author gate
                    [--inbox-thread <thread>] an Inbox thread that tracks the card (api.md §6.13)
 terrarium card new --from-mail <message id> [...]
+terrarium issue import <number> --repo <repo>   fetch a GitHub issue and import it once into the current project
 terrarium card edit <id> [--title t] [-b body] [--label l|none]... [--depends-on id|none]...
                     [--repo r|none] [--branch b|none]
 terrarium card claim <id> [--eta <minutes>m]
@@ -907,6 +908,20 @@ terrarium card files get <id> [name] [--version n] [-o path | -] [--dir d] [--fo
 terrarium card files versions <id> <name>
 terrarium card files rm <id> <name>
 ```
+
+`issue import` reads the author from GitHub, not from a CLI assertion. It
+reuses the existing card on repeated imports. Authors outside the project's
+`github_authors` list (including an empty list) produce a blocked card with
+`github` and `hold`, even when the operator imports it. The operator can
+release it with `card move <id> backlog -m <reason>`. Agent imports also open
+an operator question. Operator and webhook imports have no asking agent,
+so review their held cards and gate comments on the board.
+
+A project-scoped GitHub event source imports signed `issues` webhooks for
+`opened` and `reopened` actions through the same importer. Enable **Issues**
+in GitHub's webhook settings. The repository must be registered in that
+project. Missing or invalid signatures are refused. Global sources do not
+import issues.
 
 ETAs are agent time in minutes, not human hours. Most cards take 5-60
 minutes. Set an ETA when claiming and update it with `card eta` when the

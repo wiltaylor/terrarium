@@ -180,7 +180,7 @@ fn setup_steps(kind: SourceKind, url: &str) -> Vec<String> {
             "Content type: application/json.".into(),
             "Secret: the secret of this source (shown at create and at rotate only).".into(),
             "Events: \"Let me select individual events\": Workflow runs, Workflow jobs, \
-             Pushes, Pull requests."
+             Pushes, Pull requests, Issues."
                 .into(),
             "GitHub sends a ping at once; the source shows it in last_seen.".into(),
         ],

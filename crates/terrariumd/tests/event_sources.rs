@@ -62,6 +62,88 @@ fn github(event: &str, delivery: &str, secret: &str, body: &[u8]) -> Vec<(&'stat
     ]
 }
 
+#[tokio::test]
+async fn github_issues_require_signature_registered_repo_and_author_gate() {
+    let td = TestDaemon::start().await;
+    setup(&td).await;
+    td.patch(
+        "/api/projects/terra",
+        json!({"github_authors":["wiltaylor", "wiltaylor-daf"]}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/projects/terra/repos",
+        json!({"name":"repo", "url":"git@github.com:o/r.git"}),
+    )
+    .await
+    .ok();
+    let s = td
+        .post(
+            "/api/event-sources",
+            json!({"name":"gh", "project":"terra", "kind":"github"}),
+        )
+        .await
+        .ok()
+        .clone();
+    let secret = s["secret"].as_str().unwrap();
+    let path = "/hooks/terra/gh";
+    let payload = |number, author, repo| {
+        serde_json::to_vec(&json!({
+            "action":"opened", "repository":{"html_url":repo},
+            "issue":{"number":number,"title":"issue","user":{"login":author}}
+        }))
+        .unwrap()
+    };
+    let body = payload(1, "eve", "https://github.com/o/r");
+    for headers in [vec![], github("issues", "bad", "wrong", &body)] {
+        assert_eq!(
+            hook(&td, path, &headers, body.clone()).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let headers = github("issues", "held", secret, &body);
+    let (status, result) = hook(&td, path, &headers, body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let card_id = result["card"].as_str().unwrap();
+    let card = td.get(&format!("/api/cards/{card_id}")).await.ok().clone();
+    assert_eq!(card["column"], "blocked");
+    assert!(card["labels"].as_array().unwrap().contains(&json!("hold")));
+    assert_eq!(
+        hook(&td, path, &headers, body.clone()).await.1["status"],
+        "duplicate"
+    );
+    let retry = hook(
+        &td,
+        path,
+        &github("issues", "retry", secret, &body),
+        body.clone(),
+    )
+    .await
+    .1;
+    assert_eq!(retry["card"], card_id);
+    let body = payload(2, "wiltaylor-daf", "https://github.com/o/r");
+    let (_, result) = hook(&td, path, &github("issues", "allowed", secret, &body), body).await;
+    let card = td
+        .get(&format!("/api/cards/{}", result["card"].as_str().unwrap()))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(card["column"], "backlog");
+    let body = payload(3, "wiltaylor", "https://github.com/elsewhere/repo");
+    assert_eq!(
+        hook(
+            &td,
+            path,
+            &github("issues", "wrong-repo", secret, &body),
+            body
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
 /// A project `terra` with a lead (project_admin) and a worker, and a
 /// project `ops` with an agent.
 async fn setup(td: &TestDaemon) -> (String, String, String) {
