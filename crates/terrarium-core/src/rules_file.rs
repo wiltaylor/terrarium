@@ -2011,6 +2011,7 @@ rule "validate-pass" {
         assert!(set.rules.len() <= DEFAULT_MAX_RULES);
         let names: Vec<&str> = set.rules.iter().map(|r| r.name.as_str()).collect();
         for want in [
+            "card-wait-met",
             "merge-queued",
             "job-started",
             "job-requeued",

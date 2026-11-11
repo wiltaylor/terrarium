@@ -52,6 +52,7 @@ type Rule {
   @children("group_status") group_status: list<GroupStatus>
   @children("group_close") group_close: list<GroupClose>
   @children("card_move") card_move: list<CardMove>
+  @children("card_wait_action") card_wait_action: list<CardWaitAction>
   @children("card_label") card_label: list<CardLabel>
   @children("card_comment") card_comment: list<CardComment>
   @children("card_assign") card_assign: list<CardAssign>
@@ -169,6 +170,9 @@ type CardMove {
   comment: utf8?
   position: utf8?
 }
+
+@block("card_wait_action")
+type CardWaitAction {}
 
 // `remove` takes globs (`by:*`). A label in `add` stays.
 @block("card_label")
