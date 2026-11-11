@@ -1298,6 +1298,10 @@ mod tests {
     fn history_plans_search_indexes_after_analyze_with_large_prior_history() {
         let mut c = Connection::open_in_memory().unwrap();
         crate::db::migrate(&mut c).unwrap();
+        // The plan fixture uses historical card/project identifiers without
+        // live board rows. Keep the real schema and indexes, but allow that
+        // synthetic history without constructing a thousand live cards.
+        c.pragma_update(None, "foreign_keys", false).unwrap();
         c.execute_batch("INSERT OR REPLACE INTO card_trouble_baseline VALUES (1, 0);
             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
             INSERT INTO events (seq, id, at, kind, agent_id, card, payload) SELECT x, 'event-'||x, '2026-11-01T00:00:00Z', CASE WHEN x%5=0 THEN 'status' ELSE 'output' END,
