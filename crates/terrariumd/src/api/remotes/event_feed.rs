@@ -208,7 +208,7 @@ async fn relay(
             Some(tungstenite::Message::Close(_)) | None => {
                 // The dead connection must not occupy the eighth stream
                 // slot while its replacement waits for admission.
-                upstream.1.take();
+                drop(upstream.1.take());
                 let _ = mark(&s, &r, "offline").await;
                 loop {
                     if *closed.borrow() || feed.frames.receiver_count() == 0 {
