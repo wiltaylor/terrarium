@@ -2552,10 +2552,6 @@ const MIGRATIONS: &[&str] = &[
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
-    // Queue async callers without occupying blocking-pool threads. The
-    // permit travels into the closure so cancellation cannot release it
-    // while a committed write is still running. read_now is startup-only.
-    admission: Arc<tokio::sync::Mutex<()>>,
     hub: EventHub,
     /// The redaction matcher (PLAN §16b.6). Each write transaction takes a
     /// snapshot of it under the database lock ([`Tx::redact`]). A write
@@ -2574,7 +2570,6 @@ impl Db {
     pub fn new(conn: Connection, hub: EventHub) -> Self {
         Self {
             conn: Arc::new(Mutex::new(conn)),
-            admission: Arc::new(tokio::sync::Mutex::new(())),
             hub,
             redactor: RedactorHandle::default(),
             host_pins: Arc::default(),
@@ -2602,11 +2597,8 @@ impl Db {
         F: FnOnce(&Connection) -> ApiResult<T> + Send + 'static,
     {
         let conn = self.conn.clone();
-        let requested = std::time::Instant::now();
-        let permit = self.admission.clone().lock_owned().await;
         let queued = std::time::Instant::now();
         crate::links::spawn_blocking(move || {
-            let _permit = permit;
             let started = std::time::Instant::now();
             let guard = match conn.lock() {
                 Ok(g) => g,
@@ -2617,7 +2609,6 @@ impl Db {
             let finished = std::time::Instant::now();
             drop(guard);
             tracing::debug!(target: "terrariumd::db_timing", operation = "read",
-                admission_us = queued.duration_since(requested).as_micros() as u64,
                 scheduling_us = started.duration_since(queued).as_micros() as u64,
                 mutex_wait_us = acquired.duration_since(started).as_micros() as u64,
                 sql_us = finished.duration_since(acquired).as_micros() as u64,
@@ -2654,11 +2645,8 @@ impl Db {
         let link = crate::links::current_link_id()
             .or_else(|| actor.strip_prefix("link:").map(str::to_owned));
         let handle = self.redactor.clone();
-        let requested = std::time::Instant::now();
-        let permit = self.admission.clone().lock_owned().await;
         let queued = std::time::Instant::now();
         let (value, events, audits) = crate::links::spawn_blocking(move || {
-            let _permit = permit;
             let started = std::time::Instant::now();
             let mut guard = match conn.lock() {
                 Ok(g) => g,
@@ -2722,7 +2710,6 @@ impl Db {
             let finished = std::time::Instant::now();
             drop(guard);
             tracing::debug!(target: "terrariumd::db_timing", operation = "write",
-                admission_us = queued.duration_since(requested).as_micros() as u64,
                 scheduling_us = started.duration_since(queued).as_micros() as u64,
                 mutex_wait_us = acquired.duration_since(started).as_micros() as u64,
                 sql_us = finished.duration_since(acquired).as_micros() as u64,
