@@ -126,6 +126,13 @@ fn image_text(v: &Value) -> String {
 
 fn print_status(c: &Ctx, v: &Value) {
     let cur = &v["current"];
+    if let Some(missing) = cur["missing_templates"].as_array() {
+        for key in missing.iter().filter_map(Value::as_str) {
+            c.line(format!(
+                "warning: required daemon template {key} is missing"
+            ));
+        }
+    }
     c.line(format!(
         "running:   {}{}",
         field(cur, "version"),
