@@ -25,14 +25,29 @@ async fn patch_address_keeps_the_new_pin() {
     td.patch("/api/targets/dns-box", json!({"address": "localhost"}))
         .await
         .ok();
+    // The PATCH's own lookup is best effort (TER-367: it skips when the
+    // scheduler holds the pin lock), and the scheduler pins the name on its
+    // next tick. Wait for the pin, not for the PATCH (TER-827).
     let conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
-    let key: String = conn
-        .query_row(
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    let key: String = loop {
+        let row = conn.query_row(
             "SELECT host_key FROM job_host_keys WHERE hostname = 'localhost'",
             [],
             |r| r.get(0),
-        )
-        .unwrap();
+        );
+        match row {
+            Ok(key) => break key,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the new address was not pinned within 90 s"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
     assert!(key.parse::<std::net::IpAddr>().unwrap().is_loopback());
 }
 
