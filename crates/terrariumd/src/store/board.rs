@@ -2177,15 +2177,20 @@ pub(crate) fn create_card_with_author(
             ((!list.is_empty() || verified_author.is_some())
                 && github_gate::is_github(&title, &new.labels)
                 && !github_gate::allowed(&list, verified_author))
-            .then(|| a.clone())
+            .then_some(Some(a.clone()))
         }
         Actor::Operator => {
+            if let Some(author) = verified_author {
+                (!github_gate::allowed(&github_gate::authors(t, project)?, Some(author)))
+                    .then_some(None)
+            } else {
             if github_gate::is_github(&title, &new.labels)
                 && !github_gate::authors(t, project)?.is_empty()
             {
                 policy::operator_only(actor, "bypassing the GitHub author gate on creation")?;
             }
             None
+            }
         }
     };
     if held_for.is_some() {
@@ -2245,7 +2250,7 @@ pub(crate) fn create_card_with_author(
         json!({"from_mail": new.from_mail, "thread_id": thread}),
     )?;
     if let Some(agent) = &held_for {
-        hold(t, actor, agent, &row, verified_author)?;
+        hold(t, actor, agent.as_ref(), &row, verified_author)?;
         if let Some(c) = new.comment.as_deref().filter(|c| !c.trim().is_empty()) {
             let author = author_of(t, actor);
             insert_comment(t, &id, &author, c.trim())?;
@@ -2288,13 +2293,18 @@ pub(crate) fn create_card_with_author(
 fn hold(
     t: &mut Tx<'_>,
     actor: &Actor,
-    agent: &crate::actor::AgentActor,
+    agent: Option<&crate::actor::AgentActor>,
     row: &CardRow,
     author: Option<&str>,
 ) -> ApiResult<()> {
     let blocked = role_column(t, &row.project, BLOCKED)?;
     let comment = github_gate::hold_comment(&row.project, author);
     apply_move(t, actor, row, &blocked, None, Some(&comment))?;
+    // Operator and webhook imports have no asking agent. The held card
+    // and its gate comment remain visible until the operator releases it.
+    let Some(agent) = agent else {
+        return Ok(());
+    };
     let context = format!(
         "Title: {}\nDaemon-verified GitHub author: {}",
         row.title,

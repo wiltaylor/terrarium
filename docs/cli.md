@@ -887,9 +887,10 @@ terrarium card ls [-c column] [--mine | --assignee a] [--unassigned] [--label l]
 terrarium card show <id>
 terrarium card new <title> [-b body | -] [-c column] [--label l]... [--depends-on id]...
                    [--assignee a] [--repo r] [--branch b] [-m comment] [--eta <minutes>m]
-                   [--github-author login]   the issue author of a GitHub card (api.md §8.3)
+                   [--github-author login]   legacy assertion, not trusted by the author gate
                    [--inbox-thread <thread>] an Inbox thread that tracks the card (api.md §6.13)
 terrarium card new --from-mail <message id> [...]
+terrarium issue import <number> --repo <repo>   fetch a GitHub issue and import it once into the current project
 terrarium card edit <id> [--title t] [-b body] [--label l|none]... [--depends-on id|none]...
                     [--repo r|none] [--branch b|none]
 terrarium card claim <id> [--eta <minutes>m]

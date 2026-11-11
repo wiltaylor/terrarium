@@ -17,6 +17,8 @@ const CARDS: &str = "/api/projects/proj/cards";
 async fn issue_import_route_and_function_validate_before_fetching() {
     let td = setup().await;
     let route = "/api/projects/proj/github-issues/import";
+    td.post("/api/projects/proj/repos", json!({"name":"repo", "url":"https://github.com/o/r"}))
+        .await.ok();
     let bad = td
         .post_as("proj/w1", route, json!({"repo":"missing", "number":0}))
         .await;
@@ -25,10 +27,11 @@ async fn issue_import_route_and_function_validate_before_fetching() {
         .post_as(
             "proj/w1",
             route,
-            json!({"repo":"missing", "number":7, "github_author":"wiltaylor"}),
+            json!({"repo":"repo", "number":7, "github_author":"wiltaylor"}),
         )
         .await;
-    assert!(!forged.status.is_success());
+    assert_eq!(forged.status.as_u16(), 400, "{}", forged.body);
+    assert!(forged.body.to_string().contains("unknown field"), "{}", forged.body);
     td.agent("ops", "outsider", json!({})).await;
     let outside = td
         .post_as("ops/outsider", route, json!({"repo":"missing", "number":7}))
