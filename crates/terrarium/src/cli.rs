@@ -5039,9 +5039,23 @@ mod tests {
 
     #[test]
     fn remote_add_keeps_the_home_and_remote_urls_separate() {
-        let cli = parse(&["--url", "https://home.example", "remote", "add", "lab", "https://remote.example", "--instance-id", "confirmed-id"]);
+        let cli = parse(&[
+            "--url",
+            "https://home.example",
+            "remote",
+            "add",
+            "lab",
+            "https://remote.example",
+            "--instance-id",
+            "confirmed-id",
+        ]);
         assert_eq!(cli.url.as_deref(), Some("https://home.example"));
-        let Command::Remote { command: RemoteCmd::Add { remote_url, .. } } = cli.command else { panic!("expected remote add"); };
+        let Command::Remote {
+            command: RemoteCmd::Add { remote_url, .. },
+        } = cli.command
+        else {
+            panic!("expected remote add");
+        };
         assert_eq!(remote_url, "https://remote.example");
     }
 
