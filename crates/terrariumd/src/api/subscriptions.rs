@@ -133,6 +133,9 @@ impl From<QuotaSample> for WindowView {
 /// A subscription as the API shows it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SubscriptionView {
+    /// Local costUSD estimate for the current UTC month, even without a budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub month_spend_usd: Option<f64>,
     pub session_period: SessionPeriod,
     pub sessions: Vec<crate::store::session_refs::SubscriptionSession>,
     #[serde(flatten)]
@@ -327,6 +330,10 @@ fn view_with_key_presence(
 ) -> ApiResult<SubscriptionView> {
     let windows: Vec<WindowView> = subs::latest_windows(c, &sub.name)?
         .into_iter()
+        .filter(|w| {
+            w.window != terrarium_core::cloud::BUDGET_WINDOW
+                || sub.cloud.as_ref().and_then(|s| s.budget_usd).is_some()
+        })
         .map(WindowView::from)
         .collect();
     let session_period = session_period(&windows, chrono::Utc::now());
@@ -380,6 +387,15 @@ fn view_with_key_presence(
         has_api_key,
         windows,
         held_agents,
+        month_spend_usd: if sub.cloud_kind().is_some() {
+            Some(crate::store::cloud_spend::month_spend(
+                c,
+                &sub.name,
+                &terrarium_core::cloud::month_key(chrono::Utc::now()),
+            )?)
+        } else {
+            None
+        },
         sub,
     })
 }

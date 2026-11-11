@@ -13,6 +13,16 @@ const session = (over: Partial<LoginSession> = {}): LoginSession => ({
 });
 const run = (s: WizardState, ...actions: WizardAction[]) => actions.reduce(wizardReduce, s);
 
+it("sends optional whole USD budgets for all cloud providers", () => {
+  for (const provider of ["bedrock", "gcp", "foundry"]) {
+    expect(apiKeyBody({ provider, key: "test", budgetUsd: " 50 " }).cloud?.budget_usd).toBe(50);
+    expect(apiKeyBody({ provider, key: "test", budgetUsd: "" }).cloud?.budget_usd).toBeUndefined();
+    for (const budgetUsd of ["0", "-1", "1.5", "NaN", "4294967296"]) {
+      expect(() => apiKeyBody({ provider, key: "test", budgetUsd })).toThrow("Monthly budget");
+    }
+  }
+});
+
 it("builds a Claude-only LiteLLM key request with the proxy and models", () => {
   expect(KEY_PROVIDERS.find((p) => p.id === "litellm")?.harnesses).toEqual(["claude"]);
   expect(apiKeyBody({ provider: "litellm", key: "test-key", baseUrl: " https://proxy.example.com ", models: "a, b" })).toEqual({
