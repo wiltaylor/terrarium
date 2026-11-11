@@ -358,12 +358,14 @@ async fn proxy(
     }
     let result = tokio::select! {
         _ = closed.changed() => Err(net::unreachable()),
-        result = tokio::time::timeout(net::PLAIN,forward(&s, &r, actor, path, ws, req)) => result.map_err(|_| net::unreachable())?,
+        result = tokio::time::timeout(net::PLAIN,forward(&s, &r, actor, path, ws, req)) => result.unwrap_or_else(|_| Err(net::unreachable())),
     };
     if let Err(e) = &result {
         mark(&s, &r, failure_status(e)).await?;
     }
-    result
+    let mut response = match result { Ok(response) => response, Err(error) => error.into_response() };
+    response.headers_mut().insert("x-terrarium-remote", r.name.parse().map_err(|_| net::unreachable())?);
+    Ok(response)
 }
 
 fn failure_status(e: &ApiError) -> &'static str {

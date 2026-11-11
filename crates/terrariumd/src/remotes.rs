@@ -29,7 +29,7 @@ pub fn connection_error(e: reqwest::Error) -> ApiError {
         if e.is::<terrarium_host::tls::FingerprintMismatch>() {
             return true;
         }
-        if let Some(rustls::Error::Other(inner)) = e.downcast_ref::<rustls::Error>()
+        if let Some(rustls::Error::Other(inner) | rustls::Error::InvalidCertificate(rustls::CertificateError::Other(inner))) = e.downcast_ref::<rustls::Error>()
             && inner.0.is::<terrarium_host::tls::FingerprintMismatch>()
         {
             return true;
