@@ -52,8 +52,12 @@ fn endpoint(settings: &CloudSettings) -> ApiResult<String> {
     }
     terrarium_core::cloud::check(terrarium_core::cloud::Kind::Gcp, settings)
         .map_err(ApiError::invalid)?;
-    let region = settings.region.as_deref().unwrap_or("global");
-    let host = if region == "global" { "aiplatform.googleapis.com".to_owned() } else { format!("{region}-aiplatform.googleapis.com") };
+    let region = settings.region.as_deref().unwrap_or("us-east5");
+    let host = match region {
+        "global" => "aiplatform.googleapis.com".to_owned(),
+        "us" | "eu" => format!("aiplatform.{region}.rep.googleapis.com"),
+        _ => format!("{region}-aiplatform.googleapis.com"),
+    };
     let project = settings.project_id.as_deref().ok_or_else(|| failure("Set the Google Cloud project ID."))?;
     // word_ok allows slashes in model IDs, but URL path components must not.
     let component = |s: &str| s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.@".contains(&b)) && !s.is_empty() && s != "." && s != "..";
@@ -115,12 +119,17 @@ mod tests {
     fn canonical_hosts_and_path_components_only() {
         let mut s = CloudSettings {
             project_id: Some("my-project".into()),
+            region: Some("global".into()),
             models: terrarium_core::cloud::vertex_models(),
             ..Default::default()
         };
         assert!(endpoint(&s).unwrap().starts_with("https://aiplatform.googleapis.com/"));
         s.region = Some("us-east5".into());
         assert!(endpoint(&s).unwrap().starts_with("https://us-east5-aiplatform.googleapis.com/"));
+        for region in ["us", "eu"] {
+            s.region = Some(region.into());
+            assert!(endpoint(&s).unwrap().starts_with(&format!("https://aiplatform.{region}.rep.googleapis.com/")));
+        }
         s.base_url = Some("https://attacker.invalid".into());
         assert!(endpoint(&s).is_err());
         s.base_url = None;
@@ -165,5 +174,21 @@ mod tests {
             }
             server.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn foreign_base_url_is_refused_without_network() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let settings = CloudSettings {
+            project_id: Some("my-project".into()),
+            base_url: Some(format!("https://{}", listener.local_addr().unwrap())),
+            models: terrarium_core::cloud::vertex_models(),
+            ..Default::default()
+        };
+        let key: ApiKey = serde_json::from_value(json!({"provider": "gcp", "key": "FAKE-PRIVATE-KEY"})).unwrap();
+        let error = test(&key, &settings).await.unwrap_err().to_string();
+        assert!(error.contains("custom Vertex base URL"));
+        assert!(!error.contains("FAKE"));
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), listener.accept()).await.is_err());
     }
 }
