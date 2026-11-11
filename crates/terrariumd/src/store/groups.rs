@@ -226,8 +226,11 @@ fn historical_secs(
         }
     }
     // Before phase timing existed, successful merge jobs still recorded queue
-    // wait and total run time. Use run time as the initial e2e estimate only.
-    if !samples.contains_key("queued") || !samples.contains_key("e2e") || !samples.contains_key("merge job") {
+    // wait and total run time. Use run time until phase samples exist.
+    if !samples.contains_key("queued")
+        || !samples.contains_key("e2e")
+        || !samples.contains_key("merge job")
+    {
         let mut jobs = conn.prepare(
             "SELECT j.created_at, j.started_at, j.ended_at FROM jobs j
             JOIN card_groups g ON g.card = ?1 AND g.project = j.project
@@ -243,7 +246,9 @@ fn historical_secs(
             run.extend(running);
         }
         samples.entry("queued".into()).or_insert(queue);
-        samples.entry("merge job".into()).or_insert_with(|| run.clone());
+        samples
+            .entry("merge job".into())
+            .or_insert_with(|| run.clone());
         samples.entry("e2e".into()).or_insert(run);
     }
     Ok(samples
@@ -395,7 +400,10 @@ pub fn remove(t: &mut Tx<'_>, g: &Group, card: &str) -> ApiResult<bool> {
         let member = board::get_card(t, card)?;
         // Repair cards deliberately stay with their batch while being worked.
         // Done has no role on the default board, so it is matched by name.
-        if !member.archived && member.labels.iter().any(|l| l.starts_with("merge-fix:")) && member.column != "done" {
+        if !member.archived
+            && member.labels.iter().any(|l| l.starts_with("merge-fix:"))
+            && member.column != "done"
+        {
             return Ok(false);
         }
     }
@@ -690,14 +698,16 @@ pub fn reconcile_merge_groups(
                         || matches!(role.as_deref(), Some("working" | "blocked"))
                         || (role.is_none() && matches!(card.column.as_str(), "ready" | "backlog"))))
             {
-                remove(t, &get(t, &id)?, member)?;
+                remove(t, &g, member)?;
             }
         }
         close_finished_merge(t, &id)?;
         Ok(None)
         });
         match result {
-            Ok(Some(since)) => { still.insert(id, since); }
+            Ok(Some(since)) => {
+                still.insert(id, since);
+            }
             Ok(None) => {}
             Err(error) => warn!(group = %id, %error, "cannot reconcile merge group"),
         }
