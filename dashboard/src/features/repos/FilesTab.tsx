@@ -1,3 +1,5 @@
+import { InstanceAnchor } from "../../instance/navigation";
+import { useInstance } from "../../instance";
 // The Files tab of the repo browser: a file tree on the left and a preview
 // of the selection on the right, as on GitHub. The query `path` keeps the
 // selection (a file or a folder; "" is the root). On a phone the tree goes
@@ -17,7 +19,7 @@ import { CopyButton, Empty, ErrorBanner } from "../../components/ui";
 import { crumbs, dirOf, imageType, isMarkdown } from "../../lib/diff";
 import { bytes } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
-import { api, auth } from "../../stores";
+
 import { createTreeCache, isEntryKey, visibleRows, type FileTree } from "./fileTree";
 
 // The trees stay loaded while the page lives: a tab change or a tree change
@@ -32,9 +34,9 @@ const DEFAULT_W = 300;
 const NARROW = "(max-width: 760px)";
 const narrow = () => typeof matchMedia === "function" && matchMedia(NARROW).matches;
 
-function storedWidth(): number {
+function storedWidth(storage: ReturnType<typeof useInstance>["storage"]): number {
   try {
-    const n = Number(localStorage.getItem(WIDTH_KEY));
+    const n = Number(storage?.getItem(WIDTH_KEY));
     return n >= MIN_W && n <= MAX_W ? n : DEFAULT_W;
   } catch {
     return DEFAULT_W;
@@ -46,16 +48,18 @@ function storedWidth(): number {
  * bytes as an attachment, both with `nosniff`, so a new tab does not run them.
  * Only a cookie session can open it: a bearer token is not in a link.
  */
-function rawUrl(repo: string, tree: string, path: string): string | null {
+function rawUrl(instance: ReturnType<typeof useInstance>, repo: string, tree: string, path: string): string | null {
+  const { auth } = instance;
   if (isMock || auth.mode() !== "session") return null;
-  return `${import.meta.env.VITE_API_BASE ?? ""}/api/repos/${seg(repo)}/trees/${seg(tree)}/file${buildQuery({ path })}`;
+  return instance.apiHref(`/api/repos/${seg(repo)}/trees/${seg(tree)}/file${buildQuery({ path })}`);
 }
 
 export function FilesTab(props: { repo: Repo; tree: string; head?: string | null; reload: string; path: string; onPath: (p: string) => void }) {
+  const { api, key, storage } = useInstance();
   const ft = createMemo(() => {
     const id = props.repo.id;
     const tree = props.tree;
-    return treeCache(`${id}|${tree}|${props.head ?? ""}|${props.reload}`, (dir) => api.repos.files(id, tree, dir));
+    return treeCache(`${key}|${id}|${tree}|${props.head ?? ""}|${props.reload}`, (dir) => api.repos.files(id, tree, dir));
   });
   // Open the folders above the selection (a deep link loads each level), and a selected folder.
   createEffect(
@@ -66,12 +70,12 @@ export function FilesTab(props: { repo: Repo; tree: string; head?: string | null
     }),
   );
 
-  const [width, setWidth] = createSignal(storedWidth());
+  const [width, setWidth] = createSignal(storedWidth(storage));
   const keepWidth = (w: number) => {
     const n = Math.round(Math.min(MAX_W, Math.max(MIN_W, w)));
     setWidth(n);
     try {
-      localStorage.setItem(WIDTH_KEY, String(n));
+      storage?.setItem(WIDTH_KEY, String(n));
     } catch {
       // No storage: the width lasts for this page only.
     }
@@ -437,6 +441,7 @@ function FolderView(props: { repo: Repo; tree: string; ft: FileTree; reload: str
  * `readme` gives the short header of the README under a folder.
  */
 function FileView(props: { repo: Repo; tree: string; reload: string; path: string; onPath: (p: string) => void; readme?: boolean }) {
+  const { api } = useInstance();
   const [rendered, setRendered] = createSignal(true);
   const [file] = createResource(
     () => [props.repo.id, props.tree, props.path, props.reload] as const,
@@ -466,7 +471,8 @@ function FileView(props: { repo: Repo; tree: string; reload: string; path: strin
     if (l.length > 1 && l[l.length - 1] === "") l.pop();
     return l;
   });
-  const raw = () => rawUrl(props.repo.id, props.tree, props.path);
+  const instance = useInstance();
+  const raw = () => rawUrl(instance, props.repo.id, props.tree, props.path);
   return (
     <div class="card-box stack file-view" style={{ gap: "8px" }}>
       <div class="file-head">
@@ -488,9 +494,9 @@ function FileView(props: { repo: Repo; tree: string; reload: string; path: strin
           <Show when={!props.readme}>
             <Show when={raw()}>
               {(u) => (
-                <a class="btn small" href={u()} target="_blank" rel="noopener noreferrer" title="The bytes in a new tab (text), or a download">
+                <InstanceAnchor class="btn small" href={u()} target="_blank" rel="noopener noreferrer" title="The bytes in a new tab (text), or a download">
                   Raw
-                </a>
+                </InstanceAnchor>
               )}
             </Show>
             <CopyButton text={props.path} label="Copy path" />

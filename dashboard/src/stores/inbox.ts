@@ -48,7 +48,7 @@ export function createInboxStore(api: Pick<Api, "inbox">, events?: Pick<EventsSt
     }
   };
 
-  events?.on((e) => {
+  const off = events?.on((e) => {
     if (!isInboxEvent(e)) return;
     clearTimeout(timer);
     timer = setTimeout(() => void refresh(), opts.debounceMs ?? 300);
@@ -61,6 +61,7 @@ export function createInboxStore(api: Pick<Api, "inbox">, events?: Pick<EventsSt
     open,
     loaded,
     refresh,
+    dispose: () => { clearTimeout(timer); off?.(); },
   };
 }
 

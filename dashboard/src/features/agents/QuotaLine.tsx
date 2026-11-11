@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Under the composers of the agent page (issue #22): the quota hold as a
 // banner (it changes whether a turn runs), then one short muted line with
 // the plan, the windows, and today's use (`GET /api/usage/me?agent=`,
@@ -7,11 +8,12 @@ import { createResource, createSignal, For, onCleanup, onMount, Show } from "sol
 import type { Agent } from "../../api/types";
 import { useNow } from "../../components/ui";
 import { timeUntil } from "../../lib/format";
-import { api, events, quota } from "../../stores";
+
 import { describeCause } from "../../stores/quota";
 import { quotaLine } from "./quotaText";
 
 export function QuotaLine(props: { agent: Agent }) {
+  const { api, quota, events } = useInstance();
   const now = useNow(30_000);
   const [tick, setTick] = createSignal(0);
   const [me] = createResource(

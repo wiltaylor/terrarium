@@ -154,11 +154,53 @@ fn workspace_lock(path: &Path) -> Arc<AsyncMutex<()>> {
 
 pub(super) struct Sync {
     root: PathBuf,
+    basis: PathBuf,
     remote: String,
     shell: String,
     before: Snapshot,
     _key: Option<crate::secrets::RunDir>,
     _lock: OwnedMutexGuard<()>,
+}
+
+fn supported_rsync(version: &str) -> bool {
+    let Some(version) = version
+        .strip_prefix("rsync  version ")
+        .and_then(|s| s.split_whitespace().next())
+    else {
+        return false;
+    };
+    let parts: Vec<_> = version.split('.').map(str::parse::<u32>).collect();
+    matches!(parts.as_slice(), [Ok(major), Ok(minor), Ok(patch)] if (*major, *minor, *patch) >= (3, 4, 0))
+}
+
+#[test]
+fn rsync_version_floor() {
+    for version in ["3.4.0", "3.4.1", "4.0.0"] {
+        assert!(supported_rsync(&format!(
+            "rsync  version {version}  protocol version 32\n"
+        )));
+    }
+    for version in ["3.3.0", "3.2.7", "2.6.9", "3.4", "3.4.x", ""] {
+        assert!(!supported_rsync(&format!(
+            "rsync  version {version}  protocol version 32\n"
+        )));
+    }
+    assert!(!supported_rsync("unrecognized output"));
+}
+
+async fn check_rsync() -> ApiResult<()> {
+    let mut cmd = tokio::process::Command::new("rsync");
+    cmd.arg("--version").kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(10), cmd.output())
+        .await
+        .map_err(|_| ApiError::invalid("local rsync version check timed out"))?
+        .map_err(|_| ApiError::invalid("workspace sync requires local rsync 3.4.0 or newer"))?;
+    if !output.status.success() || !supported_rsync(&String::from_utf8_lossy(&output.stdout)) {
+        return Err(ApiError::invalid(
+            "workspace sync requires local rsync 3.4.0 or newer (CVE-2024-12086/12087)",
+        ));
+    }
+    Ok(())
 }
 
 async fn rsync(source: &str, destination: &str, shell: Option<&str>) -> ApiResult<()> {
@@ -233,6 +275,7 @@ pub(super) async fn prepare(
     if !def.sync_workspace {
         return Ok(None);
     }
+    check_rsync().await?;
     // An exedev target comes here as the ssh target of its VM
     // (`executor::resolved_def`).
     if def.kind != TargetKind::Ssh {
@@ -251,6 +294,16 @@ pub(super) async fn prepare(
     let lock = workspace_lock(&root)
         .try_lock_owned()
         .map_err(|_| ApiError::invalid("workspace sync already in progress for this agent"))?;
+    // The state directory is daemon-private, unlike the agent workspace.
+    // Keep the mirror across sessions so rsync copies only changed files.
+    let basis = state
+        .state_dir
+        .join("workspace-bases")
+        .join(terrarium_host::protocol::hex(&Sha256::digest(
+            root.as_os_str().as_encoded_bytes(),
+        )));
+    crate::secrets::private_dir(&state.state_dir.join("workspace-bases"))?;
+    crate::secrets::private_dir(&basis)?;
     let key = if let Some(name) = &def.credential {
         match crate::secrets::load_now(state, crate::store::targets::owner(def), name)? {
             Secret::SshKey(k) => {
@@ -312,6 +365,7 @@ pub(super) async fn prepare(
     rsync(&format!("{}/", root.display()), &remote, Some(&shell)).await?;
     Ok(Some(Sync {
         root,
+        basis,
         remote,
         shell,
         before,
@@ -321,25 +375,27 @@ pub(super) async fn prepare(
 }
 
 impl Sync {
-    async fn download(&self, stage: &Path) -> ApiResult<String> {
-        let basis =
-            tempfile::tempdir().map_err(|e| ApiError::invalid(format!("sync basis: {e}")))?;
+    async fn refresh_basis(&self) -> ApiResult<String> {
         // rsync must never resolve live-workspace symlinks as basis paths.
-        // Seed a private, symlink-free copy. No other process can replace its
+        // Refresh a private, symlink-free copy. No other process can replace its
         // directories during the remote transfer, and no hard links are used.
         rsync_basis(
             &format!("{}/", self.root.display()),
-            &format!("{}/", basis.path().display()),
+            &format!("{}/", self.basis.display()),
             None,
             None,
             true,
         )
-        .await?;
+        .await
+    }
+
+    async fn download(&self, stage: &Path) -> ApiResult<String> {
+        self.refresh_basis().await?;
         rsync_basis(
             &self.remote,
             &format!("{}/", stage.display()),
             Some(&self.shell),
-            Some(basis.path()),
+            Some(&self.basis),
             false,
         )
         .await
@@ -531,6 +587,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn basis_refresh_reuses_files_and_skips_replaced_links() {
+        use std::os::unix::fs::MetadataExt;
+        if std::process::Command::new("rsync")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let local = tempfile::tempdir().unwrap();
+        let basis = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(local.path().join("unchanged"), "data").unwrap();
+        std::fs::create_dir(local.path().join("replaced")).unwrap();
+        std::fs::write(local.path().join("replaced/old"), "old").unwrap();
+        std::fs::write(outside.path().join("secret"), "private").unwrap();
+        let sync = Sync {
+            root: local.path().to_owned(),
+            basis: basis.path().to_owned(),
+            remote: String::new(),
+            shell: String::new(),
+            before: Snapshot::new(),
+            _key: None,
+            _lock: workspace_lock(local.path()).try_lock_owned().unwrap(),
+        };
+        sync.refresh_basis().await.unwrap();
+        let inode = std::fs::metadata(basis.path().join("unchanged"))
+            .unwrap()
+            .ino();
+        std::fs::remove_file(local.path().join("replaced/old")).unwrap();
+        std::fs::remove_dir(local.path().join("replaced")).unwrap();
+        symlink(outside.path(), local.path().join("replaced")).unwrap();
+        let stats = sync.refresh_basis().await.unwrap();
+        assert!(
+            stats.contains("Number of regular files transferred: 0"),
+            "{stats}"
+        );
+        assert_eq!(
+            std::fs::metadata(basis.path().join("unchanged"))
+                .unwrap()
+                .ino(),
+            inode
+        );
+        // --no-links can retain the previous regular directory in the basis.
+        // It must never import the symlink or the outside file it points at.
+        assert!(!basis.path().join("replaced").is_symlink());
+        assert!(!basis.path().join("replaced/secret").exists());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("secret")).unwrap(),
+            "private"
+        );
+    }
+
+    #[tokio::test]
     async fn session_waits_for_pull_and_reports_conflicts() {
         if std::process::Command::new("rsync")
             .arg("--version")
@@ -544,6 +654,7 @@ mod tests {
         std::fs::write(remote.path().join("result"), "remote").unwrap();
         let sync = Sync {
             root: local.path().to_owned(),
+            basis: remote.path().join(".terrarium-stage"),
             remote: format!("{}/", remote.path().display()),
             shell: "ssh".into(),
             before: snapshot(local.path()).unwrap(),
@@ -574,6 +685,7 @@ mod tests {
 
         let sync = Sync {
             root: local.path().to_owned(),
+            basis: remote.path().join(".terrarium-stage"),
             remote: format!("{}/", remote.path().display()),
             shell: "ssh".into(),
             before: snapshot(local.path()).unwrap(),
@@ -602,6 +714,7 @@ mod tests {
 
         let sync = Sync {
             root: local.path().to_owned(),
+            basis: remote.path().join(".terrarium-stage"),
             remote: format!("{}/", remote.path().display()),
             shell: "ssh".into(),
             before: snapshot(local.path()).unwrap(),
@@ -753,8 +866,10 @@ mod tests {
             "fixture build failed: {:?}",
             built.end()
         );
+        let basis = tempfile::tempdir().unwrap();
         let sync = Sync {
             root: local.clone(),
+            basis: basis.path().to_owned(),
             remote: remote_spec,
             shell,
             before: snapshot(&local).unwrap(),
@@ -767,6 +882,11 @@ mod tests {
         assert!(
             stats.contains("Number of regular files transferred: 0"),
             "{stats}"
+        );
+        let stats = sync.refresh_basis().await.unwrap();
+        assert!(
+            stats.contains("Number of regular files transferred: 0"),
+            "unchanged basis must not be copied again: {stats}"
         );
         for name in SECRET_NAMES {
             assert_eq!(

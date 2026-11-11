@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The event sources of the Triggers tab (docs/api.md §20): the list, create,
 // enable and disable, rotate, and delete. A create and a rotate answer with
 // the secret: it shows one time in a panel, with the hook URL and the setup
@@ -8,7 +9,7 @@ import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "s
 import { ConfirmButton, CopyButton, Empty, ErrorBanner, Modal, useNow } from "../../components/ui";
 import { ApiError } from "../../api/http";
 import type { EventSource, EventSourceKind, EventSourceWithSecret } from "../../api/types";
-import { api, events, projects } from "../../stores";
+
 import { ago } from "../../lib/format";
 import { GLOBAL } from "./form";
 import { emptySourceForm, sortSources, SOURCE_KINDS, sourceBody, sourceFieldOf, sourceScopeLabel, upsertSource, type SourceForm, type SourceFormKey } from "./sources";
@@ -16,6 +17,7 @@ import { emptySourceForm, sortSources, SOURCE_KINDS, sourceBody, sourceFieldOf, 
 const COLS = 8;
 
 export function EventSourcesSection(props: { project: string | null }) {
+  const { api, events } = useInstance();
   const [items, setItems] = createSignal<EventSource[]>([]);
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<unknown>(null);
@@ -271,6 +273,7 @@ function SecretPanel(props: { source: EventSourceWithSecret; rotated: boolean; o
 }
 
 function NewSourceDialog(props: { project: string | null; onClose: () => void; onCreated: (s: EventSourceWithSecret) => void }) {
+  const { api, projects } = useInstance();
   const [form, setForm] = createSignal<SourceForm>(emptySourceForm(props.project));
   const [sending, setSending] = createSignal(false);
   const [bad, setBad] = createSignal<{ field?: SourceFormKey; message: string } | null>(null);

@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The create and edit dialog of a schedule or a trigger (docs/api.md §19,
 // §19.4). The state is in ./form; this file only draws it. A `403` and a
 // `422` show inline: the `422` under the field that the daemon names. A
@@ -7,7 +8,7 @@
 import { createMemo, createResource, For, Index, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { AgentVerb, CardOp, CatchUp, Schedule, ScheduleActionType, ScheduleSpecKind } from "../../api/types";
-import { agents, api, projects, subscriptions } from "../../stores";
+
 import { DAY_START_WEEKDAYS, everyWords, parseEvery, utcText, WEEKDAYS } from "../../lib/schedule";
 import { actionTypesFor, agentOptions, CRON_PRESETS, createScheduleDialog, GLOBAL, targetOptions, timeZones, type CronPreset, type ScheduleOutcome } from "./form";
 import { fieldKit } from "./fields";
@@ -31,6 +32,7 @@ const localZone = (() => {
 })();
 
 export function ScheduleDialog(props: { project: string | null; schedule?: Schedule; trigger?: boolean; action?: boolean; onClose: () => void; onSaved: (s: Schedule) => void }) {
+  const { api, agents, projects, subscriptions } = useInstance();
   // The dialog reads its props once: a new schedule needs a new dialog.
   const init = props.schedule ? undefined : props.trigger ? { specKind: "on" as const } : props.action ? { specKind: "manual" as const } : undefined;
   const dlg = createScheduleDialog(api, { project: props.project, schedule: props.schedule, init });

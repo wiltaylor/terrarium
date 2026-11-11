@@ -1,9 +1,11 @@
-import { A } from "@solidjs/router";
+import { InstanceAnchor } from "../instance/navigation";
+import { useInstance } from "../instance";
+import { A } from "../instance/navigation";
 import { For, Show } from "solid-js";
-import { bookmarks } from "../stores";
+
 import { skippedReport } from "../stores/bookmarks";
 import { ErrorBanner } from "../components/ui";
-import { expanded, TreeNode } from "./TreeRoot";
+import { TreeNode } from "./TreeRoot";
 import { createRovingTree } from "./treeNav";
 
 import { BOOKMARKS_KEY } from "./treeModel";
@@ -12,6 +14,7 @@ export const bookmarkKey = (href: string) => `bookmark:${href}`;
 
 /** A real node of the Projects navigation tree. */
 export function Bookmarks(props: { nav?: ReturnType<typeof createRovingTree> }) {
+  const { bookmarks, expanded } = useInstance();
   const nav = props.nav ?? createRovingTree({ keys: () => [BOOKMARKS_KEY, ...bookmarks.items().map((b) => bookmarkKey(b.href))] });
   return (
     <TreeNode label="Bookmarks" rowKey={BOOKMARKS_KEY} project="" groupId="bookmarks-group" open={expanded.isOpen(BOOKMARKS_KEY)} onToggle={() => expanded.toggle(BOOKMARKS_KEY)} nav={nav} actionKey="F2" action={
@@ -25,7 +28,7 @@ export function Bookmarks(props: { nav?: ReturnType<typeof createRovingTree> }) 
       <For each={bookmarks.items()} fallback={<li role="none" class="muted small">No bookmarks.</li>}>
         {(b) => (
           <li role="none" class="row">
-            <Show when={b.href.startsWith("/")} fallback={<a role="treeitem" data-key={bookmarkKey(b.href)} tabIndex={nav.tabIndex(bookmarkKey(b.href))} onFocus={() => nav.setFocusKey(bookmarkKey(b.href))} href={b.href} target="_blank" rel="noopener noreferrer" title="Opens in a new window">{b.title}</a>}>
+            <Show when={b.href.startsWith("/")} fallback={<InstanceAnchor role="treeitem" data-key={bookmarkKey(b.href)} tabIndex={nav.tabIndex(bookmarkKey(b.href))} onFocus={() => nav.setFocusKey(bookmarkKey(b.href))} href={b.href} target="_blank" rel="noopener noreferrer" title="Opens in a new window">{b.title}</InstanceAnchor>}>
               <A role="treeitem" data-key={bookmarkKey(b.href)} tabIndex={nav.tabIndex(bookmarkKey(b.href))} onFocus={() => nav.setFocusKey(bookmarkKey(b.href))} href={b.href}>{b.title}</A>
             </Show>
           </li>

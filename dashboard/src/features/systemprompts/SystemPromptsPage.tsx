@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The System prompts tab of the settings screen (docs/api.md §28): the
 // library of the config repo (`system-prompts/<name>.md`), with view, edit,
 // delete, and "New system prompt". A delete of an entry in use answers 409
@@ -5,12 +6,12 @@
 // are user content: they stay text nodes and textarea values. The logic is
 // in ./model.ts.
 
-import { A } from "@solidjs/router";
+import { A } from "../../instance/navigation";
 import { createResource, createSignal, For, Show } from "solid-js";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
 import type { SystemPromptDetail, SystemPromptSummary, SystemPromptUser } from "../../api/types";
 import { ago, bytes } from "../../lib/format";
-import { api } from "../../stores";
+
 import { systemPromptProblem } from "../agents/form";
 import { refreshPromptLibrary } from "../agents/SystemPromptSelect";
 import { promptNameProblem } from "../agents/systemPrompt";
@@ -48,6 +49,7 @@ function PromptFields(props: { description: string; text: string; onDescription:
 }
 
 function NewPromptForm(props: { onCreated: (d: SystemPromptDetail) => void; onCancel: () => void }) {
+  const { api, promptLibrary } = useInstance();
   const [name, setName] = createSignal("");
   const [description, setDescription] = createSignal("");
   const [text, setText] = createSignal("");
@@ -63,7 +65,7 @@ function NewPromptForm(props: { onCreated: (d: SystemPromptDetail) => void; onCa
     setError(null);
     try {
       const d = await api.systemPrompts.create({ name: name().trim(), text: text(), ...(description().trim() ? { description: description().trim() } : {}) });
-      refreshPromptLibrary();
+      refreshPromptLibrary(promptLibrary);
       props.onCreated(d);
     } catch (err) {
       setError(err);
@@ -102,6 +104,7 @@ function NewPromptForm(props: { onCreated: (d: SystemPromptDetail) => void; onCa
 
 /** One entry: its text, its users, edit, and delete. */
 function PromptDetail(props: { name: string; onChanged: () => void; onDeleted: () => void }) {
+  const { api, promptLibrary } = useInstance();
   const [version, setVersion] = createSignal(0);
   const [entry] = createResource(
     () => [props.name, version()] as const,
@@ -126,7 +129,7 @@ function PromptDetail(props: { name: string; onChanged: () => void; onDeleted: (
     setError(null);
     try {
       await api.systemPrompts.update(props.name, { text: text(), description: description().trim() });
-      refreshPromptLibrary();
+      refreshPromptLibrary(promptLibrary);
       setEditing(false);
       setVersion((v) => v + 1);
       props.onChanged();
@@ -141,7 +144,7 @@ function PromptDetail(props: { name: string; onChanged: () => void; onDeleted: (
     setError(null);
     try {
       await api.systemPrompts.remove(props.name, { force });
-      refreshPromptLibrary();
+      refreshPromptLibrary(promptLibrary);
       props.onDeleted();
     } catch (e) {
       const users = usersOfConflict(e);
@@ -254,6 +257,7 @@ function PromptDetail(props: { name: string; onChanged: () => void; onDeleted: (
 }
 
 export default function SystemPromptsPage() {
+  const { api } = useInstance();
   const [version, setVersion] = createSignal(0);
   const [list] = createResource(version, () => api.systemPrompts.list());
   const [q, setQ] = createSignal("");

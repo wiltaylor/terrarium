@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Ask an agent a question from the Inbox, or forward a question, bundle, or
 // notice of the Inbox to one. New requests get a dedicated thread agent.
 // Forwarding an existing question keeps its watched-mail contract.
@@ -5,11 +6,12 @@
 import { createSignal, For, Show } from "solid-js";
 import type { InboxAsk, Question, Thread } from "../../api/types";
 import { ErrorBanner, Modal } from "../../components/ui";
-import { agents, api } from "../../stores";
+
 import { ASK_TEXT_MAX, askBody } from "./model";
 import { useDefaultAgent } from "./defaultAgent";
 
 export function AskDialog(props: { question?: Question; onClose: () => void; onAsked: (r: InboxAsk) => void; onRequested?: (r: Thread) => void }) {
+  const { agents, api } = useInstance();
   const forward = () => !!props.question;
   const defaultAgent = useDefaultAgent();
   const [picked, setTo] = createSignal<string>();

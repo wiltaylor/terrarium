@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The blocks of the project dashboard (docs/api.md §30.4): stat, status,
 // chart, text, table, and note. Each monitor block has a head (title and
 // state, in a glyph and a word, never colour alone), a body by its kind,
@@ -13,7 +14,7 @@ import type { DashboardBlock, Monitor, MonitorPoint } from "../../api/types";
 import { Markdown } from "../../components/Markdown";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
-import { api } from "../../stores";
+
 import { blockState, cellText, columnsOf, numericColumns, linePath, nearestIndex, numericPoints, rangeOf, SPARK_RANGE, STATE_META, timeLabel, unitOf, valueText, xOf, yOf, yScale, type BlockState } from "./model";
 
 /** The state badge: a glyph and a word, with the colour. */
@@ -34,6 +35,7 @@ export function StateBadge(props: { state: BlockState; large?: boolean }) {
  * monitor, so the series loads again.
  */
 function useSeries(monitor: () => Monitor | undefined, range: () => { ms: number; bucket: number }, version: () => number) {
+  const { api } = useInstance();
   const [series] = createResource(
     () => {
       const m = monitor();

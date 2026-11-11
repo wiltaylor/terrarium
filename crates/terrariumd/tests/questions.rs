@@ -359,6 +359,47 @@ async fn inbox_noise_requires_notice_context_and_allows_questions_per_card() {
 }
 
 #[tokio::test]
+async fn relinking_and_legacy_edits_do_not_reapply_ask_rules() {
+    let World { td, lead, sys, .. } = setup().await;
+    let first = ask(&td, &lead, json!({"text": "First?"})).await;
+    let second = ask(&td, &lead, json!({"text": "Second?"})).await;
+    let path = format!("/api/questions/{}", id(&second));
+    let card = first["card"].clone();
+    td.patch_as(&lead, &path, json!({"card": card}))
+        .await
+        .err(409, "conflict");
+    // Both privileged actors may deliberately consolidate questions.
+    for actor in [None, Some(sys.as_str())] {
+        td.patch(&path, json!({"card": second["card"]})).await.ok();
+        let patch = json!({"card": card});
+        let result = match actor {
+            None => td.patch(&path, patch).await,
+            Some(actor) => td.patch_as(actor, &path, patch).await,
+        };
+        assert_eq!(result.ok()["revision"], 1);
+    }
+    // Duplicate legacy context must not prevent text edits or no-op links.
+    td.patch_as(&lead, &path, json!({"text": "Revised?"}))
+        .await
+        .ok();
+    td.patch_as(&lead, &path, json!({"card": card})).await.ok();
+    // Simulate an item persisted before work context was required.
+    let conn = rusqlite::Connection::open(td.state.join("terrarium.db")).unwrap();
+    conn.execute(
+        "UPDATE questions SET card = NULL WHERE id = ?1",
+        [id(&second)],
+    )
+    .unwrap();
+    td.patch_as(&lead, &path, json!({"text": "Legacy edit?"}))
+        .await
+        .ok();
+    td.patch_as(&lead, &path, json!({"card": null})).await.ok();
+    td.patch_as(&lead, &path, json!({"card": card}))
+        .await
+        .err(409, "conflict");
+}
+
+#[tokio::test]
 async fn inbox_noise_updates_and_operator_mail_replies() {
     let World { td, lead, sys, .. } = setup().await;
     let card = id(td

@@ -9,10 +9,10 @@ import { waitFor } from "../../test/wait";
 
 const repos = vi.fn(async (_p: string) => [{ id: "R1", name: "infra", project: "my app", url: "https://example.com/infra.git" }]);
 const targets = vi.fn(async (_p: string) => []);
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api: { projects: { repos, targets } },
   repos: { inProject: () => [] },
-}));
+})); });
 vi.mock("./AddRepoForm", () => ({
   AddRepoForm: (p: { project: string }) => {
     const d = document.createElement("form");

@@ -8,7 +8,7 @@ import { createBookmarksStore } from "../../stores/bookmarks";
 
 const bookmarks = createBookmarksStore(null, window.location.origin);
 let title = "Start here";
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   bookmarks,
   projects: { prefixes: () => ({}) },
   api: {
@@ -20,7 +20,7 @@ vi.mock("../../stores", () => ({
     },
     artifacts: { list: async () => [] },
   },
-}));
+})); });
 const { default: WikiPage, wikiHref } = await import("./WikiPage");
 let dispose: (() => void) | undefined;
 afterEach(() => {

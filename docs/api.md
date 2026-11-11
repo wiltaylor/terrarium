@@ -3421,6 +3421,13 @@ Cards:
   updates too. A `PATCH` with the same card changes nothing.
 - The ask (`POST /api/agents/{id}/questions`) and a `PATCH` give `422
   invalid` for a card of another project, or an unknown card.
+- Changing the card in a `PATCH` gives `409 conflict` if another open
+  question or bundle of the asking agent shares the new card or Inbox
+  thread. The operator and sysadmins may relink despite this conflict.
+  Missing required work context gives `422 invalid`. Text-only edits and
+  unchanged cards do not recheck legacy context or duplicate questions.
+  A notice losing its card must be critical (`422 invalid` otherwise),
+  including when its priority changes.
 
 Bundles:
 
@@ -6173,8 +6180,7 @@ cloud settings object (`region`, `models`, `budget_usd`, and the other
 provider fields), not a `{cloud: ...}` wrapper. Omitted optional fields are
 cleared. The operator-only endpoint checks the settings and returns the
 subscription without reading or changing its key file. File-managed and
-non-cloud subscriptions return `422 invalid`. Raising or removing the budget
-ends a cloud-budget hold at the next budget check.
+non-cloud subscriptions return `422 invalid`. Budgets send mail only.
 
 `POST /api/subscriptions/{name}/api-key` stores the key in
 `<state>/credentials/subscriptions/<name>.json`, mode `0600` (the
@@ -6348,6 +6354,23 @@ the adapter's env. The start log and `terrariumd sandbox-dry-run` show the
 value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
 `<redacted>`.
 
+For Vertex (`gcp`), `test_connection: true` exchanges a short-lived RSA-signed
+service-account assertion at Google's fixed OAuth endpoint, then makes a paid
+one-output-token Haiku request before writing anything. The wizard always
+requests this check. A failed check preserves the old key and settings. The
+check accepts only canonical regional, multi-region, or global Vertex hosts,
+refuses `cloud.base_url` without a network request, and never follows redirects.
+Use the API without `test_connection` to store a gateway configuration.
+Authentication errors name the service-account key, and access errors name the
+Vertex AI User role (`roles/aiplatform.user`), API enablement, and model access.
+Errors never contain upstream response bodies or credentials.
+
+The Vertex key save fills missing model tiers with `claude-opus-5-5`,
+`claude-sonnet-4-6`, and `claude-haiku-4-5@20251001`, and a missing region with
+`us-east5`. Explicit model mappings override those defaults. `cloud.project_id`
+is required. The sandbox receives the JSON as a 0600 file through credential
+env, with `GOOGLE_APPLICATION_CREDENTIALS` pointing to the file.
+
 For Bedrock, `test_connection: true` makes a paid one-output-token test of
 the haiku inference profile before any write. The wizard always requests
 this. On failure the endpoint returns a safe diagnostic and saves nothing.
@@ -6431,11 +6454,10 @@ price of the tokens, not the cloud bill). The subscription shows a
 `budget` window with `used_pct`, `resets_at` (the start of the next month),
 and `balance` (`total` the budget, `used`, `remaining`, `currency` `USD`).
 The quota notices of §16.6 mail the operator at `alert_at` (default 80),
-90, and 100 percent. At 100 percent, new turns of the agents on the
-subscription wait: a hold with the cause `cloud-budget:<name>` until the
-start of the next month (`quota.blocked`). A raised or removed budget ends
-the hold at the next check (after each new session total, and on each
-policy tick).
+90, and 100 percent. Budgets send mail only, even at 100 percent. Agents
+keep their turns. Checks run after each new session total and on each
+policy tick. Existing cloud-budget holds end at daemon startup with a
+`quota.resumed` event.
 
 ### 16.6 The quota policy
 
@@ -6506,9 +6528,10 @@ policy tick).
   ```
 
   A budget has two lines: its `alert_at` and 100. Each line sends one mail
-  to the operator and one `quota.alert` in a UTC day. The hold applies,
-  with the cause `budget:project:<p>[/<sub>]` and the next UTC midnight as
-  the reset.
+  to the operator and one `quota.alert` in a UTC day. No turns are held.
+  Existing holds with cause `budget:project:<p>[/<sub>]` end at daemon
+  startup with a `quota.resumed` event. Vendor-refusal holds
+  (`limit:<subscription>`) and auto-swap are unchanged.
 
 `POST /api/agents/{id}/status` (`terrarium status set`) is the agent's own
 word: `status` is `idle`, `working`, or `blocked`; `note` is up to 500
@@ -12954,6 +12977,17 @@ A batch merge:
   is the same: the tree is reset, and the card's note says why. The card
   gets `outcome: conflict` in `batch` and fails at once, as above. When
   no card merges, the job ends as a `conflict`.
+- A merge conflict onto `next` also queues one durable repair request per
+  card and job. After the existing conflict-return flow, an open bound
+  card worker receives a turn with the conflict details. Otherwise the
+  daemon spawns a bound worker using the card type's template (default
+  `card-impl`) under a non-ephemeral project admin. Normal spawn rights,
+  template grants and WIP checks apply, with no additional grants or targets.
+  The task starts from the card's branch: merge `origin/next` with a merge
+  commit, keep both sides' intended changes, run the card check and return
+  to review. No rebase or force push. Duplicate verdicts do not duplicate
+  workers. Requests survive daemon restarts and retry refusals after a minute.
+  Release and e2e jobs, and merges onto release branches, do not queue repairs.
 - Pass: each merged card moves to `accepted`.
 - Red with two or more merged cards: the batch splits into two halves (a
   half of one card is a job of one card). Both are queued at the front,

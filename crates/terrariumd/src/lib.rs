@@ -17,6 +17,7 @@ pub mod card_dispatcher;
 pub mod card_reminder;
 pub mod cloud_budget;
 pub mod config_repo;
+pub mod conflict_fixes;
 pub mod conflict_hints;
 pub mod db;
 pub mod defaults;

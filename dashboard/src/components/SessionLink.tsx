@@ -1,7 +1,7 @@
 // The small "session" link of a log row (./sessionLink.ts). A click opens
 // the session page and does not toggle the row.
 
-import { A } from "@solidjs/router";
+import { A } from "../instance/navigation";
 import { Show } from "solid-js";
 import type { LogSessionLink } from "../api/types";
 import { sessionLinkOf } from "./sessionLink";
