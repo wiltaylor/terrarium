@@ -470,18 +470,69 @@ async fn held_move_refusal_notifies_and_comment_only_action_emits_comment() {
     let a = card(&td).await;
     let b = card(&td).await;
     let c = card(&td).await;
-    set(&td, &b, wait(&[(&a, Some("review"))], Mode::All, Action { move_to: Some("ready".into()), ..Action::default() })).await;
-    set(&td, &c, wait(&[(&a, Some("review"))], Mode::All, Action { comment: Some("ready for work".into()), ..Action::default() })).await;
+    set(
+        &td,
+        &b,
+        wait(
+            &[(&a, Some("review"))],
+            Mode::All,
+            Action {
+                move_to: Some("ready".into()),
+                ..Action::default()
+            },
+        ),
+    )
+    .await;
+    set(
+        &td,
+        &c,
+        wait(
+            &[(&a, Some("review"))],
+            Mode::All,
+            Action {
+                comment: Some("ready for work".into()),
+                ..Action::default()
+            },
+        ),
+    )
+    .await;
     let id = b.clone();
-    td.daemon.as_ref().unwrap().state.db.write("operator", move |t| {
-        t.execute("UPDATE cards SET labels='[\"github\",\"hold\"]' WHERE id=?1", [id])?;
-        Ok(())
-    }).await.unwrap();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE cards SET labels='[\"github\",\"hold\"]' WHERE id=?1",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     move_to(&td, &a, "review").await;
     assert!(met(&td, &b).await);
-    assert_eq!(td.get(&format!("/api/cards/{b}")).await.ok()["column"], "backlog");
-    assert!(td.get("/api/mail?to=p/lead").await.ok().as_array().unwrap().iter().any(|m| m["subject"].as_str().is_some_and(|s| s.contains("held"))));
-    assert!(td.get(&format!("/api/cards/{c}")).await.ok()["comments"].as_array().unwrap().iter().any(|v| v["body"] == "ready for work"));
+    assert_eq!(
+        td.get(&format!("/api/cards/{b}")).await.ok()["column"],
+        "backlog"
+    );
+    assert!(
+        td.get("/api/mail?to=p/lead")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["subject"].as_str().is_some_and(|s| s.contains("held")))
+    );
+    assert!(
+        td.get(&format!("/api/cards/{c}")).await.ok()["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["body"] == "ready for work")
+    );
 }
 
 #[tokio::test]
@@ -492,8 +543,24 @@ async fn wait_queries_use_dependency_indexes_and_limits_are_enforced() {
     let db = td.daemon.as_ref().unwrap().state.db.clone();
     let w = wait(&[(&a, None); 129], Mode::All, Action::default());
     let id = b.clone();
-    assert!(db.write("operator", move |t| card_waits::set(t, &Actor::Operator, &id, &w)).await.unwrap_err().message.contains("128"));
-    set(&td, &b, wait(&[(&a, Some("review"))], Mode::Any, Action::default())).await;
+    assert!(
+        db.write("operator", move |t| card_waits::set(
+            t,
+            &Actor::Operator,
+            &id,
+            &w
+        ))
+        .await
+        .unwrap_err()
+        .message
+        .contains("128")
+    );
+    set(
+        &td,
+        &b,
+        wait(&[(&a, Some("review"))], Mode::Any, Action::default()),
+    )
+    .await;
     db.read(move |c| {
         for (sql, parameter, expected) in [
             ("EXPLAIN QUERY PLAN SELECT card FROM card_deps WHERE depends_on=?1 AND card>'' ORDER BY card LIMIT 128", a, "card_deps_reverse"),
