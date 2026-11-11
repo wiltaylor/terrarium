@@ -70,7 +70,7 @@ struct ServeArgs {
     /// The release public key of the cosign check.
     #[arg(long, env = ENV_COSIGN_KEY, default_value = DEFAULT_COSIGN_KEY)]
     cosign_key: String,
-    /// Seconds that the drain waits for the running turns.
+    /// Seconds each drain waits for running jobs or turns.
     #[arg(long, env = "TERRARIUM_UPDATE_DRAIN_WAIT", default_value_t = 600)]
     drain_wait: u64,
     /// Seconds that the new container has to become healthy.

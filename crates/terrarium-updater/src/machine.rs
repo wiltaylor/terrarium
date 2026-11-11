@@ -45,7 +45,7 @@ use crate::store::{Previous, Store};
 pub struct Config {
     /// The image repository of the releases.
     pub repository: String,
-    /// How long the drain waits for the running turns.
+    /// How long each drain waits for running turns or jobs.
     pub drain_wait: Duration,
     /// How long the new container has to become healthy.
     pub health_timeout: Duration,
@@ -125,6 +125,14 @@ pub fn resume_argv() -> Vec<String> {
     ["terrarium", "admin", "update", "resume"]
         .map(String::from)
         .to_vec()
+}
+
+/// Drain only job admission, using the daemon's authenticated CLI socket.
+pub fn drain_jobs_argv(wait: Duration) -> Vec<String> {
+    let mut argv = drain_argv(wait);
+    argv[3] = "drain-jobs".into();
+    argv.push("--json".into());
+    argv
 }
 
 /// The command that makes the backup.
@@ -398,13 +406,25 @@ impl Updater {
         }
     }
 
-    /// End the drain of the old daemon after an early failure.
+    /// End both drains after health or an early failure.
     async fn resume(&self, cur: &Container) {
-        let r = self.exec_ok(&cur.id, resume_argv()).await;
         let idx = self.begin_step("resume");
-        match r {
-            Ok(_) => self.end_step(idx, StepState::Ok, "the daemon takes new turns again"),
-            Err(e) => self.end_step(idx, StepState::Failed, e),
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            self.exec_ok(&cur.id, resume_argv()),
+        )
+        .await
+        {
+            Ok(Ok(_)) => self.end_step(
+                idx,
+                StepState::Ok,
+                "the daemon takes new turns and jobs again",
+            ),
+            _ => {
+                let warning = "cannot resume turns and jobs (values hidden)";
+                tracing::warn!("{warning}");
+                self.end_step(idx, StepState::Failed, warning);
+            }
         }
     }
 
@@ -525,7 +545,7 @@ impl Updater {
 
         // Explicit rollback always replaces the container: retained runners
         // must never replay against a journal rewound after admitted writes.
-        if kind == RunKind::Update
+        let hot = kind == RunKind::Update
             && prepared.spec["changed_env_keys"]
                 .as_array()
                 .is_none_or(|a| a.is_empty())
@@ -536,9 +556,41 @@ impl Updater {
                     |yes| format!("runtime base and runner epoch compatible: {yes}"),
                 )
                 .await
-                .map_err(failed)?
+                .map_err(failed)?;
+
+        // Older daemons may not support jobs-only drain. Never prevent an
+        // update for that reason, and never record their error values.
+        let idx = self.begin_step("drain-jobs");
+        match tokio::time::timeout(
+            self.cfg.drain_wait + Duration::from_secs(5),
+            self.exec_ok(&cur.id, drain_jobs_argv(self.cfg.drain_wait)),
+        )
+        .await
         {
-            return self.hot_swap(&cur, &to).await;
+            Ok(Ok(out)) => {
+                let detail = serde_json::from_str::<serde_json::Value>(&out)
+                    .ok()
+                    .and_then(|v| v["jobs"].as_array().cloned())
+                    .map(|jobs| format!("job admission drained; still running: {jobs:?}"))
+                    .unwrap_or_else(|| "job admission drained (values hidden)".into());
+                tracing::info!("{detail}");
+                self.end_step(idx, StepState::Ok, detail);
+            }
+            _ => {
+                let warning = "jobs drain failed or timed out (values hidden); continuing update";
+                tracing::warn!("{warning}");
+                self.end_step(idx, StepState::Failed, warning);
+            }
+        }
+
+        if hot {
+            let result = self.hot_swap(&cur, &to).await;
+            // Healthy recovery and early failures must release job admission
+            // too. Do not resume a daemon whose recovery failed.
+            if !matches!(&result, Err((Outcome::RollbackFailed, _))) {
+                self.resume(&cur).await;
+            }
+            return result;
         }
 
         // Drain and back up. A failure here changes nothing.
@@ -936,6 +988,7 @@ impl Updater {
             .await?;
         self.step("health", self.wait_healthy(&new.id), Clone::clone)
             .await?;
+        self.resume(&new).await;
         Ok(())
     }
 
@@ -1020,6 +1073,7 @@ impl Updater {
             .await?;
         self.step("health", self.wait_healthy(&old.id), Clone::clone)
             .await?;
+        self.resume(&old).await;
         Ok(())
     }
 }
