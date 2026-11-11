@@ -43,7 +43,7 @@ describe("communication blocks", () => {
   });
   for (const payload of XSS_PAYLOADS) {
     it(`escapes communication fields and bodies: ${payload.name}`, () => {
-      const value = payload.html.replace(/\n/g, " ");
+      const value = payload.src.replace(/\n/g, " ");
       const root = render(`> [!EMAIL] ${value}\n> From: ${value}\n> Subject: ${value}\n>\n> ${value}\n\n> [!CHAT] ${value}\n> **${value}** · ${value} · draft\n> ${value}`);
       expect(root.querySelector("script, iframe, svg, math, object")).toBeNull();
       for (const el of root.querySelectorAll("*")) {
