@@ -1,7 +1,6 @@
 // Ask an agent a question from the Inbox, or forward a question, bundle, or
-// notice of the Inbox to one (GitHub #24, docs/api.md §6.9 "Ask and
-// forward"). The daemon sends one mail as the operator on a new thread and
-// watches it: the Asked tab shows it until the agent answers.
+// notice of the Inbox to one. New requests get a dedicated thread agent.
+// Forwarding an existing question keeps its watched-mail contract.
 
 import { createSignal, For, Show } from "solid-js";
 import type { InboxAsk, Question, Thread } from "../../api/types";

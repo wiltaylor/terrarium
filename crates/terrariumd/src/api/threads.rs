@@ -557,6 +557,9 @@ async fn link_card(
 #[serde(deny_unknown_fields)]
 struct RestartBody {
     reason: String,
+    /// Atomically link a new related card when reopening.
+    #[serde(default)]
+    card: Option<String>,
     #[serde(default)]
     template: Option<String>,
 }
@@ -589,6 +592,9 @@ async fn restart(
     b: RestartBody,
     reopening: bool,
 ) -> ApiResult<Thread> {
+    if !reopening && b.card.is_some() {
+        return Err(ApiError::invalid("card is only accepted when reopening"));
+    }
     if b.reason.trim().is_empty()
         || b.reason.chars().count() > threads::MAX_MESSAGE
         || b.reason.contains('\0')
@@ -604,18 +610,25 @@ async fn restart(
             .ok_or_else(|| ApiError::invalid("swap requires an architect template"))?
     };
     crate::template_files::refresh_quiet(state).await;
-    let (key, who, tp) = (id.clone(), actor.clone(), template.clone());
-    let old = state.db.read(move |c| {
+    let card = b.card.as_deref().map(crate::store::board::normalise_id);
+    let (key, who, tp, linked) = (id.clone(), actor.clone(), template.clone(), card.clone());
+    let (old, epoch) = state.db.read(move |c| {
         let th = threads::get(c, &key)?;
         if !th.request || (th.status == ThreadStatus::Closed) != reopening {
             return Err(ApiError::conflict("only a closed request reopens, and only an open request swaps"));
         }
+        let new_card_project = linked.as_deref().map(|id| {
+            let card = crate::store::board::get_card(c, id)?;
+            policy::read_project(&who, &card.project)?;
+            if card.archived { return Err(ApiError::invalid("an archived card cannot reopen a request")); }
+            Ok(card.project)
+        }).transpose()?;
         let allowed = match &who {
             Actor::Operator => true,
             Actor::Agent(a) => {
                 a.roles.contains(&terrarium_core::Role::ProjectAdmin) &&
                 (th.report_to.as_deref() == Some(a.id.as_str()) || (reopening &&
-                    th.cards.as_deref().unwrap_or_default().iter().any(|card| card.project == a.project)))
+                    (new_card_project.as_deref() == Some(a.project.as_str()) || th.cards.as_deref().unwrap_or_default().iter().any(|card| card.project == a.project))))
             }
         };
         if !allowed { return Err(ApiError::forbidden("only the report-to lead or a lead with a linked card reopens a request; only the report-to lead swaps it")); }
@@ -627,7 +640,8 @@ async fn restart(
                 return Err(ApiError::invalid("swap requires an architect template"));
             }
         }
-        Ok(th.agent)
+        let epoch = c.query_row("SELECT request_epoch FROM threads WHERE id = ?1", [&key], |r| r.get::<_, i64>(0))?;
+        Ok((th.agent, epoch))
     }).await?;
     // Finish the previous bound spawn before making the new one. A delayed
     // close event must only close its original agent, never this replacement.
@@ -652,8 +666,18 @@ async fn restart(
     let th = state
         .db
         .write(actor.label(), move |t| {
-            threads::restart_request(t, &id, &by, &b.reason, &template, reopening)
+            threads::restart_request(
+                t,
+                &id,
+                &by,
+                &b.reason,
+                &template,
+                reopening,
+                (epoch, card.as_deref()),
+            )
         })
         .await?;
-    crate::thread_agent::start(state, th, super::skills::library_opt(state)).await
+    crate::thread_agent::start(state, th, super::skills::library_opt(state))
+        .await
+        .map(|th| threads::visible(&actor, th))
 }

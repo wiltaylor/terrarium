@@ -1,7 +1,4 @@
-// Message an agent from the Inbox (TER-46): one mail from the operator to an
-// agent, through `POST /api/mail` (the call of the Mail page). Unlike "Ask an
-// agent", nothing is watched and nothing waits: no Asked item, no badge. A
-// reply of the agent comes in as a normal mail item.
+// Message a lead through a dedicated request thread (TER-687).
 
 import { createSignal, For } from "solid-js";
 import type { Thread } from "../../api/types";

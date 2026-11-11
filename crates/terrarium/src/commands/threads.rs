@@ -146,13 +146,12 @@ fn print_thread(c: &Ctx, v: &Value) {
 
 pub async fn thread(ctx: &Ctx, cmd: &ThreadCmd) -> anyhow::Result<()> {
     match cmd {
-        ThreadCmd::Reopen { id, reason } => {
+        ThreadCmd::Reopen { id, reason, card } => {
+            let mut body = json!({"reason": reason});
+            super::set_opt(&mut body, "card", card.clone());
             let v = ctx
                 .api
-                .post(
-                    &format!("{}/reopen", path(id)),
-                    Some(json!({"reason": reason})),
-                )
+                .post(&format!("{}/reopen", path(id)), Some(body))
                 .await?;
             ctx.emit(&v, print_thread)
         }

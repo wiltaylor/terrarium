@@ -2640,6 +2640,9 @@ pub enum ThreadCmd {
         id: String,
         #[arg(long)]
         reason: String,
+        /// A related card ID to link atomically while reopening
+        #[arg(long)]
+        card: Option<String>,
     },
     /// Replace a request agent with an architect in the same thread
     Swap {

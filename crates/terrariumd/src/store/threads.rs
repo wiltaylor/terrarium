@@ -1103,10 +1103,20 @@ pub fn restart_request(
     reason: &str,
     template: &str,
     reopening: bool,
+    expected: (i64, Option<&str>),
 ) -> ApiResult<Thread> {
+    let (epoch, card) = expected;
     let th = get_bare(t, id)?;
     if !th.request || (th.status == ThreadStatus::Closed) != reopening {
         return Err(ApiError::conflict("the request status changed"));
+    }
+    let current: i64 = t.query_row(
+        "SELECT request_epoch FROM threads WHERE id = ?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    if current != epoch {
+        return Err(ApiError::conflict("another request agent replacement won"));
     }
     let reason = check_text("reason", reason, MAX_MESSAGE)?;
     let reason = t.redact_string(reason);
@@ -1133,9 +1143,25 @@ pub fn restart_request(
     t.execute(
         "UPDATE threads SET status = 'waiting_agent', template = ?2, agent = NULL,
          agent_end_outcome = NULL, close_proposal = NULL, handoff = NULL, closed_at = NULL,
-         closed_by = NULL, close_reason = NULL, reminded_at = NULL, updated_at = ?3 WHERE id = ?1",
+         closed_by = NULL, close_reason = NULL, reminded_at = NULL, updated_at = ?3,
+         request_epoch = request_epoch + 1 WHERE id = ?1",
         params![id, template, at],
     )?;
+    if let Some(card) = card {
+        let c = board::get_card(t, card)?;
+        if c.archived {
+            return Err(ApiError::invalid(
+                "an archived card cannot reopen a request",
+            ));
+        }
+        t.execute("INSERT OR IGNORE INTO thread_cards (thread, project, card, linked_by, linked_at) VALUES (?1, ?2, ?3, ?4, ?5)", params![id, c.project, c.id, by, at])?;
+        t.audit(
+            "thread.card_link",
+            id,
+            Some(&c.project),
+            json!({"card": c.id, "by": by}),
+        )?;
+    }
     let th = get(t, id)?;
     t.audit(
         "thread.restart",
@@ -1689,6 +1715,11 @@ pub fn propose_close(
 /// The operator confirms the agent's close proposal: the thread closes
 /// with the proposed handoff. No proposal is `409 conflict`.
 pub fn confirm_close(t: &mut Tx<'_>, id: &str) -> ApiResult<Thread> {
+    confirm_close_by(t, id, "operator")
+}
+
+/// Confirm a proposal, retaining who actually confirmed it in the audit.
+pub fn confirm_close_by(t: &mut Tx<'_>, id: &str, by: &str) -> ApiResult<Thread> {
     let th = get_bare(t, id)?;
     not_closed(&th, "a confirm")?;
     let Some(p) = th.close_proposal else {
@@ -1701,7 +1732,7 @@ pub fn confirm_close(t: &mut Tx<'_>, id: &str) -> ApiResult<Thread> {
     close_as(
         t,
         &th.id,
-        "operator",
+        by,
         &p.by,
         CloseReason::Confirmed,
         Some(&p.summary),

@@ -298,7 +298,7 @@ pub async fn sweep(state: &Shared) {
                                 && th.updated_at < cut
                                 && th.cards.as_deref().unwrap_or_default().is_empty()
                             {
-                                threads::confirm_close(t, &id)?;
+                                threads::confirm_close_by(t, &id, "system")?;
                             }
                             Ok(())
                         })

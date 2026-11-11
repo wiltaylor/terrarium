@@ -23,7 +23,9 @@ request's agent with a new agent from an architect template. The operator
 or report-to lead can do this. `terrarium thread swap <id> --template <key>
 --reason <text>` is the CLI equivalent.
 
-`POST /api/threads/{id}/reopen` with `{reason}` reopens a closed request.
+`POST /api/threads/{id}/reopen` with `{reason, card?}` reopens a closed request.
+The optional card ID is linked atomically, so a lead can reopen a request
+by linking new related work from its project, even while the thread is closed.
 The operator, report-to lead, or a project_admin whose project has a card
 linked to the thread can reopen it. `terrarium thread reopen <id> --reason
 <text>` is the CLI equivalent. Reopening creates a new `global:request`

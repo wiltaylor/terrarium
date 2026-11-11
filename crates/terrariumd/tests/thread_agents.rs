@@ -325,7 +325,7 @@ async fn request_tracks_lead_cards_and_linked_lead_can_reopen() {
     let th = request(&l).await;
     let tid = id(&th);
     let made =
-        l.td.post("/api/projects/q/cards", json!({"title": "Related work"}))
+        l.td.post("/api/projects/p/cards", json!({"title": "Requested work"}))
             .await;
     assert_eq!(made.status, 201, "{}", made.body);
     let card = made.body["id"].as_str().unwrap();
@@ -334,7 +334,7 @@ async fn request_tracks_lead_cards_and_linked_lead_can_reopen() {
     let linked =
         l.td.post(
             &format!("/api/threads/{tid}/cards"),
-            json!({"card": format!("q:{card}")}),
+            json!({"card": format!("p:{card}")}),
         )
         .await;
     assert_eq!(linked.status, 200, "{}", linked.body);
@@ -351,15 +351,41 @@ async fn request_tracks_lead_cards_and_linked_lead_can_reopen() {
     l.td.post(&format!("/api/threads/{tid}/close"), json!({}))
         .await
         .ok();
+    let new_card =
+        l.td.post(
+            "/api/projects/q/cards",
+            json!({"title": "Related new work"}),
+        )
+        .await;
+    assert_eq!(new_card.status, 201, "{}", new_card.body);
     let reopened =
         l.td.post_as(
             &l.q_lead,
             &format!("/api/threads/{tid}/reopen"),
-            json!({"reason": "The linked card needs follow-up"}),
+            json!({"reason": "The new card needs follow-up", "card": new_card.body["id"]}),
         )
         .await;
     assert_eq!(reopened.status, 200, "{}", reopened.body);
     assert_eq!(reopened.body["cards"].as_array().unwrap().len(), 1);
+    assert_eq!(reopened.body["cards"][0]["project"], "q");
+}
+
+#[tokio::test]
+async fn request_concurrent_reopen_has_one_winner() {
+    let l = lab().await;
+    let th = request(&l).await;
+    let tid = id(&th);
+    l.td.post(&format!("/api/threads/{tid}/close"), json!({}))
+        .await
+        .ok();
+    let path = format!("/api/threads/{tid}/reopen");
+    let (a, b) = tokio::join!(
+        l.td.post(&path, json!({"reason": "First related request"})),
+        l.td.post(&path, json!({"reason": "Second related request"})),
+    );
+    let statuses = [a.status, b.status];
+    assert_eq!(statuses.iter().filter(|&&s| s == 200).count(), 1);
+    assert!(statuses.contains(&409));
 }
 
 impl Lab {
