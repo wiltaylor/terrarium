@@ -508,7 +508,11 @@ async fn limits_updates_and_retracts() {
     let qid = id(&q);
     // The same question again: a conflict that names the open one.
     let r = td
-        .post_as(&lead, &path, json!({"text": "use postgres?", "card": q["card"]}))
+        .post_as(
+            &lead,
+            &path,
+            json!({"text": "use postgres?", "card": q["card"]}),
+        )
         .await;
     r.err(409, "conflict");
     assert_eq!(r.body["error"]["details"]["question"], qid.as_str());
@@ -639,11 +643,12 @@ async fn at_most_fifty_open_questions() {
     for i in 0..50 {
         ask(&td, &lead, json!({"text": format!("question {i}")})).await;
     }
+    let card = id(td.post("/api/projects/p/cards", json!({"title": "Another decision"})).await.ok());
     let r = td
         .post_as(
             &lead,
             &format!("/api/agents/{lead}/questions"),
-            json!({"text": "one more", "card": "P-1"}),
+            json!({"text": "one more", "card": card}),
         )
         .await;
     r.err(429, "rate_limited");

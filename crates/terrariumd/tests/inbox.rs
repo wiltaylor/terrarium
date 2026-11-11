@@ -58,7 +58,9 @@ async fn setup() -> World {
 
 async fn decision_card(td: &TestDaemon) -> Value {
     td.post("/api/projects/p/cards", json!({"title": "Decision"}))
-        .await.ok()["id"].clone()
+        .await
+        .ok()["id"]
+        .clone()
 }
 
 async fn notify(td: &TestDaemon, agent: &str, body: Value) -> Value {
