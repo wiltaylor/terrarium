@@ -2656,56 +2656,56 @@ impl Db {
             // The snapshot comes after the lock: a write that changed a
             // secret swapped its matcher in before it let the lock go.
             let result = {
-            let redactor = handle.get();
-            // IMMEDIATE: the write lock comes at the start, so a write of
-            // another connection to the same file (a second daemon on the
-            // same state dir, for example a test that starts the daemon
-            // again) makes this one wait up to the busy timeout. A DEFERRED
-            // transaction that reads first gets `database is locked` at
-            // once when the other connection commits between its read and
-            // its first write; SQLite does not wait in that case.
-            let tx = guard.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let mut t = Tx {
-                tx,
-                actor,
-                link,
-                cause: None,
-                events: Vec::new(),
-                audits: RefCell::default(),
-                redactor,
-                view: OnceCell::new(),
-                rebuild: None,
-                files: Vec::new(),
-            };
-            let value = f(&mut t)?;
-            let Tx {
-                tx,
-                events,
-                audits,
-                rebuild,
-                files,
-                ..
-            } = t;
-            // The new matcher reads the store as this transaction left it.
-            // A failure to build it fails the write (PLAN §16b.6, S11).
-            let next = match rebuild {
-                Some(dir) => Some(crate::secrets::redact::build(&tx, &dir)?),
-                None => None,
-            };
-            // The staged files go to disk before the commit; a failure
-            // puts the old files back, and the transaction rolls back.
-            let undo = apply_files(&files)?;
-            if let Err(e) = tx.commit() {
-                undo_files(undo);
-                return Err(e.into());
-            }
-            // The swap comes before the guard goes (at the end of this
-            // closure): the next write takes its snapshot after it.
-            if let Some(r) = next {
-                tracing::debug!(patterns = r.pattern_count(), "redaction matcher built");
-                handle.replace(r);
-            }
-            (value, events, audits.into_inner())
+                let redactor = handle.get();
+                // IMMEDIATE: the write lock comes at the start, so a write of
+                // another connection to the same file (a second daemon on the
+                // same state dir, for example a test that starts the daemon
+                // again) makes this one wait up to the busy timeout. A DEFERRED
+                // transaction that reads first gets `database is locked` at
+                // once when the other connection commits between its read and
+                // its first write; SQLite does not wait in that case.
+                let tx = guard.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let mut t = Tx {
+                    tx,
+                    actor,
+                    link,
+                    cause: None,
+                    events: Vec::new(),
+                    audits: RefCell::default(),
+                    redactor,
+                    view: OnceCell::new(),
+                    rebuild: None,
+                    files: Vec::new(),
+                };
+                let value = f(&mut t)?;
+                let Tx {
+                    tx,
+                    events,
+                    audits,
+                    rebuild,
+                    files,
+                    ..
+                } = t;
+                // The new matcher reads the store as this transaction left it.
+                // A failure to build it fails the write (PLAN §16b.6, S11).
+                let next = match rebuild {
+                    Some(dir) => Some(crate::secrets::redact::build(&tx, &dir)?),
+                    None => None,
+                };
+                // The staged files go to disk before the commit; a failure
+                // puts the old files back, and the transaction rolls back.
+                let undo = apply_files(&files)?;
+                if let Err(e) = tx.commit() {
+                    undo_files(undo);
+                    return Err(e.into());
+                }
+                // The swap comes before the guard goes (at the end of this
+                // closure): the next write takes its snapshot after it.
+                if let Some(r) = next {
+                    tracing::debug!(patterns = r.pattern_count(), "redaction matcher built");
+                    handle.replace(r);
+                }
+                (value, events, audits.into_inner())
             };
             let finished = std::time::Instant::now();
             drop(guard);
