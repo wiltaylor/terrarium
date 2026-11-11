@@ -3,6 +3,53 @@ import { cardOfHref, renderWiki, resolveWikilink, safeUrl, splitFrontMatter, tar
 
 const ctx = { project: "terrarium", pages: new Set(["index", "designs/runner-v2"]), cardPrefixes: new Set(["TER", "WEB"]), prefixProject: { TER: "terrarium", WEB: "webshop" } };
 
+describe("GitHub emoji", () => {
+  it("expands only known names in wiki and text bodies", () => {
+    for (const textBody of [false, true]) {
+      const html = renderWiki(":white_check_mark: :+1: :not_a_real_emoji: file.rs:143: :constructor:", { ...ctx, textBody });
+      expect(html).toContain("✅ 👍 :not_a_real_emoji: file.rs:143: :constructor:");
+    }
+  });
+  it("leaves code spans, fenced and indented code unchanged", () => {
+    const html = renderWiki("`:smile:`\n\n```\n:smile:\n```\n\n    :smile:", ctx);
+    expect(html).not.toContain("😄");
+    expect(html.match(/:smile:/g)).toHaveLength(3);
+  });
+  it("does not expand URLs, but expands link labels", () => {
+    const html = renderWiki("https://example.org/:smile: [:+1:](https://example.org/:smile:) <https://example.org/:smile:>", ctx);
+    expect(html).not.toContain("😄");
+    expect(html).toContain(">👍</a>");
+    // GFM excludes a trailing colon from a bare URL, but not an explicit link.
+    expect(html).toContain('href="https://example.org/:smile"');
+    expect(html.match(/href="https:\/\/example.org\/:smile:"/g)).toHaveLength(2);
+  });
+});
+
+describe("card and memory text", () => {
+  const render = (src: string) => renderWiki(src, { ...ctx, textBody: true, cardKeys: ctx.prefixProject });
+  it("keeps single newlines local to text bodies", () => {
+    expect(render("first\nsecond")).toContain("first<br>second");
+    expect(renderWiki("first\nsecond", ctx)).not.toContain("<br>");
+  });
+  it("preserves legacy placeholders, paths, globs and indented lines", () => {
+    const html = render("Use <id> at src/app.rs:42\nRun crates/*/tests/*.rs\n\n    cargo test --workspace");
+    expect(html).toContain("&lt;id&gt;");
+    expect(html).toContain("src/app.rs:42");
+    expect(html).toContain("crates/*/tests/*.rs");
+    expect(html).toContain("<pre><code>cargo test --workspace</code></pre>");
+    expect(render("---\nstatus: ready\n---\nbody")).toContain("status: ready");
+  });
+  it("uses GFM tables, fences and reader-aware links", () => {
+    const html = render("| A | B |\n| - | - |\n| x | y |\n\n```sh\nls *.rs\n```\n\n[[index]] TER-12 [card](card:WEB-4) [site](https://example.com)");
+    expect(html).toContain("<table>");
+    expect(html).toContain('<code class="language-sh">');
+    expect(html).toContain('/p/terrarium/knowledge/wiki/index');
+    expect(html).toContain('/p/terrarium/board?card=TER-12');
+    expect(html).toContain('/p/webshop/board?card=WEB-4');
+    expect(html).toContain('href="https://example.com"');
+  });
+});
+
 describe("resolveWikilink", () => {
   it("resolves every §15.1 form", () => {
     expect(resolveWikilink("designs/runner-v2", ctx)).toEqual({ kind: "page", project: "terrarium", path: "designs/runner-v2" });

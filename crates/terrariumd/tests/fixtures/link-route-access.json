@@ -1675,6 +1675,19 @@
       ]
     },
     {
+      "source": "api/remotes.rs",
+      "registration": "\"/remotes/{name}/artifact-repin\",post(artifacts::repin)",
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/remotes/x/artifact-repin",
+          "body": {},
+          "allowed": false
+        }
+      ]
+    },
+    {
       "source": "api/repo_trees.rs",
       "registration": "\"/repos/{id}/trees\",get(trees)",
       "access": "other",

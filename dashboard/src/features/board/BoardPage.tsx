@@ -6,7 +6,8 @@ import { createStore } from "solid-js/store";
 import { createPagedList } from "../../components/paged";
 import { HoldBadge } from "../../components/HoldBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
-import { LinkText } from "../../components/LinkText";
+import { TextMarkdown } from "../../components/TextMarkdown";
+import { EmojiPicker } from "../../components/EmojiPicker";
 import type { Card, CardSummary, Column, NewCard, Question } from "../../api/types";
 import { ago, compact } from "../../lib/format";
 import { projectBase } from "../../lib/url";
@@ -753,6 +754,7 @@ function CardDrawer(props: {
 }) {
   const { api, agents } = useInstance();
   const [comment, setComment] = createSignal("");
+  let commentInput: HTMLTextAreaElement | undefined;
   const [error, setError] = createSignal<unknown>(null);
   const [editing, setEditing] = createSignal(false);
   const [edit, setEdit] = createSignal<EditCardForm>(editCardForm(props.card));
@@ -816,11 +818,11 @@ function CardDrawer(props: {
         fallback={
           <div class="stack" style={{ gap: "6px" }}>
             <h2 style={{ margin: 0 }}>{props.card.title}</h2>
-            <p style={{ margin: 0, "white-space": "pre-wrap" }}>
+            <div>
               <Show when={props.card.body} fallback={<span class="muted">No description.</span>}>
-                <LinkText text={props.card.body} project={props.card.project} />
+                <TextMarkdown text={props.card.body} project={props.card.project} />
               </Show>
-            </p>
+            </div>
             <div>
               <button
                 class="small"
@@ -984,8 +986,8 @@ function CardDrawer(props: {
                   )}
                 </Show>
               </div>
-              <div style={{ "white-space": "pre-wrap" }}>
-                <LinkText text={c.body} project={props.card.project} />
+              <div>
+                <TextMarkdown text={c.body} project={props.card.project} />
               </div>
             </div>
           )}
@@ -1004,7 +1006,14 @@ function CardDrawer(props: {
             }
           }}
         >
-          <textarea value={comment()} onInput={(e) => setComment(e.currentTarget.value)} placeholder="Comment as operator" aria-label="Comment" />
+          <textarea ref={commentInput} value={comment()} onInput={(e) => setComment(e.currentTarget.value)} placeholder="Comment as operator" aria-label="Comment" />
+          <EmojiPicker onPick={(code) => {
+            const start = commentInput?.selectionStart ?? comment().length;
+            const end = commentInput?.selectionEnd ?? start;
+            setComment(comment().slice(0, start) + code + comment().slice(end));
+            commentInput?.focus();
+            commentInput?.setSelectionRange(start + code.length, start + code.length);
+          }} />
           <div>
             <button class="primary" type="submit" disabled={!comment().trim()}>
               Comment

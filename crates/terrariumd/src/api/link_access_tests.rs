@@ -472,6 +472,10 @@ async fn link_hidden_methods_in_helpers_are_not_registered() {
 fn link_remote_artifact_registrations_keep_their_access_classes() {
     let (_, registry) = routes_with_registry(state(), true, false);
     assert_eq!(
+        registry.access(&axum::http::Method::POST, "/api/remotes/remote/artifact-repin"),
+        Some(link_registry::Access::OperatorOnly)
+    );
+    assert_eq!(
         registry.access(
             &axum::http::Method::POST,
             "/api/remotes/remote/artifacts/ART-1/url"
