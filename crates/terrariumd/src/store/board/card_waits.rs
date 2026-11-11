@@ -408,22 +408,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn freeze_check_skips_non_freeze_events_with_bounded_vm_steps() {
+    fn freeze_check_skips_non_freeze_events_with_bounded_vm_steps() -> anyhow::Result<()> {
         use std::sync::{
             Arc,
             atomic::{AtomicU64, Ordering},
         };
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::migrate(&mut conn).unwrap();
+        let mut conn = Connection::open_in_memory()?;
+        crate::db::migrate(&mut conn)?;
         conn.execute(
             "INSERT INTO projects(name,description,created_at,updated_at) VALUES ('p','','a','a')",
             [],
-        )
-        .unwrap();
+        )?;
         for n in 0..1000 {
             conn.execute("INSERT INTO calendar_events(id,project,title,kind,start_at,end_at,created_by,updated_by,created_at,updated_at)
                 VALUES (?1,?2,'noise','task','2026-01-01T00:00:00Z','2026-01-02T00:00:00Z','operator','operator','a','a')",
-                params![format!("noise-{n}"), if n % 2 == 0 {Some("p")} else {None}]).unwrap();
+                params![format!("noise-{n}"), if n % 2 == 0 {Some("p")} else {None}])?;
         }
         let steps = Arc::new(AtomicU64::new(0));
         let counter = steps.clone();
@@ -434,12 +433,13 @@ mod tests {
                 false
             }),
         );
-        check_freeze(&conn, "p").unwrap();
+        check_freeze(&conn, "p")?;
         conn.progress_handler(0, None::<fn() -> bool>);
         assert!(
             steps.load(Ordering::Relaxed) < 1000,
             "{} VM steps",
             steps.load(Ordering::Relaxed)
         );
+        Ok(())
     }
 }
