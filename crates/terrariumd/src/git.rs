@@ -2461,6 +2461,23 @@ pub struct JobRepo {
 }
 
 impl JobRepo {
+    /// Drop scratch roots and collect unreachable objects only under the
+    /// lifetime write guard, with no queued or running jobs for this cache.
+    pub fn maintain(&self) -> Result<(), GitError> {
+        // Leave damaged caches to the normal guarded recovery path.
+        if self.needs_rebuild() {
+            return Ok(());
+        }
+        for namespace in ["refs/job/", "refs/remotes/job/"] {
+            let refs = self.local(&["for-each-ref", "--format=%(refname)", namespace])?;
+            for name in refs.lines() {
+                self.checked_mutation(self.local(&["update-ref", "-d", name]))?;
+            }
+        }
+        self.checked_mutation(self.local(&["reflog", "expire", "--expire=now", "--all"]))?;
+        self.checked_mutation(self.local(&["gc", "--prune=now", "--quiet"]))
+    }
+
     /// Inspect the cache without changing it. The caller holds the prepare
     /// mutex and a repository lifetime read guard.
     pub fn open(c: Checkout) -> Result<Option<Self>, GitError> {
@@ -3699,6 +3716,25 @@ mod tests {
             String::from_utf8_lossy(&o.stderr)
         );
         drop(held);
+    }
+
+    #[test]
+    fn job_cache_maintenance_collects_scratch_objects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = bare_repo(tmp.path());
+        let c = checkout(tmp.path(), &origin, &tmp.path().join("cache/repo.git"));
+        let r = JobRepo::create(c).unwrap();
+        r.fetch(&["+refs/heads/main:refs/remotes/job/old".into()]).unwrap();
+        let sha = r.commit_of("refs/remotes/job/old").unwrap().unwrap();
+        r.set_ref("refs/job/merge", &sha).unwrap();
+        r.maintain().unwrap();
+        assert!(r.commit_of("refs/job/merge").unwrap().is_none());
+        assert!(r.commit_of("refs/remotes/job/old").unwrap().is_none());
+        assert!(r.commit_of(&sha).unwrap().is_none());
+        r.maintain().unwrap();
+        assert!(!r.needs_rebuild());
+        r.fetch(&["+refs/heads/main:refs/remotes/job/new".into()]).unwrap();
+        assert_eq!(r.commit_of("refs/remotes/job/new").unwrap(), Some(sha));
     }
 
     /// TER-103: the daemon's job repo fetches, merges without a work tree
