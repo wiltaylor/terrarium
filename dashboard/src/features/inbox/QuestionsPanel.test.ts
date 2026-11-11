@@ -2,6 +2,7 @@
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../../test/wait";
 import type { Agent, AgentEvent, Question } from "../../api/types";
 
 const ofAgent = vi.fn();
@@ -36,7 +37,7 @@ const q = (id: string, status: Question["status"] = "open", kind: Question["kind
 } as Question);
 const mount = async (roles = ["project_admin"]) => {
   dispose = render(() => createComponent(QuestionsPanel, { agent: { id: "A1", roles } as Agent }), document.body);
-  await vi.waitFor(() => expect(ofAgent).toHaveBeenCalled());
+  await waitFor(() => expect(ofAgent).toHaveBeenCalled());
 };
 
 describe("agent open questions", () => {
@@ -65,7 +66,7 @@ describe("agent open questions", () => {
     await mount([]);
     expect(document.body.textContent).toContain("pending");
     event({ kind: "question", agent_id: "A1", data: { agent_id: "A1" } } as unknown as AgentEvent);
-    await vi.waitFor(() => expect(document.querySelector("section")).toBeNull());
+    await waitFor(() => expect(document.querySelector("section")).toBeNull());
     expect(ofAgent).toHaveBeenLastCalledWith("A1", { status: "open" });
   });
 });

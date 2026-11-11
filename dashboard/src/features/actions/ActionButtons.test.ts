@@ -6,6 +6,7 @@
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../../test/wait";
 import type { Schedule } from "../../api/types";
 
 const run = vi.fn();
@@ -82,7 +83,7 @@ describe("ActionButtons", () => {
     expect(d.textContent).toContain("Runs as you (the operator).");
     expect(d.querySelector("[data-exec-note]")).toBeNull();
     button(d, "Run").click();
-    await vi.waitFor(() => expect(d.querySelector(".action-result")).not.toBeNull());
+    await waitFor(() => expect(d.querySelector(".action-result")).not.toBeNull());
     expect(run).toHaveBeenCalledWith("01SCH");
     expect(onRan).toHaveBeenCalled();
     const r = d.querySelector(".action-result")!;
@@ -117,7 +118,7 @@ describe("ActionButtons", () => {
     expect(note.textContent).toContain("15 min");
     expect(note.querySelector("a")!.getAttribute("href")).toBe("/p/terra/schedules?tab=actions&open=01EX");
     button(dialog()!, "Run").click();
-    await vi.waitFor(() => expect(dialog()!.querySelector(".action-result")).not.toBeNull());
+    await waitFor(() => expect(dialog()!.querySelector(".action-result")).not.toBeNull());
     const r = dialog()!.querySelector(".action-result")!;
     expect(r.getAttribute("data-status")).toBe("failed");
     expect(r.textContent).toContain("exit code 2");
@@ -136,7 +137,7 @@ describe("ActionButtons", () => {
     el.querySelector<HTMLButtonElement>("[data-action=notify]")!.click();
     await tick();
     button(dialog()!, "Run").click();
-    await vi.waitFor(() => expect(dialog()!.querySelector(".action-result")).not.toBeNull());
+    await waitFor(() => expect(dialog()!.querySelector(".action-result")).not.toBeNull());
     const r = dialog()!.querySelector(".action-result")!;
     expect(r.getAttribute("data-status")).toBe("refused");
     expect(r.textContent).toContain("is disabled");
