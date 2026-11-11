@@ -656,7 +656,6 @@ async fn recreate(
 ) -> ApiResult<Json<Value>> {
     let opts = opts.unwrap_or_default();
     if opts.force || !opts.discard_volumes.is_empty() {
-        crate::links::refuse_for_link("override Docker recreation safety checks")?;
         policy::operator_only(&actor, "overriding Docker recreation safety checks")?;
     }
     let r = load(&state, &actor, name).await?;
