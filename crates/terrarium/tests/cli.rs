@@ -361,7 +361,14 @@ fn subscription_cloud_budget_set_and_clear_preserve_settings() {
         let v: Value = serde_json::from_slice(&o.stdout).unwrap();
         assert_eq!(v["cloud"]["region"], "us-east-1");
         assert_eq!(v["cloud"]["models"]["haiku"], "profile");
-        assert_eq!(v["cloud"]["budget_usd"], if args.contains(&"--budget-usd") { json!(50) } else { Value::Null });
+        assert_eq!(
+            v["cloud"]["budget_usd"],
+            if args.contains(&"--budget-usd") {
+                json!(50)
+            } else {
+                Value::Null
+            }
+        );
     }
 }
 
