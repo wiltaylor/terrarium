@@ -17,11 +17,11 @@
 //! `POST /api/mail/{id}/release` and `POST /api/mail/threads/{id}/resume`.
 //! Only the operator reads the Inbox: it holds the operator's mail.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
-use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -32,13 +32,48 @@ use crate::policy;
 use crate::store::inbox::{self, Counts, Filter, InboxKind, Status, Watch};
 use crate::store::mail::{self, Address, Message};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/inbox", get(list))
-        .route("/inbox/counts", get(counts))
-        .route("/inbox/mail/{id}/ack", post(ack_mail))
-        .route("/inbox/asks", post(ask))
-        .route("/inbox/watches/{thread}", delete(cancel_watch))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route(
+            "/inbox",
+            get(list),
+            &[(
+                axum::http::Method::GET,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/inbox/counts",
+            get(counts),
+            &[(
+                axum::http::Method::GET,
+                super::link_registry::Access::OperatorRead,
+            )],
+        )
+        .route(
+            "/inbox/mail/{id}/ack",
+            post(ack_mail),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/inbox/asks",
+            post(ask),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
+            "/inbox/watches/{thread}",
+            delete(cancel_watch),
+            &[(
+                axum::http::Method::DELETE,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
 }
 
 fn operator(actor: &Actor) -> ApiResult<()> {

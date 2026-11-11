@@ -167,6 +167,7 @@ pub enum Control {
 pub struct Running {
     pub events: mpsc::Receiver<Ev>,
     pub ctl: mpsc::UnboundedSender<Control>,
+    pub host_session: Option<(String, u32)>,
 }
 
 /// Everything a run made, for short verbs.
@@ -226,6 +227,7 @@ impl Running {
 
 /// Turn a host session into a [`Running`].
 pub fn pump_host(mut hs: HostSession) -> Running {
+    let host_session = Some((hs.host().to_owned(), hs.id()));
     let (etx, erx) = mpsc::channel(EVENT_QUEUE);
     let (ctx, mut crx) = mpsc::unbounded_channel::<Control>();
     tokio::spawn(async move {
@@ -257,7 +259,7 @@ pub fn pump_host(mut hs: HostSession) -> Running {
                     }
                 }
                 c = crx.recv() => match c {
-                    None | Some(Control::Kill) => break,
+                    None | Some(Control::Kill) => { hs.abandon(); break; },
                     Some(Control::Stdin(b)) => { hs.stdin(b); }
                     Some(Control::File(b)) => { hs.file(b); }
                     Some(Control::Eof) => { hs.eof(); }
@@ -272,6 +274,7 @@ pub fn pump_host(mut hs: HostSession) -> Running {
     Running {
         events: erx,
         ctl: ctx,
+        host_session,
     }
 }
 
@@ -401,6 +404,7 @@ pub fn pump_process(
     Running {
         events: erx,
         ctl: ctx,
+        host_session: None,
     }
 }
 
@@ -410,6 +414,8 @@ pub fn pump_process(
 /// (a value can be a secret, TER-142).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct RemoteCmd {
+    /// Durable queue-step identity, bound atomically to a host session.
+    pub resume_key: Option<String>,
     /// The program and its arguments. Empty with `shell`.
     pub argv: Vec<String>,
     pub cwd: Option<String>,
@@ -665,7 +671,7 @@ pub fn container_name(def: &TargetDef) -> String {
         .unwrap_or_else(|| format!("terrarium-{}", def.name))
 }
 
-fn host_of(def: &TargetDef) -> ApiResult<&str> {
+pub(crate) fn host_of(def: &TargetDef) -> ApiResult<&str> {
     def.host
         .as_deref()
         .ok_or_else(|| ApiError::invalid(format!("target `{}` names no host agent", def.name)))
@@ -832,6 +838,61 @@ pub struct ExecSession {
     /// The report of a kill of a wrapped run ([`crate::run_kill`]).
     kill_report: Mutex<Option<crate::run_kill::Report>>,
     sync_end: Mutex<Option<mpsc::UnboundedSender<End>>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedExec {
+    id: String,
+    target: String,
+    owner: Option<String>,
+    shell: bool,
+    project: Option<String>,
+    host_session: Option<(String, u32)>,
+    secrets: Vec<(String, String)>,
+}
+
+/// Rebuild output consumers before the wait engine reconciles process waits.
+pub fn restore_sessions(state: &Shared) -> ApiResult<()> {
+    let journal = crate::hosts::resume::Journal::new(&state.state_dir);
+    for (_, saved) in journal.scan::<SavedExec>("exec/")? {
+        let kind = if saved.shell { "shell" } else { "exec" };
+        let (mut session, ctl) = ExecSession::new(
+            &saved.target,
+            saved.owner,
+            kind,
+            state.executor.buffer_limit,
+        );
+        Arc::get_mut(&mut session)
+            .ok_or_else(|| ApiError::internal("restored session is unexpectedly shared"))?
+            .id = saved.id;
+        if let Some((host, id)) = saved.host_session {
+            let hs = state
+                .executor
+                .hosts
+                .reattach(&host, id)
+                .ok_or_else(|| ApiError::internal("saved exec has no host replay channel"))?;
+            let secrets: Vec<_> = saved
+                .secrets
+                .into_iter()
+                .map(|(name, value)| (name, zeroize::Zeroizing::new(value)))
+                .collect();
+            let view = saved.project.map_or(
+                terrarium_core::redact::View::All,
+                terrarium_core::redact::View::Scope,
+            );
+            let run = redact_run(
+                pump_host(hs),
+                own_redactor(&secrets),
+                state.db.redactor().get(),
+                view,
+            );
+            tokio::spawn(attach(run, session.clone(), ctl, false, false));
+        } else {
+            session.finish(End::error("interrupted", "interrupted (ssh transport)"));
+        }
+        state.executor.insert(session);
+    }
+    Ok(())
 }
 
 /// One answer of `GET .../output`.
@@ -1494,6 +1555,10 @@ impl Executor {
             .map(|s| s.id.clone())
             .collect();
         for id in old {
+            if let Err(error) = self.hosts.forget_exec(&id) {
+                warn!(%error, session = id, "cannot expire durable exec session");
+                continue;
+            }
             if let Some(s) = t.remove(&id) {
                 s.kill();
             }
@@ -1552,6 +1617,7 @@ impl Executor {
 
     pub fn close(&self, actor: &Actor, target: &str, id: &str) -> ApiResult<()> {
         let s = self.session(actor, target, id)?;
+        self.hosts.forget_exec(&s.id)?;
         s.kill();
         self.table().remove(&s.id);
         Ok(())
@@ -1736,7 +1802,11 @@ pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<
             }
         }
     });
-    Ok(Running { events, ctl })
+    Ok(Running {
+        events,
+        ctl,
+        host_session: None,
+    })
 }
 
 /// Internal jobs and probes must participate in reservation admission and
@@ -1749,6 +1819,7 @@ pub(crate) fn track_resource_run(
     mut run: Running,
     report: Option<crate::run_kill::Report>,
 ) -> ApiResult<Running> {
+    let host_session = run.host_session.clone();
     let owner = state.db.read_now(|conn| {
         Ok(cmd
             .holder
@@ -1801,7 +1872,11 @@ pub(crate) fn track_resource_run(
             executor.table().remove(&session.id);
         }
     });
-    Ok(Running { events, ctl })
+    Ok(Running {
+        events,
+        ctl,
+        host_session,
+    })
 }
 
 /// The caller holds resource_lock through session registration.
@@ -1878,7 +1953,11 @@ pub(crate) fn start_cmd_locked(
             )?;
             let shell = caps.and_then(|c| c.shell);
             let make = host_frame(def, shell.as_deref(), cmd, limits)?;
-            Ok(pump_host(ex.hosts.open(host, make)?))
+            Ok(pump_host(ex.hosts.open_bound(
+                host,
+                cmd.resume_key.as_deref(),
+                make,
+            )?))
         }
     }
 }
@@ -2106,6 +2185,7 @@ async fn start_exec_secrets(
         actor,
         &def,
         cmd.agent.as_deref().or(cmd.holder.as_deref()),
+        row.def.kind == TargetKind::Exedev,
     )
     .await?;
     let resources = state.executor.target_resource_lock(&def).lock_owned().await;
@@ -2116,7 +2196,6 @@ async fn start_exec_secrets(
         Actor::Operator => terrarium_core::redact::View::All,
     };
     let own = own_redactor(&secrets);
-    drop(secrets);
     let run = redact_run(run, own, state.db.redactor().get(), view);
     let kind = if cmd.shell { "shell" } else { "exec" };
     let (sess, ctl) = ExecSession::new(
@@ -2126,6 +2205,20 @@ async fn start_exec_secrets(
         state.executor.buffer_limit,
     );
     sess.set_kill_report(report);
+    let saved = SavedExec {
+        id: sess.id.clone(),
+        target: sess.target.clone(),
+        owner: sess.owner.clone(),
+        shell: cmd.shell,
+        project: actor.agent().map(|a| a.project.clone()),
+        host_session: run.host_session.clone(),
+        secrets: secrets
+            .iter()
+            .map(|(label, value)| (label.clone(), value.to_string()))
+            .collect(),
+    };
+    state.executor.hosts.save_exec(&sess.id, &saved)?;
+    drop(secrets);
     workspace_sync::finish_with(&sess, sync);
     tokio::spawn(attach(run, sess.clone(), ctl, false, false));
     state.executor.insert(sess.clone());
@@ -2450,7 +2543,11 @@ pub(crate) fn redact_run(
     if redactor.is_empty() && own.is_none() {
         return run;
     }
-    let Running { mut events, ctl } = run;
+    let Running {
+        mut events,
+        ctl,
+        host_session,
+    } = run;
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(async move {
         let mut out = ExecRedact::new(own.as_ref(), &redactor, &view);
@@ -2514,7 +2611,11 @@ pub(crate) fn redact_run(
             }
         }
     });
-    Running { events: rx, ctl }
+    Running {
+        events: rx,
+        ctl,
+        host_session,
+    }
 }
 
 /// The body of `POST /api/targets/{name}/cp`.
@@ -2551,7 +2652,14 @@ pub async fn start_cp(
     check_cap(state, actor)?;
     no_exec(&row.def)?;
     let def = resolved_def(state, &row, Some(actor), body.agent.as_deref()).await?;
-    let sync = workspace_sync::prepare(state, actor, &def, body.agent.as_deref()).await?;
+    let sync = workspace_sync::prepare(
+        state,
+        actor,
+        &def,
+        body.agent.as_deref(),
+        row.def.kind == TargetKind::Exedev,
+    )
+    .await?;
     let push = body.direction == CpDirection::Push;
     let (sess, ctl) = ExecSession::new(
         name,
@@ -5134,7 +5242,7 @@ if [ -n "${TERRARIUM_GIT_SSH_KEY:-}" ]; then
   # The key comes base64-encoded on one line (TER-577), as the env of an ssh
   # target does: a docker target then keeps it in its 0600 env file.
   (umask 077 && printf '%s' "$TERRARIUM_GIT_SSH_KEY" | base64 -d > "$keyfile") \
-    || { echo "cannot decode the SSH key: the target needs base64 -d"; exit 2; }
+    || { echo "cannot decode the SSH key: the target needs base64 -d" >&2; exit 2; }
   export GIT_SSH_COMMAND="$sshbase -i $keyfile -o IdentitiesOnly=yes"
 fi
 unset TERRARIUM_GIT_SSH_KEY
@@ -5614,26 +5722,27 @@ mod tests {
         )
         .unwrap();
         let v = c.env["TERRARIUM_GIT_SSH_KEY"].clone();
-        assert!(!v.contains(['\n', '\r']), "{v}");
-        assert_eq!(
+        assert!(!v.contains(['\n', '\r']));
+        assert!(
             base64::engine::general_purpose::STANDARD
                 .decode(&v)
-                .unwrap(),
-            key.as_bytes()
+                .unwrap()
+                == key.as_bytes()
         );
-        assert_eq!(
-            checkout_env(Some(&s))["TERRARIUM_GIT_SSH_KEY"],
-            key.trim_end()
-        );
+        assert!(checkout_env(Some(&s))["TERRARIUM_GIT_SSH_KEY"] == key.trim_end());
         // A fake ssh first in PATH copies the key file that it gets.
         let bin = root.join("bin");
         std::fs::create_dir(&bin).unwrap();
         let got = root.join("got");
+        let key_path = root.join("key-path");
+        let mode = root.join("mode");
         std::fs::write(
             bin.join("ssh"),
             format!(
-                "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = -i ]; then cp \"$2\" {}; fi; shift; done\nexit 1\n",
-                got.display()
+                "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = -i ]; then cp \"$2\" {}; printf '%s' \"$2\" > {}; stat -c %a \"$2\" > {}; fi; shift; done\nexit 1\n",
+                got.display(),
+                key_path.display(),
+                mode.display()
             ),
         )
         .unwrap();
@@ -5654,20 +5763,18 @@ mod tests {
                 .unwrap()
         };
         let out = run(&c.env);
-        assert_eq!(
-            std::fs::read_to_string(&got).unwrap_or_default(),
-            key,
-            "{out:?}"
-        );
+        assert!(!out.status.success());
+        assert!(std::fs::read_to_string(&got).unwrap_or_default() == key);
+        assert_eq!(std::fs::read_to_string(&mode).unwrap().trim(), "600");
+        let removed = std::fs::read_to_string(&key_path).unwrap();
+        assert!(!Path::new(&removed).exists());
         // A value that is not base64 stops the script before git runs.
         let mut bad = c.env.clone();
         bad.insert("TERRARIUM_GIT_SSH_KEY".into(), "not base64!".into());
         let out = run(&bad);
         assert!(!out.status.success());
-        assert!(
-            String::from_utf8_lossy(&out.stdout).contains("cannot decode the SSH key"),
-            "{out:?}"
-        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains("cannot decode the SSH key"));
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("cannot decode the SSH key"));
     }
 
     /// S9 (secret manager review, 2026-10-29): the agent can write the

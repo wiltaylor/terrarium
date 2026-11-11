@@ -1,4 +1,7 @@
 import { useInstance } from "../../instance";
+import { ReadBoundary, useReadBoundary } from "../../components/ReadBoundary";
+import { CommentPost } from "../../components/CommentPost";
+import { PostEditor } from "../../components/PostEditor";
 import { useParams, useSearchParams } from "@solidjs/router";
 import { A, useNavigate } from "../../instance/navigation";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
@@ -753,6 +756,7 @@ function CardDrawer(props: {
   onArchived: () => void;
 }) {
   const { api, agents } = useInstance();
+  const read = useReadBoundary("card", () => props.card.id, () => props.card.comments.map((c) => c.created_at));
   const [comment, setComment] = createSignal("");
   let commentInput: HTMLTextAreaElement | undefined;
   const [error, setError] = createSignal<unknown>(null);
@@ -970,26 +974,16 @@ function CardDrawer(props: {
 
       <section class="stack" style={{ gap: "8px" }}>
         <h3 style={{ margin: 0 }}>Comments</h3>
+        <ErrorBanner error={read.error()} />
         <For each={props.card.comments} fallback={<p class="muted">No comments.</p>}>
-          {(c) => (
-            <div class="comment">
-              <div class="small muted">
-                <strong style={{ color: "var(--text)" }}>{c.author_name ?? c.author}</strong> · {ago(c.created_at)}
-                <Show when={c.session}>
-                  {(s) => (
-                    <>
-                      {" · "}
-                      <A href={sessionHref(s().id)} title={`${s().harness} session ${s().id}`}>
-                        View session
-                      </A>
-                    </>
-                  )}
-                </Show>
-              </div>
-              <div>
-                <TextMarkdown text={c.body} project={props.card.project} />
-              </div>
-            </div>
+          {(c, index) => (
+            <>
+            <Show when={index() === read.first()}><ReadBoundary /></Show>
+            <CommentPost comment={c} index={index()} card={props.card.id} project={props.card.project} onQuote={(text) => {
+              setComment((old) => old + (old ? "\n\n" : "") + text);
+              commentInput?.focus();
+            }} />
+            </>
           )}
         </For>
         <form
@@ -1006,7 +1000,9 @@ function CardDrawer(props: {
             }
           }}
         >
+          <PostEditor label="Comment" text={comment()} project={props.card.project}>
           <textarea ref={commentInput} value={comment()} onInput={(e) => setComment(e.currentTarget.value)} placeholder="Comment as operator" aria-label="Comment" />
+          </PostEditor>
           <EmojiPicker onPick={(code) => {
             const start = commentInput?.selectionStart ?? comment().length;
             const end = commentInput?.selectionEnd ?? start;

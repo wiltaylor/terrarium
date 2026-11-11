@@ -539,6 +539,7 @@ async fn a_stale_host_agent_updates_itself_from_the_host_listener() {
             enabled: true,
             supervised: true,
             idle_poll: Duration::from_millis(20),
+            drain_timeout: Duration::from_secs(600),
         });
         o
     };
@@ -643,6 +644,7 @@ async fn a_self_update_with_a_wrong_checksum_changes_nothing() {
         enabled: true,
         supervised: true,
         idle_poll: Duration::from_millis(20),
+        drain_timeout: Duration::from_secs(600),
     });
     let run = tokio::spawn(Client::new(o).run());
     // The agent stays online and its binary stays.
@@ -1239,34 +1241,8 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
         1,
         "unchanged refusals are not repeated"
     );
-    lab.td
-        .patch(
-            "/api/targets/terra-box",
-            json!({"work_root": base.join("elsewhere")}),
-        )
-        .await
-        .ok();
-    terrariumd::target_roots::sweep(&state).await.unwrap();
-    assert!(
-        root.join("target/output").exists(),
-        "changed location must not be cleaned"
-    );
-    let refused = lab
-        .td
-        .get("/api/audit?action=agent.target_cleanup_refused")
-        .await;
-    assert!(
-        refused
-            .ok()
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| { row["detail"]["error"] == "target machine or work_root changed" })
-    );
-    lab.td
-        .patch("/api/targets/terra-box", json!({"work_root": base}))
-        .await
-        .ok();
+    // Definition edits now invalidate the plan instead of retaining a stale
+    // cleanup row. That path is covered by the target store regression test.
     std::fs::write(root.join(".terrarium-owner"), &id).unwrap();
     terrariumd::target_roots::sweep(&state).await.unwrap();
     assert!(!root.exists());

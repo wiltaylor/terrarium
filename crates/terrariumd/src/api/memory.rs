@@ -1,11 +1,11 @@
 //! `/api/projects/{name}/memories`, `/api/memories/...` (PLAN §14).
 
+use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
 use serde::Deserialize;
 
 use super::{ApiJson, ApiQuery, Shared, paged};
@@ -17,13 +17,52 @@ use crate::store::memory::{
     self, Created, Graph, Memory, MemoryFilter, MemoryPatch, NewLinkIn, NewMemory,
 };
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/projects/{name}/memories", get(list).post(create))
-        .route("/memories/{id}", get(show).patch(update).delete(remove))
-        .route("/memories/{id}/graph", get(graph))
-        .route("/memories/{id}/links", post(link).delete(unlink))
-        .route("/memories/{id}/supersede", post(supersede))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route(
+            "/projects/{name}/memories",
+            get(list).post(create),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/memories/{id}",
+            get(show).patch(update).delete(remove),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/memories/{id}/graph",
+            get(graph),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/memories/{id}/links",
+            post(link).delete(unlink),
+            &[
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/memories/{id}/supersede",
+            post(supersede),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
 }
 
 async fn list(

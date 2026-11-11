@@ -1,10 +1,10 @@
 //! `/api/projects/{name}/board`, `/api/projects/{name}/cards`, `/api/cards/...`.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
 use serde::Deserialize;
 
 use super::longpoll::{self, WaitQuery};
@@ -17,19 +17,100 @@ use crate::store::Page;
 use crate::store::accepted_heads;
 use crate::store::board::{self, Board, Card, CardFilter, CardPatch, ColumnSpec, NewCard, NewLink};
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/projects/{name}/board", get(show_board).patch(patch_board))
-        .route("/projects/{name}/cards", get(list_cards).post(create_card))
-        .route("/projects/{name}/github-issues/import", post(import_issue))
-        .route("/cards", get(active_cards))
-        .route("/cards/{id}", get(show).patch(update).delete(archive))
-        .route("/cards/{id}/move", post(move_card))
-        .route("/cards/{id}/assign", post(assign))
-        .route("/cards/{id}/claim", post(claim))
-        .route("/cards/{id}/comments", get(comments).post(comment))
-        .route("/cards/{id}/links", post(link))
-        .route("/cards/{id}/events", get(card_events))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route(
+            "/projects/{name}/board",
+            get(show_board).patch(patch_board),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
+            ],
+        )
+        .route(
+            "/projects/{name}/cards",
+            get(list_cards).post(create_card),
+            &[
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::Conditional,
+                ),
+                (
+                    axum::http::Method::POST,
+                    super::link_registry::Access::Conditional,
+                ),
+            ],
+        )
+        .route(
+            "/projects/{name}/github-issues/import",
+            post(import_issue),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/cards",
+            get(active_cards),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/cards/{id}",
+            get(show).patch(update).delete(archive),
+            &[
+                (
+                    axum::http::Method::GET,
+                    super::link_registry::Access::Conditional,
+                ),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Conditional,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Conditional,
+                ),
+            ],
+        )
+        .route(
+            "/cards/{id}/move",
+            post(move_card),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/cards/{id}/assign",
+            post(assign),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::Conditional,
+            )],
+        )
+        .route(
+            "/cards/{id}/claim",
+            post(claim),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/cards/{id}/comments",
+            get(comments).post(comment),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
+            "/cards/{id}/links",
+            post(link),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/cards/{id}/events",
+            get(card_events),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
 }
 
 #[derive(Deserialize)]

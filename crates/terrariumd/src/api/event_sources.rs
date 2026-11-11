@@ -6,10 +6,10 @@
 //! their project, a project_admin manages them, a global source needs a
 //! sysadmin. The secret is in the answers of create and rotate only.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use axum::{Json, Router};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::ci;
@@ -23,14 +23,36 @@ use crate::store::event_sources::{
     self, EventSource, ListFilter, NewSource, SourceKind, SourcePatch,
 };
 
-pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route("/event-sources", get(list).post(create))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new()
+        .route(
+            "/event-sources",
+            get(list).post(create),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::POST, super::link_registry::Access::Link),
+            ],
+        )
         .route(
             "/event-sources/{id}",
             get(show).patch(update).delete(remove),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
+                (
+                    axum::http::Method::DELETE,
+                    super::link_registry::Access::Link,
+                ),
+            ],
         )
-        .route("/event-sources/{id}/rotate", post(rotate))
+        .route(
+            "/event-sources/{id}/rotate",
+            post(rotate),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
 }
 
 /// The emit route, `POST /api/events`. The router adds it to the `GET`
