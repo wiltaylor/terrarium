@@ -10438,11 +10438,18 @@ async fn version_names_missing_required_templates() {
     let out = ok(
         false,
         &["version"],
-        vec![(200, json!({"version": terrarium_version::FULL,
-            "missing_templates": ["global:request"]}))],
+        vec![(
+            200,
+            json!({"version": terrarium_version::FULL,
+            "missing_templates": ["global:request"]}),
+        )],
         vec![req(Get, "/api/system/version")],
-    ).await;
-    assert!(out.contains("warning: required daemon template global:request is missing"), "{out}");
+    )
+    .await;
+    assert!(
+        out.contains("warning: required daemon template global:request is missing"),
+        "{out}"
+    );
 }
 
 #[tokio::test]
