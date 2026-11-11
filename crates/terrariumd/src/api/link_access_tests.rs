@@ -246,7 +246,7 @@ async fn link_unregistered_routes_never_reach_handlers() {
         // a cfg'd helper, or a nested/merged axum router.
         let plain = Router::new().route(
             "/hidden",
-            get(move || async move {
+            axum::routing::get(move || async move {
                 called.fetch_add(1, Ordering::SeqCst);
                 StatusCode::OK
             }),
@@ -277,5 +277,36 @@ async fn link_unregistered_routes_never_reach_handlers() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(called.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn link_hidden_methods_in_helpers_are_not_registered() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let s = state_at(dir.path());
+    let (_, key) = paired(&s, false).await;
+    let called = Arc::new(AtomicUsize::new(0));
+    let app = || {
+        let called = called.clone();
+        // A helper silently adding POST cannot extend the GET declaration.
+        let methods = axum::routing::get(|| async { StatusCode::OK }).post(move || async move {
+            called.fetch_add(1, Ordering::SeqCst);
+            StatusCode::OK
+        });
+        let child = link_registry::RegisteredRouter::new().route("/declared", methods,
+            &[(axum::http::Method::GET, link_registry::Access::Link)]);
+        let (router, registry) = link_registry::RegisteredRouter::new().nest("/api", child).into_parts();
+        let mut auth = TokenAuth::new("t".into(), false).with_links(LinkAuth { db: s.db.clone(), runtime: s.links.clone() });
+        auth.registry = Arc::new(registry);
+        authenticated_router(s.clone(), router.with_state(s.clone()), auth)
+    };
+    let bearer = format!("Bearer {key}");
+    let h = [("authorization", bearer.as_str())];
+    assert_eq!(send(app(), "GET", "/api/declared", &h).await.status(), StatusCode::OK);
+    assert_eq!(send(app(), "HEAD", "/api/declared", &h).await.status(), StatusCode::OK);
+    assert_eq!(send(app(), "POST", "/api/declared", &h).await.status(), StatusCode::FORBIDDEN);
+    assert_eq!(called.load(Ordering::SeqCst), 0);
+    assert_eq!(send(app(), "POST", "/api/declared", &[("authorization", "Bearer t")]).await.status(), StatusCode::OK);
     assert_eq!(called.load(Ordering::SeqCst), 1);
 }
