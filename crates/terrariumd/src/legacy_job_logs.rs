@@ -13,7 +13,10 @@ const PAGE: usize = 256;
 const PRUNE_SQL: &str = "DELETE FROM legacy_log_listings WHERE digest IN (SELECT digest FROM legacy_log_listings INDEXED BY legacy_log_listings_expiry WHERE expires_at < ? ORDER BY expires_at LIMIT 256)";
 
 /// Keep listings for a day after expiry, including consumed listings. No log data is touched.
-pub(crate) async fn prune(db: &crate::db::Db, now: chrono::DateTime<chrono::Utc>) -> ApiResult<usize> {
+pub(crate) async fn prune(
+    db: &crate::db::Db,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ApiResult<usize> {
     let cutoff = (now - chrono::Duration::days(1)).to_rfc3339();
     db.write("system", move |tx| Ok(tx.execute(PRUNE_SQL, [cutoff])?))
         .await
@@ -270,6 +273,9 @@ pub async fn confirm(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
     #[test]
     fn listing_prune_is_bounded_indexed_and_preserves_live_rows() {
         let dir = tempfile::tempdir().unwrap();
@@ -283,22 +289,42 @@ mod tests {
             ("consumed", "2026-01-02T12:00:00+00:00", 1),
             ("boundary", "2026-01-02T00:00:00+00:00", 1),
         ] {
-            db.execute("INSERT INTO legacy_log_listings VALUES (?,'p','t','identity',?,'[]',?)", params![id, expiry, consumed]).unwrap();
+            db.execute(
+                "INSERT INTO legacy_log_listings VALUES (?,'p','t','identity',?,'[]',?)",
+                params![id, expiry, consumed],
+            )
+            .unwrap();
         }
         let cutoff = "2026-01-02T00:00:00+00:00";
-        let plans = db.prepare(&format!("EXPLAIN QUERY PLAN {PRUNE_SQL}")).unwrap()
-            .query_map([cutoff], |r| r.get::<_, String>(3)).unwrap()
-            .collect::<Result<Vec<_>, _>>().unwrap();
-        assert!(plans.iter().any(|p| p.contains("SEARCH") && p.contains("legacy_log_listings_expiry")), "{plans:?}");
-        assert!(!plans.iter().any(|p| p.contains("SCAN legacy_log_listings") || p.contains("TEMP B-TREE")), "{plans:?}");
+        let plans = db
+            .prepare(&format!("EXPLAIN QUERY PLAN {PRUNE_SQL}"))
+            .unwrap()
+            .query_map([cutoff], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            plans
+                .iter()
+                .any(|p| p.contains("SEARCH") && p.contains("legacy_log_listings_expiry")),
+            "{plans:?}"
+        );
+        assert!(
+            !plans
+                .iter()
+                .any(|p| p.contains("SCAN legacy_log_listings") || p.contains("TEMP B-TREE")),
+            "{plans:?}"
+        );
         assert_eq!(db.execute(PRUNE_SQL, [cutoff]).unwrap(), 256);
         assert_eq!(db.execute(PRUNE_SQL, [cutoff]).unwrap(), 44);
         assert_eq!(db.execute(PRUNE_SQL, [cutoff]).unwrap(), 0);
-        assert_eq!(db.query_row("SELECT count(*) FROM legacy_log_listings", [], |r| r.get::<_, i64>(0)).unwrap(), 4);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM legacy_log_listings", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
     }
-
-    #![allow(clippy::unwrap_used)]
-    use super::*;
 
     #[test]
     fn inspection_refuses_symlinked_roots_and_files() {
