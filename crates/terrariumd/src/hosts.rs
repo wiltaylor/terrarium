@@ -192,7 +192,9 @@ impl Slot {
         let mut count = self.output_events.len();
         let mut prune = 0;
         for (_, len) in &self.output_events {
-            if bytes <= crate::executor::SESSION_BUFFER && count <= 4096 { break }
+            if bytes <= crate::executor::SESSION_BUFFER && count <= 4096 {
+                break;
+            }
             bytes -= len;
             count -= 1;
             prune += 1;
@@ -350,7 +352,10 @@ impl HostRegistry {
                     if let SessionEvent::Data { stream, bytes } = &ev {
                         replay_bytes += bytes.len() as u64;
                         if matches!(stream, StreamTag::Stdout | StreamTag::Stderr) {
-                            let seq = key.rsplit('/').next().and_then(|seq| seq.parse().ok())
+                            let seq = key
+                                .rsplit('/')
+                                .next()
+                                .and_then(|seq| seq.parse().ok())
                                 .ok_or_else(|| ApiError::internal("bad replay event sequence"))?;
                             output_events.push_back((seq, bytes.len()));
                         }
@@ -438,11 +443,16 @@ impl HostRegistry {
         if let Some((key, id)) = binding {
             values.push((format!("bound/{key}"), json!((host, id))));
         }
-        let removed: Vec<_> = event.into_iter().flat_map(|(id, _)| {
-            let slot = &entry.sessions[&id];
-            slot.output_events.iter().take(slot.prune_count())
-                .map(move |(seq, _)| format!("event/{host}/{id}/{seq:020}"))
-        }).collect();
+        let removed: Vec<_> = event
+            .into_iter()
+            .flat_map(|(id, _)| {
+                let slot = &entry.sessions[&id];
+                slot.output_events
+                    .iter()
+                    .take(slot.prune_count())
+                    .map(move |(seq, _)| format!("event/{host}/{id}/{seq:020}"))
+            })
+            .collect();
         journal.replace(&values, &removed, &[])
     }
 
@@ -1039,14 +1049,22 @@ impl HostRegistry {
         if let SessionEvent::Data { bytes, .. } = &event {
             s.received += bytes.len() as u64;
         }
-        let output = matches!(&event, SessionEvent::Data { stream: StreamTag::Stdout | StreamTag::Stderr, .. });
+        let output = matches!(
+            &event,
+            SessionEvent::Data {
+                stream: StreamTag::Stdout | StreamTag::Stderr,
+                ..
+            }
+        );
         if output && let SessionEvent::Data { bytes, .. } = &event {
             s.output_events.push_back((s.events, bytes.len()));
         }
         if self.persist(host, entry, Some((id, &event))).is_err() {
             let s = entry.sessions.get_mut(&id).unwrap();
             (s.received, s.held, s.events, s.terminal, s.ended_at) = old;
-            if output { s.output_events.pop_back(); }
+            if output {
+                s.output_events.pop_back();
+            }
             if let Some(c) = &entry.conn {
                 let _ = c.tx.send(Outgoing::Close(None));
             }
@@ -2173,24 +2191,49 @@ mod tests {
         crate::secrets::ensure_key(&db, dir.path()).unwrap();
         let reg = Arc::new(registry("lab1", true));
         reg.restore(dir.path()).unwrap();
-        let session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let session = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
         let id = session.id();
         let chunk = crate::executor::SESSION_BUFFER / 4;
         for byte in 0..6 {
-            reg.on_data("lab1", DataFrame::new(id, StreamTag::Stdout, vec![byte; chunk]));
+            reg.on_data(
+                "lab1",
+                DataFrame::new(id, StreamTag::Stdout, vec![byte; chunk]),
+            );
         }
-        reg.on_session_frame("lab1", HostFrame::Exit { session: id, code: Some(23), signal: None, reason: ExitReason::Exited });
+        reg.on_session_frame(
+            "lab1",
+            HostFrame::Exit {
+                session: id,
+                code: Some(23),
+                signal: None,
+                reason: ExitReason::Exited,
+            },
+        );
         drop(session);
         drop(reg);
         let restored = Arc::new(HostRegistry::default());
         restored.restore(dir.path()).unwrap();
-        assert_eq!(restored.lock()["lab1"].sessions[&id].received, (6 * chunk) as u64);
+        assert_eq!(
+            restored.lock()["lab1"].sessions[&id].received,
+            (6 * chunk) as u64
+        );
         let mut session = restored.reattach("lab1", id).unwrap();
         assert_eq!(session.consumed, (2 * chunk) as u64);
         for byte in 2..6 {
-            assert_eq!(session.recv().await, Some(SessionEvent::Data { stream: StreamTag::Stdout, bytes: vec![byte; chunk] }));
+            assert_eq!(
+                session.recv().await,
+                Some(SessionEvent::Data {
+                    stream: StreamTag::Stdout,
+                    bytes: vec![byte; chunk]
+                })
+            );
         }
-        assert!(matches!(session.recv().await, Some(SessionEvent::Exit { code: Some(23), .. })));
+        assert!(matches!(
+            session.recv().await,
+            Some(SessionEvent::Exit { code: Some(23), .. })
+        ));
         assert_eq!(session.consumed, (6 * chunk) as u64);
     }
 
