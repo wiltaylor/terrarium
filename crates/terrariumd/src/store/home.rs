@@ -324,12 +324,12 @@ mod tests {
                 t,
                 &actor,
                 &card.id,
-                "research",
+                "ready",
                 None,
                 Some("Current custom reason\nDetails"),
             )?;
             let patch = serde_json::from_value(json!({"home_board_columns": {
-                "in_progress": [], "review": [], "accepted": [], "blocked": ["research"]
+                "in_progress": [], "review": [], "accepted": [], "blocked": ["ready"]
             }}))
             .unwrap();
             projects::update(t, "alpha", &patch)?;
@@ -395,8 +395,8 @@ mod tests {
             assert_eq!(alpha.items[0]["title"], "alpha ready");
             let blocked = list(c, "cards", "blocked", None, &Page::default())?;
             assert_eq!(blocked.items.len(), 2);
-            // Creation in blocked is not a move. No older comment is a reason.
-            assert!(blocked.items[0]["blocked_reason"].is_null());
+            // Creation through the board API records an initial move.
+            assert_eq!(blocked.items[0]["blocked_reason"], "Need a lease");
             let mut cursor = None;
             let mut count = 0;
             let mut pages = 0;
