@@ -2498,7 +2498,7 @@ impl JobRepo {
                 .local(&["fsck", "--connectivity-only", "--no-dangling"])
                 .is_err()
         {
-            std::fs::write(self.c.dest.join("job-damaged"), b"").map_err(io)?;
+            // Mutation check: deliberately omit the durable damage marker.
         }
         result.map(|_| ())
     }
