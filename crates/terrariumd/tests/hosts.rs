@@ -4673,10 +4673,12 @@ async fn docker_recreate_requires_admin_and_refuses_live_sessions() {
     lab.td.post_empty("/api/targets/dbox/up").await.ok();
     let sid = exec(&lab.td, "dbox", json!({"cmd": ["sleeper"]})).await;
     lab.td.post_empty("/api/targets/dbox/down").await.ok();
-    lab.td
-        .post_empty("/api/targets/dbox/recreate")
-        .await
-        .err(409, "conflict");
+    let r = lab.td.post_empty("/api/targets/dbox/recreate").await;
+    r.err(409, "conflict");
+    assert_eq!(
+        r.body["error"]["message"],
+        "recreate refused: exec sessions are live on the target"
+    );
     assert!(!lab.log().contains("docker rm"));
     std::fs::write(lab.bins.path().join("sleeper.end"), "").unwrap();
     drain(&lab.td, "dbox", &sid).await;

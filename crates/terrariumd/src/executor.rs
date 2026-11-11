@@ -3277,16 +3277,12 @@ pub async fn lifecycle(
                     let fits = want.iter().all(|w| now.contains(w));
                     match docker_state(state, def).await?.as_str() {
                         "running" if fits => {}
-                        "running" => match recreate_refusal(state, def) {
-                            None => {
-                                docker_rm(state, def).await?;
-                                docker_run(state, def, &want).await?;
-                                attached = Some(want);
-                            }
-                            Some(why) => {
+                        "running" => {
+                            // Docker workspace changes always refuse recreation.
+                            if let Some(why) = recreate_refusal(state, def) {
                                 attach_error = Some(attach_refused(def, &now, &want, &why))
                             }
-                        },
+                        }
                         "absent" => {
                             check_running_cap(state, def, None).await?;
                             docker_run(state, def, &want).await?;
@@ -3936,9 +3932,10 @@ pub async fn delete_snapshot(
 // agent holds, at `/work/<project>/<agent>`. A docker target binds it at
 // `docker run`; a vmlab target syncs it with an `@dev` decorator in the
 // lab file of its instance (`vmlab.prepare`). Neither can add a workspace
-// to a running container or lab, so a new holder of a running target
-// needs a new container (or lab instance): the daemon makes one when the
-// target is ephemeral and no session is live, else the answer says
+// to a running container or lab. The daemon may replace an ephemeral lab
+// instance when no session is live. It never replaces a running Docker
+// container for workspace changes, since background processes may remain
+// after exec sessions end. A workspace that cannot join gets
 // "attach needs a restart of the target".
 
 /// A `lab_repo` or `lab_from_workspace` target: the daemon makes its lab
@@ -4793,30 +4790,18 @@ pub async fn detach(
               "the workspace stays attached until the target runs again: {why}");
         return Ok(None);
     }
-    let want = attach_set(state, &row.def.name, None, Some(agent)).await?;
-    let out = match row.def.kind {
-        TargetKind::Docker => {
-            docker_rm(state, &row.def).await?;
-            docker_run(state, &row.def, &want).await?;
-            let mut rt = row.runtime.clone();
-            rt.attached = want.clone();
-            store_runtime(state, &row.def.name, rt).await?;
-            json!({"target": row.def.name, "verb": "up", "state": "running", "attached": want})
-        }
-        _ => {
-            let d = LifecycleOpts {
-                destroy: true,
-                leaving: Some(agent.to_owned()),
-                ..LifecycleOpts::default()
-            };
-            lifecycle(state, &row.def, LifecycleVerb::Destroy, &d).await?;
-            let u = LifecycleOpts {
-                leaving: Some(agent.to_owned()),
-                ..LifecycleOpts::default()
-            };
-            lifecycle(state, &row.def, LifecycleVerb::Up, &u).await?
-        }
+    // Docker always returned above: only lab instances can be replaced.
+    let d = LifecycleOpts {
+        destroy: true,
+        leaving: Some(agent.to_owned()),
+        ..LifecycleOpts::default()
     };
+    lifecycle(state, &row.def, LifecycleVerb::Destroy, &d).await?;
+    let u = LifecycleOpts {
+        leaving: Some(agent.to_owned()),
+        ..LifecycleOpts::default()
+    };
+    let out = lifecycle(state, &row.def, LifecycleVerb::Up, &u).await?;
     audit_system(state, &row, "target.detach", reason, &out).await?;
     Ok(Some(out))
 }
