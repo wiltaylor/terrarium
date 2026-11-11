@@ -275,6 +275,7 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
         QuestionCmd::Ask {
             text,
             options,
+            multi_select,
             context,
             card,
             urgent,
@@ -290,6 +291,7 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
             }
             let me = ctx.me().await?;
             let mut body = json!({"text": ctx.text(text)?});
+            body["multi_select"] = json!(multi_select);
             super::set_list(&mut body, "options", options);
             super::set_opt(&mut body, "context", context_value(ctx, context)?);
             super::set_opt(&mut body, "card", card.clone());

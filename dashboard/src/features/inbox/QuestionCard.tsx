@@ -31,6 +31,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
   const q = () => props.question;
   const notice = () => q().kind === "notice";
   const [option, setOption] = createSignal<number | null>(null);
+  const [selected, setSelected] = createSignal<number[]>([]);
   const [text, setText] = createSignal("");
   const [skip, setSkip] = createSignal(false);
   const [reason, setReason] = createSignal("");
@@ -57,7 +58,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
       if ("error" in t) return setError(t.error);
       return void run(() => api.questions.ack(q().id, t.text));
     }
-    const b = answerBody(q(), text(), option(), skip());
+    const b = answerBody(q(), text(), option(), skip(), selected());
     if ("error" in b) return setError(b.error);
     void run(() => api.questions.answer(q().id, b.body));
   };
@@ -132,9 +133,13 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
             <div class="row" style={{ "flex-wrap": "wrap", gap: "6px" }} role="group" aria-label="Options">
               <For each={q().options}>
                 {(o, i) => (
+                  <Show when={q().multi_select} fallback={
                   <button type="button" class={option() === i() ? "primary" : ""} aria-pressed={option() === i()} onClick={() => { setSkip(false); setOption(option() === i() ? null : i()); }}>
                     {o}
                   </button>
+                  }>
+                    <label><input type="checkbox" checked={selected().includes(i())} onChange={(e) => { setSkip(false); setSelected(e.currentTarget.checked ? [...selected(), i()] : selected().filter((n) => n !== i())); }} />{o}</label>
+                  </Show>
                 )}
               </For>
             </div>
@@ -153,7 +158,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
             <Show
               when={notice()}
               fallback={
-                <button class="primary" type="submit" disabled={busy() || (!text().trim() && option() === null)}>
+                <button class="primary" type="submit" disabled={busy() || (skip() ? !text().trim() : !q().multi_select && !text().trim() && option() === null)}>
                   {skip() ? "Send skip reason" : "Send answer"}
                 </button>
               }
@@ -187,6 +192,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
       </Show>
 
       <Show when={q().status === "answered" || q().status === "acknowledged"}>
+        <For each={q().answer_options}>{(i) => <div>Chosen: <strong>{q().options[i]}</strong></div>}</For>
         <div class="stack small" style={{ gap: "4px" }}>
           <Show when={chosenLabel(q())}>
             {(l) => (

@@ -2746,6 +2746,9 @@ pub enum ThreadCmd {
         /// A choice for the operator; repeat for more (at most 10)
         #[arg(long = "option", short = 'o', conflicts_with = "bundle")]
         options: Vec<String>,
+        /// Allow any number of checked options, including none
+        #[arg(long, conflicts_with = "bundle")]
+        multi_select: bool,
         /// Ask a bundle: the questions come from --item or --items-file
         #[arg(long)]
         bundle: bool,
@@ -2855,6 +2858,9 @@ pub enum QuestionCmd {
         /// A choice for the operator; repeat for more (at most 10)
         #[arg(long = "option", short = 'o')]
         options: Vec<String>,
+        /// Allow any number of checked options, including none
+        #[arg(long)]
+        multi_select: bool,
         #[command(flatten)]
         context: QuestionContext,
         /// The card that the question is about

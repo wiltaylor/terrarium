@@ -183,9 +183,13 @@ export function BundleCard(props: { question: Question; now: number; showAgent?:
                         <div class="row" style={{ "flex-wrap": "wrap", gap: "6px" }} role="group" aria-label={`${label()} options`}>
                           <For each={item.options}>
                             {(o, k) => (
+                              <Show when={item.multi_select} fallback={
                               <button type="button" class={d().option === k() ? "primary" : ""} aria-pressed={d().option === k()} onClick={() => edit(i(), { option: d().option === k() ? null : k(), skip: false })}>
                                 {o}
                               </button>
+                              }>
+                                <label><input type="checkbox" checked={d().options?.includes(k()) ?? false} onChange={(e) => edit(i(), { options: e.currentTarget.checked ? [...(d().options ?? []), k()] : (d().options ?? []).filter((n) => n !== k()), skip: false })} />{o}</label>
+                              </Show>
                             )}
                           </For>
                         </div>
