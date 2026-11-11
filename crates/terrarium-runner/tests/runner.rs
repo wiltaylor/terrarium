@@ -882,7 +882,8 @@ async fn a_dialog_preserves_the_person_mark() {
     h.runner.write(b"\x12").await.expect("show dialog");
     until_status(&mut h.events, AgentStatus::Blocked).await;
     until_screen(&h, "Allow the tool?").await;
-    tokio::time::sleep(ms(2_000)).await;
+    // Cover both PERSON_INPUT_SLACK and INPUT_CLEAR_DEBOUNCE.
+    tokio::time::sleep(ms(4_000)).await;
     h.runner.write(b"\x14").await.expect("restore draft");
     until_screen(&h, "[Pasted text #1 +2 lines]").await;
     h.runner.answer("dialog", &Answer::Deny).await.expect("answer");
