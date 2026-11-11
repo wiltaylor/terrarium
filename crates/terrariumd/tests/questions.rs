@@ -370,9 +370,7 @@ async fn relinking_and_legacy_edits_do_not_reapply_ask_rules() {
         .err(409, "conflict");
     // Both privileged actors may deliberately consolidate questions.
     for actor in [None, Some(sys.as_str())] {
-        td.patch(&path, json!({"card": second["card"]}))
-            .await
-            .ok();
+        td.patch(&path, json!({"card": second["card"]})).await.ok();
         let patch = json!({"card": card});
         let result = match actor {
             None => td.patch(&path, patch).await,
@@ -384,19 +382,18 @@ async fn relinking_and_legacy_edits_do_not_reapply_ask_rules() {
     td.patch_as(&lead, &path, json!({"text": "Revised?"}))
         .await
         .ok();
-    td.patch_as(&lead, &path, json!({"card": card}))
-        .await
-        .ok();
+    td.patch_as(&lead, &path, json!({"card": card})).await.ok();
     // Simulate an item persisted before work context was required.
     let conn = rusqlite::Connection::open(td.state.join("terrarium.db")).unwrap();
-    conn.execute("UPDATE questions SET card = NULL WHERE id = ?1", [id(&second)])
-        .unwrap();
+    conn.execute(
+        "UPDATE questions SET card = NULL WHERE id = ?1",
+        [id(&second)],
+    )
+    .unwrap();
     td.patch_as(&lead, &path, json!({"text": "Legacy edit?"}))
         .await
         .ok();
-    td.patch_as(&lead, &path, json!({"card": null}))
-        .await
-        .ok();
+    td.patch_as(&lead, &path, json!({"card": null})).await.ok();
     td.patch_as(&lead, &path, json!({"card": card}))
         .await
         .err(409, "conflict");
