@@ -837,8 +837,19 @@
     {
       "source": "api/jobs.rs",
       "registration": "\"/projects/{name}/jobs/legacy-logs\",post(legacy_logs)",
-      "access": "other",
-      "cases": []
+      "access": "operator-only",
+      "cases": [
+        {
+          "method": "POST",
+          "path": "/api/projects/p/jobs/legacy-logs",
+          "body": { "target": "box" }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/p/jobs/legacy-logs",
+          "body": { "target": "box", "confirm": "digest" }
+        }
+      ]
     },
     {
       "source": "api/jobs.rs",
@@ -2778,6 +2789,7 @@
       "board::update_card(t,&Actor::Operator,&c.card,patch)?;",
       "board::update_card(t,&Actor::Operator,&card.id,patch)?;",
       "board::update_card(t,&Actor::Operator,&card.id,patch)?;",
+      "policy::operator_only(&actor,\"attestingownershipoflegacyjoblogs\")?;",
       "policy::operator_only(&actor,\"retiringaprotectedreleasetarget\")?;"
     ],
     "api/links.rs": [
