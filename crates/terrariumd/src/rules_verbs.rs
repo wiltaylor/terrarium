@@ -293,8 +293,14 @@ pub fn perform(
         }
         "card.move" => card_move(t, actor, ctx, &a, &mut effects)?,
         "card.wait_action" => {
-            if !ctx.event.as_ref().is_some_and(|e| e.kind == "card" && e.data["change"] == "wait_met") {
-                return Err(ApiError::invalid("card.wait_action needs a `card` event with change wait_met"));
+            if !ctx
+                .event
+                .as_ref()
+                .is_some_and(|e| e.kind == "card" && e.data["change"] == "wait_met")
+            {
+                return Err(ApiError::invalid(
+                    "card.wait_action needs a `card` event with change wait_met",
+                ));
             }
             let card = the_card(ctx, verb)?;
             let generation = ctx
