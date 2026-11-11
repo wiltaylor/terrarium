@@ -414,7 +414,8 @@ async fn workspace_sync_path_failure_on_exedev_explains_the_workaround() {
             .body
             .to_string()
             .contains("cannot write the sandbox workspace path"),
-        "{}", response.body
+        "{}",
+        response.body
     );
     assert!(response.body.to_string().contains("sync_workspace = false"));
     assert!(response.body.to_string().contains("TER-873"));
