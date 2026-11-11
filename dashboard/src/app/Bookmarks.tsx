@@ -28,7 +28,7 @@ export function Bookmarks(props: { nav?: ReturnType<typeof createRovingTree> }) 
       <For each={bookmarks.items()} fallback={<li role="none" class="muted small">No bookmarks.</li>}>
         {(b) => (
           <li role="none" class="row">
-            <Show when={b.href.startsWith("/")} fallback={<InstanceAnchor role="treeitem" data-key={bookmarkKey(b.href)} tabIndex={nav.tabIndex(bookmarkKey(b.href))} onFocus={() => nav.setFocusKey(bookmarkKey(b.href))} href={b.href} target="_blank" rel="noopener noreferrer" title="Opens in a new window">{b.title}</InstanceAnchor}>
+            <Show when={b.href.startsWith("/")} fallback={<InstanceAnchor role="treeitem" data-key={bookmarkKey(b.href)} tabIndex={nav.tabIndex(bookmarkKey(b.href))} onFocus={() => nav.setFocusKey(bookmarkKey(b.href))} href={b.href} target="_blank" rel="noopener noreferrer" title="Opens in a new window">{b.title}</InstanceAnchor>}>
               <A role="treeitem" data-key={bookmarkKey(b.href)} tabIndex={nav.tabIndex(bookmarkKey(b.href))} onFocus={() => nav.setFocusKey(bookmarkKey(b.href))} href={b.href}>{b.title}</A>
             </Show>
           </li>

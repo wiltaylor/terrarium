@@ -39,7 +39,7 @@ function ExtLink(props: { href: string | null | undefined; children: string }) {
       {(h) => (
         <InstanceAnchor href={h()} target="_blank" rel="noopener noreferrer">
           {props.children}
-        </InstanceAnchor
+        </InstanceAnchor>
       )}
     </Show>
   );
@@ -89,7 +89,7 @@ function RunDetailBody(props: { run: PipelineRunDetail; now: number }) {
           {(h) => (
             <InstanceAnchor href={h()} target="_blank" rel="noopener noreferrer">
               Open in {r().adapter === "github" ? "GitHub" : "the CI system"} ↗
-            </InstanceAnchor
+            </InstanceAnchor>
           )}
         </Show>
       </div>

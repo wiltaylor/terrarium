@@ -229,7 +229,7 @@ export default function SubscriptionsPage() {
                     {(u) => (
                       <InstanceAnchor class="btn small" href={u()} target="_blank" rel="noopener noreferrer" title={`Open ${u()} in a new tab`}>
                         Status page
-                      </InstanceAnchor
+                      </InstanceAnchor>
                     )}
                   </Show>
                   <Show

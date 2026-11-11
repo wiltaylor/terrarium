@@ -73,7 +73,7 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
                   {" · "}
                   <InstanceAnchor href={u()} download={props.artifact.name} target="_blank" rel="noopener noreferrer">
                     {props.artifact.kind === "bundle" ? "Open" : "Download"}
-                  </InstanceAnchor
+                  </InstanceAnchor>
                 </>
               )}
             </Show>
@@ -107,7 +107,7 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
               <iframe class="artifact-frame" src={u()} sandbox="allow-scripts" referrerPolicy="no-referrer" title={props.artifact.name} style={{ "min-height": "420px" }} />
               <InstanceAnchor class="small" href={u()} target="_blank" rel="noopener noreferrer">
                 Open {props.artifact.name} in a new tab
-              </InstanceAnchor
+              </InstanceAnchor>
             </Match>
             <Match when={kind() === "html"}>
               <iframe class="artifact-frame" src={u()} sandbox="allow-scripts" referrerPolicy="no-referrer" title={props.artifact.name} />
@@ -123,7 +123,7 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
                 No preview for {props.artifact.content_type}.{" "}
                 <InstanceAnchor href={u()} download={props.artifact.name}>
                   Download
-                </InstanceAnchor
+                </InstanceAnchor>
               </div>
             </Match>
           </Switch>

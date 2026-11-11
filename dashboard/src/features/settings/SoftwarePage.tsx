@@ -144,7 +144,7 @@ export default function SoftwarePage() {
                       <>
                         <InstanceAnchor class="mono" href={l().url} target="_blank" rel="noreferrer">
                           {l().version}
-                        </InstanceAnchor{" "}
+                        </InstanceAnchor>{" "}
                         <Show when={l().prerelease}>
                           <span class="chip info">pre-release</span>{" "}
                         </Show>

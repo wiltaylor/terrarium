@@ -295,7 +295,7 @@ function LiveLogin(props: { kind: WizardLogin; session: LoginSession; onError: (
         <div class="copy-row">
           <InstanceAnchor href={props.session.url} target="_blank" rel="noopener noreferrer" class="ellipsis">
             {props.session.url}
-          </InstanceAnchor
+          </InstanceAnchor>
           <CopyButton text={props.session.url!} label="Copy URL" />
         </div>
       </Show>

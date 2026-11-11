@@ -45,7 +45,7 @@ export function LinkText(props: { text: string; project: string }) {
             {(e) => (
               <InstanceAnchor href={e().href} target="_blank" rel="noopener noreferrer" class="text-link external">
                 {e().text}
-              </InstanceAnchor
+              </InstanceAnchor>
             )}
           </Match>
           <Match when={s.kind === "wiki" && s}>
@@ -68,7 +68,7 @@ export function LinkText(props: { text: string; project: string }) {
                 }}
               >
                 {c().text}
-              </InstanceAnchor
+              </InstanceAnchor>
             )}
           </Match>
         </Switch>

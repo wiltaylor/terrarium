@@ -107,7 +107,7 @@ function EventDetail(props: { event: CalendarEvent; occurrence: CalendarOccurren
                     <Show when={k === "url" && /^https?:\/\//i.test(v)} fallback={<span class="mono">{v}</span>}>
                       <InstanceAnchor href={v} target="_blank" rel="noopener noreferrer">
                         {v}
-                      </InstanceAnchor
+                      </InstanceAnchor>
                     </Show>
                   </span>
                 )}

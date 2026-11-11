@@ -174,7 +174,7 @@ export function HarnessVersions() {
                                 <div>
                                   <InstanceAnchor href={u()} target="_blank" rel="noopener noreferrer">
                                     changelog
-                                  </InstanceAnchor
+                                  </InstanceAnchor>
                                 </div>
                               )}
                             </Show>

@@ -30,7 +30,7 @@ export function HandoffLinks(props: { links: ThreadLink[] }) {
                 {(u) => (
                   <InstanceAnchor href={u()} target="_blank" rel="noopener noreferrer">
                     {l.ref}
-                  </InstanceAnchor
+                  </InstanceAnchor>
                 )}
               </Show>
             </li>

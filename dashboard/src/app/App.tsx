@@ -66,7 +66,7 @@ function ProjectIndex() {
 function NotFound() {
   return (
     <div class="empty">
-      Page not found. <InstanceAnchor href="/">Go home</InstanceAnchor.
+      Page not found. <InstanceAnchor href="/">Go home</InstanceAnchor>.
     </div>
   );
 }

@@ -95,7 +95,7 @@ export default function MemoryPage() {
                   <li>
                     <InstanceAnchor href={`?id=${m.id}`} onClick={(e) => (e.preventDefault(), setSearch({ id: m.id }))}>
                       {m.id}
-                    </InstanceAnchor{" "}
+                    </InstanceAnchor>{" "}
                     {m.title} <span class="muted">· {m.author_name ?? m.author}, {ago(m.updated_at)}</span>
                   </li>
                 )}
@@ -142,7 +142,7 @@ export default function MemoryPage() {
                         {l.from === m().id ? "→" : "←"}{" "}
                         <InstanceAnchor href={`?id=${l.from === m().id ? l.to : l.from}`} onClick={(e) => (e.preventDefault(), setSearch({ id: l.from === m().id ? l.to : l.from }))}>
                           {l.from === m().id ? l.to : l.from}
-                        </InstanceAnchor{" "}
+                        </InstanceAnchor>{" "}
                         <Show when={l.other_title}>
                           <span>{l.other_title} </span>
                         </Show>

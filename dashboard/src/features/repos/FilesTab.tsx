@@ -496,7 +496,7 @@ function FileView(props: { repo: Repo; tree: string; reload: string; path: strin
               {(u) => (
                 <InstanceAnchor class="btn small" href={u()} target="_blank" rel="noopener noreferrer" title="The bytes in a new tab (text), or a download">
                   Raw
-                </InstanceAnchor
+                </InstanceAnchor>
               )}
             </Show>
             <CopyButton text={props.path} label="Copy path" />
