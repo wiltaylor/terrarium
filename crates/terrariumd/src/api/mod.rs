@@ -3194,11 +3194,21 @@ mod tests {
     async fn a_link_key_cannot_list_or_confirm_legacy_job_logs() {
         let dir = tempfile::tempdir().unwrap();
         let s = state_at(dir.path());
-        let (_, key) = paired(&s,false).await;
+        let (_, key) = paired(&s, false).await;
         let auth = format!("Bearer {key}");
-        for body in [serde_json::json!({"target":"box"}),serde_json::json!({"target":"box","confirm":"digest"})] {
-            let response = send_body(link_app(&s),"POST","/api/projects/p/jobs/legacy-logs",&[("authorization",auth.as_str())],&body).await;
-            assert_eq!(response.status(),StatusCode::FORBIDDEN);
+        for body in [
+            serde_json::json!({"target":"box"}),
+            serde_json::json!({"target":"box","confirm":"digest"}),
+        ] {
+            let response = send_body(
+                link_app(&s),
+                "POST",
+                "/api/projects/p/jobs/legacy-logs",
+                &[("authorization", auth.as_str())],
+                &body,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
         }
     }
 

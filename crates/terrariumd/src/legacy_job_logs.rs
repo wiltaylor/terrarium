@@ -143,7 +143,9 @@ pub async fn list(
                     || job.ended_at.as_ref().is_none_or(|end| end >= &cutoff)
                 {
                     Some("not_terminal_before_cutoff")
-                } else if !ulid::Ulid::from_string(&id).is_ok_and(|value| value.to_string() == id) || job.attempt <= 0 {
+                } else if !ulid::Ulid::from_string(&id).is_ok_and(|value| value.to_string() == id)
+                    || job.attempt <= 0
+                {
                     Some("non_matching_name")
                 } else if c
                     .query_row(
@@ -308,12 +310,19 @@ mod tests {
             db.execute("INSERT INTO jobs(id,project,card,kind,repo,branch,state,created_by,created_at) VALUES (?,?,'C','validate','r','b','running','system','x')",params![format!("{n:026}"),if n%2==0 {"p"} else {"other"}]).unwrap();
         }
         db.execute_batch("COMMIT").unwrap();
-        let page = |after: &str| db.prepare(PAGE_SQL).unwrap().query_map(params!["p",after],|r|r.get::<_,String>(0)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+        let page = |after: &str| {
+            db.prepare(PAGE_SQL)
+                .unwrap()
+                .query_map(params!["p", after], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
         let first = page("");
-        assert_eq!(first.len(),PAGE);
+        assert_eq!(first.len(), PAGE);
         let second = page(first.last().unwrap());
-        assert_eq!(second.len(),325-PAGE);
-        assert!(second[0]>first[PAGE-1]);
+        assert_eq!(second.len(), 325 - PAGE);
+        assert!(second[0] > first[PAGE - 1]);
         let plans = db
             .prepare(&format!("EXPLAIN QUERY PLAN {PAGE_SQL}"))
             .unwrap()

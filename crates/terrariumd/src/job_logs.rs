@@ -728,29 +728,58 @@ mod tests {
     fn legacy_changes_after_confirmation_are_conflicts_not_deletions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("attempt.log");
-        std::fs::write(&path,"owned").unwrap();
-        let stat = std::process::Command::new("stat").args(["-c","%y",path.to_str().unwrap()]).output().unwrap();
+        std::fs::write(&path, "owned").unwrap();
+        let stat = std::process::Command::new("stat")
+            .args(["-c", "%y", path.to_str().unwrap()])
+            .output()
+            .unwrap();
         let mtime = String::from_utf8(stat.stdout).unwrap();
         // The production size/mtime guard, inside the held inode lock.
         let meta = std::fs::metadata(&path).unwrap();
         use std::os::unix::fs::MetadataExt;
-        let checked = remove_script_checked(path.to_str().unwrap(),dir.path().to_str().unwrap(),&format!("{}:{}",std::fs::metadata(dir.path()).unwrap().dev(),std::fs::metadata(dir.path()).unwrap().ino()),&format!("{}:{}",meta.dev(),meta.ino()),dir.path().join(".retention-delete-1").to_str().unwrap(),Some((5,mtime.trim())));
-        std::fs::write(&path,"changed length").unwrap();
-        let result = std::process::Command::new("sh").args(["-c",&checked]).output().unwrap();
+        let checked = remove_script_checked(
+            path.to_str().unwrap(),
+            dir.path().to_str().unwrap(),
+            &format!(
+                "{}:{}",
+                std::fs::metadata(dir.path()).unwrap().dev(),
+                std::fs::metadata(dir.path()).unwrap().ino()
+            ),
+            &format!("{}:{}", meta.dev(), meta.ino()),
+            dir.path().join(".retention-delete-1").to_str().unwrap(),
+            Some((5, mtime.trim())),
+        );
+        std::fs::write(&path, "changed length").unwrap();
+        let result = std::process::Command::new("sh")
+            .args(["-c", &checked])
+            .output()
+            .unwrap();
         assert!(result.status.success());
-        assert_eq!(result.stdout,b"conflict\n");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(),"changed length");
+        assert_eq!(result.stdout, b"conflict\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "changed length");
         // Same inode/size with a different timestamp must also be preserved.
-        std::fs::write(&path,"other").unwrap();
-        assert!(std::process::Command::new("touch").args(["-d","2001-01-01",path.to_str().unwrap()]).status().unwrap().success());
-        let result = std::process::Command::new("sh").args(["-c",&checked]).output().unwrap();
-        assert_eq!(result.stdout,b"conflict\n");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(),"other");
+        std::fs::write(&path, "other").unwrap();
+        assert!(
+            std::process::Command::new("touch")
+                .args(["-d", "2001-01-01", path.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let result = std::process::Command::new("sh")
+            .args(["-c", &checked])
+            .output()
+            .unwrap();
+        assert_eq!(result.stdout, b"conflict\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "other");
         // A replacement inode must not be counted as a confirmed legacy deletion.
-        std::fs::rename(&path,dir.path().join("old")).unwrap();
-        std::fs::write(&path,"new file").unwrap();
-        let result = std::process::Command::new("sh").args(["-c",&checked]).output().unwrap();
-        assert_eq!(result.stdout,b"conflict\n");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(),"new file");
+        std::fs::rename(&path, dir.path().join("old")).unwrap();
+        std::fs::write(&path, "new file").unwrap();
+        let result = std::process::Command::new("sh")
+            .args(["-c", &checked])
+            .output()
+            .unwrap();
+        assert_eq!(result.stdout, b"conflict\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new file");
     }
 }
