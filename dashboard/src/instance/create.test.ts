@@ -60,7 +60,7 @@ describe("instance scope", () => {
     remote.events.start();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(sockets).toHaveLength(2);
-    sockets[1]!.frame({ id: "E1", seq: 1, kind: "test", summary: "remote event", data: {}, at: "" });
+    sockets[1]!.frame({ id: "E1", seq: 1, kind: "system", summary: "remote event", data: {}, at: "" });
     expect(remote.events.recent().map((e) => e.id)).toEqual(["E1"]);
     expect(local.events.recent()).toEqual([]);
     remote.dispose();
