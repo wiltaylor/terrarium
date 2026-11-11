@@ -14,6 +14,60 @@ use crate::store::remotes::Remote;
 use crate::webhooks::net::{self, PrivateMode};
 
 pub const JSON_MAX: usize = 16 * 1024 * 1024;
+pub const IMAGE_MAX: usize = 8 * 1024 * 1024;
+
+pub fn image_body_type(body: &[u8]) -> ApiResult<&'static str> {
+    if body.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Ok("image/png")
+    } else if body.starts_with(b"\xff\xd8\xff") {
+        Ok("image/jpeg")
+    } else if body.starts_with(b"GIF87a") || body.starts_with(b"GIF89a") {
+        Ok("image/gif")
+    } else if body.starts_with(b"RIFF") && body.get(8..12) == Some(b"WEBP") {
+        Ok("image/webp")
+    } else {
+        Err(unreachable())
+    }
+}
+
+pub fn image_content_type(headers: &HeaderMap) -> ApiResult<&'static str> {
+    match headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "image/png" => Ok("image/png"),
+        "image/jpeg" => Ok("image/jpeg"),
+        "image/gif" => Ok("image/gif"),
+        "image/webp" => Ok("image/webp"),
+        _ => Err(unreachable()),
+    }
+}
+
+pub fn check_image_path(method: &Method, path: &str) -> ApiResult<()> {
+    if *method != Method::GET {
+        return Err(ApiError::bad_request("images require GET"));
+    }
+    // Only the file-serving /a/{artifact-ULID}/{path} route, never JSON APIs.
+    // Reuse the strict ambiguity checks before validating the whole route.
+    let rest = path
+        .strip_prefix("/a/")
+        .ok_or_else(|| ApiError::bad_request("not an image endpoint"))?;
+    check_path(method, &format!("/api/{rest}"), false, true)?;
+    let (id, file) = rest
+        .split_once('/')
+        .ok_or_else(|| ApiError::bad_request("missing artifact file"))?;
+    if id.len() != 26 || id.parse::<ulid::Ulid>().is_err() || file.is_empty() {
+        return Err(ApiError::bad_request("invalid artifact path"));
+    }
+    Ok(())
+}
 pub const UPLOAD_MAX: usize = 256 * 1024 * 1024;
 pub const CONNECT: Duration = Duration::from_secs(30);
 pub const PLAIN: Duration = Duration::from_secs(60);

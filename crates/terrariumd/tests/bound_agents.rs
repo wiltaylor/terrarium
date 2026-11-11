@@ -299,7 +299,8 @@ async fn round_trip(harness: &str, flow: &str) {
     assert_eq!(r.status, 201, "{}", r.body);
     let eph = id(&r.body);
     let aid: AgentId = eph.parse().unwrap();
-    td.wait_status(&eph, "idle").await;
+    // Startup idle precedes the task and its harness session metadata.
+    td.wait_task_done(&eph).await;
     let before = sessions(&td, &eph).await;
     assert_eq!(before.len(), 1, "{before:?}");
     let session = before[0]["id"].clone();
@@ -714,7 +715,8 @@ async fn a_move_between_other_columns_does_not_park(flow: &str) {
     let (td, lead) = setup_flow(flow).await;
     let c = card(&td, "p", "in_progress").await;
     let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
-    td.wait_status(&eph, "idle").await;
+    // The status assertion below must not race the initial task turn.
+    td.wait_task_done(&eph).await;
     mv(&td, &c, "blocked", Some("Question to lead.")).await;
     mv(&td, &c, "ready", None).await;
     mv(&td, &c, "backlog", None).await;

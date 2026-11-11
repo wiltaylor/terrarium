@@ -340,11 +340,12 @@ mod tests {
         let v = view("a", &["a", "b", "c"]);
         assert_eq!(pick(state, &v, &members, |_| false).as_deref(), Some("c"));
         assert_eq!(pick(state, &v, &members, |n| n == "c"), None);
-        for p in ["gcp", "foundry"] {
+        for p in ["gcp", "foundry", "litellm"] {
             members[1].provider = p.into();
             assert_eq!(pick(state, &v, &members, |n| n == "c"), None, "{p}");
         }
         // Named by a swap of an agent with no subscription: allowed.
+        members[1].provider = "foundry".into();
         assert!(check(state, &v, None, &members[1]).is_ok());
     }
 

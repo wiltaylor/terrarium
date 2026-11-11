@@ -2341,6 +2341,7 @@ export interface SubscriptionAgentRef {
 
 /** docs/api.md §16.1. */
 export interface Subscription {
+  fallback_spend_usd?: number;
   cloud?: CloudSettings;
   month_spend_usd?: number;
   session_period?: { since: string; until: string };
@@ -2410,6 +2411,8 @@ export type SelfHostedApi = "openai" | "anthropic";
 
 /** The server of a `selfhosted` subscription (docs/api.md §16). No secret: the key is in the key store. */
 export interface SelfHosted {
+  /** LiteLLM monthly fallback budget, counted from session costs. Mail only. */
+  budget_usd?: number;
   api: SelfHostedApi;
   /** `http` or `https`. The OpenAI root with `/v1`, or the Anthropic root without it. */
   base_url: string;
