@@ -43,10 +43,13 @@ pub(super) async fn repin(
     )?;
     let instance = net::instance(&c, &r, &h).await?;
     let u = net::check_url(&b.origin)?;
-    if u.scheme() != "https" || b.pin_sha256.len() != 64
+    if u.scheme() != "https"
+        || b.pin_sha256.len() != 64
         || !b.pin_sha256.bytes().all(|c| c.is_ascii_hexdigit())
     {
-        return Err(ApiError::invalid("an HTTPS origin and SHA-256 leaf pin are required"));
+        return Err(ApiError::invalid(
+            "an HTTPS origin and SHA-256 leaf pin are required",
+        ));
     }
     let mode = destination_policy(&r.url, instance.artifact_origin.as_deref(), &u)?;
     let origin = format!("{}/", u.origin().ascii_serialization());
@@ -55,8 +58,12 @@ pub(super) async fn repin(
     probe.pin_sha256 = Some(b.pin_sha256.clone());
     probe.ca_pem = None;
     // No remote key, cookies or operator headers go to the artifact origin.
-    net::client_with_policy(&probe, &own_ports(&s), mode).await?
-        .get(&origin).timeout(net::PLAIN).send().await
+    net::client_with_policy(&probe, &own_ports(&s), mode)
+        .await?
+        .get(&origin)
+        .timeout(net::PLAIN)
+        .send()
+        .await
         .map_err(net::connection_error)?;
     r.artifact_origin = Some(origin);
     r.artifact_pin_sha256 = Some(b.pin_sha256);
@@ -65,15 +72,21 @@ pub(super) async fn repin(
             "UPDATE remotes SET artifact_origin=?2,artifact_pin_sha256=?3 WHERE id=?1",
             rusqlite::params![r.id, r.artifact_origin, r.artifact_pin_sha256],
         )?;
-        t.audit("remote.artifact_repin", &r.name, None,
-            serde_json::json!({"origin": r.artifact_origin, "pin_sha256": r.artifact_pin_sha256}))
-    }).await?;
+        t.audit(
+            "remote.artifact_repin",
+            &r.name,
+            None,
+            serde_json::json!({"origin": r.artifact_origin, "pin_sha256": r.artifact_pin_sha256}),
+        )
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn artifact_transport(r: &crate::store::remotes::Remote, u: &url::Url)
-    -> ApiResult<crate::store::remotes::Remote>
-{
+fn artifact_transport(
+    r: &crate::store::remotes::Remote,
+    u: &url::Url,
+) -> ApiResult<crate::store::remotes::Remote> {
     let mut origin = r.clone();
     origin.url = format!("{}/", u.origin().ascii_serialization());
     let api = net::check_url(&r.url)?;
