@@ -220,9 +220,22 @@ async fn setup_opts(
         .await
         .ok();
     }
-    td.put("/api/hosts/h/capacity", json!({"percentage":50}))
-        .await
-        .ok();
+    // Target creation can still hold a lifecycle verb after its HTTP reply.
+    // Retry only the explicitly retryable conflict, not other setup errors.
+    tokio::time::timeout(crate::common::WAIT, async {
+        loop {
+            let response = td
+                .put("/api/hosts/h/capacity", json!({"percentage":50}))
+                .await;
+            if response.status.as_u16() != 409 || response.code() != "resource_busy" {
+                response.ok();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     (td, server, client)
 }
 
