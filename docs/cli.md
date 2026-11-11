@@ -930,6 +930,53 @@ estimate changes.
 `card comment` takes the text as the last argument, with `-b`/`--body`, or
 with `-m`, as `card move` does. Give only one of them.
 
+### Card Markdown
+
+Card bodies and comments use GitHub-flavored Markdown. Use tables for
+results, fenced code blocks for output and code, and `[label](url)` links
+for references. A single newline renders as a line break. Emoji (Unicode
+or supported `:shortcodes:`) are allowed only as status marks for pass,
+fail, warning, or blocked in card bodies and comments. They remain banned
+everywhere else in agent output.
+
+Chat and email use GitHub-style blockquotes. Keep every line, including
+blank lines, prefixed with `>`. An optional title follows the marker.
+
+```markdown
+> [!CHAT] Build discussion
+> **Alex** · 2026-11-11 10:00 UTC · received
+> Is the build ready?
+>
+> **Sam** · 2026-11-11 10:05 UTC · draft
+> The **filtered tests** passed.
+
+> [!EMAIL] Build update
+> From: Alex
+> To: Sam
+> Cc: Team
+> Subject: Build
+> Date: 2026-11-11
+> Status: received
+>
+> See the [results](https://example.com/results).
+>
+> ---
+> From: Sam
+> To: Alex
+> Status: draft
+>
+> The build is **ready for review**.
+```
+
+Each chat message starts with `**Author**`, optionally followed by
+`· time · status`. Email headers are `From:`, `To:`, `Cc:`, `Subject:`,
+`Date:`, and `Status:`, followed by a blank line and a Markdown body.
+Separate emails with a quoted `---` line. Status is `draft`, `sent`, or
+`received` (case-insensitive, default `received`). Mark unsent text
+`draft`, which displays as "Draft, not sent". Several messages or emails
+can share a block. This syntax works wherever the dashboard Markdown
+renderer runs. It does not send mail or chat.
+
 In `card edit`, `--label` and `--depends-on` replace the whole list. Repeat
 the flag for more values. A command without the flag keeps the list. The
 one value `none` removes every label or dependency: `card edit TER-2

@@ -1,4 +1,4 @@
-//! Only newly recorded daemon logs participate in retention. No directory scans.
+//! Ledger-owned logs participate in retention. Legacy ownership needs operator confirmation.
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use terrarium_core::config::DeliveryDef;
@@ -28,6 +28,8 @@ pub struct Log {
     pub expired: bool,
     pub cleanup_state: String,
     pub quarantine: String,
+    pub legacy_size: Option<i64>,
+    pub legacy_mtime: Option<String>,
 }
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Log> {
@@ -47,11 +49,13 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Log> {
         target_identity: r.get(12)?,
         cleanup_state: r.get(13)?,
         quarantine: r.get(14)?,
+        legacy_size: r.get(15)?,
+        legacy_mtime: r.get(16)?,
     })
 }
 
-const FIELDS: &str = "id, job, attempt, target, path, written_at, expires_at, bytes, expired, root, root_identity, file_identity, target_identity, cleanup_state, quarantine";
-const CANDIDATES: &str = "SELECT id, job, attempt, target, path, written_at, expires_at, bytes, expired, root, root_identity, file_identity, target_identity, cleanup_state, quarantine FROM job_logs INDEXED BY job_logs_cleanup WHERE project=? AND cleanup_state=? AND id>? ORDER BY id LIMIT ?";
+const FIELDS: &str = "id, job, attempt, target, path, written_at, expires_at, bytes, expired, root, root_identity, file_identity, target_identity, cleanup_state, quarantine, legacy_size, legacy_mtime";
+const CANDIDATES: &str = "SELECT id, job, attempt, target, path, written_at, expires_at, bytes, expired, root, root_identity, file_identity, target_identity, cleanup_state, quarantine, legacy_size, legacy_mtime FROM job_logs INDEXED BY job_logs_cleanup WHERE project=? AND cleanup_state=? AND id>? ORDER BY id LIMIT ?";
 
 pub fn target_identity(row: &targets::TargetRow) -> String {
     // Name is the target primary key. Creation time distinguishes remove/recreate,
@@ -189,12 +193,24 @@ cd -P -- "$root" || return 1
 [ "$(pwd -P)" = "$root" ] || return 1
 }"#;
 
+#[cfg(test)]
 pub(crate) fn remove_script(
     path: &str,
     root: &str,
     root_identity: &str,
     file_identity: &str,
     quarantine: &str,
+) -> String {
+    remove_script_checked(path, root, root_identity, file_identity, quarantine, None)
+}
+
+fn remove_script_checked(
+    path: &str,
+    root: &str,
+    root_identity: &str,
+    file_identity: &str,
+    quarantine: &str,
+    expected: Option<(i64, &str)>,
 ) -> String {
     let Some(name) = std::path::Path::new(path)
         .file_name()
@@ -239,6 +255,7 @@ reconcile() {{
     flock -n 9 || return 1
     [ "$trash/log" -ef /proc/self/fd/9 ] && [ ! -L "$trash/log" ] || return 1
     [ "$(stat -Lc '%d:%i' /proc/self/fd/9)" = {file_identity} ] || return 1
+    {check_size}
     rm -- "$trash/log" || return 1
     rmdir -- "$trash" 2>/dev/null || :
     printf 'expired\n'
@@ -249,7 +266,7 @@ reconcile() {{
   if ln -P -- "$trash/log" "$name" 2>/dev/null; then
     rm -- "$trash/log" || return 1
     rmdir -- "$trash" 2>/dev/null || :
-    printf 'expired\n'
+    printf '{changed_inode}\n'
   else
     printf 'conflict\n'
   fi
@@ -263,7 +280,8 @@ if [ ! -e "$name" ] && [ ! -L "$name" ]; then rmdir -- "$trash" 2>/dev/null || :
 exec 9<"$name" || exit 1
 flock -n 9 || exit 1
 [ "$name" -ef /proc/self/fd/9 ] && [ ! -L "$name" ] || exit 1
-if [ "$(stat -Lc '%d:%i' /proc/self/fd/9)" != {file_identity} ]; then printf 'expired\n'; exit 0; fi
+if [ "$(stat -Lc '%d:%i' /proc/self/fd/9)" != {file_identity} ]; then printf '{changed_inode}\n'; exit 0; fi
+{check_size}
 [ -d "$trash" ] || (umask 077 && mkdir -- "$trash") || exit 1
 mv -- "$name" "$trash/log" || exit 1
 # AFTER_MOVE: persisted quarantining state makes this boundary recoverable.
@@ -276,6 +294,8 @@ reconcile
         root_identity = sh_quote(root_identity),
         file_identity = sh_quote(file_identity),
         trash = sh_quote(trash),
+        changed_inode = if expected.is_some() { "conflict" } else { "expired" },
+        check_size = expected.map(|(size, mtime)| format!("[ \"$(stat -Lc '%s|%y' /proc/self/fd/9)\" = {} ] || {{ printf 'conflict\\n'; exit 0; }}", sh_quote(&format!("{size}|{mtime}")))).unwrap_or_default(),
     )
 }
 
@@ -301,6 +321,15 @@ pub(crate) fn test_remove_script(path: &std::path::Path) -> String {
 /// A page is bounded before checking job states. The caller carries `after`
 /// across pages, so active or unreachable logs cannot starve later records.
 pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<serde_json::Value> {
+    cleanup_selected(state, project, after, None).await
+}
+
+pub(crate) async fn cleanup_selected(
+    state: &Shared,
+    project: String,
+    after: i64,
+    only: Option<Vec<i64>>,
+) -> ApiResult<serde_json::Value> {
     let _guard = state
         .job_queue
         .log_cleanup
@@ -319,6 +348,15 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
                 )
                 .optional()?
                 .unwrap_or((0, 0));
+            if let Some(ids) = only {
+                let mut logs = Vec::new();
+                for id in ids {
+                    if let Some(log) = c.query_row(&format!("SELECT {FIELDS} FROM job_logs WHERE id=? AND project=? AND cleanup_state='quarantining'"),params![id,p],row).optional()? {
+                        logs.push(log);
+                    }
+                }
+                return Ok((logs, jobs::delivery(c, &p)?, total, 0));
+            }
             // Reconcile first, independently paginated so inaccessible attempts
             // cannot starve later quarantines. Both seeks are indexed and bounded.
             let mut recovery = c
@@ -404,12 +442,13 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
             argv: vec![
                 "sh".into(),
                 "-c".into(),
-                remove_script(
+                remove_script_checked(
                     &log.path,
                     &log.root,
                     &log.root_identity,
                     &log.file_identity,
                     &quarantine,
+                    log.legacy_size.zip(log.legacy_mtime.as_deref()),
                 ),
             ],
             timeout_secs: Some(10),
@@ -439,6 +478,8 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
         let id = log.id;
         let p = project.clone();
         let bytes = log.bytes;
+        let legacy = log.legacy_size.is_some();
+        let path = log.path.clone();
         state
             .db
             .write("system", move |t| {
@@ -451,6 +492,9 @@ pub async fn cleanup(state: &Shared, project: String, after: i64) -> ApiResult<s
                         "UPDATE job_log_budgets SET bytes=MAX(0,bytes-?) WHERE project=?",
                         params![bytes, p],
                     )?;
+                    if legacy {
+                        t.audit("job.legacy_log_deleted", &path, Some(&p), serde_json::json!({"ledger_id":id,"bytes":bytes}))?;
+                    }
                 }
                 Ok(())
             })
@@ -522,6 +566,8 @@ mod tests {
             expired: false,
             cleanup_state: "retained".into(),
             quarantine: String::new(),
+            legacy_size: None,
+            legacy_mtime: None,
         };
         assert!(!due(&log, "a", 10, 10));
         assert!(due(&log, "b", 10, 10));
@@ -676,5 +722,64 @@ mod tests {
             std::fs::read_to_string(dir.path().join(".retention-delete-1/log")).unwrap(),
             "captured"
         );
+    }
+
+    #[test]
+    fn legacy_changes_after_confirmation_are_conflicts_not_deletions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("attempt.log");
+        std::fs::write(&path, "owned").unwrap();
+        let stat = std::process::Command::new("stat")
+            .args(["-c", "%y", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let mtime = String::from_utf8(stat.stdout).unwrap();
+        // The production size/mtime guard, inside the held inode lock.
+        let meta = std::fs::metadata(&path).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let checked = remove_script_checked(
+            path.to_str().unwrap(),
+            dir.path().to_str().unwrap(),
+            &format!(
+                "{}:{}",
+                std::fs::metadata(dir.path()).unwrap().dev(),
+                std::fs::metadata(dir.path()).unwrap().ino()
+            ),
+            &format!("{}:{}", meta.dev(), meta.ino()),
+            dir.path().join(".retention-delete-1").to_str().unwrap(),
+            Some((5, mtime.trim())),
+        );
+        std::fs::write(&path, "changed length").unwrap();
+        let result = std::process::Command::new("sh")
+            .args(["-c", &checked])
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(result.stdout, b"conflict\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "changed length");
+        // Same inode/size with a different timestamp must also be preserved.
+        std::fs::write(&path, "other").unwrap();
+        assert!(
+            std::process::Command::new("touch")
+                .args(["-d", "2001-01-01", path.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let result = std::process::Command::new("sh")
+            .args(["-c", &checked])
+            .output()
+            .unwrap();
+        assert_eq!(result.stdout, b"conflict\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "other");
+        // A replacement inode must not be counted as a confirmed legacy deletion.
+        std::fs::rename(&path, dir.path().join("old")).unwrap();
+        std::fs::write(&path, "new file").unwrap();
+        let result = std::process::Command::new("sh")
+            .args(["-c", &checked])
+            .output()
+            .unwrap();
+        assert_eq!(result.stdout, b"conflict\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new file");
     }
 }

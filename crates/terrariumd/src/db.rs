@@ -2637,7 +2637,12 @@ impl Db {
     /// Run a write in one transaction. `actor` labels the events and audit
     /// rows that the write makes. The transaction commits when `f` returns
     /// `Ok`; then the new events and audit rows go to the subscribers.
-    pub async fn write<T, F>(&self, actor: impl Into<String>, f: F) -> ApiResult<T>
+    #[track_caller]
+    pub fn write<T, F>(
+        &self,
+        actor: impl Into<String>,
+        f: F,
+    ) -> impl std::future::Future<Output = ApiResult<T>> + '_
     where
         T: Send + 'static,
         F: for<'c> FnOnce(&mut Tx<'c>) -> ApiResult<T> + Send + 'static,
@@ -2652,89 +2657,102 @@ impl Db {
         let handle = self.redactor.clone();
         let queued = tracing::enabled!(target: "terrariumd::db_timing", tracing::Level::DEBUG)
             .then(std::time::Instant::now);
-        let (value, events, audits) = crate::links::spawn_blocking(move || {
-            let started = queued.map(|_| std::time::Instant::now());
-            let mut guard = match conn.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            let acquired = queued.map(|_| std::time::Instant::now());
-            // The snapshot comes after the lock: a write that changed a
-            // secret swapped its matcher in before it let the lock go.
-            let result = {
-                let redactor = handle.get();
-                // IMMEDIATE: the write lock comes at the start, so a write of
-                // another connection to the same file (a second daemon on the
-                // same state dir, for example a test that starts the daemon
-                // again) makes this one wait up to the busy timeout. A DEFERRED
-                // transaction that reads first gets `database is locked` at
-                // once when the other connection commits between its read and
-                // its first write; SQLite does not wait in that case.
-                let tx = guard.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let mut t = Tx {
-                    tx,
-                    actor,
-                    link,
-                    cause: None,
-                    events: Vec::new(),
-                    audits: RefCell::default(),
-                    redactor,
-                    view: OnceCell::new(),
-                    rebuild: None,
-                    files: Vec::new(),
+        // Capture the call site before constructing the future. An async fn's
+        // track_caller would identify the executor, not the write's caller.
+        // Source locations are static labels, never actor names or SQL.
+        let caller = if queued.is_some() {
+            Some(std::panic::Location::caller())
+        } else {
+            None
+        };
+        async move {
+            let (value, events, audits) = crate::links::spawn_blocking(move || {
+                let started = queued.map(|_| std::time::Instant::now());
+                let mut guard = match conn.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
                 };
-                let value = f(&mut t)?;
-                let Tx {
-                    tx,
-                    events,
-                    audits,
-                    rebuild,
-                    files,
-                    ..
-                } = t;
-                // The new matcher reads the store as this transaction left it.
-                // A failure to build it fails the write (PLAN §16b.6, S11).
-                let next = match rebuild {
-                    Some(dir) => Some(crate::secrets::redact::build(&tx, &dir)?),
-                    None => None,
-                };
-                // The staged files go to disk before the commit; a failure
-                // puts the old files back, and the transaction rolls back.
-                let undo = apply_files(&files)?;
-                if let Err(e) = tx.commit() {
-                    undo_files(undo);
-                    return Err(e.into());
-                }
-                // The swap comes before the guard goes (at the end of this
-                // closure): the next write takes its snapshot after it.
-                if let Some(r) = next {
-                    tracing::debug!(patterns = r.pattern_count(), "redaction matcher built");
-                    handle.replace(r);
-                }
-                (value, events, audits.into_inner())
-            };
-            let finished = queued.map(|_| std::time::Instant::now());
-            drop(guard);
-            if let (Some(queued), Some(started), Some(acquired), Some(finished)) =
-                (queued, started, acquired, finished)
-            {
-                tracing::debug!(target: "terrariumd::db_timing", operation = "write",
+                let acquired = queued.map(|_| std::time::Instant::now());
+                // The snapshot comes after the lock: a write that changed a
+                // secret swapped its matcher in before it let the lock go.
+                let result = (|| {
+                    let redactor = handle.get();
+                    // IMMEDIATE: the write lock comes at the start, so a write of
+                    // another connection to the same file (a second daemon on the
+                    // same state dir, for example a test that starts the daemon
+                    // again) makes this one wait up to the busy timeout. A DEFERRED
+                    // transaction that reads first gets `database is locked` at
+                    // once when the other connection commits between its read and
+                    // its first write; SQLite does not wait in that case.
+                    let tx = guard.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    let mut t = Tx {
+                        tx,
+                        actor,
+                        link,
+                        cause: None,
+                        events: Vec::new(),
+                        audits: RefCell::default(),
+                        redactor,
+                        view: OnceCell::new(),
+                        rebuild: None,
+                        files: Vec::new(),
+                    };
+                    let value = f(&mut t)?;
+                    let Tx {
+                        tx,
+                        events,
+                        audits,
+                        rebuild,
+                        files,
+                        ..
+                    } = t;
+                    // The new matcher reads the store as this transaction left it.
+                    // A failure to build it fails the write (PLAN §16b.6, S11).
+                    let next = match rebuild {
+                        Some(dir) => Some(crate::secrets::redact::build(&tx, &dir)?),
+                        None => None,
+                    };
+                    // The staged files go to disk before the commit; a failure
+                    // puts the old files back, and the transaction rolls back.
+                    let undo = apply_files(&files)?;
+                    if let Err(e) = tx.commit() {
+                        undo_files(undo);
+                        return Err(e.into());
+                    }
+                    // The swap comes before the guard goes (at the end of this
+                    // closure): the next write takes its snapshot after it.
+                    if let Some(r) = next {
+                        tracing::debug!(patterns = r.pattern_count(), "redaction matcher built");
+                        handle.replace(r);
+                    }
+                    Ok::<_, ApiError>((value, events, audits.into_inner()))
+                })();
+                let finished = queued.map(|_| std::time::Instant::now());
+                drop(guard);
+                if let (Some(queued), Some(started), Some(acquired), Some(finished), Some(caller)) =
+                    (queued, started, acquired, finished, caller)
+                {
+                    tracing::debug!(target: "terrariumd::db_timing", operation = "write",
+                    caller_file = caller.file(),
+                    caller_line = caller.line(),
+                    success = result.is_ok(),
                     scheduling_us = started.duration_since(queued).as_micros() as u64,
                     mutex_wait_us = acquired.duration_since(started).as_micros() as u64,
                     sql_us = finished.duration_since(acquired).as_micros() as u64,
                     "database access");
+                }
+                result
+            })
+            .await
+            .map_err(|e| ApiError::internal(format!("database task failed: {e}")))??;
+            for e in events {
+                self.hub.publish(e);
             }
-            Ok::<_, ApiError>(result)
-        })
-        .await
-        .map_err(|e| ApiError::internal(format!("database task failed: {e}")))??;
-        for e in events {
-            self.hub.publish(e);
+            for a in audits {
+                self.hub.publish_audit(a);
+            }
+            Ok(value)
         }
-        for a in audits {
-            self.hub.publish_audit(a);
-        }
-        Ok(value)
     }
 }
 
@@ -3314,6 +3332,24 @@ mod tests {
 
     fn migration_count() -> usize {
         MIGRATIONS.len() + NAMED_MIGRATIONS.len()
+    }
+
+    #[tokio::test]
+    async fn failed_profiled_write_rolls_back_and_releases_lock() {
+        let db = Db::new(test_db(), EventHub::default());
+        let result = db
+            .write("system", |t| {
+                t.execute_batch("CREATE TABLE failed_profile_write (id INTEGER)")?;
+                Err::<(), _>(ApiError::internal("intentional rollback"))
+            })
+            .await;
+        assert!(result.is_err());
+        db.write("system", |t| {
+            t.execute_batch("CREATE TABLE failed_profile_write (id INTEGER)")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
