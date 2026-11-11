@@ -5,7 +5,12 @@ use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 fn link_compact(tokens: impl ToTokens) -> String {
-    tokens.to_token_stream().to_string().chars().filter(|c| !c.is_whitespace()).collect()
+    tokens
+        .to_token_stream()
+        .to_string()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect()
 }
 
 // Hash the entire enclosing item, not just the line containing Operator. This
@@ -15,21 +20,30 @@ fn link_gate_lines(source: &str) -> Vec<String> {
     fn marker(tokens: proc_macro2::TokenStream) -> bool {
         tokens.into_iter().any(|token| match token {
             proc_macro2::TokenTree::Group(group) => marker(group.stream()),
-            proc_macro2::TokenTree::Ident(ident) => matches!(ident.to_string().as_str(),
-                "Operator" | "operator_only" | "operator_only_with_provenance" | "is_operator"),
-            proc_macro2::TokenTree::Literal(literal) => syn::parse_str::<syn::LitStr>(&literal.to_string())
-                .is_ok_and(|s| s.value() == "operator"),
+            proc_macro2::TokenTree::Ident(ident) => matches!(
+                ident.to_string().as_str(),
+                "Operator" | "operator_only" | "operator_only_with_provenance" | "is_operator"
+            ),
+            proc_macro2::TokenTree::Literal(literal) => {
+                syn::parse_str::<syn::LitStr>(&literal.to_string())
+                    .is_ok_and(|s| s.value() == "operator")
+            }
             _ => false,
         })
     }
     fn walk(nodes: &[syn::Item], out: &mut Vec<String>) {
         for item in nodes {
             if let syn::Item::Mod(module) = item {
-                if let Some((_, contents)) = &module.content { walk(contents, out); }
+                if let Some((_, contents)) = &module.content {
+                    walk(contents, out);
+                }
             } else if marker(item.to_token_stream()) {
                 let tokens = item.to_token_stream().to_string();
                 let label = tokens.chars().take(100).collect::<String>();
-                out.push(format!("{label}:sha256:{:x}", Sha256::digest(tokens.as_bytes())));
+                out.push(format!(
+                    "{label}:sha256:{:x}",
+                    Sha256::digest(tokens.as_bytes())
+                ));
             }
         }
     }
@@ -56,7 +70,10 @@ fn link_production_source(source: &str) -> String {
                 syn::Item::Trait(i) => &i.attrs,
                 syn::Item::Type(i) => &i.attrs,
                 syn::Item::Macro(i) => &i.attrs,
-                _ => { syn::visit::visit_item(self, item); return; }
+                _ => {
+                    syn::visit::visit_item(self, item);
+                    return;
+                }
             };
             if attrs.iter().any(|a| link_compact(&a.meta) == "cfg(test)") {
                 self.0.push(item.span().byte_range());
@@ -71,7 +88,9 @@ fn link_production_source(source: &str) -> String {
     let mut bytes = source.as_bytes().to_vec();
     for range in tests.0 {
         for byte in &mut bytes[range] {
-            if *byte != b'\n' { *byte = b' '; }
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
         }
     }
     String::from_utf8(bytes).unwrap()
@@ -79,7 +98,10 @@ fn link_production_source(source: &str) -> String {
 
 fn link_syntax_inventory(source: &str) -> (Vec<String>, Vec<String>) {
     #[derive(Default)]
-    struct Routes { registrations: Vec<String>, compositions: Vec<String> }
+    struct Routes {
+        registrations: Vec<String>,
+        compositions: Vec<String>,
+    }
     fn inline_methods(expr: &syn::Expr) -> bool {
         match expr {
             syn::Expr::Call(call) => matches!(&*call.func, syn::Expr::Path(path)
@@ -94,34 +116,62 @@ fn link_syntax_inventory(source: &str) -> (Vec<String>, Vec<String>) {
             match call.method.to_string().as_str() {
                 "route" => {
                     assert_eq!(call.args.len(), 2, "unsupported route arguments");
-                    assert!(inline_methods(&call.args[1]), "method-router variables must be classified structurally before use");
+                    assert!(
+                        inline_methods(&call.args[1]),
+                        "method-router variables must be classified structurally before use"
+                    );
                     self.registrations.push(link_compact(&call.args));
                 }
                 "merge" | "nest" => {
-                    self.compositions.push(format!("{}({})", call.method, link_compact(&call.args)));
+                    self.compositions.push(format!(
+                        "{}({})",
+                        call.method,
+                        link_compact(&call.args)
+                    ));
                 }
-                "route_service" | "nest_service" => panic!("service routes need explicit inventory support"),
+                "route_service" | "nest_service" => {
+                    panic!("service routes need explicit inventory support")
+                }
                 _ => {}
             }
             syn::visit::visit_expr_method_call(self, call);
         }
         fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
             if let syn::Expr::Path(path) = &*call.func {
-                assert!(!path.path.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(),
-                    "route" | "merge" | "nest" | "route_service" | "nest_service")),
-                    "UFCS router operations need explicit inventory support");
+                assert!(
+                    !path.path.segments.last().is_some_and(|s| matches!(
+                        s.ident.to_string().as_str(),
+                        "route" | "merge" | "nest" | "route_service" | "nest_service"
+                    )),
+                    "UFCS router operations need explicit inventory support"
+                );
             }
             syn::visit::visit_expr_call(self, call);
         }
         fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
-            assert!(!matches!(rename.ident.to_string().as_str(), "Operator" | "operator_only" | "operator_only_with_provenance"),
-                "operator gate aliases need explicit inventory support");
+            assert!(
+                !matches!(
+                    rename.ident.to_string().as_str(),
+                    "Operator" | "operator_only" | "operator_only_with_provenance"
+                ),
+                "operator gate aliases need explicit inventory support"
+            );
             syn::visit::visit_use_rename(self, rename);
         }
         fn visit_macro(&mut self, mac: &'ast syn::Macro) {
             let tokens = link_compact(&mac.tokens);
-            assert!(![".route(", ".merge(", ".nest(", ".route_service(", ".nest_service("].iter().any(|s| tokens.contains(s)),
-                "router operations in macros need explicit inventory support");
+            assert!(
+                ![
+                    ".route(",
+                    ".merge(",
+                    ".nest(",
+                    ".route_service(",
+                    ".nest_service("
+                ]
+                .iter()
+                .any(|s| tokens.contains(s)),
+                "router operations in macros need explicit inventory support"
+            );
             syn::visit::visit_macro(self, mac);
         }
     }
@@ -142,14 +192,33 @@ fn link_inventory_parser_regressions() {
         "use crate::Actor::Operator as Root;",
         "fn routes() { register!(r.route(\"/x\", get(read))); }",
     ] {
-        assert!(std::panic::catch_unwind(|| link_syntax_inventory(source)).is_err(), "accepted {source}");
+        assert!(
+            std::panic::catch_unwind(|| link_syntax_inventory(source)).is_err(),
+            "accepted {source}"
+        );
     }
-    for source in ["fn routes() { r.nest(\"/new\", existing); }", "fn routes() { r.merge(existing); }"] {
+    for source in [
+        "fn routes() { r.nest(\"/new\", existing); }",
+        "fn routes() { r.merge(existing); }",
+    ] {
         assert!(!link_syntax_inventory(source).1.is_empty());
     }
-    let source = link_production_source("#[cfg(test)]\nmod tests { fn test() {} }\nfn routes() { r . route (r#\"/real\"#, get(read).post(write)); }\n");
-    assert_eq!(link_syntax_inventory(&source).0, ["r#\"/real\"#,get(read).post(write)"]);
-    for spelling in ["Self :: Operator", "Operator", "label == \"operator\"", "policy :: operator_only (actor)"] {
-        assert!(!link_gate_lines(&format!("fn gate() {{ let _ = {spelling}; }}")).is_empty(), "missed {spelling}");
+    let source = link_production_source(
+        "#[cfg(test)]\nmod tests { fn test() {} }\nfn routes() { r . route (r#\"/real\"#, get(read).post(write)); }\n",
+    );
+    assert_eq!(
+        link_syntax_inventory(&source).0,
+        ["r#\"/real\"#,get(read).post(write)"]
+    );
+    for spelling in [
+        "Self :: Operator",
+        "Operator",
+        "label == \"operator\"",
+        "policy :: operator_only (actor)",
+    ] {
+        assert!(
+            !link_gate_lines(&format!("fn gate() {{ let _ = {spelling}; }}")).is_empty(),
+            "missed {spelling}"
+        );
     }
 }
