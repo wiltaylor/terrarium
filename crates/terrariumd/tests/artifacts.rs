@@ -1011,3 +1011,160 @@ async fn upload_finishes_after_the_client_goes_away() {
     }
     assert!(td.state.join("artifacts").join(&sha).is_file());
 }
+
+/// The number of stored rows whose name starts with `prefix`.
+async fn stored_rows(td: &TestDaemon, prefix: &str) -> usize {
+    let list = td
+        .req(
+            Method::GET,
+            "/api/projects/proj/artifacts",
+            None,
+            Some("proj/w1"),
+        )
+        .await;
+    list.ok().to_string().matches(prefix).count()
+}
+
+/// Wait until `n` upload permits are free. The wait fails only after
+/// [`common::WAIT`] in which neither the free permits nor the stored
+/// `dropped-` rows changed, or after 120 s in all. Under merge-job load
+/// (load 20 to 24) the 8 store tasks, one after the other under the digest
+/// lock of their shared blob, took longer than a fixed 10 s (TER-682).
+async fn wait_for_free_permits(
+    td: &TestDaemon,
+    ctx: &terrariumd::store::artifacts::ArtifactCtx,
+    n: usize,
+) {
+    let mark = async || (ctx.free_upload_permits(), stored_rows(td, "dropped-").await);
+    let mut stall = common::Stall::with_limits(
+        mark().await,
+        common::WAIT,
+        std::time::Duration::from_secs(120),
+    );
+    while ctx.free_upload_permits() != n {
+        if stall.due() {
+            let now = mark().await;
+            assert!(
+                stall.moved(now),
+                "free upload permits: {}, want {n}, held {}, stored rows {}: {stall}",
+                now.0,
+                terrariumd::store::artifacts::MAX_CONCURRENT_UPLOADS - now.0,
+                now.1
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// TER-605: detached upload tasks hold the upload permits, also after
+/// their clients went away. One more upload is refused with `429` and
+/// `Retry-After`, and the permits are free again when the tasks end.
+#[tokio::test]
+async fn uploads_past_the_limit_are_refused_and_permits_come_back() {
+    use terrariumd::store::artifacts::MAX_CONCURRENT_UPLOADS;
+    let td = setup().await;
+    let ctx = terrariumd::store::artifacts::context(&td.state, &td.config).unwrap();
+    assert_eq!(ctx.free_upload_permits(), MAX_CONCURRENT_UPLOADS);
+    let data = b"bytes of many dropped clients".to_vec();
+    let sha = terrariumd::store::artifacts::sha256_hex(&data);
+    let guard = ctx.digest_lock(&sha).lock_owned().await;
+    // Each client sends, then goes away while its task waits for the lock.
+    for i in 0..MAX_CONCURRENT_UPLOADS {
+        let body = serde_json::to_vec(
+            &json!({"name": format!("dropped-{i}.bin"), "data_base64": b64(&data)}),
+        )
+        .unwrap();
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            raw(
+                &td,
+                Method::POST,
+                "/api/projects/proj/artifacts",
+                Some("application/json"),
+                body,
+                Some("proj/w1"),
+            ),
+        )
+        .await;
+        assert!(r.is_err(), "upload {i} did not wait for the lock");
+    }
+    wait_for_free_permits(&td, &ctx, 0).await;
+    let body =
+        serde_json::to_vec(&json!({"name": "one-more.bin", "data_base64": b64(b"other")})).unwrap();
+    let r = raw(
+        &td,
+        Method::POST,
+        "/api/projects/proj/artifacts",
+        Some("application/json"),
+        body,
+        Some("proj/w1"),
+    )
+    .await;
+    assert_eq!(r.status.as_u16(), 429);
+    assert_eq!(header(&r, "retry-after"), "2");
+    let v: Value = serde_json::from_slice(&r.body).unwrap();
+    assert_eq!(v["error"]["code"], "rate_limited", "{v}");
+    assert_eq!(v["error"]["details"]["retry_after"], 2, "{v}");
+    assert_eq!(
+        v["error"]["details"]["max_concurrent_uploads"], MAX_CONCURRENT_UPLOADS,
+        "{v}"
+    );
+    // The detached tasks finish their rows and give their permits back.
+    drop(guard);
+    wait_for_free_permits(&td, &ctx, MAX_CONCURRENT_UPLOADS).await;
+    let list = td
+        .req(
+            Method::GET,
+            "/api/projects/proj/artifacts",
+            None,
+            Some("proj/w1"),
+        )
+        .await;
+    let list = list.ok().to_string();
+    for i in 0..MAX_CONCURRENT_UPLOADS {
+        assert!(list.contains(&format!("dropped-{i}.bin")), "{list}");
+    }
+    assert!(!list.contains("one-more.bin"), "{list}");
+    upload(&td, "proj/w1", "after.bin", b"other").await;
+    assert_eq!(ctx.free_upload_permits(), MAX_CONCURRENT_UPLOADS);
+}
+
+/// TER-605: an upload that fails, at the parse or at the row, gives its
+/// permit back.
+#[tokio::test]
+async fn failed_uploads_release_their_permit() {
+    use terrariumd::store::artifacts::MAX_CONCURRENT_UPLOADS;
+    let td = setup_with(|c| {
+        write(
+            c,
+            "daemon.toml",
+            "[artifacts]\nmax_file_bytes = 100\nproject_quota_bytes = 1000\n",
+        )
+    })
+    .await;
+    let ctx = terrariumd::store::artifacts::context(&td.state, &td.config).unwrap();
+    upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "big.bin", "data_base64": b64(&[0u8; 200])}),
+    )
+    .await
+    .err(413, "too_large");
+    upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "bad.bin", "data_base64": "!!"}),
+    )
+    .await
+    .err(400, "bad_request");
+    // The row fails in the store task: a card that does not exist.
+    let r = upload_json(
+        &td,
+        "proj/w1",
+        json!({"name": "d", "data_base64": b64(b"attach fails"),
+               "attach": {"kind": "card", "ref": "TER-999"}}),
+    )
+    .await;
+    assert!(r.status.is_client_error(), "{:?}", r.body);
+    assert_eq!(ctx.free_upload_permits(), MAX_CONCURRENT_UPLOADS);
+}

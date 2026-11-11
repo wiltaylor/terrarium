@@ -702,17 +702,9 @@ async fn validate(
             let validating =
                 board::role_name(t, &card.project, board::VALIDATING, rt::COL_VALIDATING)?;
             if card.column != validating {
-                board::move_card(
-                    t,
-                    &Actor::Operator,
-                    &card.id,
-                    &validating,
-                    None,
-                    Some(&note),
-                )?;
-            } else {
-                board::add_comment(t, &Actor::Operator, &card.id, &note)?;
+                board::move_card(t, &Actor::Operator, &card.id, &validating, None, None)?;
             }
+            board::system_comment(t, &card.id, &note, None)?;
             let place = jobs::place(t, &job)?;
             let room = jobs::host_room(t, &job.project)?;
             Ok((job, (place, room)))
@@ -782,12 +774,7 @@ async fn merge(
                     ..CardPatch::default()
                 };
                 board::update_card(t, &Actor::Operator, &card.id, patch)?;
-                board::add_comment(
-                    t,
-                    &Actor::Operator,
-                    &card.id,
-                    &rt::queue_comment(&job, &card.id),
-                )?;
+                board::system_comment(t, &card.id, &rt::queue_comment(&job, &card.id), None)?;
             }
             let place = jobs::place(t, &job)?;
             let room = jobs::host_room(t, &job.project)?;
@@ -1139,12 +1126,7 @@ async fn merge_batch(
                     ..CardPatch::default()
                 };
                 board::update_card(t, &Actor::Operator, &c.card, patch)?;
-                board::add_comment(
-                    t,
-                    &Actor::Operator,
-                    &c.card,
-                    &rt::queue_comment(&job, &c.card),
-                )?;
+                board::system_comment(t, &c.card, &rt::queue_comment(&job, &c.card), None)?;
             }
             let place = jobs::place(t, &job)?;
             let room = jobs::host_room(t, &job.project)?;

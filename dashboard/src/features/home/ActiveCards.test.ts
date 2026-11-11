@@ -5,6 +5,7 @@
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../../test/wait";
 import type { ActiveCard } from "../../api/types";
 
 const active = vi.fn();
@@ -58,7 +59,7 @@ async function mount(now: number) {
   const el = document.createElement("div");
   document.body.append(el);
   dispose = render(() => createComponent(ActiveCards, { now }), el);
-  await vi.waitFor(() => expect(active).toHaveBeenCalled());
+  await waitFor(() => expect(active).toHaveBeenCalled());
   await new Promise((r) => setTimeout(r, 0));
   return el;
 }
@@ -70,7 +71,7 @@ describe("ActiveCards", () => {
       card({ assignee: "A1", assignee_name: "terrarium/rust-ci", assignee_status: "working", eta_at: "2026-11-05T11:00:00Z" }),
     ]);
     const el = await mount(Date.parse("2026-11-05T10:00:00Z"));
-    await vi.waitFor(() => expect(el.querySelectorAll("tr[data-card]").length).toBe(2));
+    await waitFor(() => expect(el.querySelectorAll("tr[data-card]").length).toBe(2));
     const groups = [...el.querySelectorAll(".active-project h3")].map((h) => h.textContent);
     expect(groups).toEqual(["abc", "terrarium"]);
     const row = el.querySelector('tr[data-card="TER-1"]')!;
@@ -96,7 +97,7 @@ describe("ActiveCards", () => {
       card({ assignee: "A1", assignee_name: "terrarium/rust-ci", assignee_status: "working", eta_at: "2026-11-05T11:00:00Z" }),
     ]);
     const el = await mount(Date.parse("2026-11-05T10:00:00Z"));
-    await vi.waitFor(() => expect(el.querySelectorAll("tr[data-card]").length).toBe(3));
+    await waitFor(() => expect(el.querySelectorAll("tr[data-card]").length).toBe(3));
 
     // One table, one colgroup of five columns: every group shares the widths.
     const tables = el.querySelectorAll("table");
@@ -136,7 +137,7 @@ describe("ActiveCards", () => {
       card({ id: "TER-2", assignee: "A2", assignee_name: "terrarium/w3", assignee_status: "working" }),
     ]);
     const el = await mount(Date.parse("2026-11-05T10:00:00Z"));
-    await vi.waitFor(() => expect(el.querySelectorAll("tr[data-card]").length).toBe(2));
+    await waitFor(() => expect(el.querySelectorAll("tr[data-card]").length).toBe(2));
     const badge = el.querySelector('tr[data-card="TER-1"] td.active-agent .idle-badge')!;
     expect(badge.textContent).toBe("idle 20m");
     expect(badge.getAttribute("title")).toContain("leads were told");
@@ -146,7 +147,7 @@ describe("ActiveCards", () => {
   it("shows the empty state", async () => {
     active.mockResolvedValue([]);
     const el = await mount(Date.now());
-    await vi.waitFor(() => expect(el.textContent).toContain("No card is in progress or in research."));
+    await waitFor(() => expect(el.textContent).toContain("No card is in progress or in research."));
   });
 
   it("puts the enabled project actions next to the project name (TER-53)", async () => {
@@ -154,7 +155,7 @@ describe("ActiveCards", () => {
     const action = (name: string, project: string, enabled = true) => ({ id: `id-${name}`, name, project, enabled, spec: { kind: "manual" }, action: { type: "mail", to: "lead", subject: "", body: "" }, run_as: "operator" });
     listSchedules.mockImplementation(() => Promise.resolve([action("deploy", "terrarium"), action("off", "terrarium", false), action("other", "nowip")]));
     const el = await mount(Date.parse("2026-11-05T10:00:00Z"));
-    await vi.waitFor(() => expect(el.querySelector("[data-action=deploy]")).not.toBeNull());
+    await waitFor(() => expect(el.querySelector("[data-action=deploy]")).not.toBeNull());
     expect(listSchedules).toHaveBeenCalledWith({ kind: "action" });
     const terra = [...el.querySelectorAll("tr.active-group")].find((g) => g.querySelector("h3")!.textContent === "terrarium")!;
     expect([...terra.querySelectorAll("[data-action]")].map((b) => b.getAttribute("data-action"))).toEqual(["deploy"]);

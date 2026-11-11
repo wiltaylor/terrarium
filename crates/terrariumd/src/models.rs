@@ -519,6 +519,7 @@ zai-api   glm-5.3            1M       131.1K   yes       no    \n";
             last_success_at: None,
             selfhosted: None,
             enabled: true,
+            cloud: None,
             created_at: String::new(),
             updated_at: String::new(),
         };
@@ -528,6 +529,8 @@ zai-api   glm-5.3            1M       131.1K   yes       no    \n";
             plan: None,
             base_url: base.map(str::to_owned),
             models: vec![],
+            key_id: None,
+            cloud: None,
         };
         assert_eq!(
             openai_base(&sub("zai", Some("coding")), &key(None)).as_deref(),
@@ -597,6 +600,7 @@ zai-api   glm-5.3            1M       131.1K   yes       no    \n";
                 last_success_at: None,
                 selfhosted: None,
                 enabled: true,
+                cloud: None,
                 created_at: String::new(),
                 updated_at: String::new(),
             }
@@ -725,6 +729,8 @@ zai-api   glm-5.3            1M       131.1K   yes       no    \n";
                 plan: None,
                 base_url: None,
                 models: vec![],
+                key_id: None,
+                cloud: None,
             };
             login::store_key(env.state.path(), "s", &key).unwrap();
             let http = FakeHttp::with(

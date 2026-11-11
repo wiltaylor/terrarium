@@ -3,6 +3,7 @@ import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
+import { waitFor } from "../../test/wait";
 import { createMockApi } from "../../api/mock";
 
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
@@ -17,7 +18,7 @@ vi.mock("../../stores", () => ({
   projects: { projects: () => [] },
   cardPeek: { open: () => {}, close: () => {} },
 }));
-const { BoardPage } = await import("./BoardPage");
+const { BoardPage, DoneCardsPage } = await import("./BoardPage");
 const { loadBoards } = await import("../inbox/TrackedCards");
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ""; vi.restoreAllMocks(); });
@@ -46,8 +47,8 @@ it("opens full details for a Done card absent from the active board", async () =
     history,
     get children() { return createComponent(Route, { path: "/p/:project/board", component: BoardPage }); },
   }), host);
-  await vi.waitFor(() => expect(get).toHaveBeenCalledWith(done.id));
-  await vi.waitFor(() => expect(document.body.textContent).toContain("Full comment only"));
+  await waitFor(() => expect(get).toHaveBeenCalledWith(done.id));
+  await waitFor(() => expect(document.body.textContent).toContain("Full comment only"));
   expect(document.body.textContent).toContain("Full detail only");
   expect((await api.board.get("terrarium")).cards.some(c => c.id === done.id)).toBe(false);
   get.mockClear();
@@ -57,7 +58,7 @@ it("opens full details for a Done card absent from the active board", async () =
   expect(get).not.toHaveBeenCalled();
   onEvent({ ...event, card: done.id });
   onEvent(event);
-  await vi.waitFor(() => expect(get).toHaveBeenCalledExactlyOnceWith(done.id));
+  await waitFor(() => expect(get).toHaveBeenCalledExactlyOnceWith(done.id));
 });
 
 it("does not fetch full cards when the board has no open drawer", async () => {
@@ -70,9 +71,30 @@ it("does not fetch full cards when the board has no open drawer", async () => {
     history,
     get children() { return createComponent(Route, { path: "/p/:project/board", component: BoardPage }); },
   }), host);
-  await vi.waitFor(() => expect(host.querySelectorAll("[data-card]").length).toBeGreaterThan(0));
+  await waitFor(() => expect(host.querySelectorAll("[data-card]").length).toBeGreaterThan(0));
   expect(get).not.toHaveBeenCalled();
   const chip = host.querySelector("[data-card='TER-12'] .test-chip");
   expect(chip?.getAttribute("title")).toContain("Latest test run");
   expect(chip?.getAttribute("href")).toContain("/p/terrarium/tests/");
+});
+
+it("has no New card button on the done screen, and the toggle keeps the version view (TER-245)", async () => {
+  await api.cards.create("terrarium", { title: "Done for the toggle", column: "done", labels: ["version:vnext"] });
+  const history = createMemoryHistory();
+  history.set({ value: "/p/terrarium/board/done?version=vnext&group=version&card=TER-1" });
+  const host = document.createElement("div");
+  document.body.append(host);
+  dispose = render(() => createComponent(MemoryRouter, {
+    history,
+    get children() { return [
+      createComponent(Route, { path: "/p/:project/board", component: BoardPage }),
+      createComponent(Route, { path: "/p/:project/board/done", component: DoneCardsPage }),
+    ]; },
+  }), host);
+  await vi.waitFor(() => expect(host.querySelectorAll("[data-card]").length).toBeGreaterThan(0));
+  expect(host.querySelector(".column-add")).toBeNull();
+  const toggle = [...host.querySelectorAll("button")].find(b => b.textContent === "Back to cards")!;
+  toggle.click();
+  await vi.waitFor(() => expect(history.get()).toBe("/p/terrarium/board?version=vnext&group=version"));
+  await vi.waitFor(() => expect(host.querySelector(".column-add")).not.toBeNull());
 });

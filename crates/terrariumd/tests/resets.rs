@@ -41,15 +41,21 @@ fn aid(s: &str) -> AgentId {
     s.parse().unwrap()
 }
 
-/// Wait until `f` holds. A deadline, not a count of tries: each try is a
-/// request, and it is slow on a loaded machine.
-async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl FnMut() -> F) {
-    let start = std::time::Instant::now();
+/// Wait until `f` holds. The wait counts only time without progress of
+/// the daemon (its newest event, [`common::Stall`]): under merge-job load
+/// a turn of the fake took over [`common::WAIT`] while the daemon still
+/// wrote its events (TER-674).
+async fn until<F: std::future::Future<Output = bool>>(
+    td: &TestDaemon,
+    what: &str,
+    mut f: impl FnMut() -> F,
+) {
+    let mut stall = common::Stall::new(td.last_seq().await);
     while !f().await {
-        assert!(
-            start.elapsed() < common::WAIT,
-            "timed out waiting for {what}"
-        );
+        if stall.due() {
+            let mark = td.last_seq().await;
+            assert!(stall.moved(mark), "timed out waiting for {what} ({stall})");
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
@@ -115,7 +121,7 @@ async fn start_with_a_turn(td: &TestDaemon, a: &str) {
     td.post(&format!("/api/agents/{a}/send"), json!({"text": "work"}))
         .await
         .ok();
-    until("the turn ran", || async {
+    until(td, "the turn ran", || async {
         td.sup.prompts(aid(a)).len() > before
     })
     .await;
@@ -123,7 +129,7 @@ async fn start_with_a_turn(td: &TestDaemon, a: &str) {
     // `idle` status event. The fake has the prompt before it is `working`,
     // and the API status can still be the `idle` from before the turn, so
     // `wait_status(idle)` alone can come back while the turn runs.
-    until("the end of the turn", || async {
+    until(td, "the end of the turn", || async {
         let new = statuses(td, a).await.split_off(seen);
         new.iter()
             .position(|s| s == "working")
@@ -138,7 +144,7 @@ async fn start_with_a_turn(td: &TestDaemon, a: &str) {
 /// has stored its status and session, so a check right after `prompted`
 /// can still see the old state (`restarting`, no session).
 async fn new_session_shown(td: &TestDaemon, a: &str, first: &Value) {
-    until("the new session in the API", || async {
+    until(td, "the new session in the API", || async {
         let now = agent(td, a).await;
         now["session"].is_string() && now["session"] != *first
     })
@@ -148,7 +154,7 @@ async fn new_session_shown(td: &TestDaemon, a: &str, first: &Value) {
 /// Wait until a prompt of agent `a` is `want`.
 async fn prompted(td: &TestDaemon, a: &str, want: &str) {
     let a = aid(a);
-    until(want, || async {
+    until(td, want, || async {
         td.sup.prompts(a).iter().any(|p| p == want)
     })
     .await;
@@ -446,7 +452,7 @@ async fn reset_rights() {
         .await;
     assert_eq!(r.status, 202, "{}", r.body);
     td.wait_status(&w, "idle").await;
-    until("the lead's compaction", || async {
+    until(&td, "the lead's compaction", || async {
         td.sup.compactions(aid(&w)) == 1
     })
     .await;
@@ -456,7 +462,7 @@ async fn reset_rights() {
         .await;
     assert_eq!(r.status, 202, "{}", r.body);
     assert_eq!(r.body["reset"]["deferred"], true);
-    until("the operator's compaction", || async {
+    until(&td, "the operator's compaction", || async {
         td.sup.compactions(aid(&w)) == 2
     })
     .await;
@@ -468,17 +474,19 @@ async fn reset_rights() {
 /// request runs.
 #[tokio::test]
 async fn a_busy_agent_queues_and_a_new_request_replaces_the_pending_one() {
-    // The time limit of `setup` (5 s), not a short one: the two requests
-    // below must come while the silent compaction runs, also on a loaded
-    // machine. A 400 ms limit could end it first.
+    // A time limit longer than the test: the two requests below must come
+    // while the silent compaction runs. Under merge-job load the 5 s limit
+    // of `setup` ended it before the first of them (TER-674). The test
+    // ends the compaction itself, as its time limit does.
     let (td, lead, w) = setup().await;
+    tune(&td, Duration::from_secs(600));
     start_with_a_turn(&td, &w).await;
     td.sup.set_compact(aid(&w), FakeCompact::Silent);
     let path = |verb: &str| format!("/api/agents/{w}/{verb}");
     let r = td.post_empty(&path("compact")).await;
     assert_eq!(r.body["reset"]["state"], "started", "{}", r.body);
     // The API shows the reason once the daemon has stored the status event.
-    until("compacting in the API", || async {
+    until(&td, "compacting in the API", || async {
         agent(&td, &w).await["status_reason"] == "compacting"
     })
     .await;
@@ -497,6 +505,7 @@ async fn a_busy_agent_queues_and_a_new_request_replaces_the_pending_one() {
     assert_eq!(r.body["reset_pending"]["kind"], "new_session");
     assert_eq!(r.body["reset_pending"]["by"], "p/lead");
     assert_eq!(td.sup.compactions(aid(&w)), 1, "not interrupted");
+    assert!(td.sup.time_out_compaction(aid(&w)));
     prompted(&td, &w, "[System:reset requested by p/lead] B").await;
     assert!(
         !td.sup.prompts(aid(&w)).iter().any(|p| p.ends_with("] A")),
@@ -532,7 +541,7 @@ async fn a_request_waits_for_a_run_on_the_way() {
     assert_eq!(r.body["reset"]["state"], "started", "{}", r.body);
     // The answer came after the run on the way let the agent go.
     assert!(took >= Duration::from_millis(300), "{took:?}");
-    until("the compaction", || async {
+    until(&td, "the compaction", || async {
         !events(&td, &w, "agent.compacted").await.is_empty()
     })
     .await;
@@ -593,7 +602,7 @@ async fn a_queued_compaction_that_cannot_run_is_dropped_with_a_trace() {
             .filter(|e| e["data"]["state"] == "dropped")
             .collect::<Vec<_>>()
     };
-    until("the drop", || async { !dropped().await.is_empty() }).await;
+    until(&td, "the drop", || async { !dropped().await.is_empty() }).await;
     let d = dropped().await;
     assert_eq!(d.len(), 1, "{d:#?}");
     let data = &d[0]["data"];

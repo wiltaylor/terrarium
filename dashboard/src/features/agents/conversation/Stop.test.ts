@@ -4,6 +4,7 @@
 import { createComponent, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../../../test/wait";
 import type { Agent, AgentStatus } from "../../../api/types";
 import { ApiError } from "../../../api/http";
 
@@ -58,10 +59,10 @@ describe("the Stop button", () => {
     const { el, setA, stop } = mount(agent("working"));
     stop()!.click();
     expect(interrupt).toHaveBeenCalledWith("A1");
-    await vi.waitFor(() => expect(stop()!.textContent).toBe("Stopping…"));
+    await waitFor(() => expect(stop()!.textContent).toBe("Stopping…"));
     expect(stop()!.disabled).toBe(true);
     done({ accepted: true, interrupted: true });
-    await vi.waitFor(() => expect(el.textContent).toContain("Stop sent"));
+    await waitFor(() => expect(el.textContent).toContain("Stop sent"));
     // The daemon reports the end of the turn: the button goes, the note stays.
     setA(agent("idle", "interrupted"));
     expect(stop()).toBeUndefined();
@@ -72,6 +73,6 @@ describe("the Stop button", () => {
     interrupt.mockRejectedValue(new ApiError(409, "the agent runs no turn: there is nothing to interrupt", undefined, "conflict"));
     const { el, stop } = mount(agent("working"));
     stop()!.click();
-    await vi.waitFor(() => expect(el.textContent).toContain("nothing to interrupt"));
+    await waitFor(() => expect(el.textContent).toContain("nothing to interrupt"));
   });
 });

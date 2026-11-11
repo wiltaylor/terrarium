@@ -248,17 +248,38 @@ pub async fn run_ssh(
     }
 }
 
-/// Test a target. Only `ssh` targets: other kinds are `422 invalid`, as
-/// is an `ssh` target whose `credential` does not work.
-pub async fn test(state: &Shared, def: &TargetDef) -> ApiResult<TestReport> {
-    if def.kind != TargetKind::Ssh {
-        return Err(ApiError::invalid(format!(
-            "`target test` is not supported for a `{}` target, only for ssh; for a target \
-             with a host agent, `terrarium admin target verb {} status` asks the host",
-            targets::kind_str(def.kind),
-            def.name
-        )));
-    }
+/// Test a target. `ssh` targets, and `exedev` targets through the ssh
+/// target of their VM ([`crate::exedev::exec_def`]): other kinds are `422
+/// invalid`, as is a target whose `credential` does not work. An `exedev`
+/// target with no VM (or a VM with no ssh host yet) is `409 conflict`.
+pub async fn test(state: &Shared, target: &TargetDef) -> ApiResult<TestReport> {
+    let vm_def;
+    let def = match target.kind {
+        TargetKind::Ssh => target,
+        TargetKind::Exedev => {
+            vm_def = crate::exedev::exec_def(state, target).map_err(|e| {
+                if e.code == crate::error::Code::Conflict {
+                    ApiError::conflict(format!(
+                        "{}. `target test` logs in to the VM: run `terrarium admin target \
+                         verb {} up` (or start a holder), then test again",
+                        e.message, target.name
+                    ))
+                } else {
+                    e
+                }
+            })?;
+            &vm_def
+        }
+        _ => {
+            return Err(ApiError::invalid(format!(
+                "`target test` is not supported for a `{}` target, only for ssh and exedev; \
+                 for a target with a host agent, `terrarium admin target verb {} status` \
+                 asks the host",
+                targets::kind_str(target.kind),
+                target.name
+            )));
+        }
+    };
     // A global secret with no grant to the project: `403` and a
     // `secret.refused` event (PLAN §16b.6a).
     if let Some(name) = &def.credential {
@@ -303,8 +324,8 @@ pub async fn test(state: &Shared, def: &TargetDef) -> ApiResult<TestReport> {
     drop(run);
     let (result, host_key, message) = classify(exit, &stderr);
     Ok(TestReport {
-        target: def.name.clone(),
-        kind: targets::kind_str(def.kind),
+        target: target.name.clone(),
+        kind: targets::kind_str(target.kind),
         address: def.address.clone(),
         result,
         message,

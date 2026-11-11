@@ -422,7 +422,9 @@ pub async fn spawn_with(
                 )));
             }
             let mut refusals = Vec::new();
-            let mut candidate = |t: &templates::Template| {
+            // `fallback`: the `-alt` template of the automatic switch,
+            // which never takes a cloud subscription (TER-630).
+            let mut candidate = |t: &templates::Template, fallback: bool| {
                 let mut def = agent_template::to_def(&t.spec, "selection", &p)
                     .map_err(|e| ApiError::invalid(e.to_string()))?;
                 spawn_rights::inherit_pool(&mut def, selection_owner.as_ref());
@@ -445,10 +447,10 @@ pub async fn spawn_with(
                 if def.subscription.is_none() && def.subscription_pool.is_empty() {
                     return Ok(Some(None));
                 }
-                crate::spawn_selection::pick(c, &def, &selection_state, &mut refusals)
+                crate::spawn_selection::pick(c, &def, &selection_state, fallback, &mut refusals)
                     .map(|s| s.map(Some))
             };
-            if let Some(sub) = candidate(&first)? {
+            if let Some(sub) = candidate(&first, false)? {
                 return Ok((first, sub));
             }
             // Alternatives stay in the requested template's scope. In
@@ -456,7 +458,7 @@ pub async fn spawn_with(
             let alt_name = format!("{}-alt", first.name);
             if let Some(alt) = templates::find_in(c, first.project.as_deref(), &alt_name)?
                 && allowed(&alt)
-                && let Some(sub) = candidate(&alt)?
+                && let Some(sub) = candidate(&alt, true)?
             {
                 return Ok((alt, sub));
             }

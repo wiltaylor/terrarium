@@ -5,6 +5,7 @@ import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { createComponent, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../test/wait";
 import { createBookmarksStore } from "../stores/bookmarks";
 const bookmarks = createBookmarksStore(null, window.location.origin);
 
@@ -75,7 +76,7 @@ describe("ProjectTree", () => {
     if (activation === "Enter") row.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     else if (activation === "name link") row.querySelector<HTMLAnchorElement>("a.tree-project-link")!.click();
     else row.querySelector<HTMLElement>(":scope > .tree-row")!.click();
-    await vi.waitFor(() => expect(lastHistory.get()).toBe("/p/my%20app"));
+    await waitFor(() => expect(lastHistory.get()).toBe("/p/my%20app"));
     expect(row.getAttribute("aria-selected")).toBe("true");
   });
 

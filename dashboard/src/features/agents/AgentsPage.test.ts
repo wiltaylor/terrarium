@@ -5,6 +5,7 @@ import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { createComponent, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "../../test/wait";
 import { PROJECT_TABS } from "../../app/nav";
 
 const [pinned, setPinned] = createSignal<string[]>([]);
@@ -69,20 +70,20 @@ const card = (root: HTMLElement, name: string) => Array.from(root.querySelectorA
 describe("AgentsPage", () => {
   it("pins and unpins an agent from its card", async () => {
     const root = mount("/p/my%20app/agents", "/p/:project/agents", AgentsPage);
-    await vi.waitFor(() => expect(card(root, "worker")).toBeTruthy());
+    await waitFor(() => expect(card(root, "worker")).toBeTruthy());
     const pin = Array.from(card(root, "worker").querySelectorAll("button")).find((b) => b.textContent === "Pin")!;
     expect(pin.getAttribute("aria-pressed")).toBe("false");
     pin.click();
     expect(toggle).toHaveBeenCalledWith("A2");
-    await vi.waitFor(() => expect(pin.textContent).toBe("Unpin"));
+    await waitFor(() => expect(pin.textContent).toBe("Unpin"));
     expect(pin.getAttribute("aria-pressed")).toBe("true");
     pin.click();
-    await vi.waitFor(() => expect(pin.textContent).toBe("Pin"));
+    await waitFor(() => expect(pin.textContent).toBe("Pin"));
   });
 
   it("gives a card agent no pin", async () => {
     const root = mount("/p/my%20app/agents", "/p/:project/agents", AgentsPage);
-    await vi.waitFor(() => expect(root.querySelector(".card-agents .agent-card")).toBeTruthy());
+    await waitFor(() => expect(root.querySelector(".card-agents .agent-card")).toBeTruthy());
     const buttons = Array.from(root.querySelectorAll(".card-agents button")).map((b) => b.textContent);
     expect(buttons).not.toContain("Pin");
   });
@@ -90,7 +91,7 @@ describe("AgentsPage", () => {
   it("opens New agent for the route project", async () => {
     const root = mount("/p/my%20app/agents", "/p/:project/agents", AgentsPage);
     Array.from(root.querySelectorAll("button")).find((b) => b.textContent === "New agent")!.click();
-    await vi.waitFor(() => expect(root.querySelector('[role="dialog"]')?.textContent).toBe("new agent in my app"));
+    await waitFor(() => expect(root.querySelector('[role="dialog"]')?.textContent).toBe("new agent in my app"));
   });
 });
 

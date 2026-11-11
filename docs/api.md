@@ -446,7 +446,7 @@ refused it. Do not parse the message; use `code`.
 | 409 | `lease_held` | Another agent holds a lease on the target that the new lease clashes with (§17.7). `details: {"target", "holder", "holder_id", "lease_id", "exclusive", "expires_at"}`. |
 | 413 | `too_large` | An upload is over the per-file limit or the project quota. |
 | 415 | `unsupported_media_type` | An attachment is not a PNG, JPEG, GIF, or WebP image (§6.2). |
-| 429 | `rate_limited` | Too many calls of one kind; try again later. The credential helper (§5.1) has a limit per agent. An agent has too many live exec sessions (§17). A host agent runs its maximum of sessions. |
+| 429 | `rate_limited` | Too many calls of one kind; try again later. The credential helper (§5.1) has a limit per agent. An agent has too many live exec sessions (§17). A host agent runs its maximum of sessions. All upload slots of the daemon are busy (§12.2). |
 | 501 | `not_available` | The route exists, but this phase does not do the request. |
 | 503 | `unavailable` | The daemon cannot do the request on this machine: the repo browser has no `bwrap` to read an agent tree (§5.3). |
 | 422 | `invalid` | Well-formed values that break a rule: a bad name, an empty title, a missing column. |
@@ -1033,6 +1033,7 @@ helper gives the agent's proxy credential, not the forge token.
 | Endpoint | Body | Answer | Needs |
 |---|---|---|---|
 | `GET /api/repos/{id}` | | `200` repo | read |
+| `DELETE /api/repos/{id}` | | `200` the removed repo; `409` while a queued or running job, `next_repos` of the delivery config, a `github` pipeline of the same `owner/name`, or an open bound agent's checkout at the repo's `path` uses it; `409 file_managed` for a repo of a project file. The clones stay. Audit and event `repo.delete` | project_admin |
 | `POST /api/repos/{id}/checkout` | below | `200` checkout result | own workspace: read; another agent's: project_admin |
 | `POST /api/repos/credential` | `{"protocol", "host", "path"?}` | `200` `{"username", "password"}` | an agent |
 | `GET /api/repos/{id}/trees...` | | the repo browser (§5.3) | read |
@@ -3853,28 +3854,6 @@ focus.
 
 ### 6.12 Project folders
 
-#### Sidebar bookmarks
-
-`/api/bookmarks` stores the operator's sidebar bookmarks in SQLite, shared
-across browsers. All methods are operator-only. GET returns an array of
-`{title, href}` in insertion order. PUT accepts `{title, href}`, adds or
-renames that URL, and returns the list. DELETE accepts `{href}` and returns
-the list, including when the URL was absent. Mutations write `bookmark.add`
-or `bookmark.remove` audit rows.
-
-PUT also accepts an optional `previous_href` to edit an existing bookmark's
-title and URL atomically, preserving its position. A missing source or a URL
-already used by another bookmark returns `422 invalid` without changing the list.
-
-Titles must be nonblank and at most 500 bytes. URLs must be absolute HTTP(S)
-without credentials, or a relative `/p/<project>/knowledge/wiki` path.
-URLs are normalized and deduplicated, and are limited to 8192 bytes on add.
-Invalid values return `422 invalid`. Wiki links open in place. External
-links open in a new window. The dashboard refreshes on focus and every 30
-seconds and imports its old `terrarium.bookmarks` list on first load,
-clearing that list only after successful import. Existing daemon titles win
-over legacy titles during migration.
-
 The code is in `crates/terrariumd/src/store/project_folders.rs` and
 `crates/terrariumd/src/api/project_folders.rs`. The tables are
 `project_folders` and `project_placements` (migration 68).
@@ -4309,6 +4288,34 @@ rows: `thread.open`, `thread.agent`, `thread.respond`,
 `thread.propose_close`, `thread.remind`, `thread.track`,
 `thread.card_link`, `thread.card_wake`, `thread.close` (with `reason`,
 `session`, and the commented `cards`).
+
+### 6.14 Sidebar bookmarks
+
+The code is in `crates/terrariumd/src/api/bookmarks.rs` (migration 93).
+
+`/api/bookmarks` stores the operator's sidebar bookmarks in SQLite, shared
+across browsers. All methods are operator-only. GET returns an array of
+`{title, href}` in insertion order. PUT accepts `{title, href}`, adds or
+renames that URL, and returns the list. DELETE accepts `{href}` and returns
+the list, including when the URL was absent. Mutations write `bookmark.add`
+or `bookmark.remove` audit rows.
+
+PUT also accepts an optional `previous_href` to edit an existing bookmark's
+title and URL atomically, preserving its position. A missing source or a URL
+already used by another bookmark returns `422 invalid` without changing the list.
+
+Titles must be nonblank and at most 500 bytes. URLs must be absolute HTTP(S)
+without credentials, or a relative `/p/<project>/knowledge/wiki` path.
+URLs are normalized and deduplicated, and are limited to 8192 bytes on add.
+Invalid values return `422 invalid`. Wiki links open in place. External
+links open in a new window. The dashboard refreshes on focus and every 30
+seconds and imports its old `terrarium.bookmarks` list on first load.
+It clears that list only after each row was imported or refused: a row that
+the daemon refuses (`422 invalid`, for example a title over 500 bytes) is
+skipped and reported once in the sidebar, and it does not block the import
+or later changes (TER-257). Existing daemon titles win over legacy titles
+during migration. A dashboard user that is not the operator gets `403`: the
+dashboard then keeps the bookmarks in that browser only, with no error.
 
 ## 7. Mail
 
@@ -5390,6 +5397,12 @@ Multipart (`multipart/form-data`): a `file` part with the bytes (its
   of its root, and with `index.html` at the root. Else `422 invalid`.
 - Over the per-file limit or the project quota: `413 too_large`, with
   `details` (`size`, `max_file_bytes`, or `used_bytes`, `quota_bytes`).
+- The daemon runs at most 8 uploads at one time. An upload that finds no
+  free slot within 3 s gets `429 rate_limited` with `Retry-After: 2` and
+  `details` (`retry_after`, `max_concurrent_uploads`). It stores nothing
+  (TER-605). `terrarium artifact push` and `terrarium test push` try a `429`
+  again after `Retry-After` (else `details.retry_after`, else 2 s, at most
+  60 s), at most 5 tries in all, then fail with the error (TER-661).
 
 Limits come from `$TERRARIUM_CONFIG_DIR/daemon.toml`. The daemon reads the
 file at the first artifact call; a change needs a restart.
@@ -5412,7 +5425,7 @@ listens alone on `$TERRARIUM_ARTIFACT_LISTEN` (default `0.0.0.0:8081`).
 | Endpoint | Body | Answer |
 |---|---|---|
 | `GET /api/projects/{name}/artifacts?label=&limit=&cursor=` | | `200` artifacts newest first, cursor: number; `label` keeps the artifacts with that exact label |
-| `POST /api/projects/{name}/artifacts` | §12.2 | `201` artifact |
+| `POST /api/projects/{name}/artifacts` | §12.2 | `201` artifact; `429 rate_limited` with `Retry-After` when all 8 upload slots stay busy for 3 s (§12.2) |
 | `GET /api/projects/{name}/artifacts/usage` | | `200 {"project", "count", "used_bytes", "quota_bytes", "max_file_bytes"}` |
 | `GET /api/artifacts/{id}` | | `200` artifact |
 | `DELETE /api/artifacts/{id}` | | `204`; the author or an admin |
@@ -5758,7 +5771,7 @@ keep their card.
 | `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. A plan account: removes the account directory and nothing else; no harness command runs, so no other account and no shared file changes. `409 conflict` while an agent's current subscription is this one. A subscription with no account (a shared login before its migration): runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command (it uses API keys only): `422 invalid`. An old pi plan account (from before pi took API keys only) logs out as any plan account: its directory goes. A `zai` subscription has no logout either (`422 invalid`): the Claude logout would end the shared Claude login. |
 | `POST /api/subscriptions/{name}/default` | | The subscription (§16.1), with `default: true`. Its plan account becomes the default account of its harness; the old default stops being one, in the same transaction. The audit row is `subscription.default` (`{harness, from, to, reason}`), and a `subscription` event (§16.7) follows. `422 invalid` for an API-key subscription, a subscription with no plan account, and a pi account or a provider that is not the plan provider of the harness. `404 not_found` for an unknown name. |
 | `PUT /api/subscriptions/{name}/label` | `{label}` | The subscription (§16.1). `label` is a string (at most 80 characters, no control characters) or `null`; `null` or only spaces removes it, and `display_name` comes from the vendor table again. Text for people only: the name, the ids, and the keys stay. Works on a file subscription too. Needs the operator or sysadmin. The audit row is `subscription.label` (`{label}`). |
-| `POST /api/subscriptions/{name}/api-key` | `{provider, key, plan?, base_url?, models?}` | The subscription, without the key. `plan` is for `zai` and `moonshot` only. See §16.5. |
+| `POST /api/subscriptions/{name}/api-key` | `{provider, key, plan?, base_url?, models?, key_id?, cloud?}` | The subscription, without the key. `plan` is for `zai` and `moonshot` only; `key_id` for `bedrock`, `cloud` for `bedrock`, `gcp`, and `foundry`. See §16.5. |
 | `GET /api/subscriptions/detect` | | Logins found in the Claude Code, Codex, and Copilot homes that no subscription covers (same provider, and the harness is in `harnesses`): `[{kind, harness, provider, logged_in, plan?, detail?, suggested}]`. pi uses API keys only: no pi login is found. `suggested` is a subscription definition. |
 | `POST /api/subscriptions/login` | `{kind, provider?, name?}` | `201` with the login session (§16.4). |
 | `GET /api/subscriptions/login/{id}` | | The login session. |
@@ -6032,6 +6045,9 @@ directories are `0700`), and sets `env_var`:
 | `github` | `COPILOT_GITHUB_TOKEN` (a fine-grained PAT with Copilot Requests; the Copilot probe uses it) |
 | `zai` (takes `plan`) | `ZAI_API_KEY`, and the Claude Code vars below |
 | `moonshot` (takes `plan`; pi only) | `MOONSHOT_API_KEY`, and `KIMI_API_KEY` for a Kimi Code plan |
+| `bedrock` (takes `key_id` and `cloud`; Claude Code only) | `AWS_SECRET_ACCESS_KEY` with `key_id`, else `AWS_BEARER_TOKEN_BEDROCK`; the Claude Code vars below |
+| `gcp` (takes `cloud`; Claude Code only) | `GOOGLE_APPLICATION_CREDENTIALS` (a file); the Claude Code vars below |
+| `foundry` (takes `cloud`; Claude Code only) | `ANTHROPIC_FOUNDRY_API_KEY`; the Claude Code vars below |
 
 A new name makes an `api` subscription (harness `pi`, or `copilot` for
 `github`, or `claude` and `pi` for `zai`). No endpoint returns the key. The
@@ -6184,6 +6200,84 @@ every agent whose `subscription` has `env_var`
 the adapter's env. The start log and `terrariumd sandbox-dry-run` show the
 value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
 `<redacted>`.
+
+**Cloud providers (Claude Code only).** `provider` `bedrock` (Amazon
+Bedrock), `gcp` (Google Cloud Vertex AI), or `foundry` (Microsoft
+Foundry); the code is `crates/terrarium-core/src/cloud.rs`. The
+subscription gets `harnesses = ["claude"]` (another harness is `422
+invalid`), no plan, no probe, and `login_status` `api_key`. The key file
+keeps the secrets:
+
+- `bedrock`: `key` is the secret access key and `key_id` the access key
+  ID of an IAM user, or `key` alone is an Amazon Bedrock API key.
+- `gcp`: `key` is the service-account JSON (an object with `type`).
+- `foundry`: `key` is the API key of the resource.
+
+`cloud` holds the settings, which are no secret. They go to the
+definition (`[cloud]` in `subscriptions/<name>.toml`, or `cloud` in `POST
+/api/subscriptions`), not to the key file. A key without `cloud` keeps
+the stored settings, and a `cloud` without `models` keeps the stored
+model map. A file subscription takes its `[cloud]` from the file only
+(`422 invalid` with `cloud`). Today the key endpoint is the only API path
+that changes `cloud`, so a new budget sends the key again.
+
+| Field | Kinds | Claude Code var |
+|---|---|---|
+| `region` | `bedrock`, `gcp` | `AWS_REGION`, `CLOUD_ML_REGION` |
+| `project_id` (needed) | `gcp` | `ANTHROPIC_VERTEX_PROJECT_ID` |
+| `resource` (or `base_url`, one of them needed) | `foundry` | `ANTHROPIC_FOUNDRY_RESOURCE` |
+| `base_url` (`https://`) | all | `ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_VERTEX_BASE_URL`, `ANTHROPIC_FOUNDRY_BASE_URL` |
+| `models` | all | `ANTHROPIC_DEFAULT_OPUS_MODEL`, `_SONNET_MODEL`, `_HAIKU_MODEL` for the keys `opus`, `sonnet`, `haiku`; and `--model` |
+| `budget_usd` | all | none: the monthly budget (below) |
+
+The env of an agent on it adds the switch (`CLAUDE_CODE_USE_BEDROCK`,
+`CLAUDE_CODE_USE_VERTEX`, or `CLAUDE_CODE_USE_FOUNDRY` = `1`) and the key
+vars: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, or
+`AWS_BEARER_TOKEN_BEDROCK`; `ANTHROPIC_FOUNDRY_API_KEY`. Every value comes
+through `terrarium exec-env` (`POST /api/agent/secrets/env`), never the
+launch spec. The GCP JSON is in `credential_files` of that answer:
+`exec-env` writes it with mode `0600` (the dir `0700`) to
+`$HOME/.terrarium/credentials/<agent>/`, a tmpfs in the bwrap sandbox,
+and sets `GOOGLE_APPLICATION_CREDENTIALS` to the file. In sandbox mode
+`none` (development and tests) the daemon names the dir in
+`TERRARIUM_CREDENTIAL_DIR`: `<runtime dir>/credentials/<agent>`, which it
+removes when the harness exits. The redaction matcher has
+the key, `key_id`, and the `private_key` and `private_key_id` of a GCP
+JSON.
+
+`models` maps Terrarium model names to cloud model ids: a Bedrock
+inference profile id or ARN, a Vertex model id, a Foundry deployment
+name. The keys are lowercase (`opus`, `sonnet`, `haiku`, or a Claude id
+such as `claude-opus-5-5`). Claude Code gets `--model` with the map entry
+of the agent's `model`, else the model as it is for the aliases `opus`,
+`sonnet`, and `haiku` (Claude Code maps them with the
+`ANTHROPIC_DEFAULT_*_MODEL` vars or its default for the cloud). Any other
+name that is not in the map is refused: `422 invalid` at agent create, a
+patch, a file sync, and a template; a start refusal (`NotReady`) at start.
+The message names the subscription and the missing `cloud.models.<name>`.
+
+A cloud subscription is never in the automatic account choice: the
+auto-swap after a usage limit (§16.6) never moves an agent to one, the
+spawn pick takes one only when the template or the agent names it as
+`subscription`, never from `subscription_pool`, and the `<template>-alt`
+fallback of a spawn without headroom never takes one, also when the alt
+template names it. The spawn pick counts a cloud subscription as full at
+100 percent of its budget window, not at 80. A swap that names it is
+allowed (`POST /api/agents/{id}/subscription`, §6.2, with the rules of a
+swap).
+
+**The monthly budget.** With `budget_usd`, the daemon keeps the spend of
+the UTC month: the sum of the `costUSD` running totals of the Claude Code
+sessions on the subscription (`cost-state` of the session file; the list
+price of the tokens, not the cloud bill). The subscription shows a
+`budget` window with `used_pct`, `resets_at` (the start of the next month),
+and `balance` (`total` the budget, `used`, `remaining`, `currency` `USD`).
+The quota notices of §16.6 mail the operator at `alert_at` (default 80),
+90, and 100 percent. At 100 percent, new turns of the agents on the
+subscription wait: a hold with the cause `cloud-budget:<name>` until the
+start of the next month (`quota.blocked`). A raised or removed budget ends
+the hold at the next check (after each new session total, and on each
+policy tick).
 
 ### 16.6 The quota policy
 
@@ -6881,8 +6975,13 @@ POST /api/targets/box/test
 
 `host_key` is `known`, `added`, `unknown`, `mismatch`, or `not_checked`.
 `stderr` is the tail of the ssh stderr (at most 2000 bytes). The key
-never shows. A target of another kind is `422 invalid` ("not
-supported"); for a target with a host agent, use the `status` verb
+never shows. An `exedev` target is tested through the ssh target of its
+recorded VM (`exedev@<ssh_dest>`, its `credential`); the report keeps
+`"kind": "exedev"` and shows that address. With no VM, or a VM with no
+ssh host yet, the test is `409 conflict`: bring the VM up with the `up`
+verb or a holder's start, then test again (TER-651). A target of another
+kind is `422 invalid` ("not supported"); for a target with a host agent,
+use the `status` verb
 (§17.3). A target whose credential does not work is `422 invalid`. Each
 test writes a `target.test` audit row with `{result, host_key,
 exit_code}`.
@@ -7189,9 +7288,10 @@ of `sh -c <script>` on the target. The URL, the path, the branch, and the
 depth are arguments of the script. The credential of the repo goes in the
 env of that run only: `TERRARIUM_GIT_USERNAME` and
 `TERRARIUM_GIT_PASSWORD` for a token, which a `credential.helper` of `-c`
-reads, or `TERRARIUM_GIT_SSH_KEY` for an SSH key, which the script writes
-to a 0600 temp file for `GIT_SSH_COMMAND` and removes at exit. The secret
-is never on a command line. The target needs `git` and `sh`. A vmlab
+reads, or `TERRARIUM_GIT_SSH_KEY` for an SSH key, base64-encoded on one
+line, which the script decodes with `base64 -d` into a 0600 temp file for
+`GIT_SSH_COMMAND` and removes at exit. The secret is never on a command
+line. The target needs `git` and `sh`, and `base64` for an SSH key. A vmlab
 target is `422 invalid`.
 
 `path` is an absolute path on the target, or a path under
@@ -7254,8 +7354,12 @@ max_life_secs = 28800        # 60 to 28800 (8 hours)
 ```
 
 - The lifecycle goes through `POST https://exe.dev/exec` with the token
-  in the `Authorization` header only: `new --name=terrarium-x-<target>-<id>
-  --sandbox --tag=<tag> --cpu=<n> --memory=<n>GB`, `ls`, `rm`. Commands,
+  in the `Authorization` header only: `new
+  --name=terrarium-x-<instance>-<target>-<id> --sandbox --tag=<tag>
+  --cpu=<n> --memory=<n>GB`, `ls`, `rm`. `<instance>` is the exe.dev
+  instance id of the daemon: 8 hex characters, made once in its database
+  (table `exedev_instance`). Two daemons on one exe.dev account have two
+  ids. Commands,
   copies and the workspace sync go over ssh to `<user>@<ssh_dest>` (the
   API stops a command at 30 s and a body at 64 KB). `up` waits up to 180 s
   for ssh.
@@ -7269,7 +7373,9 @@ max_life_secs = 28800        # 60 to 28800 (8 hours)
   removal of that target's VM. An `up` that finds a recorded VM in `ls`,
   in its life, adopts it (also a row that `new` never answered: the ssh
   host then comes from `ls`). A recorded VM past its life is removed and
-  replaced, never adopted. A `new` that fails removes its VM; when that
+  replaced, never adopted. A row with no ssh host that `ls` does not list
+  stays for 10 minutes after its `created_at` (its `new` may still run):
+  `status` answers `absent`, and `up` makes a new VM next to it. A `new` that fails removes its VM; when that
   `rm` fails too, the row stays for the sweep.
 - At most 3 VMs at once over all exedev targets (the recorded ones and the
   `terrarium-x-` VMs in `ls`). The fourth `up` answers `409` with
@@ -7284,10 +7390,14 @@ max_life_secs = 28800        # 60 to 28800 (8 hours)
     inbox (or to the operator for a global target);
   - `orphaned`: a recorded VM whose target is gone;
   - `unready`: a recorded VM with no ssh host after 10 minutes, held or not;
-  - `unheld`: a recorded VM that no running agent holds after 10 minutes;
-  - `leftover`: a VM in `ls` with the `terrarium-x-` prefix and a tag of
-    the account, that no row of any account records, 10 minutes after its
-    `created_at` in `ls` (or after the sweep first saw it).
+  - `unheld`: a recorded VM that no running agent holds after 10 minutes
+    (the holders are read again under the target lock, right before the
+    `rm`);
+  - `leftover`: a VM in `ls` with this daemon's `terrarium-x-<instance>-`
+    prefix and a tag of the account, that no row of any account records,
+    10 minutes after its `created_at` in `ls` (or after the sweep first
+    saw it). A VM of another daemon (another instance id) is never a
+    leftover here.
   Each removal of a recorded VM writes `target.destroy` with
   `"reason": "exedev_<reason>"`. A VM without the prefix is never removed.
 - Deleting the target removes its VM. When that `rm` fails, the target is
@@ -9321,11 +9431,25 @@ or name) and a `review` column:
 |---|---|---|
 | `merge-queue-move` | a new merge job (`card merge`, `POST /api/merges`, or the batch rule) | each card to `@merge_queue` (a card there already stays) |
 | `merge-queue-cancel` | a cancelled merge verdict | the card from `@merge_queue` back to `@review` |
-| `merge-queue-batch` | a card moved to the `merge_queue` role column, and its timer | one batch merge of the cards that wait in `@merge_queue`, in board order: `limit = 8`, `min_cards = 8`, `max_wait_minutes = 30` (8 cards wait, or 30 minutes after the first one) |
+| `merge-queue-batch` | a card moved to the `merge_queue` role column, and its timer | one batch merge of the cards that wait in `@merge_queue`, in board order, when the merge lane is free: `limit = 8`, `min_cards = 4`, `max_wait_minutes = 30` (4 cards wait, or 30 minutes after the first one) |
 
 The pass (`@accepted`), the red result (the top of `@ready`), and the
 labels and comments stay with the flow of the project. Change the three
 numbers of `merge-queue-batch` to change the batch.
+
+The merge lane (TER-644): a `job_queue` batch is a no-op while a merge
+job of the project is queued or running, with the job in `lane` of the
+run detail, so the cards wait and the next batch takes them all. The
+engine checks each batch rule with `min_cards` and `max_wait_minutes`
+about every 10 seconds: when the lane is free and `min_cards` cards wait,
+or the first one came `max_wait_minutes` ago, it writes a `rule.timer`
+event that runs the rule. While the lane is busy it writes no timer and
+keeps the wait, so 1 to 3 cards go soon after the lane is free once they
+waited 30 minutes. A `release-blocker` card (TER-607) also waits for a
+busy lane, then goes first and alone with no count or wait. A project
+trigger on the end of a merge job (for
+example a schedule that mails the lead) can stay as a notice; the batch
+does not need it.
 
 A switch back from `rules` to `code` drops the pack at the next pass of
 the engine. A job that ended under `rules` but whose events the engine

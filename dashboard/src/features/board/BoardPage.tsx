@@ -27,7 +27,8 @@ import { activeFilterCount, columnFromQuery, columnQuery, nearestColumn, PHONE_Q
 import { boardVersions, matchesVersion, NO_VERSION } from "./versionLabels";
 import { cardAgentName } from "./cardAgent";
 import { agents, api, events } from "../../stores";
-import { boardView } from "./done";
+import { boardView, doneToggleHref } from "./done";
+import { BOARD_RELOAD_MS, createDebounce, DONE_RELOAD_MS, eventTouchesCard, RELOAD_MAX_WAIT_MS } from "./liveReload";
 
 export function DoneCardsPage() {
   return <BoardPage done />;
@@ -131,19 +132,19 @@ export function BoardPage(props: { done?: boolean }) {
     onCleanup(() => clearTimeout(t));
   });
 
-  let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+  // Done can span many pages. Coalesce busy project bursts before fetching
+  // that range, rather than requesting every page several times a second.
+  // The max wait keeps a busy project from holding the reload back for good.
+  const reloadBoard = createDebounce(() => void board.reload(), RELOAD_MAX_WAIT_MS);
   let detailTimer: ReturnType<typeof setTimeout> | undefined;
   let questionTimer: ReturnType<typeof setTimeout> | undefined;
   // Live events refresh summaries (including compact test chips and job state),
   // retaining the loaded Done range. Only the open drawer reloads full details.
   const off = events.on((e) => {
     if ((e.kind === "card" || e.kind === "board" || e.kind === "test_run" || e.kind === "job") && e.project === params.project && !dragging()) {
-      clearTimeout(reloadTimer);
-      // Done can span many pages. Coalesce busy project bursts before fetching
-      // that range, rather than requesting every page several times a second.
-      reloadTimer = setTimeout(() => void board.reload(), props.done ? 2000 : 300);
+      reloadBoard.schedule(props.done ? DONE_RELOAD_MS : BOARD_RELOAD_MS);
       const card = search.card;
-      if (card && (e.card === card || e.data.card_id === card)) {
+      if (card && eventTouchesCard(e, card)) {
         clearTimeout(detailTimer);
         detailTimer = setTimeout(() => {
           if (search.card === card) void reloadSelected();
@@ -157,7 +158,7 @@ export function BoardPage(props: { done?: boolean }) {
   });
   onCleanup(() => {
     off();
-    clearTimeout(reloadTimer);
+    reloadBoard.cancel();
     clearTimeout(detailTimer);
     clearTimeout(questionTimer);
   });
@@ -266,7 +267,7 @@ export function BoardPage(props: { done?: boolean }) {
   return (
     <div class="board-page">
       <PageHead title={props.done ? "Done cards" : "Cards"} level={2}>
-        <button type="button" onClick={() => navigate(`${projectBase(params.project)}/board${props.done ? "" : "/done"}`)}>
+        <button type="button" onClick={() => navigate(doneToggleHref(projectBase(params.project), !!props.done, search))}>
           {props.done ? "Back to cards" : "Show done cards"}
         </button>
         {/* A phone folds the two filters into this button; a wider screen shows them in the row and hides the button. */}
@@ -346,7 +347,7 @@ export function BoardPage(props: { done?: boolean }) {
               collapsed={laneState().collapsed}
               onToggle={(key) => saveLaneState(toggleCollapsed(laneState(), key))}
               visible={visible}
-              addColumn={newCardColumn(columnNames())}
+              addColumn={props.done ? undefined : newCardColumn(columnNames())}
               addButton={addCardButton}
               onDrop={(...a) => void onLaneDrop(...a)}
               boardRef={(el) => (boardEl = el)}

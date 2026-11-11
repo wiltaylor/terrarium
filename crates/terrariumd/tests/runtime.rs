@@ -36,9 +36,11 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 /// The deadline of the waits for a state. Under load one start of the fake
-/// TUI took 18 s (TER-117), so 15 s was too short. Only a failing test
+/// TUI took 18 s (TER-117), so 15 s was too short, and 45 s was too short
+/// at load 40 to 60 on 32 cores (TER-647). The state waits of [`Td`] count
+/// only time without progress ([`common::Stall`]). Only a failing test
 /// waits it out.
-const WAIT: Duration = Duration::from_secs(45);
+const WAIT: Duration = common::WAIT;
 /// The lead nudge rate limit in these tests. Long enough that the requests
 /// a test makes inside one interval fit in it on a loaded machine. 4 s was
 /// too short at a load of 70 to 100: the hub listener handles each card
@@ -202,8 +204,12 @@ impl Td {
     /// stays), then start a new daemon with a new supervisor on the same
     /// state dir.
     async fn restart_daemon(&mut self) {
+        // Wait for the tasks of the old daemon and their database calls:
+        // after a bare shutdown a call on the blocking pool still ran, and
+        // the new daemon's open failed with `database is locked` under
+        // load (TER-646, TER-685).
         if let Some(d) = self.daemon.take() {
-            d.shutdown();
+            d.shutdown_and_wait().await;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         self.sup = Arc::new(supervisor(self.dir.path(), self.adapter.clone()));
@@ -283,17 +289,29 @@ impl Td {
             .to_owned()
     }
 
+    /// The newest event `seq` of the agent and its status: what moves
+    /// while a start, a restart or a turn goes on.
+    async fn progress(&self, id: &str) -> (Value, String) {
+        let newest = self
+            .get(&format!("/api/agents/{id}/events?order=desc&limit=1"))
+            .await;
+        (newest[0]["seq"].clone(), self.status(id).await)
+    }
+
     async fn wait_status(&self, id: &str, want: &str) {
-        let start = Instant::now();
+        let mut stall = common::Stall::new(self.progress(id).await);
         loop {
             let s = self.status(id).await;
             if s == want {
                 return;
             }
-            assert!(
-                start.elapsed() < WAIT,
-                "agent never reached {want}; last {s}"
-            );
+            if stall.due() {
+                let mark = self.progress(id).await;
+                assert!(
+                    stall.moved(mark),
+                    "agent never reached {want}; last {s} ({stall})"
+                );
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -308,16 +326,19 @@ impl Td {
 
     /// Wait until `f` holds for the events of one kind.
     async fn wait_events(&self, id: &str, kind: &str, f: impl Fn(&[Value]) -> bool) -> Vec<Value> {
-        let start = Instant::now();
+        let mut stall = common::Stall::new(self.progress(id).await);
         loop {
             let ev = self.events(id, kind).await;
             if f(&ev) {
                 return ev;
             }
-            assert!(
-                start.elapsed() < WAIT,
-                "{kind} events never matched: {ev:#?}"
-            );
+            if stall.due() {
+                let mark = self.progress(id).await;
+                assert!(
+                    stall.moved(mark),
+                    "{kind} events never matched ({stall}): {ev:#?}"
+                );
+            }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
     }
@@ -1769,6 +1790,10 @@ async fn agent_rpc_write_answers_survive_restart_without_duplicate_mail() {
     );
 }
 
+/// The `wait` of the long polls in [`agent_rpc_tunnel_and_long_poll`], in
+/// seconds: below [`common::HARD_WAIT`] and the longest hold (300 s).
+const LONG_POLL: u64 = 120;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_rpc_tunnel_and_long_poll() {
     let td = Td::start_with(false).await;
@@ -1831,7 +1856,9 @@ async fn agent_rpc_tunnel_and_long_poll() {
 
     // Long-poll: the request waits until new mail arrives. Its wait is
     // long, so an answer before the wait ends came from the mail, also on
-    // a loaded machine.
+    // a loaded machine. A timeout answers an empty list, so the mail in
+    // the answer is the proof. 30 s ran out in a uid 1001 merge pass at
+    // load 30 (TER-685).
     let after = mail[0]["id"].as_str().unwrap().to_owned();
     let s2 = sock.clone();
     let started = Instant::now();
@@ -1840,7 +1867,7 @@ async fn agent_rpc_tunnel_and_long_poll() {
             &s2,
             "http",
             json!({"method": "GET", "path": "/api/mail",
-            "query": {"wait": 30, "cursor": after}}),
+            "query": {"wait": LONG_POLL, "cursor": after}}),
         )
         .await
     });
@@ -1848,9 +1875,12 @@ async fn agent_rpc_tunnel_and_long_poll() {
     assert!(!waiter.is_finished());
     td.post("/api/mail", Some(json!({"to": "demo/bob", "body": "late"})))
         .await;
-    let r = timeout(WAIT, waiter).await.unwrap().unwrap();
+    let r = timeout(common::HARD_WAIT, waiter).await.unwrap().unwrap();
     let took = started.elapsed();
-    assert!(took < Duration::from_secs(30), "the wait ran out: {took:?}");
+    assert!(
+        took < Duration::from_secs(LONG_POLL),
+        "the wait ran out: {took:?}"
+    );
     let mail = r["result"]["body"].as_array().unwrap();
     assert_eq!(mail.len(), 1, "{r}");
     assert_eq!(mail[0]["body"], "late");
@@ -1877,7 +1907,7 @@ async fn agent_rpc_tunnel_and_long_poll() {
             &s3,
             "http",
             json!({"method": "GET", "path": "/api/projects/demo/cards",
-            "query": {"assignee": "me", "wait": 10}}),
+            "query": {"assignee": "me", "wait": LONG_POLL}}),
         )
         .await
     });
@@ -1887,7 +1917,7 @@ async fn agent_rpc_tunnel_and_long_poll() {
         Some(json!({"assignee": "demo/bob"})),
     )
     .await;
-    let r = timeout(WAIT, waiter).await.unwrap().unwrap();
+    let r = timeout(common::HARD_WAIT, waiter).await.unwrap().unwrap();
     assert_eq!(r["result"]["body"].as_array().unwrap().len(), 1, "{r}");
 }
 

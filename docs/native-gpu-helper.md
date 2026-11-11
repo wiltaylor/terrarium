@@ -140,9 +140,27 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
       sessions. `RemoveIPC=yes` makes systemd remove the System V and
       POSIX IPC objects of the UID, also its files in `/dev/shm`, when the
       last unit of that UID stops.
-    - The pool users have no home directory (see the install steps).
+    - `ProtectHome=tmpfs` puts an empty read-only tmpfs over `/home`,
+      `/root`, and `/run/user`. Git in a session trusts every repo
+      (`safe.directory=*`), so a repo there that the UID could read (an
+      operator's home that is not 0700) would run its config
+      (`core.fsmonitor`, hooks) as the UID (TER-659).
+    - The pool users have no home directory (see the install steps). Their
+      passwd home (`/home/terrarium-w<n>` by default) does not exist, also
+      not in the unit.
+    - `ProtectProc=invisible` mounts the unit's `/proc` with
+      `hidepid=invisible`: a session sees only the processes of its own UID,
+      not the host's processes or their command lines, and cannot open
+      `/proc/<pid>/root` or `/proc/<pid>/cwd` of a session of another UID
+      (TER-638). The processes that stay visible are of the same pool UID,
+      and a pool UID serves one holder at a time (above), so they are the
+      holder's own sessions with the same workspace scope. `ProcSubset=pid`
+      is not set, since CUDA and `nvidia-smi` read `/proc/driver/nvidia`.
+      `PrivatePIDs=` is not set: it needs systemd 257, and the command
+      would run as PID 1, which ignores SIGINT and SIGTERM without a handler.
     - `workspace_root` must not be under `/tmp` or `/var/tmp` (each unit
-      gets a private copy of them): the helper refuses to start. A workspace
+      gets a private copy of them), nor under `/home`, `/root`, or
+      `/run/user` (hidden in each unit): the helper refuses to start. A workspace
       root or scope path with whitespace, quotes, `%`, `:`, or a backslash
       is refused, since it goes in systemd path lists. The working
       directory is not in such a list: only `%` and control characters are
@@ -153,10 +171,12 @@ daemon --exec{limits.native_gpu}--> host agent (agent user)
   Properties: `--uid`/`--gid` of the holder's workload user,
   `NoNewPrivileges=yes`, `CapabilityBoundingSet=`, `AmbientCapabilities=`,
   `RestrictSUIDSGID=yes`, `PrivateTmp=yes`, `PrivateIPC=yes`,
-  `RemoveIPC=yes`, `ProtectSystem=strict`, `TemporaryFileSystem=<workspace_root>:ro`,
+  `RemoveIPC=yes`, `ProtectSystem=strict`, `ProtectHome=tmpfs`,
+  `TemporaryFileSystem=<workspace_root>:ro`,
   `BindPaths=` and `ReadWritePaths=` of the holder's workspace scope,
   `DevicePolicy=closed`, `DeviceAllow=char-pts rw`, one `DeviceAllow=` for
-  each granted GPU and support node, `--expand-environment=no`. The
+  each granted GPU and support node, `ProtectProc=invisible`,
+  `--expand-environment=no`. The
   environment goes in a root-only (0600) `EnvironmentFile` under
   `state_dir`, not on a command line. Each value is double-quoted with `"`,
   `\`, `` ` ``, and `$` escaped, so systemd reads it back byte for byte,

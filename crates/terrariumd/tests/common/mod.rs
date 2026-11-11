@@ -24,6 +24,70 @@ pub const DELAY: Duration = Duration::from_millis(20);
 /// load 90 on 32 cores, agent starts stayed `starting` and stops stayed
 /// `idle` for over 15 s, and each test passed alone (TER-471).
 pub const WAIT: Duration = Duration::from_secs(60);
+/// The longest time a [`Stall`] wait goes on while it still makes progress.
+pub const HARD_WAIT: Duration = Duration::from_secs(180);
+
+/// The deadline of a wait that counts only time without progress. Under
+/// merge-job load (load 40 to 60 on 32 cores) real runner starts and
+/// restarts went past a fixed deadline from the start of the wait while
+/// the agent still moved (TER-647). The wait fails after [`WAIT`] with
+/// the same mark, or after [`HARD_WAIT`] in all.
+pub struct Stall<M> {
+    mark: M,
+    since: std::time::Instant,
+    start: std::time::Instant,
+    window: Duration,
+    hard: Duration,
+}
+
+impl<M: PartialEq + std::fmt::Debug> Stall<M> {
+    pub fn new(mark: M) -> Self {
+        Self::with_limits(mark, WAIT, HARD_WAIT)
+    }
+
+    /// A wait that fails after `window` without progress, or after `hard`
+    /// in all.
+    pub fn with_limits(mark: M, window: Duration, hard: Duration) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            mark,
+            since: now,
+            start: now,
+            window,
+            hard,
+        }
+    }
+
+    /// True when the window went by since the last progress: read a new
+    /// mark and give it to [`Stall::moved`].
+    pub fn due(&self) -> bool {
+        self.since.elapsed() >= self.window
+    }
+
+    /// Takes a new mark. A changed mark is progress and starts a new
+    /// window. False: the wait has failed.
+    pub fn moved(&mut self, mark: M) -> bool {
+        if mark == self.mark || self.start.elapsed() >= self.hard {
+            return false;
+        }
+        self.mark = mark;
+        self.since = std::time::Instant::now();
+        true
+    }
+}
+
+impl<M: std::fmt::Debug> std::fmt::Display for Stall<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no progress for {:.0}s after {:.0}s, last mark {:?}",
+            self.since.elapsed().as_secs_f64(),
+            self.start.elapsed().as_secs_f64(),
+            self.mark
+        )
+    }
+}
+
 /// The longest time daemon boot waits for job queue recovery.
 pub const RECOVERY_WAIT: Duration = Duration::from_secs(90);
 
@@ -367,7 +431,7 @@ impl TestDaemon {
         f: impl FnOnce(&mut terrariumd::executor::Executor),
     ) {
         if let Some(d) = self.daemon.take() {
-            d.shutdown();
+            d.shutdown_and_wait().await;
         }
         seed_database(&self.state);
         let mut executor = terrariumd::executor::Executor::default();
@@ -482,6 +546,9 @@ impl TestDaemon {
     pub async fn put_as(&self, agent: &str, path: &str, body: Value) -> Resp {
         self.req(Method::PUT, path, Some(body), Some(agent)).await
     }
+    pub async fn delete_as(&self, agent: &str, path: &str) -> Resp {
+        self.req(Method::DELETE, path, None, Some(agent)).await
+    }
 
     /// Open a WebSocket on the Unix socket.
     pub async fn ws(
@@ -520,21 +587,46 @@ impl TestDaemon {
         self.post("/api/agents", def).await.ok().clone()
     }
 
-    /// Poll until the agent has `status`.
+    /// The newest event `seq` of the whole daemon: what moves while a
+    /// start, a turn, a job or a rule run goes on.
+    pub async fn last_seq(&self) -> i64 {
+        let db = self.daemon.as_ref().unwrap().state.db.clone();
+        db.read(terrariumd::events::last_seq).await.unwrap()
+    }
+
+    /// The progress of agent `agent`: its newest event `seq`, its status,
+    /// and the newest event of the daemon.
+    pub async fn agent_progress(&self, agent: &str) -> (Value, Value, i64) {
+        let newest = self
+            .get(&format!("/api/agents/{agent}/events?order=desc&limit=1"))
+            .await;
+        let status = self.get(&format!("/api/agents/{agent}")).await;
+        (
+            newest.body[0]["seq"].clone(),
+            status.body["status"].clone(),
+            self.last_seq().await,
+        )
+    }
+
+    /// Poll until the agent has `status`. The wait counts only time
+    /// without progress ([`Stall`]): under merge-job load a fake start
+    /// stayed `starting` for over [`WAIT`] while the daemon still moved
+    /// (TER-674).
     pub async fn wait_status(&self, agent: &str, status: &str) {
-        // A deadline, not a count of tries: on a loaded machine each GET is
-        // slow, and a start can take seconds. Only a failing test waits it out.
-        let start = std::time::Instant::now();
+        let mut stall = Stall::new(self.agent_progress(agent).await);
         loop {
             let r = self.get(&format!("/api/agents/{agent}")).await;
             if r.body["status"] == status {
                 return;
             }
-            assert!(
-                start.elapsed() < WAIT,
-                "agent {agent} never reached {status}; last {}",
-                r.body["status"]
-            );
+            if stall.due() {
+                let mark = self.agent_progress(agent).await;
+                assert!(
+                    stall.moved(mark),
+                    "agent {agent} never reached {status}; last {} ({stall})",
+                    r.body["status"]
+                );
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }

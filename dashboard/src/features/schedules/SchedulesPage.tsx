@@ -18,7 +18,7 @@ import { ConfirmButton, Empty, ErrorBanner, LoadMore, PageHead, Tabs, useNow } f
 import type { Schedule } from "../../api/types";
 import { api, events } from "../../stores";
 import { SCOPE_FILTERS, type ScopeFilter } from "../../lib/target-scope";
-import { actionWords, guardWords, matchesWords, nextRunWords, specWords } from "../../lib/schedule";
+import { actionWords, dayStartMarkWords, guardWords, matchesWords, nextRunWords, specWords } from "../../lib/schedule";
 import { ago } from "../../lib/format";
 import { EventSourcesSection } from "./EventSources";
 import { createRunHistory } from "./history";
@@ -418,7 +418,11 @@ function RunHistoryPanel(props: { schedule: Schedule }) {
               {(r) => (
                 <tr>
                   <td title={r.started_at}>{new Date(r.started_at).toLocaleString()}</td>
-                  <td>{r.trigger.replace("_", " ")}</td>
+                  <td>
+                    {r.trigger.replace("_", " ")}
+                    {/* A day_start run: the start that the daemon detected (TER-458). */}
+                    <Show when={r.day_start}>{(m) => <div class="muted">{dayStartMarkWords(m())}</div>}</Show>
+                  </td>
                   <Show when={trigger}>
                     <td>
                       <Show when={r.event} fallback={<span class="muted">{r.event_seq ? `#${r.event_seq} (pruned)` : "—"}</span>}>

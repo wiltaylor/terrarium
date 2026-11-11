@@ -868,13 +868,11 @@ pub fn plan_start(
     if req.env.len() > MAX_ENV {
         return Err(Refusal::invalid("too many environment variables"));
     }
-    let mut env = String::new();
     for (k, v) in &req.env {
         if !valid_env_name(k) || !valid_env_value(v) {
             return Err(Refusal::invalid(format!("bad environment variable {k:?}")));
         }
         size += k.len() + v.len() + 2;
-        env.push_str(&env_line(k, v));
     }
     if size > MAX_FRAME {
         return Err(Refusal::invalid("command and environment too large"));
@@ -902,6 +900,14 @@ pub fn plan_start(
             req.holder
         )));
     }
+
+    let mut vars = req.env.clone();
+    if let Some(w) = &own
+        && *w != ctx.workspace_root
+    {
+        add_safe_directory(&mut vars)?;
+    }
+    let env: String = vars.iter().map(|(k, v)| env_line(k, v)).collect();
 
     let mut devices = Vec::new();
     if !req.gpus.is_empty() {
@@ -964,6 +970,18 @@ pub fn plan_start(
         "CapabilityBoundingSet=",
         "AmbientCapabilities=",
         "RestrictSUIDSGID=yes",
+        // The unit's /proc shows only the processes of its own UID
+        // (hidepid=invisible, TER-638): a session sees neither the host's
+        // processes nor their command lines, and cannot open
+        // /proc/<pid>/root or cwd of a session of another UID. The UID is
+        // that of one holder only ([`Sessions::admit`]), so every process
+        // that stays visible is of the same holder and has the same
+        // workspace scope. ProcSubset=pid is not set: CUDA and nvidia-smi
+        // read /proc/driver/nvidia, and build tools read /proc/meminfo.
+        // PrivatePIDs= needs systemd 257 (above [`MIN_SYSTEMD`]) and makes
+        // the command PID 1, which ignores SIGINT and SIGTERM without a
+        // handler.
+        "ProtectProc=invisible",
         // A pool UID passes to another holder when its holder's last
         // session ends. What the UID can reach from one holder to the next:
         // /tmp and /var/tmp are private to the unit; systemd removes the
@@ -977,10 +995,24 @@ pub fn plan_start(
         // the unit. PrivateIPC gives each unit its own IPC namespace
         // (System V and POSIX message queues): a session does not see the
         // IPC objects of the host users or of other sessions (TER-641).
+        // ProtectHome=tmpfs puts an empty read-only tmpfs over /home,
+        // /root and /run/user: git trusts every repo (safe.directory=*),
+        // so a repo there that the UID can read would run its config
+        // (core.fsmonitor, hooks) as the UID (TER-659). The pool users
+        // have no home directory, so nothing of theirs is hidden.
         "PrivateTmp=yes",
         "PrivateIPC=yes",
+        // The sessions of one holder can run as different pool UIDs (one
+        // per session, TER-635). What one of them makes in the holder's
+        // workspace must stay writable for the others: they share the
+        // group terrarium-ws, which the setgid workspace root passes on to
+        // each new directory. UMask=0007 keeps the group bits and drops
+        // the other bits. The holder's directory stays private to the
+        // holder through the mount view (below), not through the owner.
+        "UMask=0007",
         "RemoveIPC=yes",
         "ProtectSystem=strict",
+        "ProtectHome=tmpfs",
         "KillMode=control-group",
         "DevicePolicy=closed",
         "DeviceAllow=char-pts rw",
@@ -1039,6 +1071,31 @@ pub fn plan_start(
             stuck: false,
         },
     })
+}
+
+/// Add `safe.directory=*` to git's command-line config scope
+/// (`GIT_CONFIG_COUNT`), after the entries that the request already has
+/// (TER-635). A holder's repos can be owned by another pool UID
+/// of the same holder (one per session), which git refuses as "dubious
+/// ownership". `*`, not the workspace path: git before 2.46 (Debian 12 has
+/// 2.39) matches no path prefix, and the repos are anywhere under the
+/// workspace. The unit sees only its holder's workspace scope (the
+/// workspace root is a read-only tmpfs with only that scope bound in), so
+/// the repos it can write there belong to its own trust domain. The
+/// operator, which sees every holder's workspace, gets no override.
+fn add_safe_directory(env: &mut BTreeMap<String, String>) -> Result<(), Refusal> {
+    let n = match env.get("GIT_CONFIG_COUNT") {
+        None => 0,
+        Some(c) => c
+            .parse::<u32>()
+            .ok()
+            .filter(|n| *n < 1000)
+            .ok_or_else(|| Refusal::invalid("bad environment variable \"GIT_CONFIG_COUNT\""))?,
+    };
+    env.insert("GIT_CONFIG_COUNT".into(), (n + 1).to_string());
+    env.insert(format!("GIT_CONFIG_KEY_{n}"), "safe.directory".into());
+    env.insert(format!("GIT_CONFIG_VALUE_{n}"), "*".into());
+    Ok(())
 }
 
 /// `systemctl set-property --runtime` of a slice, from typed limits only.
@@ -1161,13 +1218,23 @@ pub fn holder_workspace(root: &Path, holder: &str) -> Result<Option<PathBuf>, Re
 }
 
 /// `workspace_root` at helper start: not under /tmp or /var/tmp, which
-/// `PrivateTmp=yes` replaces in each unit (every session would fail).
+/// `PrivateTmp=yes` replaces in each unit, and not under /home, /root or
+/// /run/user, which `ProtectHome=tmpfs` hides (every session would fail).
 pub fn check_workspace_root(root: &Path) -> Result<(), String> {
     for tmp in ["/tmp", "/var/tmp"] {
         if root.starts_with(tmp) {
             return Err(format!(
                 "workspace_root {} is under {tmp}, which each session gets a private copy of \
                  (PrivateTmp=yes): put the workspace elsewhere, for example /srv/terrarium/work",
+                root.display()
+            ));
+        }
+    }
+    for home in ["/home", "/root", "/run/user"] {
+        if root.starts_with(home) {
+            return Err(format!(
+                "workspace_root {} is under {home}, which each session hides \
+                 (ProtectHome=tmpfs): put the workspace elsewhere, for example /srv/terrarium/work",
                 root.display()
             ));
         }

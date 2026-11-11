@@ -2,7 +2,8 @@
 -- on the release client target of its project, on a commit of `main`.
 -- SQLite cannot change a CHECK, so `jobs` is made again with all of its
 -- columns (legacy migrations 71, 72, the batch, planned and slot columns,
--- and ter-607-job-onto).
+-- and ter-607-job-onto) and all of its indexes (also ter-401-job-stats-window,
+-- which runs before this file).
 ALTER TABLE jobs RENAME TO jobs_v623;
 CREATE TABLE jobs (
     id           TEXT PRIMARY KEY,
@@ -43,3 +44,4 @@ DROP TABLE jobs_v623;
 CREATE INDEX jobs_project_state ON jobs(project, state, created_at);
 CREATE INDEX jobs_card ON jobs(card);
 CREATE INDEX jobs_host_state ON jobs(host, state);
+CREATE INDEX IF NOT EXISTS jobs_project_created_at ON jobs(project, created_at);

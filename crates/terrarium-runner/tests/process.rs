@@ -549,6 +549,50 @@ async fn a_second_runner_for_the_agent_refuses_to_start() {
     env.until_gone().await;
 }
 
+/// TER-667: a start that times out kills the process. Before, the process
+/// lived on: here it would run the runner once the gate went, and hold the
+/// agent with no daemon that knew of it.
+#[tokio::test]
+async fn a_start_that_times_out_kills_the_process() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new();
+    let gate = env.dir.path().join("gate");
+    let pid_file = env.dir.path().join("gated.pid");
+    std::fs::write(&gate, "").unwrap();
+    let gated = env.dir.path().join("gated-runner");
+    std::fs::write(
+        &gated,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nwhile [ -e '{}' ]; do sleep 0.02; done\nexec '{}' \"$@\"\n",
+            pid_file.display(),
+            gate.display(),
+            bin().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gated, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut opts = SpawnOptions::new(env.agent, env.state(), env.run(), env.spec());
+    opts.connect = env.options(Some(0));
+    opts.start_timeout = Duration::from_millis(300);
+    let err = RemoteRunner::spawn_process(&gated, opts)
+        .await
+        .err()
+        .expect("the start times out");
+    assert!(err.to_string().contains("did not open"), "{err}");
+    // A kill before the shell wrote its pid leaves no file, and no process.
+    if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+        let proc_dir = PathBuf::from(format!("/proc/{}", pid.trim()));
+        until("the gated process is killed and reaped", || {
+            !proc_dir.exists()
+        })
+        .await;
+    }
+    std::fs::remove_file(&gate).unwrap();
+    tokio::time::sleep(ms(500)).await;
+    assert_eq!(live_runner_pid(&env.run(), env.agent), None);
+}
+
 #[tokio::test]
 async fn a_new_daemon_connection_replaces_the_old_one() {
     let env = Env::new();

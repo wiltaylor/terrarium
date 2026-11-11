@@ -27,6 +27,14 @@ use terrarium_host::{Client, ClientOptions};
 /// only: each poll returns as soon as its state is there.
 const DEADLINE: Duration = Duration::from_secs(300);
 
+/// A wait on the queue or a card that fails after [`DEADLINE`] without
+/// progress, or after two of them in all. Under merge-job load (load 39,
+/// IO pressure 40%) a queue that still moved took longer than
+/// [`DEADLINE`] from the start of the wait (TER-674).
+fn stall<M: PartialEq + std::fmt::Debug>(mark: M) -> common::Stall<M> {
+    common::Stall::with_limits(mark, DEADLINE, 2 * DEADLINE)
+}
+
 /// Run the test `$name(flow)` once with each board flow (TER-170): the
 /// tests `$name::code` and `$name::rules`.
 macro_rules! both_flows {
@@ -1075,7 +1083,7 @@ impl Lab {
     /// engine then settles, so the later actions of the run that made `f`
     /// true (an unassign after a move) are there too.
     async fn until_card(&self, id: &str, what: &str, f: impl Fn(&Value) -> bool) -> Value {
-        let start = Instant::now();
+        let mut stall = stall((self.td.last_seq().await, Value::Null));
         loop {
             let c = self.card_of(id).await;
             if f(&c) {
@@ -1085,7 +1093,7 @@ impl Lab {
                 self.settle().await;
                 return self.card_of(id).await;
             }
-            if start.elapsed() >= DEADLINE {
+            if stall.due() && !stall.moved((self.td.last_seq().await, c["updated_at"].clone())) {
                 let runs = self.td.get("/api/projects/p/rules/runs?limit=200").await;
                 let runs: Vec<Value> = runs.body["runs"]
                     .as_array()
@@ -1094,7 +1102,7 @@ impl Lab {
                     .into_iter()
                     .filter(|r| r["state"] != "noop" && r["card"] == id)
                     .collect();
-                panic!("card {id} never got {what}; last {c}\nrule runs: {runs:#?}");
+                panic!("card {id} never got {what} ({stall}); last {c}\nrule runs: {runs:#?}");
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -1159,13 +1167,22 @@ impl Lab {
     }
 
     async fn until_idle(&self) -> Vec<Value> {
-        let start = Instant::now();
+        let mut stall = stall((self.td.last_seq().await, Vec::new()));
         loop {
             let v = self.td.get("/api/projects/p/jobs").await.ok().clone();
             if v["running"] == 0 && v["queued"] == 0 {
                 return v["jobs"].as_array().unwrap().clone();
             }
-            assert!(start.elapsed() < DEADLINE, "the queue never drained: {v}");
+            // The state and the tail length of each job, not `at`: the time
+            // of the answer moves on each poll.
+            if stall.due() {
+                let jobs = v["jobs"].as_array().unwrap().iter();
+                let jobs: Vec<_> = jobs
+                    .map(|j| (j["state"].clone(), j["tail"].as_str().map(str::len)))
+                    .collect();
+                let mark = (self.td.last_seq().await, jobs);
+                assert!(stall.moved(mark), "the queue never drained ({stall}): {v}");
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
@@ -1332,6 +1349,18 @@ async fn a_green_validation_moves_the_card_to_review(flow: &'static str) {
         .find(|c| c["body"] == "done by w1")
         .unwrap();
     assert_eq!(own["author"], lab.w1.as_str(), "{own:#}");
+    let queued = c["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["body"].as_str().is_some_and(|b| b.contains("queued")))
+        .expect("queue note");
+    let expected_author = if flow == "rules" {
+        "rule:p/validate-queued-move"
+    } else {
+        "system"
+    };
+    assert_eq!(queued["author"], expected_author, "{queued:#}");
     std::fs::write(&gate, "").unwrap();
     let c = lab
         .until_card(&id, "review", |c| c["column"] == "review")
@@ -2509,6 +2538,11 @@ fn daemon_trace_capture() -> TraceCapture {
 #[tokio::test]
 async fn merge_job_resolves_daemon_credentials_resets_before_tunnel_and_revokes() {
     use std::os::unix::fs::PermissionsExt;
+    // The failed resets are infra failures that run once more after
+    // `INFRA_RETRY`: 5 min by default, which only another test of this
+    // binary made short (a global). When this test ran first, a held
+    // retry outlasted the drain wait (TER-674).
+    terrariumd::jobs::set_infra_retry(Duration::from_millis(200));
     let trace = daemon_trace_capture();
     let fixtures = tempfile::tempdir().unwrap();
     let ssh = fixtures.path().join("ssh");
@@ -4163,6 +4197,100 @@ async fn a_fix_stacked_on_a_card_merged_after_the_cut_is_refused() {
     );
 }
 
+/// TER-637 (TER-607 review round 3, minor 1): card X, branched from
+/// `next` before the cut, merges onto `next` after it. Fix F's branch
+/// points at a commit of X's branch with no commit of its own, so F's
+/// merge onto `next` passes with no merge commit, and the oldest
+/// first-parent commit of `next` that holds F is X's merge. The merge of
+/// F onto the release is refused and the release stays.
+#[tokio::test]
+async fn a_fix_whose_next_merge_made_no_commit_is_refused() {
+    let lab = lab(2).await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK",
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    let x1 = lab.branch("ter-x", "next", &[("OK", "yes\n"), ("X1", "x\n")]);
+    lab.branch("ter-x", "ter-x", &[("X2", "x\n")]);
+    lab.branch("release/1.4.0", "next", &[("FROZEN", "1.4.0\n")]);
+    let frozen = git(&lab.origin, &["rev-parse", "release/1.4.0"]);
+    let x = lab.card("x", "ter-x").await;
+    let j = merge_and_wait(&lab, &x, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    // F's branch is X's first commit: no commit of its own.
+    git(
+        &lab.work,
+        &["push", "-q", "origin", &format!("{x1}:refs/heads/ter-rb4")],
+    );
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    let rb4 = lab.card("ter-rb4", "ter-rb4").await;
+    let j = merge_and_wait(&lab, &rb4, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "next"]),
+        next,
+        "a no-op merge"
+    );
+    let j = merge_and_wait(&lab, &rb4, Some("release/1.4.0")).await;
+    assert_eq!(j["state"], "failed", "{j:#}");
+    let tail = j["tail"].as_str().unwrap_or_default();
+    assert!(tail.contains("which is not its own merge"), "{tail}");
+    assert!(tail.contains(&next), "names X's merge: {tail}");
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "release/1.4.0"]),
+        frozen,
+        "the release stays"
+    );
+}
+
+/// TER-637 (TER-607 review round 3, minor 2): when the first-parent
+/// commit of `next` that holds the tested commit has no first parent (a
+/// `next` rewritten to a root commit), the check cannot see what `next`
+/// held before the fix: the merge onto the release is refused.
+#[tokio::test]
+async fn a_fix_whose_next_merge_has_no_first_parent_is_refused() {
+    let lab = lab(2).await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK",
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    lab.branch("release/1.4.0", "next", &[("FROZEN", "1.4.0\n")]);
+    let frozen = git(&lab.origin, &["rev-parse", "release/1.4.0"]);
+    // A root commit, pushed as `next` and as the fix branch.
+    git(&lab.work, &["checkout", "-q", "--orphan", "ter-rb5"]);
+    std::fs::write(lab.work.join("OK"), "yes\n").unwrap();
+    git(&lab.work, &["add", "-A"]);
+    git(&lab.work, &["commit", "-q", "-m", "root"]);
+    let root = git(&lab.work, &["rev-parse", "HEAD"]);
+    git(
+        &lab.work,
+        &["push", "-q", "-f", "origin", "ter-rb5", "ter-rb5:next"],
+    );
+    let rb5 = lab.card("ter-rb5", "ter-rb5").await;
+    let j = merge_and_wait(&lab, &rb5, None).await;
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(git(&lab.origin, &["rev-parse", "next"]), root);
+    let j = merge_and_wait(&lab, &rb5, Some("release/1.4.0")).await;
+    assert_eq!(j["state"], "failed", "{j:#}");
+    let tail = j["tail"].as_str().unwrap_or_default();
+    assert!(tail.contains("has no first parent"), "{tail}");
+    assert_eq!(
+        git(&lab.origin, &["rev-parse", "release/1.4.0"]),
+        frozen,
+        "the release stays"
+    );
+}
+
 /// TER-607 review round 2, finding 3: a batch of two or more cards with a
 /// release-blocker card is refused; the fix merges alone.
 #[tokio::test]
@@ -4765,9 +4893,15 @@ both_flows!(a_green_batch_of_three_merges_in_one_job);
 /// `accepted`.
 async fn a_green_batch_of_three_merges_in_one_job(flow: &'static str) {
     let lab = lab_flow(2, flow).await;
+    // The job waits for the gate, not a fixed sleep: under load a batch
+    // that ends before the 409 check below lets a new job take card 2.
+    let gate = lab._dirs.path().join("gate");
     set_recipe(
         &lab,
-        "test -f OK && test -f g1 && test -f g2 && test -f g3 && sleep 1",
+        &format!(
+            "{} && test -f OK && test -f g1 && test -f g2 && test -f g3",
+            common::gate_wait(&gate, DEADLINE)
+        ),
     )
     .await;
     let mut heads = Vec::new();
@@ -4845,6 +4979,7 @@ async fn a_green_batch_of_three_merges_in_one_job(flow: &'static str) {
         })
         .await;
     }
+    std::fs::write(&gate, "").unwrap();
     for c in &cards {
         let card = lab
             .until_card(c, "accepted", |c| c["column"] == "accepted")
@@ -6486,6 +6621,152 @@ async fn a_lost_host_agent_session_reruns_the_whole_batch() {
         next_merges(&lab),
         ["Merge ter-s1 onto next", "Merge ter-s2 onto next"]
     );
+}
+
+// ------------------------------------------------------------- TER-676
+
+/// True when `flock` with a wait works here: the TER-676 tests need it.
+fn flock_waits() -> bool {
+    std::process::Command::new("sh")
+        .args([
+            "-c",
+            "command -v flock >/dev/null 2>&1 && flock -E 75 -w 1 /dev/null true",
+        ])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// A process outside the job's run that takes the lock `lock` of a slot
+/// tree as soon as it is free, and keeps it for `secs`. It waits in its
+/// own process group, so the kill of a lost run does not end it, and
+/// [`stop_group`] does.
+fn slot_holder(lock: &Path, secs: u32) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    std::process::Command::new("flock")
+        .args(["-w", "300"])
+        .arg(lock)
+        .args(["sleep", &secs.to_string()])
+        .process_group(0)
+        .spawn()
+        .unwrap()
+}
+
+/// End the process group of `child` and reap it.
+fn stop_group(mut child: std::process::Child) {
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .status();
+    let _ = child.wait();
+}
+
+/// Queue a merge of one card whose first run sleeps until it is lost and
+/// whose rerun passes. When the recipe runs, `hold` secs of a slot holder
+/// start (it gets the lock once the lost run lets go of it), and the host
+/// agent restarts: the run is lost. `wait`: the cap of the wait for the
+/// slot lock of this job. Returns the card, the job, and the holder.
+async fn lose_a_run_with_a_held_slot(
+    lab: &Lab,
+    m: &Path,
+    hold: u32,
+    wait: Option<u64>,
+) -> (String, String, std::process::Child) {
+    let md = m.display().to_string();
+    set_recipe(
+        lab,
+        &format!(
+            "test -f OK && echo run >> '{md}/runs' && \
+             if test -f '{md}/ran'; then exit 0; fi; touch '{md}/ran'; sleep 600"
+        ),
+    )
+    .await;
+    lab.branch("ter-h1", "next", &[("OK", "yes\n"), ("h1", "1")]);
+    let c1 = lab.card("h1", "ter-h1").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let job_id = r.body["job"]["id"].as_str().unwrap().to_owned();
+    if let Some(w) = wait {
+        terrariumd::jobs::set_lost_slot_wait(&job_id, w);
+    }
+    let ran = m.join("ran");
+    let start = Instant::now();
+    while !ran.exists() {
+        assert!(start.elapsed() < DEADLINE, "the recipe never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The holder waits for the lock that the lost run holds: when the
+    // kill ends the run, the holder has it before the daemon looks.
+    let lock = lab._dirs.path().join("jobs/p/slot-0.lock");
+    assert!(lock.exists(), "no slot lock at {}", lock.display());
+    let holder = slot_holder(&lock, hold);
+    lab.agent_down().await;
+    lab.agent_up().await;
+    (c1, job_id, holder)
+}
+
+/// TER-676: the slot of a lost run is still held for a few seconds after
+/// its kill (here by a process that the kill does not reach, as a run
+/// that ends slowly under load). The job goes back to the queue only
+/// when the lock is free, so its rerun does not fail in the receive step
+/// as held, and the card merges.
+#[tokio::test]
+async fn a_lost_run_reruns_only_after_its_slot_lock_is_free() {
+    if !flock_waits() {
+        eprintln!("skipped: no flock with -w and -E here");
+        return;
+    }
+    let lab = lab(1).await;
+    let marks = tempfile::tempdir().unwrap();
+    let (c1, job_id, holder) = lose_a_run_with_a_held_slot(&lab, marks.path(), 6, None).await;
+    let card = lab
+        .until_card(&c1, "accepted", |c| c["column"] == "accepted")
+        .await;
+    stop_group(holder);
+    let text = comments(&card);
+    assert!(!text.contains("is held by another job"), "{card}");
+    assert!(!text.contains("failed before its tests"), "{card}");
+    let j = lab
+        .td
+        .get(&format!("/api/jobs/{job_id}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(j["attempt"], 1, "{j:#}");
+    let runs = std::fs::read_to_string(marks.path().join("runs")).unwrap();
+    assert_eq!(runs.lines().count(), 2, "{runs}");
+}
+
+/// TER-676: when the slot of a lost run stays held past the cap of the
+/// wait, the job does not rerun into a receive step that fails as held.
+/// It ends as an infra failure (a merge), with the lock in its tail.
+#[tokio::test]
+async fn a_lost_run_whose_slot_stays_held_ends_with_the_lock_in_its_tail() {
+    if !flock_waits() {
+        eprintln!("skipped: no flock with -w and -E here");
+        return;
+    }
+    let lab = lab(1).await;
+    let marks = tempfile::tempdir().unwrap();
+    let (_c1, job_id, holder) = lose_a_run_with_a_held_slot(&lab, marks.path(), 120, Some(2)).await;
+    let jobs = lab.until_idle().await;
+    stop_group(holder);
+    assert_eq!(jobs.len(), 1, "{jobs:#?}");
+    let j = lab
+        .td
+        .get(&format!("/api/jobs/{job_id}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(j["state"], "failed", "{j:#}");
+    assert_eq!(j["outcome"], "infra", "{j:#}");
+    let tail = j["tail"].as_str().unwrap_or("");
+    assert!(tail.contains("its kill did not end it"), "{tail}");
+    assert!(tail.contains("slot-0.lock"), "{tail}");
+    let runs = std::fs::read_to_string(marks.path().join("runs")).unwrap();
+    assert_eq!(runs.lines().count(), 1, "the job reran: {runs}");
 }
 
 /// TER-196 review 2, major 1: a run that the infrastructure lost past

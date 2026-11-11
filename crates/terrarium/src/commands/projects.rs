@@ -339,7 +339,33 @@ pub async fn repo(ctx: &Ctx, cmd: &RepoCmd) -> anyhow::Result<()> {
             ctx.emit(&r, checkout_lines)
         }
         RepoCmd::Credential { operation } => credential(ctx, operation).await,
+        RepoCmd::Rm { repo } => repo_rm(ctx, repo).await,
     }
+}
+
+/// `repo rm` (TER-658): `DELETE /api/repos/{id}`. No confirm prompt; the
+/// daemon checks project_admin and the uses of the repo.
+async fn repo_rm(ctx: &Ctx, repo: &str) -> anyhow::Result<()> {
+    let name = ctx.project_or(None).await?;
+    let all = ctx
+        .api
+        .list(&format!("{}/repos", project_path(&name)), vec![], None)
+        .await?;
+    let id = all
+        .iter()
+        .find(|r| r["name"] == repo || r["id"] == repo)
+        .map_or_else(|| repo.to_owned(), |r| field(r, "id"));
+    let r = ctx
+        .api
+        .delete(&format!("/api/repos/{}", encode(&id)), vec![])
+        .await?;
+    ctx.emit(&r, |c, r| {
+        c.line(format!(
+            "removed repo {} from {} (the clones stay)",
+            field(r, "name"),
+            field(r, "project")
+        ));
+    })
 }
 
 /// The first line of the answer of `repo checkout` (TER-37):

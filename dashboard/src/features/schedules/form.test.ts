@@ -358,3 +358,37 @@ describe("a trigger in the schedule form", () => {
     expect(e).toMatchObject({ kind: "rejected", field: "actionType" });
   });
 });
+
+describe("a day_start schedule (TER-458)", () => {
+  const base = emptyScheduleForm("terrarium", { name: "morning", specKind: "day_start", mailTo: "terrarium/lead", mailSubject: "Morning" });
+  it("sends only the fields that are set, Monday first", () => {
+    expect(scheduleBody(base)).toMatchObject({ body: { spec: { kind: "day_start", tz: "UTC" } } });
+    const b = scheduleBody({ ...base, tz: "Australia/Brisbane", notBefore: "07:30", notAfter: "18:00", delay: "5m", weekdays: ["fri", "mon"] });
+    expect("body" in b && b.body.spec).toEqual({ kind: "day_start", tz: "Australia/Brisbane", not_before: "07:30", not_after: "18:00", delay: "5m", weekdays: ["mon", "fri"] });
+    const all = scheduleBody({ ...base, weekdays: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] });
+    expect("body" in all && all.body.spec).toEqual({ kind: "day_start", tz: "UTC" });
+  });
+  it("checks the window and the delay as the daemon does", () => {
+    expect(scheduleBody({ ...base, notBefore: "7:30" })).toMatchObject({ field: "notBefore" });
+    expect(scheduleBody({ ...base, notBefore: "09:00", notAfter: "08:00" })).toMatchObject({ field: "notAfter" });
+    expect(scheduleBody({ ...base, delay: "soon" })).toMatchObject({ field: "delay" });
+    expect(scheduleBody({ ...base, delay: "13h" })).toMatchObject({ field: "delay", error: "The delay is at most 12h." });
+    expect(scheduleBody({ ...base, delay: "12h" })).toHaveProperty("body");
+  });
+  it("reads a day_start schedule back for Edit", () => {
+    const f = formFromSchedule({
+      id: "s", name: "morning", project: "terrarium", enabled: true, spec: { kind: "day_start", tz: "UTC", not_before: "07:30", delay: "5m", weekdays: ["Monday", "fri"] },
+      action: { type: "mail", to: "terrarium/lead", subject: "Morning", body: "" }, catch_up: "skip", created_by: "operator", run_as: "operator",
+      next_run_at: null, last_run: null, runs_count: 0, source: "api", created_at: "t", updated_at: "t",
+    } as Schedule);
+    expect(f).toMatchObject({ specKind: "day_start", tz: "UTC", notBefore: "07:30", notAfter: "", delay: "5m", weekdays: ["mon", "fri"] });
+  });
+  it("creates it on the mock, and the mock refuses what the daemon refuses", async () => {
+    const api = mock();
+    const d = createScheduleDialog(api, { project: "terrarium", init: { ...base, notBefore: "07:30", weekdays: ["mon"] } });
+    const s = await d.submit();
+    expect(s).toMatchObject({ spec: { kind: "day_start", tz: "UTC", not_before: "07:30", weekdays: ["mon"] }, next_run_at: null });
+    await expect(api.schedules.create({ name: "bad", project: "terrarium", spec: { kind: "day_start", weekdays: ["someday"] }, action: { type: "mail", to: "operator", subject: "x", body: "" } })).rejects.toMatchObject({ status: 422 });
+    await expect(api.schedules.create({ name: "bad2", project: "terrarium", spec: { kind: "day_start", delay: "13h" }, action: { type: "mail", to: "operator", subject: "x", body: "" } })).rejects.toMatchObject({ status: 422 });
+  });
+});

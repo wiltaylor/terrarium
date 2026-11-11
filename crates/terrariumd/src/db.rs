@@ -2559,6 +2559,11 @@ pub struct Db {
     /// it in before it lets the lock go ([`Tx::rebuild_redactor`]), so no
     /// other write sees the value with the old matcher.
     redactor: RedactorHandle,
+    /// Serializes the host pin resolution of this database
+    /// ([`crate::jobs::prepare_hosts`]). Per database, not per process: the
+    /// test binary runs hundreds of daemons in one process, and one shared
+    /// lock queued every boot behind the DNS lookups of the others (TER-648).
+    host_pins: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Db {
@@ -2567,7 +2572,13 @@ impl Db {
             conn: Arc::new(Mutex::new(conn)),
             hub,
             redactor: RedactorHandle::default(),
+            host_pins: Arc::default(),
         }
+    }
+
+    /// The lock of [`crate::jobs::prepare_hosts`] on this database.
+    pub(crate) fn host_pins(&self) -> &tokio::sync::Mutex<()> {
+        &self.host_pins
     }
 
     pub fn hub(&self) -> &EventHub {
@@ -3170,9 +3181,14 @@ pub fn now() -> String {
 pub fn open(path: &Path) -> anyhow::Result<Connection> {
     let mut conn =
         Connection::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    // The busy timeout comes first: the pragmas take locks too. Without it,
+    // an open while another connection to the file holds the exclusive lock
+    // fails at once with `database is locked`. The last connection of a WAL
+    // database takes that lock when it closes, to checkpoint (TER-646: a
+    // test daemon started again while the old daemon's connection closed).
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     migrate(&mut conn)?;
     Ok(conn)
 }
