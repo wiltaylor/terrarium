@@ -2417,7 +2417,7 @@ mod tests {
                 };
                 assert_eq!(q.status, status);
                 assert_eq!(get(t, &id)?.status, status);
-                let mails: i64 = t.query_row("SELECT count(*) FROM mail", [], |r| r.get(0))?;
+                let mails: i64 = t.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?;
                 assert_eq!(mails, 0);
                 let audits: i64 = t.query_row(
                     "SELECT count(*) FROM audit WHERE action = ?1",
