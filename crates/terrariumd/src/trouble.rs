@@ -653,6 +653,7 @@ fn reconcile(t: &mut Tx<'_>, change: &Change, reminder_default: bool) -> ApiResu
             // lead still receives this signal and all other worker signals
             // keep their existing mail behavior. Honor the agent override.
             let eta_reminder = signal == "eta_overdue"
+                && board_reminder_covers(t, &card.id, agent)?
                 && t.query_row(
                     "SELECT card_reminder FROM agents WHERE id = ?1",
                     [agent],
@@ -692,6 +693,15 @@ fn reconcile(t: &mut Tx<'_>, change: &Change, reminder_default: bool) -> ApiResu
         )?;
     }
     Ok(())
+}
+
+fn board_reminder_covers(c: &Connection, card: &str, agent: &str) -> ApiResult<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM cards c JOIN board_columns k ON k.id = c.column_id
+         WHERE c.id = ?1 AND c.assignee = ?2 AND k.role = 'working' AND c.archived = 0)",
+        params![card, agent],
+        |r| r.get(0),
+    )?)
 }
 
 fn plan(c: &Connection, now: DateTime<Utc>) -> ApiResult<Vec<Change>> {
@@ -1286,25 +1296,26 @@ mod tests {
 
     #[test]
     fn history_plans_search_indexes_after_analyze_with_large_prior_history() {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch("CREATE TABLE events(seq INTEGER PRIMARY KEY, at TEXT, kind TEXT, agent_id TEXT, card TEXT, payload TEXT);
-            CREATE INDEX events_card ON events(card, seq);
-            CREATE TABLE waits(id TEXT PRIMARY KEY, due_at TEXT);
-            CREATE TABLE card_trouble_baseline(singleton INTEGER PRIMARY KEY, seq INTEGER);
-            INSERT INTO card_trouble_baseline VALUES (1, 0);
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        // The plan fixture uses historical card/project identifiers without
+        // live board rows. Keep the real schema and indexes, but allow that
+        // synthetic history without constructing a thousand live cards.
+        c.pragma_update(None, "foreign_keys", false).unwrap();
+        c.execute_batch("INSERT OR REPLACE INTO card_trouble_baseline VALUES (1, 0);
             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
-            INSERT INTO events SELECT x, '2026-11-01T00:00:00Z', CASE WHEN x%5=0 THEN 'status' ELSE 'output' END,
+            INSERT INTO events (seq, id, at, kind, agent_id, card, payload) SELECT x, 'event-'||x, '2026-11-01T00:00:00Z', CASE WHEN x%5=0 THEN 'status' ELSE 'output' END,
                 CASE WHEN x%7=0 THEN 'other' ELSE 'worker' END, NULL, '{\"status\":\"working\"}' FROM n;
             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000)
-            INSERT INTO waits SELECT 'w'||x, '2026-11-01T00:00:00Z' FROM n;
-            INSERT INTO events VALUES
+            INSERT INTO waits (id, agent, project, kind, spec, summary, created_by, created_at, due_at)
+            SELECT 'w'||x, 'worker', 'p', 'time', '{}', '', 'operator', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z' FROM n;
+            INSERT INTO events (seq, at, kind, agent_id, card, payload, id)
+            SELECT column1, column2, column3, column4, column5, column6, 'event-'||column1 FROM (VALUES
                 (100001,'2026-11-02T00:00:00Z','card','worker','P-1','{\"change\":\"moved\",\"to_role\":\"working\",\"column_role\":\"working\",\"assignee\":\"worker\"}'),
                 (100002,'2026-11-02T00:00:01Z','status','worker',NULL,'{\"status\":\"working\"}'),
                 (100003,'2026-11-02T00:00:02Z','output','worker',NULL,'{}'),
                 (100004,'2026-11-02T00:00:03Z','status','other',NULL,'{\"status\":\"working\"}'),
-                (100005,'2026-11-02T00:00:04Z','card','lead','P-1','{\"change\":\"commented\"}');").unwrap();
-        c.execute_batch(include_str!("../migrations/ter-79-trouble-agent-index.sql"))
-            .unwrap();
+                (100005,'2026-11-02T00:00:04Z','card','lead','P-1','{\"change\":\"commented\"}'));").unwrap();
         c.execute_batch("ANALYZE;").unwrap();
         for (sql, key, index) in [
             (START_SQL, "P-1", "events_card"),
@@ -1335,14 +1346,12 @@ mod tests {
         let events = history(&c, "P-1").unwrap();
         assert_eq!(events.len(), 4, "only one prior status and post-entry rows");
         assert_eq!(events.iter().filter(|e| e.kind == "status").count(), 2);
-        c.execute_batch("CREATE TABLE test_runs(pk INTEGER PRIMARY KEY, name TEXT, commit_sha TEXT, failed INTEGER, errored INTEGER, created_by TEXT);
-            CREATE TABLE card_branch_heads(card TEXT PRIMARY KEY, head TEXT, working_seconds INTEGER, checked_at TEXT);
-            CREATE TABLE test_run_cards(run INTEGER, card TEXT, PRIMARY KEY(run, card));
-            CREATE INDEX test_run_cards_card ON test_run_cards(card, run);
-            CREATE TABLE project_trouble(project TEXT PRIMARY KEY, settings TEXT);
-            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
-            INSERT INTO test_runs SELECT x, 'check', 'sha', 0, 0, 'worker' FROM n;
-            INSERT INTO test_run_cards SELECT pk, CASE WHEN pk%1000=0 THEN 'P-1' ELSE 'other-'||(pk%999) END FROM test_runs;
+        c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+            INSERT INTO test_runs (pk, id, project, name, format, passed, failed, errored, skipped, total,
+                commit_sha, file_name, raw_size, raw_gz, created_by, created_at)
+            SELECT x, 'run-'||x, 'p', 'check', 'libtest-json', 1, 0, 0, 0, 1,
+                'sha', 'test.json', 0, X'', 'worker', '2026-11-01T00:00:00Z' FROM n;
+            INSERT INTO test_run_cards SELECT pk, CASE WHEN pk%1000=0 THEN 'P-1' ELSE 'other-'||(pk%999) END, 'worker', '2026-11-01T00:00:00Z' FROM test_runs;
             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000)
             INSERT INTO project_trouble SELECT 'project-'||x, '{}' FROM n;
             INSERT INTO project_trouble VALUES ('p', '{}');
@@ -1372,15 +1381,8 @@ mod tests {
 
     #[test]
     fn branch_observation_queries_are_indexed_and_bounded() {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch(
-            "CREATE TABLE cards(id TEXT PRIMARY KEY, project TEXT, repo TEXT, branch TEXT,
-                archived INTEGER, column_id INTEGER);
-             CREATE TABLE board_columns(id INTEGER PRIMARY KEY, project TEXT, role TEXT, name TEXT);",
-        )
-        .unwrap();
-        c.execute_batch(include_str!("../migrations/ter-370-card-branch-head.sql"))
-            .unwrap();
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
         let plan = |sql: &str, args: usize| -> Vec<String> {
             let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
             let args = vec!["x"; args];

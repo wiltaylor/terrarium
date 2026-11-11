@@ -25,6 +25,8 @@ it("moves the full progress block with members instead of leaving it at home", (
   try {
     const cell = (column: string) => el.querySelector(`[data-lane-cell="all:${column}"]`)!;
     expect(cell("review").querySelector("progress")).not.toBeNull();
+    expect(cell("review").querySelector(".lane-cell-count")?.textContent?.trim()).toBe("1");
+    expect(cell("review").querySelector(".lane-cell-count")?.getAttribute("title")).toContain("1 of the 1 cards");
     setCards(cards().map((c) => c.id === "P-1" ? { ...c, column: "ready" } : c));
     expect(cell("review").querySelector(".board-group-head")).toBeNull();
     expect(el.querySelectorAll("progress")).toHaveLength(1);
