@@ -711,7 +711,10 @@ def gh_env(ctx: Ctx) -> dict[str, str]:
 
 def notes(ctx: Ctx, version: str, digest: str) -> str:
     image = ctx.image
-    return f"""## Image
+    gate = ctx.summary.get("gate", {})
+    cut = (f"Tested at cut: {gate['runs']}\n\n"
+           if gate.get("reason") == "tested-at-cut" else "")
+    return cut + f"""## Image
 
 `{image}:{version}` (digest `{digest}`)
 
@@ -794,7 +797,13 @@ def release(ctx: Ctx) -> int:
             check_secrets(ctx)
             registry_login(ctx)
         step_check(ctx, version)
-        if ctx.run_gate:
+        if values.get("tested_at_cut") == "true":
+            ctx.summary["gate"] = {
+                "skipped": True, "reason": "tested-at-cut",
+                "runs": release_version.trailer(str(ctx.repo_dir), "tested-at-cut"),
+            }
+            ctx.save()
+        elif ctx.run_gate:
             step_gate(ctx, commit)
         else:
             ctx.summary["gate"] = {"skipped": True}
