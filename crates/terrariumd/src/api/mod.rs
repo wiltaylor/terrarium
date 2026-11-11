@@ -1287,6 +1287,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn home_http_settings_pagination_and_project_rights() {
+        let s = state();
+        let member = s.db.write("operator", |t| {
+            for name in ["alpha", "beta"] {
+                crate::store::projects::create(t, &crate::store::projects::NewProject {
+                    name: name.into(), ..Default::default()
+                }, "api")?;
+                crate::store::board::create_card(t, &crate::actor::Actor::Operator, name,
+                    crate::store::board::NewCard { title: Some(name.into()), column: Some("in_progress".into()), ..Default::default() })?;
+            }
+            Ok(crate::store::agents::create(t, &toml_def("member", "alpha"), Path::new("/state"), "api")?.id)
+        }).await.unwrap();
+        let headers = [(crate::actor::AGENT_HEADER, member.as_str())];
+        let r = send(unix_router(s.clone()), "GET", "/api/home/cards?limit=1", &[]).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let first = json_of(r).await;
+        assert_eq!(first["items"].as_array().unwrap().len(), 1);
+        let uri = format!("/api/home/cards?limit=1&cursor={}", first["next"].as_str().unwrap());
+        let second = json_of(send(unix_router(s.clone()), "GET", &uri, &[]).await).await;
+        assert_eq!(second["items"].as_array().unwrap().len(), 1);
+        assert!(second["next"].is_null());
+        for kind in ["cards", "monitors", "pipelines"] {
+            let own = send(unix_router(s.clone()), "GET", &format!("/api/home/{kind}"), &headers).await;
+            assert_eq!(own.status(), StatusCode::OK);
+            let own = json_of(own).await;
+            for item in own["items"].as_array().unwrap() {
+                assert_eq!(item["project"], "alpha");
+            }
+            let other = send(unix_router(s.clone()), "GET", &format!("/api/home/{kind}?project=beta"), &headers).await;
+            assert_eq!(other.status(), StatusCode::FORBIDDEN);
+        }
+        let setting = serde_json::json!({"home_board_columns": {"in_progress": [], "review": ["working"], "accepted": [], "blocked": []}});
+        let r = send_body(unix_router(s.clone()), "PATCH", "/api/projects/alpha", &headers, &setting).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = send_body(unix_router(s.clone()), "PATCH", "/api/projects/alpha", &[], &setting).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(json_of(r).await["home_board_columns"], setting["home_board_columns"]);
+        let own = json_of(send(unix_router(s.clone()), "GET", "/api/home/cards?column=review", &headers).await).await;
+        assert_eq!(own["items"].as_array().unwrap().len(), 1);
+        assert_eq!(send(unix_router(s), "GET", "/api/home/cards?column=nope", &[]).await.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
     async fn tcp_router_needs_the_token_on_api_only() {
         let s = state();
         let app = || tcp_router_with(s.clone(), TokenAuth::new("secret".into(), false), false);

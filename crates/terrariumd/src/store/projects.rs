@@ -62,8 +62,10 @@ pub struct Project {
 
 fn project_row(r: &Row<'_>) -> rusqlite::Result<Project> {
     Ok(Project {
-        home_board_columns: r.get::<_, Option<String>>("home_board_columns")?
-            .map(|s| crate::store::json_col(&s)).unwrap_or_default(),
+        home_board_columns: r
+            .get::<_, Option<String>>("home_board_columns")?
+            .map(|s| crate::store::json_col(&s))
+            .unwrap_or_default(),
         card_dispatcher: r.get("card_dispatcher")?,
         review_dispatcher: r.get("review_dispatcher")?,
         human_comment_notifications: r.get("human_comment_notifications")?,
@@ -278,8 +280,10 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Pro
     let before = get(t, name)?;
     if let Some(columns) = &patch.home_board_columns {
         columns.validate()?;
-        t.execute("UPDATE projects SET home_board_columns = ?2 WHERE name = ?1",
-            params![name, serde_json::to_string(columns)?])?;
+        t.execute(
+            "UPDATE projects SET home_board_columns = ?2 WHERE name = ?1",
+            params![name, serde_json::to_string(columns)?],
+        )?;
     }
     if let Some(owner) = &patch.review_dispatcher {
         set_review_dispatcher(t, name, owner)?;
