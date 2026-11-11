@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Files section of the card drawer (docs/api.md §8.4): the files of the
 // card, with a drop zone, paste, and an upload button. A file of a name the
 // card has already is uploaded as a new version. Each file has a preview
@@ -11,7 +12,7 @@ import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { SafeHtml } from "../../components/SafeHtml";
 import { ago, bytes } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
-import { api, events } from "../../stores";
+
 import { ACCEPT, existing, fileLine, fileProblem, isCardFileEvent, pastedFiles, previewOf, rasterType, safeName } from "./cardFileRules";
 
 /** Save a blob as a file of the browser. */
@@ -27,6 +28,7 @@ function save(blob: Blob, name: string) {
 }
 
 export function CardFiles(props: { card: Card }) {
+  const { api, events } = useInstance();
   const [files, setFiles] = createSignal<CardFile[]>([]);
   const [loaded, setLoaded] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
@@ -166,6 +168,7 @@ export function CardFiles(props: { card: Card }) {
 }
 
 function FileRow(props: { card: Card; file: CardFile; open: boolean; onToggle: () => void; onError: (e: unknown) => void; onRemoved: () => void }) {
+  const { api } = useInstance();
   const [versions, setVersions] = createSignal<CardFileVersion[] | null>(null);
   const download = async (version?: number) => {
     try {
@@ -243,6 +246,7 @@ function FileRow(props: { card: Card; file: CardFile; open: boolean; onToggle: (
 
 /** The preview of the latest version. The text goes through the safe renderer; an image is a blob URL with a fixed raster type. */
 function FilePreview(props: { card: Card; file: CardFile; onError: (e: unknown) => void }) {
+  const { api } = useInstance();
   const kind = () => previewOf(props.file.name);
   const [text, setText] = createSignal<string | null>(null);
   const [image, setImage] = createSignal<string | null>(null);

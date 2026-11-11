@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Terrarium-managed skills, kept in the config repo: the list (name,
 // description, files, "used by", problems), a new skill (name and
 // description), and the editor of one skill at /settings/skills/<name>: SKILL.md in a
@@ -7,14 +8,15 @@
 // it. A daemon with no config repo answers `501`; the page then shows a
 // short note. The logic is in ./model.ts. A description is plain text.
 
-import { A, useNavigate, useParams } from "@solidjs/router";
+import { useParams } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createEffect, createResource, createSignal, For, on, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead, Tabs } from "../../components/ui";
 import { Markdown } from "../../components/Markdown";
 import type { SkillDetail, SkillSummary } from "../../api/types";
 import { bytes } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
-import { api } from "../../stores";
+
 import { COMMIT_NOTE, DEFAULT_ON_TITLE, descriptionProblem, filterSkills, nameProblem, NO_SKILLS_NOTE, noSkills, previewBody, RESTART_NOTE, skillProblems, usedBy, usedByText } from "./model";
 
 /** The note with a link to the Harness config page. */
@@ -42,6 +44,7 @@ function Problems(props: { title: string; list: string[] }) {
 
 /** The "used by" cell of a row: the usage, read when the row shows. */
 function UsedByCell(props: { name: string }) {
+  const { api } = useInstance();
   const [usage] = createResource(
     () => props.name,
     (n) => api.skills.usage(n).catch(() => null),
@@ -55,6 +58,7 @@ function UsedByCell(props: { name: string }) {
 
 /** The form of a new skill: a name and a description. The daemon writes SKILL.md. */
 function NewSkillForm(props: { onCreated: (d: SkillDetail) => void; onCancel: () => void }) {
+  const { api } = useInstance();
   const [name, setName] = createSignal("");
   const [description, setDescription] = createSignal("");
   const [error, setError] = createSignal<unknown>(null);
@@ -122,6 +126,7 @@ const EDITOR_TABS = [
 
 /** The editor of one skill. */
 function SkillEditor(props: { name: string; onSaved: () => void; onDeleted: () => void }) {
+  const { api } = useInstance();
   const [skill, { mutate }] = createResource(
     () => props.name,
     (n) => api.skills.get(n),
@@ -330,6 +335,7 @@ function SkillEditor(props: { name: string; onSaved: () => void; onDeleted: () =
 }
 
 export default function SkillsPage() {
+  const { api } = useInstance();
   const params = useParams<{ name?: string }>();
   const navigate = useNavigate();
   const selected = () => (params.name ? decodeURIComponent(params.name) : null);

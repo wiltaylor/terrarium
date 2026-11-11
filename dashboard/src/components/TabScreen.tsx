@@ -5,7 +5,7 @@
 // Knowledge screens of a project. A tab with the empty path is the index
 // tab: its URL is `base`, and it is active on `base` only.
 
-import { A, useLocation } from "@solidjs/router";
+import { A, useLocation } from "../instance/navigation";
 import { For, type JSX } from "solid-js";
 import { PageHead } from "./ui";
 import { decodePath } from "../lib/url";

@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The job-queue strip of the project dashboard (TER-178): the first-attempt
 // pass rate of the project's merge jobs over a window (docs/api.md §35.4),
 // the number the test-stability theme tracks. Merge jobs only: the queue runs
@@ -19,13 +20,14 @@
 
 import { createEffect, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { JobStats } from "../../api/types";
-import { api, events } from "../../stores";
+
 import { JOB_WINDOWS, jobStatNotes, passRateText } from "./model";
 
 /** The wait after the last ended merge job before the strip reads the stats again. */
 export const JOB_REFRESH_MS = 1500;
 
 export function JobQueuePanel(props: { project: string }) {
+  const { api, events } = useInstance();
   const [win, setWin] = createSignal<(typeof JOB_WINDOWS)[number]["id"]>("7d");
   const [stats, { refetch }] = createResource(
     () => [props.project, win()] as const,

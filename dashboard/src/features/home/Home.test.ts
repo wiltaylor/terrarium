@@ -7,13 +7,13 @@ import { createMockApi } from "../../api/mock";
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const navigate = vi.fn();
 vi.mock("@solidjs/router", () => ({ A: (p: { children?: unknown }) => p.children, useNavigate: () => navigate }));
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api,
   agents: { state: { agents: api.world.agents } },
   projects: { projects: () => api.world.projects },
   subscriptions: { list: () => [], loaded: () => true, missing: () => false, byName: () => undefined },
   events: { on: () => () => {} },
-}));
+})); });
 vi.mock("./ActiveCards", () => ({ ActiveCards: () => null }));
 vi.mock("./BlockedCards", () => ({ BlockedCards: () => null }));
 vi.mock("./HostCards", () => ({ HostCards: () => createComponent(() => {

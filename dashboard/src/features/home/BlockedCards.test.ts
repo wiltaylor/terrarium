@@ -10,10 +10,10 @@ import { waitFor } from "../../test/wait";
 import type { ActiveCard } from "../../api/types";
 
 const active = vi.fn();
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api: { cards: { active } },
   events: { on: () => () => {} },
-}));
+})); });
 vi.mock("@solidjs/router", () => ({
   A: (p: { href: string; children?: unknown }) => {
     const a = document.createElement("a");

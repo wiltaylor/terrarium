@@ -8,7 +8,7 @@ import { waitFor } from "../../test/wait";
 
 const attachRepo = vi.fn();
 const added = vi.fn();
-vi.mock("../../stores", () => ({ api: { projects: { attachRepo } }, repos: { added } }));
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({ api: { projects: { attachRepo } }, repos: { added } })); });
 
 const { AddRepoForm, AddRepoDialog, newRepoBody } = await import("./AddRepoForm");
 

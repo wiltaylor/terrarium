@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Settings > Tools (GitHub #21, design D7, docs/api.md §17.11): the tool
 // proxies with their definitions and grants, grant and revoke, the delete
 // of an API tool, and the recent runs (the `tool.run` audit rows). The
@@ -9,10 +10,11 @@ import { createResource, createSignal, For, onMount, Show } from "solid-js";
 import type { Tool } from "../../api/types";
 import { ConfirmButton, Empty, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
-import { agents, api, projects } from "../../stores";
+
 import { approvalText, argsText, commandLine, granteeOptions, runRows } from "./model";
 
 export default function ToolsPage() {
+  const { api, agents } = useInstance();
   const [tools, { refetch }] = createResource(() => api.tools.list());
   const [runs] = createResource(() => api.audit({ action: "tool.run", order: "desc", limit: 20 }).then((p) => runRows(p.items)).catch(() => []));
   const [error, setError] = createSignal<unknown>(null);
@@ -82,6 +84,7 @@ export default function ToolsPage() {
 
 /** One tool: its definition, its grants with revoke, a new grant, and Delete for an API tool. */
 export function ToolCard(props: { tool: Tool; onChange: () => void; onError: (e: unknown) => void }) {
+  const { projects, agents, api } = useInstance();
   const t = () => props.tool;
   const [who, setWho] = createSignal("");
   const [busy, setBusy] = createSignal(false);

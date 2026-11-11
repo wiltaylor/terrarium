@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The Monitors tab of the dashboard (docs/api.md §30): each monitor of the
 // project with its state, last run, next run, an on/off switch, Run now,
 // edit, and delete. The edit dialog has a script editor, the target, the
@@ -12,7 +13,7 @@ import { ConfirmButton, Empty, ErrorBanner, Modal } from "../../components/ui";
 import { previewCron } from "../../lib/cron";
 import { ago } from "../../lib/format";
 import { everyWords, parseEvery } from "../../lib/schedule";
-import { api } from "../../stores";
+
 import { StateBadge } from "./blocks";
 import { blockState, ownerText, scheduleText, unitOf, valueText } from "./model";
 
@@ -96,6 +97,7 @@ export function defOf(f: Form, was: ItemOwner = "actor"): MonitorDef {
 }
 
 export function MonitorDialog(props: { project: string; monitor?: Monitor; onClose: () => void; onSaved: (m: Monitor) => void }) {
+  const { api } = useInstance();
   const [f, setF] = createSignal<Form>(formOf(props.monitor));
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((x) => ({ ...x, [k]: v }));
   const [error, setError] = createSignal<unknown>(null);
@@ -312,6 +314,7 @@ export function RunReport(props: { report: MonitorRunReport; unit?: string; titl
 }
 
 export function MonitorsPanel(props: { project: string; monitors: Monitor[]; now: number; onChanged: () => void }) {
+  const { api } = useInstance();
   const [editing, setEditing] = createSignal<Monitor | "new" | null>(null);
   const [error, setError] = createSignal<unknown>(null);
   const [report, setReport] = createSignal<{ id: string; report: MonitorRunReport } | null>(null);

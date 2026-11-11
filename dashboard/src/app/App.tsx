@@ -1,8 +1,11 @@
-import { Navigate, Route, Router, useParams } from "@solidjs/router";
+import { InstanceAnchor } from "../instance/navigation";
+import { useInstance } from "../instance";
+import { Route, Router, useParams } from "@solidjs/router";
+import { Navigate } from "../instance/navigation";
 import { For, lazy, Match, Show, Switch } from "solid-js";
 import { isMock } from "../api";
 import { escapeMalformedPath } from "../lib/url";
-import { auth } from "../stores";
+
 import { Layout } from "./Layout";
 import { MOVED_ROUTES, movedTo, withQuery } from "./nav";
 import { LoginScreen } from "./LoginScreen";
@@ -63,12 +66,13 @@ function ProjectIndex() {
 function NotFound() {
   return (
     <div class="empty">
-      Page not found. <a href="/">Go home</a>.
+      Page not found. <InstanceAnchor href="/">Go home</InstanceAnchor>.
     </div>
   );
 }
 
 export function App() {
+  const { auth } = useInstance();
   // @solidjs/router decodes the location in every link. Escape a malformed
   // path before it renders; valid paths and their project params stay intact.
   const pathname = escapeMalformedPath(window.location.pathname);

@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // Settings, Harness config tab: the config repo (PLAN §8.3, docs/api.md
 // §25), for the operator or a sysadmin: the repo state, the changed files with their diffs, commit,
 // sync, pull, push, the export plans of a pull, the secret grants of a
@@ -10,7 +11,7 @@ import { createResource, createSignal, For, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui";
 import type { ConfigChangeStatus, ConfigExportPlan, ConfigScanFinding, ConfigSecretsImport, ConfigStatus } from "../../api/types";
 import { ago } from "../../lib/format";
-import { api } from "../../stores";
+
 import {
   actions,
   aheadBehind,
@@ -51,6 +52,7 @@ function DiffView(props: { text: string }) {
 
 /** One changed file. A click loads its diff. */
 function ChangeRow(props: { path: string; status: ConfigChangeStatus; onError: (e: unknown) => void }) {
+  const { api } = useInstance();
   const [open, setOpen] = createSignal(false);
   const [diff] = createResource(
     () => (open() ? props.path : null),
@@ -258,6 +260,7 @@ function RemoteEditor(props: { status: ConfigStatus; busy: boolean; onSave: (url
 }
 
 export default function ConfigPage() {
+  const { api } = useInstance();
   const [status, { refetch: refetchStatus, mutate: setStatus }] = createResource(() => api.config.status());
   const [defaults, { refetch: refetchDefaults, mutate: setDefaults }] = createResource(() => api.config.defaults().catch(() => []));
   const [log, { refetch: refetchLog }] = createResource(() => api.config.log(10).catch(() => []));

@@ -13,11 +13,11 @@ import { createCardPeekStore } from "../../stores/cardPeek";
 
 const cardPeek = createCardPeekStore();
 const get = vi.fn();
-vi.mock("../../stores", () => ({
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   api: { cards: { get } },
   cardPeek,
   projects: { projects: () => [{ name: "terrarium", card_prefix: "TER" }] },
-}));
+})); });
 
 const { CardPeek } = await import("./CardPeek");
 const { Drawer } = await import("../../components/ui");

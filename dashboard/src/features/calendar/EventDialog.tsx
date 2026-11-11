@@ -1,3 +1,4 @@
+import { useInstance } from "../../instance";
 // The create and edit dialog of a calendar event (docs/api.md §33): the
 // title, the kind, the times in the event's zone (or the days of an
 // all-day event), the repeat rule, the assignees, the links, and the
@@ -6,7 +7,7 @@
 import { createResource, createSignal, For, Show } from "solid-js";
 import type { CalendarDay, CalendarEvent } from "../../api/types";
 import { ErrorBanner, Modal } from "../../components/ui";
-import { api } from "../../stores";
+
 import { DAY_LABELS, emptyForm, formError, formOf, inputOf, KINDS, type EventForm } from "./model";
 import { DAYS } from "./recur";
 
@@ -22,6 +23,7 @@ export function EventDialog(props: {
   onClose: () => void;
   onSaved: (e: CalendarEvent) => void;
 }) {
+  const { api } = useInstance();
   const [f, setF] = createSignal<EventForm>(props.event ? formOf(props.event) : emptyForm(props.now, props.day));
   const set = <K extends keyof EventForm>(k: K, v: EventForm[K]) => setF((x) => ({ ...x, [k]: v }));
   const [scope, setScope] = createSignal<string | null>(props.event ? props.event.project : props.scope);

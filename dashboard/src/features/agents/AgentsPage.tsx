@@ -1,4 +1,6 @@
-import { A, useNavigate, useParams } from "@solidjs/router";
+import { useInstance } from "../../instance";
+import { useParams } from "@solidjs/router";
+import { A, useNavigate } from "../../instance/navigation";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { LeaseChips } from "../../components/Leases";
 import { HoldBadge } from "../../components/HoldBadge";
@@ -7,7 +9,7 @@ import { Empty, ErrorBanner, PageHead, useNow } from "../../components/ui";
 import { AGENT_STATUSES, roleLabel, type Agent, type AgentStatus } from "../../api/types";
 import { duration } from "../../lib/format";
 import { decodePathParam } from "../../lib/url";
-import { agents, api, events, leases } from "../../stores";
+
 import { PinButton } from "../../app/PinnedBar";
 import { NewAgentDialog } from "./NewAgentDialog";
 
@@ -84,6 +86,7 @@ export function AgentCard(props: { agent: Agent; now: number; onError?: (e: unkn
 
 /** The agents of the route project (`/p/:project/agents`). */
 export function AgentsPage() {
+  const { leases, agents, api, events } = useInstance();
   const now = useNow(1000);
   const navigate = useNavigate();
   const route = useParams<{ project: string }>();
