@@ -314,15 +314,21 @@ async fn dispatch_candidate_query_uses_only_indexed_searches() {
     enabled(&td).await;
     let first = card(&td, "small").await;
     let second = card(&td, "impl").await;
-    state(&td).db.write("system", move |t| {
-        t.execute("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i + 1 FROM n WHERE i < 2048)
+    state(&td)
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i + 1 FROM n WHERE i < 2048)
             INSERT INTO conflict_fixes(job, card, project, template, task, done, retry_at)
             SELECT 'job-' || i, CASE WHEN i % 2 = 0 THEN ?1 ELSE ?2 END,
                 'p', 'card-impl', 'repair', i % 3 = 0,
                 CASE WHEN i % 4 = 0 THEN unixepoch() + 3600 ELSE i % 16 END FROM n",
-            rusqlite::params![first, second])?;
-        Ok(())
-    }).await.unwrap();
+                rusqlite::params![first, second],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let plan = state(&td)
         .db
         .read(|c| {
@@ -358,7 +364,11 @@ async fn dispatch_candidate_query_uses_only_indexed_searches() {
     assert!(plan.iter().all(|s| !s.contains("SCAN")), "{plan:?}");
     assert!(plan.iter().all(|s| !s.contains("TEMP B-TREE")), "{plan:?}");
     for index in ["conflict_fixes_card_pending", "conflict_fixes_pending"] {
-        assert!(plan.iter().any(|s| s.contains("SEARCH") && s.contains(index)), "{index}: {plan:?}");
+        assert!(
+            plan.iter()
+                .any(|s| s.contains("SEARCH") && s.contains(index)),
+            "{index}: {plan:?}"
+        );
     }
 }
 
