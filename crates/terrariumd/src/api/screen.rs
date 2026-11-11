@@ -5,9 +5,9 @@
 //! project, a sysadmin, or the operator reads it. The snapshot is
 //! read-only: it takes no PTY attachment and types nothing.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::routing::get;
-use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use terrarium_runner::ScreenSnapshot;
@@ -18,8 +18,12 @@ use crate::actor::Actor;
 use crate::error::ApiResult;
 use crate::policy;
 
-pub fn routes() -> Router<Shared> {
-    Router::new().route("/agents/{id}/screen", get(screen))
+pub fn routes() -> super::link_registry::RegisteredRouter {
+    super::link_registry::RegisteredRouter::new().route(
+        "/agents/{id}/screen",
+        get(screen),
+        &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+    )
 }
 
 #[derive(Debug, Default, Deserialize)]

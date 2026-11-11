@@ -1,5 +1,7 @@
 import { useInstance } from "../../instance";
 import { ReadBoundary, useReadBoundary } from "../../components/ReadBoundary";
+import { CommentPost } from "../../components/CommentPost";
+import { PostEditor } from "../../components/PostEditor";
 import { useParams, useSearchParams } from "@solidjs/router";
 import { A, useNavigate } from "../../instance/navigation";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
@@ -389,6 +391,7 @@ export function BoardPage(props: { done?: boolean }) {
       <Show when={newCardIn()}>
         {(column) => (
           <NewCardModal
+            project={params.project}
             prefix={board.prefix()}
             column={column()}
             columns={boardColumns()}
@@ -588,6 +591,7 @@ function KCard(props: {
  * "Create and add another" keeps it open for the next card (newCard.ts nextNewCardForm).
  */
 function NewCardModal(props: {
+  project: string;
   prefix: string | null;
   column: string;
   columns: Column[];
@@ -659,6 +663,7 @@ function NewCardModal(props: {
             </span>
           </Show>
         </label>
+        <PostEditor label="Description" text={form.body} project={props.project} textBody>
         <label>
           Description (Markdown)
           <textarea
@@ -673,6 +678,7 @@ function NewCardModal(props: {
             }}
           />
         </label>
+        </PostEditor>
         <div class="row">
           <label class="drawer-field">
             Column
@@ -843,10 +849,12 @@ function CardDrawer(props: {
           Title
           <input value={edit().title} onInput={editField("title")} />
         </label>
+        <PostEditor label="Body" text={edit().body} project={props.card.project} textBody>
         <label>
           Body
           <textarea value={edit().body} onInput={editField("body")} />
         </label>
+        </PostEditor>
         <label>
           Labels
           <input value={edit().labels} onInput={editField("labels")} placeholder="bug, ui" />
@@ -977,24 +985,10 @@ function CardDrawer(props: {
           {(c, index) => (
             <>
             <Show when={index() === read.first()}><ReadBoundary /></Show>
-            <div class="comment">
-              <div class="small muted">
-                <strong style={{ color: "var(--text)" }}>{c.author_name ?? c.author}</strong> · {ago(c.created_at)}
-                <Show when={c.session}>
-                  {(s) => (
-                    <>
-                      {" · "}
-                      <A href={sessionHref(s().id)} title={`${s().harness} session ${s().id}`}>
-                        View session
-                      </A>
-                    </>
-                  )}
-                </Show>
-              </div>
-              <div>
-                <TextMarkdown text={c.body} project={props.card.project} />
-              </div>
-            </div>
+            <CommentPost comment={c} index={index()} card={props.card.id} project={props.card.project} onQuote={(text) => {
+              setComment((old) => old + (old ? "\n\n" : "") + text);
+              commentInput?.focus();
+            }} />
             </>
           )}
         </For>
@@ -1012,7 +1006,9 @@ function CardDrawer(props: {
             }
           }}
         >
+          <PostEditor label="Comment" text={comment()} project={props.card.project} textBody>
           <textarea ref={commentInput} value={comment()} onInput={(e) => setComment(e.currentTarget.value)} placeholder="Comment as operator" aria-label="Comment" />
+          </PostEditor>
           <EmojiPicker onPick={(code) => {
             const start = commentInput?.selectionStart ?? comment().length;
             const end = commentInput?.selectionEnd ?? start;

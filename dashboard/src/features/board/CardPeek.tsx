@@ -1,14 +1,15 @@
 import { useInstance } from "../../instance";
 import { ReadBoundary, useReadBoundary } from "../../components/ReadBoundary";
+import { CommentPost } from "../../components/CommentPost";
+import { PostEditor } from "../../components/PostEditor";
 // The card side panel (GitHub #31, TER-571). A card key in text opens the card
 // over the current view: the title, the column, the description, and the
 // comments, with a link to the card on its board. The Layout mounts it once.
 
 import { A } from "../../instance/navigation";
-import { createResource, For, Show } from "solid-js";
+import { createResource, createSignal, For, Show } from "solid-js";
 import { TextMarkdown } from "../../components/TextMarkdown";
 import { Drawer, ErrorBanner } from "../../components/ui";
-import { ago } from "../../lib/format";
 import { targetHref } from "../../lib/markdown";
 
 
@@ -17,7 +18,11 @@ export function CardPeek() {
   return (
     <Show when={cardPeek.current()} keyed>
       {(t) => {
-        const [card] = createResource(() => t.id, (id) => api.cards.get(id));
+        const [card, { mutate }] = createResource(() => t.id, (id) => api.cards.get(id));
+        const [text, setText] = createSignal("");
+        const [error, setError] = createSignal<unknown>(null);
+        const [sending, setSending] = createSignal(false);
+        let editor: HTMLTextAreaElement | undefined;
         // `card.latest` throws the load error again: read it only without an error (TER-598).
         const loaded = () => (card.error ? undefined : card.latest);
         const read = useReadBoundary("card", () => t.id, () => loaded()?.comments.map((c) => c.created_at) ?? []);
@@ -58,17 +63,30 @@ export function CardPeek() {
                       {(m, index) => (
                         <>
                         <Show when={index() === read.first()}><ReadBoundary /></Show>
-                        <div class="comment">
-                          <div class="small muted">
-                            <strong style={{ color: "var(--text)" }}>{m.author_name ?? m.author}</strong> · {ago(m.created_at)}
-                          </div>
-                          <div>
-                            <TextMarkdown text={m.body} project={c().project} />
-                          </div>
-                        </div>
+                        <CommentPost comment={m} index={index()} card={c().id} project={c().project} onQuote={(quote) => {
+                          setText((old) => old + (old ? "\n\n" : "") + quote);
+                          editor?.focus();
+                        }} />
                         </>
                       )}
                     </For>
+                    <ErrorBanner error={error()} />
+                    <form class="stack" onSubmit={async (e) => {
+                      e.preventDefault();
+                      if (!text().trim() || sending()) return;
+                      setSending(true);
+                      try {
+                        mutate(await api.cards.comment(t.id, text().trim()));
+                        setText("");
+                        setError(null);
+                      } catch (err) { setError(err); }
+                      finally { setSending(false); }
+                    }}>
+                      <PostEditor label="Comment" text={text()} project={c().project} textBody>
+                        <textarea ref={editor} aria-label="Comment" value={text()} onInput={(e) => setText(e.currentTarget.value)} placeholder="Comment as operator" />
+                      </PostEditor>
+                      <button type="submit" disabled={!text().trim() || sending()}>Comment</button>
+                    </form>
                   </section>
                 </div>
               )}

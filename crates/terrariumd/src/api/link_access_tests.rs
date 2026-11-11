@@ -1,20 +1,13 @@
-// The inventory is a reviewed classification, not a generated allow list.
-// New registrations, methods, handlers, and operator comparisons must be
-// classified before this test passes. The HTTP walk consumes the same data.
+// Runtime registry entries are the boundary. These additional reviewed cases
+// exercise conditional actions and real approval resources.
 #[derive(serde::Deserialize)]
 struct LinkRouteInventory {
     routes: Vec<LinkRouteEntry>,
-    gates: std::collections::BTreeMap<String, Vec<String>>,
 }
-
 #[derive(serde::Deserialize)]
 struct LinkRouteEntry {
-    source: String,
-    registration: String,
-    access: String,
     cases: Vec<LinkRouteCase>,
 }
-
 #[derive(serde::Deserialize)]
 struct LinkRouteCase {
     method: String,
@@ -26,164 +19,12 @@ struct LinkRouteCase {
     #[serde(default)]
     approval: bool,
 }
-
 fn link_inventory() -> LinkRouteInventory {
     serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/link-route-access.json"
     )))
     .unwrap()
-}
-
-fn link_inventory_sources(
-    dir: &Path,
-    root: &Path,
-    out: &mut std::collections::BTreeMap<String, String>,
-) {
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            link_inventory_sources(&path, root, out);
-        } else if path.extension().is_some_and(|e| e == "rs")
-            && path.file_name().unwrap() != "link_access_tests.rs"
-        {
-            let source = std::fs::read_to_string(&path).unwrap();
-            out.insert(
-                path.strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned(),
-                source.split("#[cfg(test)]").next().unwrap().to_owned(),
-            );
-        }
-    }
-}
-
-fn link_registration_expressions(source: &str) -> Vec<String> {
-    assert!(
-        !source.contains(".route_service("),
-        "classify service routes before adding a new registration form"
-    );
-    let mut result = Vec::new();
-    let mut rest = source;
-    // Capture the whole registration, including its method chain and handler
-    // names. Constants as paths are included too, not silently skipped.
-    while let Some(start) = rest.find(".route(") {
-        let call = &rest[start + 7..];
-        let (mut depth, mut quoted, mut escaped) = (1, false, false);
-        let mut end = None;
-        for (i, c) in call.char_indices() {
-            if quoted {
-                if escaped {
-                    escaped = false;
-                } else if c == '\\' {
-                    escaped = true;
-                } else if c == '"' {
-                    quoted = false;
-                }
-            } else {
-                match c {
-                    '"' => quoted = true,
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = Some(i);
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let end = end.expect("unparsed route registration");
-        result.push(call[..end].chars().filter(|c| !c.is_whitespace()).collect());
-        rest = &call[end + 1..];
-    }
-    result
-}
-
-fn link_gate_lines(source: &str) -> Vec<String> {
-    let mut result: Vec<_> = source
-        .lines()
-        .filter(|line| {
-            !line.trim_start().starts_with("//")
-                && [
-                    "Actor::Operator",
-                    "Address::Operator",
-                    "operator_only(",
-                    "operator_only_with_provenance(",
-                    ".is_operator()",
-                ]
-                .iter()
-                .any(|needle| line.contains(needle))
-        })
-        .map(|line| {
-            line.chars()
-                .filter(|c| !c.is_whitespace())
-                .collect::<String>()
-        })
-        .collect();
-    result.sort();
-    result
-}
-
-#[test]
-fn link_route_inventory_is_complete() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut sources = std::collections::BTreeMap::new();
-    link_inventory_sources(&root, &root, &mut sources);
-    let inventory = link_inventory();
-    let actual: std::collections::BTreeSet<_> = sources
-        .iter()
-        .flat_map(|(name, source)| {
-            link_registration_expressions(source)
-                .into_iter()
-                .map(|r| (name.clone(), r))
-        })
-        .collect();
-    let expected: std::collections::BTreeSet<_> = inventory
-        .routes
-        .iter()
-        .map(|r| (r.source.clone(), r.registration.clone()))
-        .collect();
-    assert_eq!(
-        actual, expected,
-        "classify each new or changed router registration in link-route-access.json"
-    );
-    assert_eq!(
-        expected.len(),
-        inventory.routes.len(),
-        "duplicate inventory entry"
-    );
-    for entry in &inventory.routes {
-        assert!(
-            matches!(
-                entry.access.as_str(),
-                "operator-only" | "link-allowed-read" | "conditional" | "other"
-            ),
-            "unclassified registration: {}",
-            entry.registration
-        );
-        if entry.access != "other" {
-            assert!(
-                !entry.cases.is_empty(),
-                "missing HTTP coverage: {}",
-                entry.registration
-            );
-        }
-    }
-    let gates: std::collections::BTreeMap<_, _> = sources
-        .iter()
-        .filter_map(|(name, source)| {
-            let lines = link_gate_lines(source);
-            (!lines.is_empty()).then(|| (name.clone(), lines))
-        })
-        .collect();
-    assert_eq!(
-        gates, inventory.gates,
-        "review new operator comparisons and conditional gates, then update their route classes and HTTP cases"
-    );
 }
 
 async fn link_approval_fixtures(
@@ -288,7 +129,6 @@ async fn link_approval_snapshot(s: &Shared) -> serde_json::Value {
 
 #[tokio::test]
 async fn link_operator_routes_deny_by_default() {
-    link_route_inventory_is_complete();
     let dir = tempfile::tempdir().unwrap();
     let s = state_at(dir.path());
     let (_, dev) = seed_sysadmin(&s).await;
@@ -296,6 +136,38 @@ async fn link_operator_routes_deny_by_default() {
     let fixture = link_approval_fixtures(&s, dev).await;
     let auth = format!("Bearer {key}");
     let h = [("authorization", auth.as_str())];
+    let (_, registry) = routes_with_registry(s.clone(), false, false);
+    for entry in &registry.entries {
+        if entry.access != link_registry::Access::OperatorOnly {
+            continue;
+        }
+        let path = entry
+            .path
+            .split('/')
+            .map(|segment| {
+                if segment.starts_with('{') {
+                    "link-test"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        let response = send_body(
+            link_app(&s),
+            entry.method.as_str(),
+            &path,
+            &h,
+            &serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "{} {path}",
+            entry.method
+        );
+    }
     let mut approvals = Vec::new();
     for entry in link_inventory().routes {
         for case in entry.cases {
@@ -359,4 +231,284 @@ async fn link_operator_routes_deny_by_default() {
         assert_eq!(status, StatusCode::OK, "operator {path}: {v}");
         assert_eq!(v["status"], "answered");
     }
+}
+
+#[tokio::test]
+async fn link_unregistered_routes_never_reach_handlers() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let s = state_at(dir.path());
+    let (_, key) = paired(&s, false).await;
+    let called = Arc::new(AtomicUsize::new(0));
+    let app = || {
+        let called = called.clone();
+        let shadow_called = called.clone();
+        let outside_called = called.clone();
+        // No registration helper: this could equally come from a macro,
+        // a cfg'd helper, or a nested/merged axum router.
+        let plain = Router::new().route(
+            "/hidden",
+            axum::routing::get(move || async move {
+                called.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }),
+        );
+        let (real, registry) = routes_with_registry(s.clone(), false, false);
+        let mut auth = TokenAuth::new("t".into(), false).with_links(LinkAuth {
+            db: s.db.clone(),
+            runtime: s.links.clone(),
+        });
+        auth.registry = registry;
+        let real = real.nest("/api/unregistered", plain).route(
+            "/api/agents/shadow",
+            axum::routing::get(move || async move {
+                shadow_called.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }),
+        );
+        let real = real.route(
+            "/outside",
+            axum::routing::get(move || async move {
+                outside_called.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }),
+        );
+        authenticated_router(s.clone(), real, auth)
+    };
+    let bearer = format!("Bearer {key}");
+    let response = send(
+        app(),
+        "GET",
+        "/api/unregistered/hidden",
+        &[("authorization", &bearer)],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(called.load(Ordering::SeqCst), 0);
+    let response = send(
+        app(),
+        "GET",
+        "/api/agents/shadow",
+        &[("authorization", &bearer)],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(called.load(Ordering::SeqCst), 0);
+    let response = send(
+        app(),
+        "GET",
+        "/api/unregistered/hidden",
+        &[("authorization", "Bearer t")],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(called.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        send(app(), "GET", "/outside", &[("authorization", &bearer)])
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(called.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        ws(
+            app(),
+            "/outside",
+            &[("sec-websocket-protocol", &format!("bearer.{key}"))]
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(called.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        send(app(), "GET", "/outside", &[]).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(app(), "GET", "/outside", &[("authorization", "Bearer t")])
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(called.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn link_credentials_do_not_bypass_public_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state_at(dir.path());
+    seed_sysadmin(&s).await;
+    let (_, key) = paired(&s, false).await;
+    let app = || {
+        tcp_router_with(
+            s.clone(),
+            TokenAuth::new("t".into(), false).with_links(LinkAuth {
+                db: s.db.clone(),
+                runtime: s.links.clone(),
+            }),
+            true,
+        )
+    };
+    let op = [("authorization", "Bearer t")];
+    let upload = send_body(app(), "POST", "/api/projects/p/artifacts", &op,
+        &serde_json::json!({"name":"public.txt", "content_type":"text/plain", "data_base64":"cHVibGlj"})).await;
+    assert_eq!(upload.status(), StatusCode::CREATED);
+    let artifact = json_of(upload).await;
+    let mint = send_body(
+        app(),
+        "POST",
+        &format!("/api/artifacts/{}/url", artifact["id"].as_str().unwrap()),
+        &op,
+        &serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(mint.status(), StatusCode::OK);
+    let signed = json_of(mint).await;
+    let uri: axum::http::Uri = signed["url"].as_str().unwrap().parse().unwrap();
+    let artifact_path = uri.path_and_query().unwrap().as_str();
+    let bearer = format!("Bearer {key}");
+    for path in [
+        "/install/host.sh",
+        "/install/terrarium-host",
+        "/install/terrarium-host.sha256",
+        "/",
+        "/favicon.svg",
+        "/agents/dashboard",
+        "/missing.js",
+        "/ra/cap/123/sig/",
+        "/ra/cap/123/sig/index.html",
+        artifact_path,
+    ] {
+        let anonymous = send(app(), "GET", path, &[]).await;
+        let status = anonymous.status();
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "public control {path}");
+        assert_eq!(
+            send(app(), "GET", path, &op).await.status(),
+            status,
+            "operator control {path}"
+        );
+        for method in ["GET", "HEAD"] {
+            let response = send(app(), method, path, &[("authorization", &bearer)]).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+    }
+    assert_eq!(
+        send(app(), "GET", artifact_path, &[]).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(send(app(), "GET", "/", &[]).await.status(), StatusCode::OK);
+    assert_eq!(
+        send(app(), "GET", "/install/host.sh", &[]).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(app(), "GET", "/", &[("authorization", "Bearer tlk_wrong")])
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn link_hidden_methods_in_helpers_are_not_registered() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let s = state_at(dir.path());
+    let (_, key) = paired(&s, false).await;
+    let called = Arc::new(AtomicUsize::new(0));
+    let app = || {
+        let called = called.clone();
+        // A helper silently adding POST cannot extend the GET declaration.
+        let methods = axum::routing::get(|| async { StatusCode::OK }).post(move || async move {
+            called.fetch_add(1, Ordering::SeqCst);
+            StatusCode::OK
+        });
+        let child = link_registry::RegisteredRouter::new().route(
+            "/declared",
+            methods,
+            &[(axum::http::Method::GET, link_registry::Access::Link)],
+        );
+        let (router, registry) = link_registry::RegisteredRouter::new()
+            .nest("/api", child)
+            .into_parts();
+        let mut auth = TokenAuth::new("t".into(), false).with_links(LinkAuth {
+            db: s.db.clone(),
+            runtime: s.links.clone(),
+        });
+        auth.registry = Arc::new(registry);
+        authenticated_router(s.clone(), router.with_state(s.clone()), auth)
+    };
+    let bearer = format!("Bearer {key}");
+    let h = [("authorization", bearer.as_str())];
+    assert_eq!(
+        send(app(), "GET", "/api/declared", &h).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(app(), "HEAD", "/api/declared", &h).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(app(), "POST", "/api/declared", &h).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(called.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        send(
+            app(),
+            "POST",
+            "/api/declared",
+            &[("authorization", "Bearer t")]
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(called.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn link_remote_artifact_registrations_keep_their_access_classes() {
+    let (_, registry) = routes_with_registry(state(), true, false);
+    assert_eq!(
+        registry.access(
+            &axum::http::Method::POST,
+            "/api/remotes/remote/artifact-repin"
+        ),
+        Some(link_registry::Access::OperatorOnly)
+    );
+    assert_eq!(
+        registry.access(
+            &axum::http::Method::POST,
+            "/api/remotes/remote/artifacts/ART-1/url"
+        ),
+        Some(link_registry::Access::OperatorOnly)
+    );
+    for path in ["/ra/cap/123/sig/", "/ra/cap/123/sig/index.html"] {
+        for method in [axum::http::Method::GET, axum::http::Method::HEAD] {
+            assert_eq!(
+                registry.access(&method, path),
+                Some(link_registry::Access::PublicDenied)
+            );
+        }
+    }
+}
+
+#[test]
+fn link_job_log_cleanup_registration_keeps_project_policy() {
+    let (_, registry) = routes_with_registry(state(), false, false);
+    assert_eq!(
+        registry.access(&axum::http::Method::POST, "/api/projects/p/jobs/cleanup"),
+        Some(link_registry::Access::OperatorOnly)
+    );
+}
+
+#[test]
+fn link_read_positions_registration_is_operator_only() {
+    let (_, registry) = routes_with_registry(state(), false, false);
+    assert_eq!(
+        registry.access(&axum::http::Method::POST, "/api/read-positions/thread/item"),
+        Some(link_registry::Access::OperatorOnly)
+    );
 }

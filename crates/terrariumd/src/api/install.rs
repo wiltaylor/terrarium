@@ -39,9 +39,28 @@ const UNIT: &str = include_str!("../../../terrarium-host/terrarium-host.service"
 const VERSION: &str = terrarium_version::FULL;
 
 pub fn routes() -> Router<Shared> {
-    Router::new()
-        .route(SCRIPT_PATH, get(script))
-        .merge(binary_routes())
+    registered_routes().into_parts().0
+}
+
+pub(super) fn registered_routes() -> super::link_registry::RegisteredRouter {
+    use super::link_registry::{Access, RegisteredRouter};
+    use axum::http::Method;
+    RegisteredRouter::new()
+        .route(
+            SCRIPT_PATH,
+            get(script),
+            &[(Method::GET, Access::PublicDenied)],
+        )
+        .route(
+            BINARY_PATH,
+            get(binary),
+            &[(Method::GET, Access::PublicDenied)],
+        )
+        .route(
+            CHECKSUM_PATH,
+            get(checksum),
+            &[(Method::GET, Access::PublicDenied)],
+        )
 }
 
 /// The binary and its SHA-256 only. The host listener serves these too:
