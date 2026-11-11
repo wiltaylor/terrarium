@@ -3167,19 +3167,13 @@ async fn a_used_up_cloud_budget_mails_without_holding_turns() {
     assert_eq!(alerts.len(), 1);
     assert_eq!(alerts[0]["data"]["level"], "exhausted");
     let mail = td.get("/api/mail?to=operator").await;
-    assert!(
-        mail.ok()
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| {
-                m["subject"] == "Quota: aws budget window is used up"
-                    && m["body"]
-                        .as_str()
-                        .unwrap()
-                        .contains("The agents keep their turns.")
-            })
-    );
+    assert!(mail.ok().as_array().unwrap().iter().any(|m| {
+        m["subject"] == "Quota: aws budget window is used up"
+            && m["body"]
+                .as_str()
+                .unwrap()
+                .contains("The agents keep their turns.")
+    }));
     let win = td.get("/api/subscriptions/aws").await.ok().clone();
     let budget = win["windows"]
         .as_array()
