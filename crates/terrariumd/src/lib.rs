@@ -1180,8 +1180,8 @@ fn spawn_pump(state: Shared) -> JoinHandle<()> {
             // An idle stop and a pause give the `stopped` status their
             // reason (`crate::lifecycle`).
             let ev = state.lifecycle.with_stop_reason(ev);
-            let provenance_agent = matches!(&ev.kind, SupervisorEventKind::NewSession { .. })
-                .then_some(ev.agent);
+            let provenance_agent =
+                matches!(&ev.kind, SupervisorEventKind::NewSession { .. }).then_some(ev.agent);
             let ended = matches!(
                 &ev.kind,
                 SupervisorEventKind::Status {
