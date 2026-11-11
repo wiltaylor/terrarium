@@ -53,6 +53,9 @@ pub fn set(t: &mut Tx<'_>, actor: &Actor, id: &str, wait: &Wait) -> ApiResult<()
     if wait.dependencies.is_empty() || wait.dependencies.len() > MAX_DEPS {
         return Err(ApiError::invalid("a card wait needs 1 to 128 dependencies"));
     }
+    if wait.action.comment.as_ref().is_some_and(|c| c.trim().is_empty()) {
+        return Err(ApiError::invalid("a wait action comment must not be empty"));
+    }
     if let Some(to) = &wait.action.move_to {
         column(t, &card.project, to)?;
     }
@@ -72,34 +75,12 @@ pub fn set(t: &mut Tx<'_>, actor: &Actor, id: &str, wait: &Wait) -> ApiResult<()
         if let Some(target) = &dep.target {
             column(t, &row.project, target)?;
         }
-        let mut seen = HashSet::new();
-        let mut stack = vec![key.clone()];
-        while let Some(next) = stack.pop() {
-            if next == card.id {
-                return Err(ApiError::invalid("card wait makes a dependency cycle"));
-            }
-            if seen.insert(next.clone()) {
-                if seen.len() > MAX_GRAPH {
-                    return Err(ApiError::invalid("dependency graph exceeds 4096 cards"));
-                }
-                let mut stmt =
-                    t.prepare("SELECT depends_on FROM card_deps WHERE card = ?1 LIMIT 129")?;
-                let edges = stmt
-                    .query_map([next], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                if edges.len() > MAX_DEPS {
-                    return Err(ApiError::invalid(
-                        "dependency graph exceeds 128 edges per card",
-                    ));
-                }
-                stack.extend(edges);
-            }
-        }
         if wanted.iter().any(|(id, _)| id == &key) {
             return Err(ApiError::invalid("duplicate dependency"));
         }
         wanted.push((key, dep.target.clone()));
     }
+    check_cycles(t, &card.id, &wanted.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>())?;
     t.execute("DELETE FROM card_deps WHERE card = ?1", [&card.id])?;
     for (dep, target) in wanted {
         t.execute(
@@ -113,6 +94,28 @@ pub fn set(t: &mut Tx<'_>, actor: &Actor, id: &str, wait: &Wait) -> ApiResult<()
         params![card.id, if wait.mode == Mode::All { "all" } else { "any" }, serde_json::to_string(&wait.action)?, actor.address(), ulid::Ulid::new().to_string()])?;
     card_event(t, &card, "edited", json!({"fields": ["wait"]}))?;
     evaluate(t, &card.id, false)
+}
+
+/// One visited set and work budget for all roots, also used by legacy depends_on.
+pub(super) fn check_cycles(conn: &Connection, card: &str, roots: &[String]) -> ApiResult<()> {
+    let mut seen = HashSet::new();
+    let mut stack = roots.to_vec();
+    let mut statement = conn.prepare("SELECT depends_on FROM card_deps WHERE card = ?1 LIMIT 129")?;
+    while let Some(next) = stack.pop() {
+        if next == card {
+            return Err(ApiError::invalid("card wait makes a dependency cycle"));
+        }
+        if !seen.insert(next.clone()) { continue }
+        if seen.len() > MAX_GRAPH {
+            return Err(ApiError::invalid("dependency graph exceeds 4096 cards"));
+        }
+        let edges = statement.query_map([next], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        if edges.len() > MAX_DEPS {
+            return Err(ApiError::invalid("dependency graph exceeds 128 edges per card"));
+        }
+        stack.extend(edges);
+    }
+    Ok(())
 }
 
 pub fn get(conn: &Connection, id: &str) -> ApiResult<Option<Wait>> {
@@ -202,6 +205,21 @@ pub(super) fn on_dependency_changed(t: &mut Tx<'_>, id: &str, broken: bool) -> A
 
 /// Pack rule action. The latch survives a restart and duplicate event delivery.
 pub fn act(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiResult<bool> {
+    let row = find_row(t, id)?;
+    policy::write_project(actor, &row.project)?;
+    // Keep completion and the dependency change outside the action savepoint.
+    // Tx::savepoint also discards staged events/files/audits on failure.
+    match t.savepoint(|t| act_inner(t, actor, id, generation)) {
+        Ok(acted) => Ok(acted),
+        Err(error) => {
+            t.execute("UPDATE card_waits SET acted_at=?3 WHERE card=?1 AND generation=?2 AND met_at IS NOT NULL", params![id, generation, now()])?;
+            t.audit("card.wait_action_failed", id, Some(&row.project), json!({"reason": error.to_string(), "wait_generation": generation}))?;
+            Ok(true)
+        }
+    }
+}
+
+fn act_inner(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiResult<bool> {
     let config: Option<(String, String, bool)> = t
         .query_row(
             "SELECT action, setter, broken FROM card_waits
@@ -246,6 +264,7 @@ pub fn act(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiResu
                 Err(e) => {
                     reason = format!("wait met, move refused: {e}");
                     refused = true;
+                    t.audit("card.wait_action_failed", id, Some(&row.project), json!({"reason": reason, "wait_generation": generation}))?;
                 }
             }
         } else if let Some(comment) = action.comment {
@@ -260,7 +279,7 @@ pub fn act(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiResu
             .find_map(|a| mail::resolve(t, a, None).ok());
         let to = match target {
             Some(to) => to,
-            None => Address::Project(row.project.clone()),
+            None => mail::inbox_recipient(t, &row.project)?.unwrap_or(Address::Operator),
         };
         mail::send(
             t,

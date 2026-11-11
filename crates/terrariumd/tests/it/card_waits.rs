@@ -574,3 +574,109 @@ async fn wait_queries_use_dependency_indexes_and_limits_are_enforced() {
         Ok(())
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn blank_action_comments_are_refused_before_dependency_changes() {
+    let td = setup().await;
+    let a = card(&td).await;
+    let b = card(&td).await;
+    let db = td.daemon.as_ref().unwrap().state.db.clone();
+    for comment in ["", " \n\t "] {
+        let id = b.clone();
+        let w = wait(&[(&a, Some("review"))], Mode::All, Action { comment: Some(comment.into()), ..Action::default() });
+        let error = db.write("operator", move |t| card_waits::set(t, &Actor::Operator, &id, &w)).await.unwrap_err();
+        assert_eq!(error.code, terrariumd::error::Code::Invalid);
+    }
+    move_to(&td, &a, "review").await;
+    assert_eq!(td.get(&format!("/api/cards/{a}")).await.ok()["column"], "review");
+}
+
+#[tokio::test]
+async fn no_lead_and_bad_actions_cannot_rollback_dependency_changes() {
+    let td = TestDaemon::start().await;
+    td.post("/api/projects", json!({"name":"p", "card_prefix":"N"})).await.ok();
+    let a = card(&td).await;
+    let b = td.post("/api/projects/p/cards", json!({"title":"legacy", "depends_on":[a]})).await.ok()["id"].as_str().unwrap().to_owned();
+    td.delete(&format!("/api/cards/{a}")).await.ok();
+    assert!(td.get(&format!("/api/cards/{a}")).await.ok()["archived"].as_bool().unwrap());
+    assert!(met(&td, &b).await);
+    assert!(td.get("/api/mail?to=operator").await.ok().as_array().unwrap().iter().any(|m| m["subject"].as_str().is_some_and(|s| s.contains("wait broken"))));
+
+    let a = card(&td).await;
+    let b = card(&td).await;
+    set(&td, &b, wait(&[(&a, Some("review"))], Mode::All, Action { move_to:Some("blocked".into()), ..Action::default() })).await;
+    move_to(&td, &a, "review").await;
+    assert!(met(&td, &b).await);
+    assert_eq!(td.get(&format!("/api/cards/{a}")).await.ok()["column"], "review");
+    assert_eq!(td.get(&format!("/api/cards/{b}")).await.ok()["column"], "backlog");
+    assert!(td.get("/api/mail?to=operator").await.ok().as_array().unwrap().iter().any(|m| m["subject"].as_str().is_some_and(|s| s.contains("move refused"))));
+
+    let c = card(&td).await;
+    let d = card(&td).await;
+    set(&td, &d, wait(&[(&c, Some("review"))], Mode::All, Action { comment:Some("valid".into()), ..Action::default() })).await;
+    let id = d.clone();
+    let db = td.daemon.as_ref().unwrap().state.db.clone();
+    // Model an invalid action persisted before blank comments were refused.
+    db.write("operator", move |t| {
+        t.execute("UPDATE card_waits SET action=?2 WHERE card=?1", rusqlite::params![id, json!({"comment":" "}).to_string()])?;
+        Ok(())
+    }).await.unwrap();
+    move_to(&td, &c, "review").await;
+    assert!(met(&td, &d).await);
+    assert_eq!(td.get(&format!("/api/cards/{c}")).await.ok()["column"], "review");
+    db.read(move |c| {
+        let acted: bool = c.query_row("SELECT acted_at IS NOT NULL FROM card_waits WHERE card=?1", [&d], |r| r.get(0))?;
+        let recorded: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM audit WHERE action='card.wait_action_failed' AND target=?1)", [&d], |r| r.get(0))?;
+        assert!(acted && recorded);
+        Ok(())
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_graph_budget_covers_all_roots_and_legacy_walks() {
+    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+    let td = setup().await;
+    let template = card(&td).await;
+    let waiter = card(&td).await;
+    let legacy = card(&td).await;
+    let roots: Vec<String> = (0..128).map(|n| format!("GRAPH-{n}")).collect();
+    let w = Wait { dependencies: roots.iter().map(|id| Dependency { card:id.clone(), target:None }).collect(), mode:Mode::All, action:Action::default(), met_at:None };
+    let db = td.daemon.as_ref().unwrap().state.db.clone();
+    db.write("operator", move |t| {
+        // 128 roots share a 3900-card chain. Another 69 nodes test the global cap.
+        for n in 0..4097 {
+            t.execute("INSERT INTO cards(id,project,number,column_id,position,title,body,labels,created_by,created_at,updated_at)
+                SELECT ?1,project,?2,column_id,?2,'graph','','[]',created_by,created_at,updated_at FROM cards WHERE id=?3",
+                rusqlite::params![format!("GRAPH-{n}"), n+10000, template])?;
+        }
+        for n in 0..4027 {
+            let next = if n < 128 { 128 } else { n+1 };
+            t.execute("INSERT INTO card_deps(card,depends_on) VALUES (?1,?2)", rusqlite::params![format!("GRAPH-{n}"),format!("GRAPH-{next}")])?;
+        }
+        let steps = Arc::new(AtomicU64::new(0));
+        let counter = steps.clone();
+        t.progress_handler(1000, Some(move || {counter.fetch_add(1000, Ordering::Relaxed); false}));
+        card_waits::set(t, &Actor::Operator, &waiter, &w)?;
+        t.progress_handler(0, None::<fn() -> bool>);
+        assert!(steps.load(Ordering::Relaxed) < 500_000, "shared set walk: {} VM steps", steps.load(Ordering::Relaxed));
+        steps.store(0, Ordering::Relaxed);
+        let counter = steps.clone();
+        t.progress_handler(1000, Some(move || {counter.fetch_add(1000, Ordering::Relaxed); false}));
+        let patch = serde_json::from_value(json!({"depends_on":roots}))?;
+        terrariumd::store::board::update_card(t, &Actor::Operator, &legacy, patch)?;
+        t.progress_handler(0, None::<fn() -> bool>);
+        assert!(steps.load(Ordering::Relaxed) < 500_000, "shared legacy walk: {} VM steps", steps.load(Ordering::Relaxed));
+        for n in 4027..4096 {
+            t.execute("INSERT INTO card_deps(card,depends_on) VALUES (?1,?2)", rusqlite::params![format!("GRAPH-{n}"),format!("GRAPH-{}",n+1)])?;
+        }
+        assert!(card_waits::set(t, &Actor::Operator, &waiter, &w).unwrap_err().message.contains("4096"));
+        // Oversized legacy adjacency lists are refused after at most 129 rows.
+        for n in 1..130 {
+            if n == 128 { continue }
+            t.execute("INSERT INTO card_deps(card,depends_on) VALUES ('GRAPH-0',?1)", [format!("GRAPH-{n}")])?;
+        }
+        let patch = serde_json::from_value(json!({"depends_on":["GRAPH-0"]}))?;
+        assert!(terrariumd::store::board::update_card(t, &Actor::Operator, &legacy, patch).unwrap_err().message.contains("128"));
+        Ok(())
+    }).await.unwrap();
+}

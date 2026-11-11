@@ -2088,23 +2088,8 @@ fn set_deps(t: &mut Tx<'_>, actor: &Actor, card: &str, wanted: &[String]) -> Api
         }
         let dependency = find_row(t, d)?;
         policy::read_project(actor, &dependency.project)?;
-        // A cycle: `d` reaches `card` through existing dependencies.
-        let mut seen = HashSet::new();
-        let mut stack = vec![d.clone()];
-        while let Some(next) = stack.pop() {
-            if next == card {
-                return Err(ApiError::invalid(format!(
-                    "{card} -> {d} makes a dependency cycle"
-                )));
-            }
-            if seen.insert(next.clone()) {
-                if seen.len() > 4096 {
-                    return Err(ApiError::invalid("dependency graph exceeds 4096 cards"));
-                }
-                stack.extend(deps(t, &next)?);
-            }
-        }
     }
+    card_waits::check_cycles(t, card, &wanted)?;
     t.execute("DELETE FROM card_deps WHERE card = ?1", [card])?;
     for d in &wanted {
         t.execute(
