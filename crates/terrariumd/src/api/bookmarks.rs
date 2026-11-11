@@ -106,10 +106,11 @@ async fn add(
             if changed == 0 {
                 return Err(ApiError::invalid("The bookmark no longer exists"));
             }
+            t.audit("bookmark.edit", &href, None, json!({"owner": owner, "previous_href": previous, "href": href}))?;
         } else {
             t.execute("INSERT INTO bookmarks(owner, href, title) VALUES (?1, ?2, ?3) ON CONFLICT(owner, href) DO UPDATE SET title = excluded.title", params![owner, href, title])?;
+            t.audit("bookmark.add", &href, None, json!({"owner": owner}))?;
         }
-        t.audit("bookmark.add", &href, None, json!({"owner": owner}))?;
         list_rows(t, &owner)
     }).await?))
 }

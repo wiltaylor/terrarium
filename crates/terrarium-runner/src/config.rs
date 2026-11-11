@@ -12,8 +12,11 @@ pub const DEFAULT_KILL_GRACE: Duration = Duration::from_secs(3);
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(5);
 /// The default of [`RunnerConfig::output_capacity`].
 pub const DEFAULT_OUTPUT_CAPACITY: usize = 1024;
-/// The default of [`RunnerConfig::startup_hook_timeout`]. pi can fetch `fd`
-/// and `rg` in its startup, so this is long.
+/// The default of [`RunnerConfig::startup_hook_timeout`], shared by pi and
+/// Claude's `SessionStart` gate. pi can fetch `fd` and `rg` in its startup,
+/// so this is long. Keep the same allowance for Claude: a missing hook
+/// cannot be distinguished from a slow startup, and an early screen-only
+/// fallback can submit a queued turn before the harness is ready.
 pub const DEFAULT_STARTUP_HOOK_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The settings of one runner.

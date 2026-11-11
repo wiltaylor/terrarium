@@ -18,6 +18,9 @@ use crate::secrets::{RunDir, RunDirs};
 use terrarium_core::config::{DockerCiDef, DockerReleaseDef, TargetDef};
 
 const RELAY: &str = include_str!("docker_relay.py");
+// Stop-and-wait bounds memory, but each chunk costs one executor round trip.
+// 256 KiB amortizes that latency without removing socket-write backpressure.
+const RELAY_CHUNK_SIZE: usize = 256 * 1024;
 
 /// The env name of the job socket in the recipe. Not `DOCKER_HOST`: on a
 /// `docker` target the host agent runs `docker exec -e <name>`, and the
@@ -480,7 +483,7 @@ async fn bridge(mut run: crate::executor::Running, socket: PathBuf, ready: onesh
             continue;
         };
         buffer.extend(data);
-        if buffer.len() > 131072 {
+        if buffer.len() > 1024 * 1024 {
             break;
         }
         while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
@@ -535,7 +538,7 @@ async fn bridge(mut run: crate::executor::Running, socket: PathBuf, ready: onesh
                 let Ok(data) = STANDARD.decode(data) else {
                     return;
                 };
-                if data.len() > 16384 {
+                if data.len() > RELAY_CHUNK_SIZE {
                     return;
                 }
                 if let Some(tx) = connections.get(&id)
@@ -575,7 +578,7 @@ async fn connection(
         writer.shutdown().await.ok()
     };
     let read = async {
-        let mut data = vec![0; 16384];
+        let mut data = vec![0; RELAY_CHUNK_SIZE];
         loop {
             match reader.read(&mut data).await {
                 Ok(0) => return send(&ctl, json!({"id":id,"eof":true})),
