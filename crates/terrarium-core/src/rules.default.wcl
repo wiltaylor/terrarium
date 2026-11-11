@@ -279,7 +279,6 @@ rule "job-fail-conflict" {
     subject = "{{card.id}}: validation failed"
     body = "{{job.fail_mail}}"
   }
-  job_fix {}
 }
 
 rule "job-moved" {

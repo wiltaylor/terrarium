@@ -4282,6 +4282,11 @@ pub fn emit_verdicts(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
         return Ok(());
     }
     for data in verdicts(j) {
+        if j.kind == JobKind::Merge && data["verdict"] == "conflict" {
+            let view = j.batch.iter().find(|c| data["card"] == c.card)
+                .map(|c| card_view(j, c)).unwrap_or_else(|| j.clone());
+            crate::conflict_fixes::enqueue(t, &view)?;
+        }
         let card = data["card"].as_str().unwrap_or_default().to_owned();
         let summary = format!(
             "{} job {} for {card}: {}",

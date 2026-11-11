@@ -37,7 +37,7 @@ fn owner(c: &Connection, project: &str) -> ApiResult<Option<Actor>> {
     Ok(Some(actor(v.agent)))
 }
 
-fn template(labels: &[String]) -> Option<String> {
+pub(crate) fn template(labels: &[String]) -> Option<String> {
     // Only known worker types, not arbitrary labels used as template names.
     let types: Vec<_> = labels
         .iter()

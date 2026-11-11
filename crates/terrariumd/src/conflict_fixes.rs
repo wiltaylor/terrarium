@@ -14,8 +14,20 @@ struct Request {
     card: String,
     project: String,
     template: String,
-    owner: Option<String>,
     task: String,
+}
+
+/// Queue from the trusted per-card verdict, in the job-end transaction.
+/// Dispatch waits for the existing conflict-return flow to reach ready.
+pub fn enqueue(t: &mut crate::db::Tx<'_>, j: &crate::store::jobs::Job) -> ApiResult<()> {
+    if j.kind != crate::store::jobs::JobKind::Merge || j.outcome.as_deref() != Some("conflict") || j.onto() != "next" {
+        return Ok(());
+    }
+    let card = board::get_card(t, &j.card)?;
+    let template = crate::card_dispatcher::template(&card.labels).unwrap_or_else(|| "card-impl".into());
+    let task = format!("Fix merge conflict for {} on its existing card branch. Merge origin/next into the card branch with a merge commit. Do not rebase or force push. Resolve conflicts keeping both sides' intended changes. Read the card and repo AGENTS.md, run the card check on your pushed commit, push test evidence, then move the card to review. Do not deploy or merge into next.\n\nBranch and conflict details (data):\n{}\n{}", j.card, j.branch, crate::jobs::failure_block(j));
+    t.execute("INSERT OR IGNORE INTO conflict_fixes(job, card, project, template, task) VALUES (?1, ?2, ?3, ?4, ?5)", params![j.id, j.card, j.project, template, task])?;
+    Ok(())
 }
 
 async fn dispatch(state: &Shared, r: Request) -> ApiResult<()> {
@@ -50,6 +62,9 @@ async fn dispatch(state: &Shared, r: Request) -> ApiResult<()> {
             t.execute("UPDATE conflict_fixes SET done = 1 WHERE job = ?1 AND card = ?2", params![r.job, r.card])?;
             return Ok(Some(Some(sp.id)));
         }
+        if board::role_of(t, &r.project, &card.column)?.as_deref() != Some("ready") {
+            return Err(ApiError::conflict("waiting for conflict return to ready"));
+        }
         Ok(None)
     }).await?;
     if let Some(id) = live {
@@ -60,13 +75,10 @@ async fn dispatch(state: &Shared, r: Request) -> ApiResult<()> {
     }
     let request = r.clone();
     let who = state.db.read(move |c| {
-        let name = match request.owner {
-            Some(name) => name,
-            None => c.query_row(
+        let name: String = c.query_row(
                 "SELECT a.name FROM agents a JOIN roles r ON r.agent_id = a.id WHERE a.project = ?1 AND r.project = ?1 AND r.role = 'project_admin' AND a.owner IS NULL ORDER BY a.name LIMIT 1",
                 [&request.project], |row| row.get(0),
-            ).optional()?.ok_or_else(|| ApiError::conflict("no project admin for conflict repair"))?,
-        };
+            ).optional()?.ok_or_else(|| ApiError::conflict("no project admin for conflict repair"))?;
         let v = agents::find(c, &name, Some(&request.project))?;
         if v.ephemeral || v.paused || v.agent.project != request.project || !v.agent.roles.contains(&Role::ProjectAdmin) {
             return Err(ApiError::forbidden("conflict repair owner must be an unpaused project admin"));
@@ -109,8 +121,8 @@ async fn dispatch(state: &Shared, r: Request) -> ApiResult<()> {
 /// restart cannot lose it. Atomic bound checks arbitrate with dispatchers.
 pub async fn pass(state: &Shared) {
     let requests = state.db.read(|c| {
-        let mut q = c.prepare("SELECT job, card, project, template, owner, task FROM conflict_fixes WHERE done = 0 AND retry_at <= unixepoch() ORDER BY rowid LIMIT 16")?;
-        Ok(q.query_map([], |row| Ok(Request { job: row.get(0)?, card: row.get(1)?, project: row.get(2)?, template: row.get(3)?, owner: row.get(4)?, task: row.get(5)? }))?.collect::<Result<Vec<_>, _>>()?)
+        let mut q = c.prepare("SELECT job, card, project, template, task FROM conflict_fixes WHERE done = 0 AND retry_at <= unixepoch() ORDER BY rowid LIMIT 16")?;
+        Ok(q.query_map([], |row| Ok(Request { job: row.get(0)?, card: row.get(1)?, project: row.get(2)?, template: row.get(3)?, task: row.get(4)? }))?.collect::<Result<Vec<_>, _>>()?)
     }).await;
     let Ok(requests) = requests else { return };
     for r in requests {

@@ -1,9 +1,9 @@
 CREATE TABLE conflict_fixes (
-    job TEXT NOT NULL REFERENCES jobs(id),
+    -- Keep history across the later jobs-table rebuilds.
+    job TEXT NOT NULL,
     card TEXT NOT NULL REFERENCES cards(id),
     project TEXT NOT NULL REFERENCES projects(name),
     template TEXT NOT NULL,
-    owner TEXT,
     task TEXT NOT NULL,
     done INTEGER NOT NULL DEFAULT 0,
     retry_at INTEGER NOT NULL DEFAULT 0,

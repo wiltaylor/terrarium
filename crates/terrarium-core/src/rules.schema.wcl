@@ -255,8 +255,6 @@ type JobFix {
   to: utf8?
   labels: list<utf8>?
   max: i64?
-  template: utf8?
-  owner: utf8?
 }
 
 // `reason`: the park reason (absent: `rule <name>`).
