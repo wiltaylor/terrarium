@@ -1,4 +1,5 @@
 // Deterministic UI evidence, not a live-daemon integration test.
+/* global process, fetch, setTimeout, localStorage, URL */
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
@@ -15,6 +16,7 @@ try {
   await mkdir("/tmp/ter-64-screenshots", { recursive: true });
   for (const theme of ["light", "dark"]) {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    page.on("pageerror", (error) => console.error(error.message));
     await page.addInitScript((theme) => localStorage.setItem("terrarium.theme", theme), theme);
     await page.route("**/api/**", async (route) => {
       const path = new URL(route.request().url()).pathname;
@@ -26,6 +28,8 @@ try {
       await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
     });
     await page.goto(`${origin}/remote/lab/projects`);
+    await page.screenshot({ path: `/tmp/ter-64-screenshots/debug-${theme}.png`, fullPage: true });
+    console.log(await page.locator("body").innerText());
     await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
     await page.getByText("Remote: lab", { exact: true }).first().waitFor();
     await page.screenshot({ path: `/tmp/ter-64-screenshots/remote-${theme}.png`, fullPage: true });
