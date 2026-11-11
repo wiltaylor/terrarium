@@ -3288,7 +3288,7 @@ mod tests {
         let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
         let plan = statement
             .query_map(
-                params![
+                rusqlite::params![
                     "2026-11-11T00:00:00.000Z",
                     "2020-01-01T00:00:00.000Z",
                     "cursor",
