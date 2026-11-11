@@ -144,6 +144,17 @@ fn answers_value(ctx: &Ctx, arg: &str, bundle: &Value) -> anyhow::Result<Value> 
                     entry["option"] = option_ref(&item, &o)
                         .map_err(|e| CliError::usage(format!("item {}: {e}", i + 1)))?;
                 }
+                if let Some(options) = o.get("options").and_then(Value::as_array) {
+                    let selected = options.iter().map(|o| {
+                        let label = match o {
+                            Value::String(s) => s.clone(),
+                            Value::Number(n) => n.to_string(),
+                            _ => return Err(CliError::usage("a checked option must be a label or number")),
+                        };
+                        option_ref(&item, &label)
+                    }).collect::<anyhow::Result<Vec<_>>>()?;
+                    entry["options"] = json!(selected);
+                }
             }
             _ => {
                 return Err(CliError::usage(format!(
@@ -186,6 +197,7 @@ fn print_items(c: &Ctx, v: &Value, items: &[Value]) {
             c.line(format!("item {n} chosen option: {}. {label}", k + 1));
         }
         if let Some(a) = item["answer"].as_str() {
+            print_selected(c, item);
             c.line(format!(
                 "item {n} answer by {}:",
                 field(v, "answered_by_name")
@@ -201,6 +213,7 @@ fn print_items(c: &Ctx, v: &Value, items: &[Value]) {
 /// One question: the fields, then the agent's words between markers,
 /// then the answer.
 fn print_question(c: &Ctx, v: &Value) {
+    print_selected(c, v);
     let mut head = v.clone();
     let mut take = |k: &str| head.as_object_mut().and_then(|o| o.remove(k));
     let text = take("text");
@@ -255,6 +268,16 @@ fn print_question(c: &Ctx, v: &Value) {
         c.out.write_str(a);
         if !a.ends_with('\n') {
             c.line("");
+        }
+    }
+}
+
+fn print_selected(c: &Ctx, v: &Value) {
+    for index in as_items(&v["answer_options"]) {
+        if let Some(i) = index.as_u64().and_then(|i| usize::try_from(i).ok())
+            && let Some(label) = v["options"].get(i).and_then(Value::as_str)
+        {
+            c.line(format!("chosen option: {}. {label}", i + 1));
         }
     }
 }
@@ -581,6 +604,7 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
             id,
             text,
             option,
+            selected,
             answers_file,
         } => {
             if let Some(f) = answers_file {
@@ -601,13 +625,17 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
                     ));
                 });
             }
-            if text.is_none() && option.is_none() {
+            let q = ctx.api.get(&path(id), vec![]).await?;
+            if text.is_none() && option.is_none() && selected.is_empty() && q["multi_select"] != true {
                 return Err(CliError::usage(
                     "give the answer as text, --option <label|n>, or both; answer a bundle \
                      with --answers-file",
                 ));
             }
             let mut body = json!({});
+            if q["multi_select"] == true || !selected.is_empty() {
+                body["options"] = json!(selected.iter().map(|o| option_ref(&q, o)).collect::<anyhow::Result<Vec<_>>>()?);
+            }
             if let Some(t) = text {
                 body["answer"] = json!(ctx.text(t)?);
             }

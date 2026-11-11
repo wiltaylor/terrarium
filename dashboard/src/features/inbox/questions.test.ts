@@ -2,6 +2,17 @@ import { describe, expect, it } from "vitest";
 import type { AgentEvent, Question } from "../../api/types";
 import { ackText, answerBody, chosenLabel, isQuestionEvent, putQuestion, shortQuestion, sortQuestions, statusChip } from "./questions";
 
+it.each([[], [1], [0, 2]])("checkbox answers accept any selection %j", (selected) => {
+  expect(answerBody({ status: "open", options: ["A", "B", "C"], multi_select: true }, "", null, false, selected)).toEqual({ body: { options: selected } });
+});
+
+it("checkbox answers include text and still require a reason when skipped", () => {
+  const q = { status: "open" as const, options: ["A"], multi_select: true };
+  expect(answerBody(q, "notes", null, false, [0])).toEqual({ body: { options: [0], answer: "notes" } });
+  expect(answerBody(q, "", null, true, [0])).toHaveProperty("error");
+  expect(answerBody(q, "", null, false, [3])).toHaveProperty("error");
+});
+
 const q = (id: string, over: Partial<Question> = {}): Question => ({
   id,
   kind: "question",

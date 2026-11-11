@@ -10,6 +10,40 @@ use common::TestDaemon;
 use serde_json::{Value, json};
 use terrariumd::waits::Tuning;
 
+#[tokio::test]
+async fn checkbox_questions_and_bundle_items_accept_zero_one_and_several() {
+    let World { td, lead, .. } = setup().await;
+    for selected in [json!([]), json!([1]), json!([0, 2])] {
+        let q = ask(&td, &lead, json!({"text": "Choose any", "multi_select": true, "options": ["A", "B", "C"]})).await;
+        let result = td.post(&format!("/api/questions/{}/answer", id(&q)), json!({"options": selected, "answer": ""})).await;
+        let answered = result.ok();
+        assert_eq!(answered["status"], "answered");
+        assert_eq!(answered["multi_select"], true);
+        assert_eq!(answered["answer_options"], selected);
+        assert_eq!(answered["answer"], "");
+        let bundle = ask(&td, &lead, json!({"kind": "bundle", "text": "Choose together", "items": [
+            {"text": "Choose any", "multi_select": true, "options": ["A", "B", "C"]},
+            {"text": "Anything else?", "multi_select": true}
+        ]})).await;
+        let result = td.post(&format!("/api/questions/{}/answer", id(&bundle)), json!({"items": [{"options": selected, "answer": "notes"}, {}]})).await;
+        let answered = result.ok();
+        assert_eq!(answered["items"][0]["answer_options"], selected);
+        assert_eq!(answered["items"][0]["answer"], "notes");
+        assert_eq!(answered["items"][1]["answer_options"], json!([]));
+    }
+}
+
+#[tokio::test]
+async fn checkbox_answers_reject_invalid_duplicate_and_single_option_fields() {
+    let World { td, lead, .. } = setup().await;
+    let q = ask(&td, &lead, json!({"text": "Choose any", "multi_select": true, "options": ["A", "B"]})).await;
+    for body in [json!({"options": [2]}), json!({"options": [0, "A"]}), json!({"option": 0})] {
+        td.post(&format!("/api/questions/{}/answer", id(&q)), body).await.err(422, "invalid");
+    }
+    let result = td.post(&format!("/api/questions/{}/answer", id(&q)), json!({"options": ["B", "A"], "answer": "notes"})).await;
+    assert_eq!(result.ok()["answer_options"], json!([0, 1]));
+}
+
 fn id(v: &Value) -> String {
     v["id"].as_str().unwrap().to_owned()
 }
