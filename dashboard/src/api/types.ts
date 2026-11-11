@@ -1766,7 +1766,18 @@ export interface CardFileUploaded extends CardFile {
   outcome: "added" | "replaced" | "unchanged";
 }
 
+/** Reader-filtered wait state supplied by the daemon, never inferred from the board. */
+export interface CardWait {
+  dependencies: { card?: string; target?: string; met: boolean; hidden?: boolean; title?: string; column?: string; project?: string }[];
+  mode: "all" | "any";
+  action: { move_to?: string | null; comment?: string | null; wake: boolean };
+  met_at?: string | null;
+  generation?: number;
+  wake_recipient?: string | null;
+}
+
 export interface Card {
+  wait?: CardWait | null;
   kind?: "card" | "group";
   group?: BoardGroup;
   id: string;

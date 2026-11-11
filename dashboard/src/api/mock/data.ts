@@ -358,7 +358,18 @@ export function seed(now: number = Date.now()): MockWorld {
       links: [{ kind: "branch", ref: "runner-dev/pty-resize", created_by: byName("runner-dev").id, created_at: ago(40) }],
     }),
     card("TER-13", "terrarium", "ready", "Stall timeout marks agents blocked", { labels: ["runner"], comments: [comment("lead", `Mock: hostile markup that must show as text. ${hostile}`, 30)] }),
-    card("TER-14", "terrarium", "ready", "Board WIP limits in the API", { labels: ["api"], depends_on: ["TER-12"], blocked_by: ["TER-12"] }),
+    card("TER-14", "terrarium", "ready", "Board WIP limits in the API", {
+      labels: ["api"], depends_on: ["TER-12"], blocked_by: ["TER-12"],
+      wait: {
+        dependencies: [
+          { card: "TER-10", target: "done", title: "Scaffold the Cargo workspace", column: "done", met: true },
+          { card: "TER-12", target: "review", title: "PTY resize follows the browser", column: "in_progress", met: false },
+          { hidden: true, met: false },
+        ],
+        mode: "all", action: { move_to: "ready", comment: "Dependencies ready. Review the **WIP limits**.", wake: true },
+        met_at: null, generation: 1, wake_recipient: "terrarium/lead",
+      },
+    }),
     card("TER-15", "terrarium", "blocked", "Codex adapter: resume by session id", {
       assigneeName: "adapter-codex",
       labels: ["adapter", "codex"],
