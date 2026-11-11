@@ -10,7 +10,9 @@ async fn done_and_all_pages_cover_questions_and_notices_without_hydrating_the_ta
     let td = TestDaemon::start().await;
     td.project("p").await;
     let agent = td.agent("p", "lead", serde_json::json!({})).await["id"]
-        .as_str().unwrap().to_owned();
+        .as_str()
+        .unwrap()
+        .to_owned();
     let db = &td.daemon.as_ref().unwrap().state.db;
     db.write("test", move |t| {
         for i in 0..51 {
@@ -26,33 +28,59 @@ async fn done_and_all_pages_cover_questions_and_notices_without_hydrating_the_ta
     }).await.unwrap();
     db.read(|c| {
         for status in [Status::Done, Status::All] {
-            let f = Filter { status, project: Some("p".into()), ..Filter::default() };
+            let f = Filter {
+                status,
+                project: Some("p".into()),
+                ..Filter::default()
+            };
             // The malformed field on the last done row must not be hydrated.
             assert_eq!(inbox::page(c, &f, None, 7)?.len(), 7);
         }
-        c.execute("UPDATE questions SET answer_option = NULL WHERE id = 'filtered-010'", [])?;
+        c.execute(
+            "UPDATE questions SET answer_option = NULL WHERE id = 'filtered-010'",
+            [],
+        )?;
         for status in [Status::Done, Status::All] {
-            let f = Filter { status, project: Some("p".into()), ..Filter::default() };
+            let f = Filter {
+                status,
+                project: Some("p".into()),
+                ..Filter::default()
+            };
             let mut cursor = None;
             let mut ids = std::collections::HashSet::new();
             let mut saw_done = false;
             loop {
                 let rows = inbox::page(c, &f, cursor.as_deref(), 7)?;
-                if rows.is_empty() { break; }
+                if rows.is_empty() {
+                    break;
+                }
                 assert!(rows.len() <= 7);
                 for row in &rows {
                     assert!(ids.insert(row.id.clone()), "duplicate {}", row.id);
-                    if !row.open { saw_done = true; }
+                    if !row.open {
+                        saw_done = true;
+                    }
                     assert!(!saw_done || !row.open);
                     assert!(row.question.is_some());
                 }
                 let last = rows.last().unwrap();
-                cursor = Some(serde_json::to_string(&(last.open, last.critical, last.urgent, &last.at, &last.id)).unwrap());
+                cursor = Some(
+                    serde_json::to_string(&(
+                        last.open,
+                        last.critical,
+                        last.urgent,
+                        &last.at,
+                        &last.id,
+                    ))
+                    .unwrap(),
+                );
             }
             assert_eq!(ids.len(), if status == Status::Done { 41 } else { 51 });
         }
         Ok(())
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

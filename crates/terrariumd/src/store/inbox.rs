@@ -592,17 +592,43 @@ fn question_items(
     limit: usize,
 ) -> ApiResult<Vec<InboxItem>> {
     let mut st = conn.prepare(QUESTION_PAGE_SQL)?;
-    Ok(st.query_map(params![
-        f.project, f.status.open(), f.status.done(), wants(f, InboxKind::Question),
-        wants(f, InboxKind::Notice), cursor.map(|c| c.0), cursor.map(|c| c.1),
-        cursor.map(|c| c.2), cursor.map(|c| c.3.as_str()), cursor.map(|c| c.4.as_str()),
-        i64::try_from(limit).unwrap_or(i64::MAX),
-    ], |r| Ok(InboxItem {
-        id: r.get(0)?, project: r.get(1)?, at: r.get(2)?, open: r.get(3)?,
-        critical: r.get(4)?, urgent: r.get(5)?,
-        kind: if r.get::<_, bool>(6)? { InboxKind::Notice } else { InboxKind::Question },
-        question: None, message: None, system: None, watch: None, thread: None,
-    }))?.collect::<Result<Vec<_>, _>>()?)
+    Ok(st
+        .query_map(
+            params![
+                f.project,
+                f.status.open(),
+                f.status.done(),
+                wants(f, InboxKind::Question),
+                wants(f, InboxKind::Notice),
+                cursor.map(|c| c.0),
+                cursor.map(|c| c.1),
+                cursor.map(|c| c.2),
+                cursor.map(|c| c.3.as_str()),
+                cursor.map(|c| c.4.as_str()),
+                i64::try_from(limit).unwrap_or(i64::MAX),
+            ],
+            |r| {
+                Ok(InboxItem {
+                    id: r.get(0)?,
+                    project: r.get(1)?,
+                    at: r.get(2)?,
+                    open: r.get(3)?,
+                    critical: r.get(4)?,
+                    urgent: r.get(5)?,
+                    kind: if r.get::<_, bool>(6)? {
+                        InboxKind::Notice
+                    } else {
+                        InboxKind::Question
+                    },
+                    question: None,
+                    message: None,
+                    system: None,
+                    watch: None,
+                    thread: None,
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?)
 }
 
 /// The item of an Inbox thread: open while it waits for the operator, has
@@ -787,7 +813,10 @@ pub fn page(
     });
     items.retain(|i| cursor.as_ref().is_none_or(|c| key(i) < *c));
     items.truncate(limit);
-    for i in items.iter_mut().filter(|i| matches!(i.kind, InboxKind::Question | InboxKind::Notice)) {
+    for i in items
+        .iter_mut()
+        .filter(|i| matches!(i.kind, InboxKind::Question | InboxKind::Notice))
+    {
         if let Some((_, id)) = i.id.split_once(':') {
             *i = question_item(questions::get(conn, id)?);
         }
@@ -944,10 +973,29 @@ mod paging_tests {
         crate::db::migrate(&mut conn).unwrap();
         for project in [None, Some("p")] {
             for (open, done) in [(true, false), (false, true), (true, true)] {
-                let plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {QUESTION_PAGE_SQL}"))
-                    .unwrap().query_map(params![project, open, done, true, true,
-                        true, false, false, "a", "question:a", 20], |r| r.get::<_, String>(3))
-                    .unwrap().collect::<Result<Vec<_>, _>>().unwrap().join(" ");
+                let plan = conn
+                    .prepare(&format!("EXPLAIN QUERY PLAN {QUESTION_PAGE_SQL}"))
+                    .unwrap()
+                    .query_map(
+                        params![
+                            project,
+                            open,
+                            done,
+                            true,
+                            true,
+                            true,
+                            false,
+                            false,
+                            "a",
+                            "question:a",
+                            20
+                        ],
+                        |r| r.get::<_, String>(3),
+                    )
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+                    .join(" ");
                 assert!(plan.contains("questions_inbox_pages"), "{plan}");
                 assert!(!plan.contains("TEMP B-TREE"), "{plan}");
             }
