@@ -1425,6 +1425,27 @@ async fn default_merge_group_returned_members_leave_and_last_abandons() {
 }
 
 #[tokio::test]
+async fn merge_group_sweep_releases_archived_repairs_and_stranded_queue_cards() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(&td, "p", json!({"title":"a", "column":"review", "repo":"app"})).await;
+    let b = new_card(&td, "p", json!({"title":"b", "column":"review", "repo":"app", "labels":["merge-fix:test"]})).await;
+    let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"].as_str().unwrap().to_owned();
+    let members = (a.clone(), b.clone());
+    state(&td).db.write("test", move |t| {
+        t.execute("UPDATE jobs SET state = 'failed' WHERE id = ?1", [job.id])?;
+        t.execute("UPDATE cards SET column_id = (SELECT id FROM board_columns WHERE project = 'p' AND role = 'merge_queue') WHERE id = ?1", [members.0])?;
+        t.execute("UPDATE cards SET archived = 1 WHERE id = ?1", [members.1])?;
+        terrariumd::store::groups::expire(t)?;
+        terrariumd::store::groups::expire(t)
+    }).await.unwrap();
+    assert!(card(&td, &a).await.get("group").is_none());
+    assert_eq!(card(&td, &gid).await["group"]["total"], 0);
+}
+
+#[tokio::test]
 async fn default_merge_group_sweep_repairs_stale_members_idempotently() {
     let td = queue_lab().await;
     put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;

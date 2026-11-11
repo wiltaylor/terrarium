@@ -386,6 +386,7 @@ pub fn add(t: &mut Tx<'_>, g: &Group, card: &str) -> ApiResult<bool> {
 }
 
 pub fn remove(t: &mut Tx<'_>, g: &Group, card: &str) -> ApiResult<bool> {
+    let g = &get(t, &g.id)?;
     if g.closed_at.is_some() {
         return Ok(false);
     }
@@ -393,7 +394,7 @@ pub fn remove(t: &mut Tx<'_>, g: &Group, card: &str) -> ApiResult<bool> {
         let member = board::get_card(t, card)?;
         // Repair cards deliberately stay with their batch while being worked.
         // Done has no role on the default board, so it is matched by name.
-        if member.labels.iter().any(|l| l.starts_with("merge-fix:")) && member.column != "done" {
+        if !member.archived && member.labels.iter().any(|l| l.starts_with("merge-fix:")) && member.column != "done" {
             return Ok(false);
         }
     }
@@ -414,6 +415,9 @@ fn close_finished_merge(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
         if g.total == 0 {
             close(t, &g, "Merge group abandoned: no members remain.")?;
         } else if g.done == g.total {
+            for name in ["merge job", "e2e", "merged"] {
+                step(t, &g, name, Some("done"), None, None)?;
+            }
             close(t, &g, "All remaining members merged (accepted or later).")?;
         }
     }
@@ -659,17 +663,22 @@ pub fn reconcile_merge_groups(
             .collect::<Result<_, _>>()?
     };
     for id in ids {
+        let result = t.savepoint(|t| {
         if let Some(run) = pending_run(t, &id)? {
             let since = waiting.get(&id).copied().unwrap_or(now);
             if now - since < RECONCILE_WAIT {
                 debug!(group = %id, run = %run, "merge group repair waits for a pending rule run");
-                still.insert(id, since);
-                continue;
+                return Ok(Some(since));
             }
             warn!(group = %id, run = %run, since = %since,
                 "merge group repair runs anyway: a rule run stayed pending for 10 minutes");
         }
         let g = get(t, &id)?;
+        let job_ended = t.query_row(
+            "SELECT EXISTS(SELECT 1 FROM jobs WHERE 'merge:' || id = ?1
+             AND state IN ('passed', 'failed', 'cancelled'))",
+            [&g.key], |r| r.get::<_, bool>(0),
+        )?;
         for member in &g.members {
             let card = board::get_card(t, member)?;
             let role: Option<String> = t.query_row(
@@ -680,16 +689,24 @@ pub fn reconcile_merge_groups(
             // Ready, backlog and done have no roles on the default board.
             // Working and blocked use roles so renamed columns work too.
             let repair = card.labels.iter().any(|l| l.starts_with("merge-fix:"));
-            if (repair && card.column == "done")
+            if card.archived || (repair && card.column == "done")
                 || (!repair
-                    && (card.archived
+                    && ((job_ended && role.as_deref() == Some("merge_queue")
+                            && super::jobs::open_of_card(t, member)?.is_none())
                         || matches!(role.as_deref(), Some("working" | "blocked"))
                         || (role.is_none() && matches!(card.column.as_str(), "ready" | "backlog"))))
             {
-                remove(t, &g, member)?;
+                remove(t, &get(t, &id)?, member)?;
             }
         }
         close_finished_merge(t, &id)?;
+        Ok(None)
+        });
+        match result {
+            Ok(Some(since)) => { still.insert(id, since); }
+            Ok(None) => {}
+            Err(error) => warn!(group = %id, %error, "cannot reconcile merge group"),
+        }
     }
     Ok(still)
 }
