@@ -4780,7 +4780,11 @@ impl Supervisor for RunnerSupervisor {
                 let Some(held) = holds.get_mut(&agent) else {
                     return Ok(false);
                 };
-                let Some(index) = held.waiting.iter().position(|t| t.queued.is_none() && t.id == id) else {
+                let Some(index) = held
+                    .waiting
+                    .iter()
+                    .position(|t| t.queued.is_none() && t.id == id)
+                else {
                     return Ok(false);
                 };
                 held.waiting.remove(index);
@@ -6656,20 +6660,49 @@ mod tests {
         let second_id = second.id.clone();
         let mut third: crate::supervisor::PendingTurn = String::from("third").into();
         third.queued = Some(42);
-        lock(&sup.inner.holds).insert(id, Held {
-            hold: TurnHold { until: None, reason: "limit:sub".into() },
-            waiting: vec![first, second, third],
-        });
+        lock(&sup.inner.holds).insert(
+            id,
+            Held {
+                hold: TurnHold {
+                    until: None,
+                    reason: "limit:sub".into(),
+                },
+                waiting: vec![first, second, third],
+            },
+        );
         let list = sup.list_pending(id).await.unwrap();
-        assert_eq!(list.items.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), ["first", "second", "third"]);
+        assert_eq!(
+            list.items
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
         assert!(list.items.iter().all(|t| t.source == "hold"));
         assert_eq!(list.items[2].id, "42");
         assert_eq!(list.items[2].queued, Some(42));
         assert_eq!(sup.list_pending(id).await.unwrap().items[1].id, second_id);
-        assert!(!sup.cancel_pending(AgentId::new(), "hold", second_id.clone()).await.unwrap());
-        assert!(sup.cancel_pending(id, "hold", second_id.clone()).await.unwrap());
+        assert!(
+            !sup.cancel_pending(AgentId::new(), "hold", second_id.clone())
+                .await
+                .unwrap()
+        );
+        assert!(
+            sup.cancel_pending(id, "hold", second_id.clone())
+                .await
+                .unwrap()
+        );
         assert!(!sup.cancel_pending(id, "hold", second_id).await.unwrap());
-        assert_eq!(sup.list_pending(id).await.unwrap().items.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), ["first", "third"]);
+        assert_eq!(
+            sup.list_pending(id)
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "third"]
+        );
         // Durable turns must be cancelled by deleting the store row.
         assert!(!sup.cancel_pending(id, "hold", "42".into()).await.unwrap());
     }

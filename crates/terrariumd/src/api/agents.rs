@@ -1547,7 +1547,13 @@ async fn remove_queued(
             "unknown queue `{s}`: give the source of the turn in the list"
         )));
     }
-    policy::admin_project(&actor, &a.agent.project, "removing a queued turn")?;
+    crate::links::operator_only("removing a queued turn")?;
+    if let Actor::Agent(agent) = &actor
+        && (agent.project != a.agent.project
+            || !agent.roles.contains(&terrarium_core::Role::ProjectAdmin))
+    {
+        return Err(ApiError::forbidden("removing a queued turn needs the operator or the agent's project lead"));
+    }
     let lock = state.lifecycle.turn_lock(agent_id(&a));
     let _held = lock.lock().await;
     if let Some(source @ ("runner" | "supervisor" | "hold")) = q.source.as_deref()
