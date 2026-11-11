@@ -3101,7 +3101,7 @@ pub enum AdminQuestionCmd {
 #[derive(Debug, Subcommand)]
 pub enum AdminInboxCmd {
     /// The open items: questions, notices, mail to you, and paused threads,
-    /// urgent first (the project with `-p`)
+    /// urgent first (the project with `-p`). Shows at most 200 items.
     Ls {
         /// The open and the done items
         #[arg(long, conflicts_with = "done")]
