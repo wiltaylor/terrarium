@@ -55,7 +55,8 @@ fn serve() -> anyhow::Result<()> {
     handle.set_service_status(status(ServiceState::StartPending, 0))?;
     let binary = std::env::current_exe()?;
     let pending = sidecar(&binary, selfupdate::PENDING);
-    let checking = pending.exists();
+    let startup_pending = std::fs::read(&pending).ok();
+    let checking = startup_pending.is_some();
     if !checking {
         // The previous image can only be removed after its process exited.
         let _ = std::fs::remove_file(sidecar(&binary, "old"));
@@ -87,7 +88,9 @@ fn serve() -> anyhow::Result<()> {
         rt.shutdown_timeout(Duration::from_secs(3));
         result
     })();
-    if checking && pending.exists() && !operator_stop {
+    // A later successful update in this process has a different journal.
+    // Never mistake it for the startup transaction's failed health check.
+    if checking && std::fs::read(&pending).ok() == startup_pending && !operator_stop {
         selfupdate::windows_rollback(&binary)?;
     }
     // A deliberate operator stop never invokes failure recovery. An update,
