@@ -271,7 +271,13 @@ fn db(td: &TestDaemon) -> rusqlite::Connection {
 #[tokio::test]
 async fn owned_root_cleanup_requires_proven_vm_absence() {
     let (td, fake, _, _, _) = daemon().await;
-    td.post("/api/targets", target("roots", 3600)).await.ok();
+    let base = td.dir.path().join("remote-owned");
+    let owned = base.join("p/worker");
+    std::fs::create_dir_all(&owned).unwrap();
+    std::fs::write(owned.join(".terrarium-owner"), "another-agent").unwrap();
+    let mut definition = target("roots", 3600);
+    definition["work_root"] = json!(base);
+    td.post("/api/targets", definition).await.ok();
     td.post_empty("/api/targets/roots/up").await.ok();
     td.project("p").await;
     let shared = state(&td);
