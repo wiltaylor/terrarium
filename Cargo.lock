@@ -4014,6 +4014,7 @@ dependencies = [
  "png",
  "portable-pty",
  "rcgen",
+ "ring",
  "rustix",
  "rustls",
  "rustls-native-certs",

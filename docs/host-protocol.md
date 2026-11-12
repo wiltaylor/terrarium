@@ -1294,6 +1294,23 @@ another host. A TLS proxy in front of the host listener must pass
 
 **The steps of the host agent.**
 
+Self-updates require a cosign sign-blob signature verified offline against the
+release ECDSA P-256 public key built into the host. A daemon hash is not an
+authentication mechanism. Before making an offer, the daemon downloads the
+release's `<asset>.sigstore.json` from GitHub over HTTPS with system roots
+(30 seconds, at most 1 MiB). It caches the bundle beside the dist binary, keyed
+by the binary hash, and serves it on
+`/install/terrarium-host.sigstore.json?arch=<arch>` on the pinned host listener.
+No available bundle means no offer, with the reason logged. Hosts never need
+GitHub access. Proxies must pass this route too.
+
+The host downloads the bundle from that same listener (30 seconds, 1 MiB) and
+verifies its signature over the downloaded binary before writing or executing
+`.new`. Missing, malformed, or invalid signatures refuse the update. This is
+release-key authentication only, not transparency-log verification or rollback
+protection. Dev builds without `TERRARIUM_RELEASE_PUBKEY` at compile time have
+no key and refuse self-update with an instruction to install manually.
+
 1. It checks that it may update. It does not update when:
    - `auto_update = false` is in its config;
    - it does not run under systemd (no `INVOCATION_ID`), because then

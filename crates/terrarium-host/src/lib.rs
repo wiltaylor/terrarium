@@ -48,6 +48,7 @@ pub mod outbox;
 pub mod prepare;
 pub mod protocol;
 pub mod selfupdate;
+pub mod update_signature;
 pub mod session;
 pub mod tls;
 pub mod transfer;
