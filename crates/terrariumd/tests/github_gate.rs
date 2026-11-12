@@ -14,6 +14,62 @@ use serde_json::{Value, json};
 const CARDS: &str = "/api/projects/proj/cards";
 
 #[tokio::test]
+async fn issue_closure_requires_own_project_admin_and_fixed_repo_secret() {
+    let td = setup().await;
+    td.post(
+        "/api/projects",
+        json!({"name":"terrarium","card_prefix":"TT"}),
+    )
+    .await
+    .ok();
+    td.agent("terrarium", "lead", json!({"roles":["project_admin"]}))
+        .await;
+    td.agent("terrarium", "worker", json!({})).await;
+    let route = "/api/projects/terrarium/github-issues/close-done";
+    let body = json!({"repo":"repo","dry_run":true});
+    td.post_as(
+        "terrarium/lead",
+        route,
+        json!({"repo":"repo","issue":20,"version":"0.1.0-alpha"}),
+    )
+    .await
+    .err(403, "forbidden");
+    td.post(route, json!({"repo":"repo","issue":20}))
+        .await
+        .err(422, "invalid");
+    for who in ["proj/lead", "terrarium/worker", "ops/sys"] {
+        td.post_as(who, route, body.clone())
+            .await
+            .err(403, "forbidden");
+    }
+    td.post(
+        "/api/projects/terrarium/repos",
+        json!({"name":"repo","url":"https://github.com/wiltaylor/terrarium"}),
+    )
+    .await
+    .ok();
+    {
+        let who = "terrarium/lead";
+        let result = td.post_as(who, route, body.clone()).await;
+        assert!(
+            result.body.to_string().contains("github-issues-token"),
+            "{}",
+            result.body
+        );
+        result.err(403, "forbidden");
+    }
+    td.post(
+        "/api/projects/terrarium/repos",
+        json!({"name":"wrong","url":"https://github.com/other/repo"}),
+    )
+    .await
+    .ok();
+    td.post(route, json!({"repo":"wrong"}))
+        .await
+        .err(422, "invalid");
+}
+
+#[tokio::test]
 async fn issue_import_route_and_function_validate_before_fetching() {
     let td = setup().await;
     let route = "/api/projects/proj/github-issues/import";

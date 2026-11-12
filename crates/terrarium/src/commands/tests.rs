@@ -136,6 +136,26 @@ async fn issue_import_uses_the_daemon_endpoint() {
 }
 
 #[tokio::test]
+async fn issue_close_done_sends_dry_run_and_displays_plan() {
+    let run = exec(
+        true,
+        &["issue", "close-done", "--repo", "terrarium", "--dry-run"],
+        vec![(200, json!([{"number":7,"comment":"Done in Terrarium 1.0.0-alpha (cards TER-1). Closing.","dry_run":true}]))],
+        None,
+    ).await;
+    run.result.unwrap();
+    assert!(run.out.contains("TER-1") && run.out.contains("1.0.0-alpha"));
+    assert_eq!(
+        run.reqs[0].path,
+        "/api/projects/terra/github-issues/close-done"
+    );
+    assert_eq!(
+        run.reqs[0].body,
+        Some(json!({"repo":"terrarium","dry_run":true,"issue":null,"version":null}))
+    );
+}
+
+#[tokio::test]
 async fn reservation_commands_send_amounts_and_queue_options() {
     let run = exec(
         true,
