@@ -68,8 +68,15 @@ async fn daemon_main() -> anyhow::Result<()> {
     }
     if let Some(Command::Backup { command }) = &settings.command {
         backup_command(&settings, command)?;
-        if matches!(command, BackupCommand::Create { .. }) {
-            terrariumd::backup::retention::after_backup().await;
+        if matches!(command, BackupCommand::Create { .. })
+            && let Err(e) = terrariumd::backup::retention::request(None).await
+        {
+            // Keep --json stdout machine-readable, including when the
+            // optional updater is absent or busy with this very update.
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("backup retention deferred: {e}");
+            }
         }
         return Ok(());
     }
