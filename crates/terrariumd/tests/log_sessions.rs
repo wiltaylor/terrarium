@@ -73,6 +73,54 @@ fn assert_no_link(row: &Value) {
 }
 
 #[tokio::test]
+async fn thread_messages_link_to_the_authors_session() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    td.agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    let (aid, sid) = started(&td, "p", "w").await;
+    let thread = td
+        .post(
+            "/api/threads",
+            json!({
+                "topic": "Session links", "scope": "p", "agent": "w", "text": "Operator message"
+            }),
+        )
+        .await
+        .ok()
+        .clone();
+    let path = format!("/api/threads/{}", thread["id"].as_str().unwrap());
+    td.post_as(
+        &aid,
+        &format!("{path}/messages"),
+        json!({"text": "Agent message"}),
+    )
+    .await
+    .ok();
+    let thread_id = thread["id"].as_str().unwrap().to_owned();
+    let stored = td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(move |c| terrariumd::store::threads::get(c, &thread_id))
+        .await
+        .unwrap();
+    let messages = stored.messages.unwrap();
+    assert_eq!(messages[1].author, aid);
+    for message in messages {
+        assert_eq!(message.session, Default::default());
+    }
+    for response in [td.get(&path).await, td.get_as(&aid, &path).await] {
+        let rows = &response.ok()["messages"];
+        assert_no_link(&rows[0]);
+        assert_eq!(rows[1]["author"], aid);
+        assert_link(&rows[1], &sid);
+    }
+}
+
+#[tokio::test]
 async fn events_mail_and_audit_rows_link_to_the_session() {
     let td = TestDaemon::start().await;
     td.project("p").await;

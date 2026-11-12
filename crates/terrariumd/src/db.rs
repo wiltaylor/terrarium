@@ -3319,6 +3319,9 @@ pub fn open(path: &Path) -> anyhow::Result<Connection> {
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
+    // Defence in depth for permanent history: REPLACE's implicit DELETE must
+    // run delete guards too. Live-workspace insert guards also work without it.
+    conn.pragma_update(None, "recursive_triggers", true)?;
     migrate(&mut conn)?;
     Ok(conn)
 }
@@ -3349,6 +3352,9 @@ fn migrate_named(conn: &mut Connection, migrations: &[(&str, &str)]) -> anyhow::
         }
         tx.execute_batch(sql)
             .with_context(|| format!("migration {name} failed"))?;
+        if *name == "ter-970-seeded-waits.sql" {
+            complete_seeded_waits(&tx)?;
+        }
         tx.execute(
             "INSERT INTO schema_migrations (name, applied_at) VALUES (?1, ?2)",
             rusqlite::params![name, now()],
@@ -3358,6 +3364,32 @@ fn migrate_named(conn: &mut Connection, migrations: &[(&str, &str)]) -> anyhow::
         applied += 1;
     }
     Ok(applied)
+}
+
+// Use the same view as board::unmet, without publishing events or running actions.
+// Only the legacy seed shape is eligible. Later set() generations are untouched.
+fn complete_seeded_waits(conn: &Connection) -> anyhow::Result<()> {
+    let mut after = String::new();
+    loop {
+        let page = conn
+            .prepare("SELECT card FROM card_waits WHERE card > ?1 ORDER BY card LIMIT 128")?
+            .query_map([&after], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if page.is_empty() {
+            break;
+        }
+        for card in &page {
+            conn.execute(
+                "UPDATE card_waits SET met_at=?2
+                 WHERE card=?1 AND met_at IS NULL AND mode='all'
+                   AND action='{}' AND setter='operator'
+                   AND NOT EXISTS (SELECT 1 FROM card_dependency_unmet WHERE card=?1)",
+                rusqlite::params![card, now()],
+            )?;
+        }
+        after = page.last().cloned().unwrap_or_default();
+    }
+    Ok(())
 }
 
 fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> anyhow::Result<usize> {
@@ -3811,6 +3843,72 @@ mod tests {
     }
 
     #[test]
+    fn seeded_waits_complete_silently_once_across_pages() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let before: Vec<_> = NAMED_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|(name, _)| *name != "ter-970-seeded-waits.sql")
+            .collect();
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
+        migrate_named(&mut conn, &before).unwrap();
+        seed_migration_dependencies(&conn);
+        conn.execute_batch(
+            "INSERT INTO board_columns(id,project,name,role,position) VALUES (2,'p','finished','done',1);
+             UPDATE cards SET column_id=2 WHERE id IN ('P-4','P-6');
+             INSERT INTO card_waits(card,generation,mode,action,setter)
+             SELECT DISTINCT card,'legacy','all','{}','operator' FROM card_deps;
+             WITH RECURSIVE n(x) AS (VALUES(10) UNION ALL SELECT x+1 FROM n WHERE x<270)
+             INSERT INTO cards(id,project,number,column_id,position,title,created_by,created_at,updated_at)
+             SELECT 'P-'||x,'p',x,1,x,'paged seed','operator','t','t' FROM n;
+             INSERT INTO card_deps(card,depends_on) SELECT id,'P-4' FROM cards WHERE number>=10;
+             INSERT INTO card_waits(card,generation,mode,action,setter)
+             SELECT id,'legacy','all','{}','operator' FROM cards WHERE number>=10;"
+        ).unwrap();
+        let counts = |conn: &Connection| -> (i64, i64) {
+            (
+                conn.query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+                    .unwrap(),
+                conn.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+                    .unwrap(),
+            )
+        };
+        let initial = counts(&conn);
+        assert_eq!(migrate(&mut conn).unwrap(), 1);
+        let met: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM card_waits WHERE met_at IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(met, 262);
+        let timestamp: String = conn
+            .query_row("SELECT met_at FROM card_waits WHERE card='P-2'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        for card in ["P-1", "P-3"] {
+            assert!(
+                conn.query_row("SELECT met_at FROM card_waits WHERE card=?1", [card], |r| r
+                    .get::<_, Option<String>>(0))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(counts(&conn), initial);
+        assert_eq!(migrate(&mut conn).unwrap(), 0);
+        assert_eq!(
+            conn.query_row("SELECT met_at FROM card_waits WHERE card='P-2'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            timestamp
+        );
+        assert_eq!(counts(&conn), initial);
+    }
+
+    #[test]
     fn card_waits_migration_upgrades_populated_055_database() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", true).unwrap();
@@ -3822,13 +3920,15 @@ mod tests {
             .filter(|(name, _)| {
                 !matches!(
                     *name,
-                    "ter-712-card-waits.sql" | "ter-893-legacy-listing-expiry.sql"
+                    "ter-712-card-waits.sql"
+                        | "ter-893-legacy-listing-expiry.sql"
+                        | "ter-970-seeded-waits.sql"
                 )
             })
             .collect();
         migrate_named(&mut conn, &before).unwrap();
         seed_migration_dependencies(&conn);
-        assert_eq!(migrate(&mut conn).unwrap(), 2);
+        assert_eq!(migrate(&mut conn).unwrap(), 3);
         assert_migrated_dependencies(&conn);
         assert_eq!(migrate(&mut conn).unwrap(), 0);
         assert_migrated_dependencies(&conn);

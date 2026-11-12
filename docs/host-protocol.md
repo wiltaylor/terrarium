@@ -902,7 +902,12 @@ its exclusively reserved UUIDs. The granted GPUs are
 `{}` and the session gets no GPU. The host agent then starts the command
 through the helper, as the helper's workload user, in a transient system
 service with `DevicePolicy=closed` and one `DeviceAllow=` for each granted
-GPU and the NVIDIA support nodes. A host agent without `[native_gpu]`
+GPU and the NVIDIA support nodes. The helper maps each reserved UUID to its
+NVIDIA Minor Number, never its enumeration index. It sets
+`CUDA_VISIBLE_DEVICES` to the reserved UUIDs in reservation order, comma
+separated, overriding any caller value. With no reserved GPU it sets the
+variable to the empty string, so CUDA sees no GPU by default.
+A host agent without `[native_gpu]`
 refuses such an `exec` (`unsupported`), and so does one whose helper did
 not answer with enforcement at the last `hello`. The helper refuses a
 session while another reservation's session holds one of its exclusive

@@ -3,7 +3,6 @@ import { useInstance } from "../../instance";
 // are the sender's words: they go into the page as text nodes only.
 
 import { createSignal, For, Show } from "solid-js";
-import { SessionLink } from "../../components/SessionLink";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { Message } from "../../api/types";
 import { ForumPost, quotePost } from "../../components/ForumPost";
@@ -44,10 +43,9 @@ export function StateChips(props: { message: Message }) {
 
 export function MessageView(props: { message: Message; number?: number; project?: string; onQuote?: (text: string) => void }) {
   return (
-    <ForumPost id={`mail-${props.message.id}`} number={props.number ?? 1} href={`/logs/mail?open=${encodeURIComponent(props.message.id)}#mail-${props.message.id}`} author={props.message.from_name} at={props.message.created_at} label="Mail" onQuote={props.onQuote ? (post) => props.onQuote?.(quotePost(props.message.body, post)) : undefined}>
+    <ForumPost id={`mail-${props.message.id}`} number={props.number ?? 1} href={`/logs/mail?open=${encodeURIComponent(props.message.id)}#mail-${props.message.id}`} author={props.message.from_name} authorId={props.message.from} session={props.message} at={props.message.created_at} label="Mail" onQuote={props.onQuote ? (post) => props.onQuote?.(quotePost(props.message.body, post)) : undefined}>
       <div class="row small" style={{ gap: "6px", "flex-wrap": "wrap" }}>
         <span title={props.message.to}>To {props.message.to_name}</span>
-        <SessionLink row={props.message} />
         <Show when={props.message.subject}>
           <span class="muted">{props.message.subject}</span>
         </Show>

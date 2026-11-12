@@ -4753,6 +4753,10 @@ impl RunnerSupervisor {
 }
 
 impl Supervisor for RunnerSupervisor {
+    fn workspace_alias(&self) -> Option<std::path::PathBuf> {
+        let sandbox = &self.inner.cfg.sandbox;
+        (sandbox.mode == SandboxMode::Bwrap).then(|| sandbox.home.join("work"))
+    }
     fn list_pending(
         &self,
         agent: AgentId,

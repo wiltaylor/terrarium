@@ -26,6 +26,7 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -50,6 +51,9 @@ struct Fake {
     fail_new: bool,
     /// `rm` answers 500 and removes nothing.
     fail_rm: bool,
+    /// `ls` answers an error instead of a listing.
+    ls_status: Option<u16>,
+    malformed_ls: bool,
     /// `new` waits this long before it answers.
     new_delay_ms: u64,
     /// `ls` reports each VM this much older than it is.
@@ -131,6 +135,12 @@ async fn fake_api() -> (String, FakeRef) {
                         (StatusCode::OK, v.to_string())
                     }
                     Some("ls") => {
+                        if let Some(status) = g.ls_status {
+                            return (StatusCode::from_u16(status).unwrap(), "unavailable".into());
+                        }
+                        if g.malformed_ls {
+                            return (StatusCode::OK, "{}".into());
+                        }
                         let older = chrono::Duration::seconds(g.ls_older_secs);
                         let vms: Vec<Value> = g
                             .vms
@@ -257,6 +267,73 @@ fn target(name: &str, life: u64) -> Value {
 
 fn db(td: &TestDaemon) -> rusqlite::Connection {
     terrariumd::db::open(&td.state.join("terrarium.db")).unwrap()
+}
+
+#[tokio::test]
+async fn owned_root_cleanup_requires_proven_vm_absence() {
+    let (td, fake, _, _, _) = daemon().await;
+    let base = td.dir.path().join("remote-owned");
+    let owned = base.join("p/worker");
+    std::fs::create_dir_all(&owned).unwrap();
+    std::fs::write(owned.join(".terrarium-owner"), "another-agent").unwrap();
+    let mut definition = target("roots", 3600);
+    definition["work_root"] = json!(base);
+    td.post("/api/targets", definition).await.ok();
+    td.post_empty("/api/targets/roots/up").await.ok();
+    td.project("p").await;
+    let shared = state(&td);
+    let def = shared
+        .db
+        .read_now(|c| terrariumd::store::targets::get(c, "roots"))
+        .unwrap()
+        .def;
+    let resolved = terrariumd::exedev::exec_def(&shared, &def).unwrap();
+    let saved = serde_json::to_string(&resolved).unwrap();
+    db(&td).execute(
+        "INSERT INTO agent_target_roots (agent, project, name, target, definition) VALUES ('finished', 'p', 'worker', 'roots', ?1)",
+        [&saved],
+    ).unwrap();
+    let count = || {
+        db(&td)
+            .query_row(
+                "SELECT count(*) FROM agent_target_roots WHERE agent='finished'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    let audits = || {
+        db(&td).query_row("SELECT count(*) FROM audit WHERE action='target.root_dropped' AND json_extract(detail, '$.reason')='vm_absent'", [], |r| r.get::<_, i64>(0)).unwrap()
+    };
+    // Present VM: use the normal owner-marker check, which refuses this
+    // unowned path. An API miss must never bypass that check on a live VM.
+    terrariumd::target_roots::sweep(&shared).await.unwrap();
+    assert_eq!(count(), 1);
+    assert_eq!(audits(), 0);
+    fake.lock().unwrap().vms.clear();
+    for status in [401, 500, 504] {
+        fake.lock().unwrap().ls_status = Some(status);
+        terrariumd::target_roots::sweep(&shared).await.unwrap();
+        assert_eq!(count(), 1);
+        assert_eq!(audits(), 0);
+    }
+    {
+        let mut f = fake.lock().unwrap();
+        f.ls_status = None;
+        f.malformed_ls = true;
+    }
+    terrariumd::target_roots::sweep(&shared).await.unwrap();
+    assert_eq!(count(), 1);
+    fake.lock().unwrap().malformed_ls = false;
+    // The lease-end path has already forgotten the local VM record.
+    db(&td)
+        .execute("DELETE FROM exedev_vms WHERE target='roots'", [])
+        .unwrap();
+    terrariumd::target_roots::sweep(&shared).await.unwrap();
+    terrariumd::target_roots::sweep(&shared).await.unwrap();
+    assert_eq!(count(), 0);
+    assert_eq!(audits(), 1);
+    assert_eq!(fake.lock().unwrap().news(), 1);
 }
 
 /// The name prefix of the VMs of this daemon (TER-653).
@@ -433,6 +510,8 @@ async fn workspace_sync_roundtrip(work_root: bool) {
     let agent = td.agent("p", "worker", json!({})).await;
     let id = agent["id"].as_str().unwrap();
     let local = state(&td).work_dir.join("p/worker");
+    let alias = Path::new("/configured-sandbox-home/work");
+    td.sup.set_workspace_alias(alias.to_owned());
     std::fs::create_dir_all(local.join("repo")).unwrap();
     std::fs::write(local.join("repo/input"), "source").unwrap();
     let response = td
@@ -454,6 +533,28 @@ async fn workspace_sync_roundtrip(work_root: bool) {
     );
     assert_eq!(
         std::fs::read_to_string(local.join("repo/output")).unwrap(),
+        "source"
+    );
+    let response = td
+        .post(
+            "/api/targets/sync/exec",
+            json!({
+                "agent": id,
+                "cwd": alias.join("repo"),
+                "env": {"INPUT": alias.join("repo/input")},
+                "cmd": ["sh", "-c", "cat \"$INPUT\" > \"$1\"; pwd", "sh", alias.join("repo/alias-output")]
+            }),
+        )
+        .await;
+    let session = response.ok()["session_id"].as_str().unwrap();
+    let (stdout, end) = output(&td, "sync", session).await;
+    assert_eq!(end["code"], 0, "{end}");
+    assert_eq!(
+        stdout.trim(),
+        base.join("p/worker/workspace/repo").to_str().unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(local.join("repo/alias-output")).unwrap(),
         "source"
     );
     if work_root {
