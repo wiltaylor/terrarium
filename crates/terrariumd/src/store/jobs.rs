@@ -1044,10 +1044,10 @@ pub fn pick(
     let mut jobs: HashMap<_, _> = queued.into_iter().map(|j| (j.id.clone(), j)).collect();
     pick_entries(entries, &running, queues, caps)
         .into_iter()
-        .map(|(entry, host)| {
-            let mut job = jobs.remove(&entry.id).expect("picked queued job");
+        .filter_map(|(entry, host)| {
+            let mut job = jobs.remove(&entry.id)?;
             job.slot = entry.slot;
-            (job, host)
+            Some((job, host))
         })
         .collect()
 }

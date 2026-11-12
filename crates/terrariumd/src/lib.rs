@@ -1049,10 +1049,10 @@ pub fn apply_status_at(
     depth: u8,
 ) -> ApiResult<()> {
     let status = shown_status(t, id, status)?;
-    let a = agents::get(t, id)?;
+    let (name, project, previous) = agents::event_context(t, id)?;
     // The runner says `idle` again for an agent that waits (the end of a
     // quota hold, for example): no change.
-    if status == AgentStatus::Waiting && a.agent.status == AgentStatus::Waiting {
+    if status == AgentStatus::Waiting && previous == AgentStatus::Waiting {
         return Ok(());
     }
     let from = agents::set_status(t, id, status, reason)?;
@@ -1072,11 +1072,11 @@ pub fn apply_status_at(
     t.emit(
         EventDraft::new(
             "status",
-            format!("{}: {from} -> {status}", a.agent.name),
+            format!("{name}: {from} -> {status}"),
             data,
         )
-        .agent(id, a.agent.name.clone())
-        .project(a.agent.project.clone())
+        .agent(id, name)
+        .project(project)
         .session(session),
     )?;
     store::waits::after_status(t, id, depth)?;
@@ -1133,19 +1133,19 @@ fn record(t: &mut Tx<'_>, ev: &SupervisorEvent) -> ApiResult<()> {
             // <program>"), but the supervisor has already set `starting`.
             // A change to the status the agent already has is no change: it
             // goes in as a `system` notice, not as `starting -> starting`.
-            let a = agents::get(t, &id)?;
+            let (name, project, status) = agents::event_context(t, &id)?;
             let shown = shown_status(t, &id, *to)?;
-            if a.agent.status == shown && !matches!(to, AgentStatus::Stopped | AgentStatus::Error) {
+            if status == shown && !matches!(to, AgentStatus::Stopped | AgentStatus::Error) {
                 let message = reason.clone().unwrap_or_else(|| format!("status {to}"));
                 let session = agents::current_session(t, &id)?;
                 t.emit(
                     EventDraft::new(
                         "system",
-                        format!("{}: {message}", a.agent.name),
+                        format!("{name}: {message}"),
                         json!({"message": message, "status": to}),
                     )
-                    .agent(id, a.agent.name.clone())
-                    .project(a.agent.project.clone())
+                    .agent(id, name)
+                    .project(project)
                     .session(session),
                 )?;
                 return Ok(());
@@ -1158,7 +1158,7 @@ fn record(t: &mut Tx<'_>, ev: &SupervisorEvent) -> ApiResult<()> {
         }
         SupervisorEventKind::Harness(e) => e,
     };
-    let a = agents::get(t, &id)?;
+    let (name, project, _) = agents::event_context(t, &id)?;
     if let Event::SessionStarted {
         harness_session, ..
     } = event
@@ -1177,9 +1177,9 @@ fn record(t: &mut Tx<'_>, ev: &SupervisorEvent) -> ApiResult<()> {
         .unwrap_or_else(|| "harness".into());
     let session = agents::current_session(t, &id)?;
     t.emit(
-        EventDraft::new(kind.clone(), summary(&a.agent.name, &kind, &data), data)
-            .agent(id, a.agent.name.clone())
-            .project(a.agent.project.clone())
+        EventDraft::new(kind.clone(), summary(&name, &kind, &data), data)
+            .agent(id, name)
+            .project(project)
             .session(session),
     )?;
     Ok(())

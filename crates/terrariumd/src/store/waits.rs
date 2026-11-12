@@ -319,7 +319,7 @@ pub fn wake_unseen(conn: &Connection, agent: &str, since: &str) -> ApiResult<boo
 /// waits, the oldest first, at most 3 and a count of the others.
 pub fn waiting_on(conn: &Connection, agent: &str) -> ApiResult<Option<String>> {
     let mut st = conn.prepare(
-        "SELECT summary FROM waits WHERE agent = ?1 AND state = 'open' ORDER BY created_at, id LIMIT 3",
+        "SELECT summary FROM waits WHERE agent = ?1 AND state = 'open' ORDER BY created_at, id",
     )?;
     let all = st
         .query_map([agent], |r| r.get::<_, String>(0))?
@@ -328,9 +328,8 @@ pub fn waiting_on(conn: &Connection, agent: &str) -> ApiResult<Option<String>> {
         return Ok(None);
     }
     let mut line = all.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
-    let count = open_count(conn, agent)?;
-    if count > 3 {
-        line.push_str(&format!("; +{} more", count - 3));
+    if all.len() > 3 {
+        line.push_str(&format!("; +{} more", all.len() - 3));
     }
     Ok(Some(line))
 }
