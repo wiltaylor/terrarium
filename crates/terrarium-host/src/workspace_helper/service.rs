@@ -11,15 +11,17 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 use terrarium_core::live_workspace::{Capability, PROTOCOL_VERSION, STATE_VERSION};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Config {
     host_agent_uid: u32,
     host_agent_gid: u32,
     work_root: PathBuf,
     registrations: Vec<Registration>,
+    #[serde(default)]
+    receiver: Option<receiver::Specification>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Registration {
     publisher_root: PathBuf,
@@ -86,6 +88,8 @@ fn parse_config(bytes: &[u8]) -> Result<Config, Reply> {
     }
     let config: Config = serde_json::from_slice(bytes).map_err(|_| Reply::Failed)?;
     if config.host_agent_uid == 0
+        || (!config.registrations.is_empty() && config.receiver.is_none())
+        || config.receiver.as_ref().is_some_and(|s| s.digest().is_err())
         || config.registrations.len() > 128
         || !config.work_root.is_absolute()
         || [
@@ -173,12 +177,18 @@ pub async fn run() -> std::io::Result<()> {
     // state/config/socket roots and their bind aliases are known not to export.
     confinement::validate(&data, &controls).map_err(|_| failed())?;
     let mut helpers = BTreeMap::new();
-    let mut _bootstrap_stores = Vec::new();
+    let mut bootstrap_stores = Vec::new();
     // Take every journal lock before touching the socket. A second process can
     // neither replace a live listener nor mutate this registration stream.
     for r in opened {
         let bootstrap_store = Store::open(r.bootstrap).map_err(|_| failed())?;
-        let bootstrap = bootstrap_store.load_bootstrap().map_err(|_| failed())?;
+        let mut bootstrap = bootstrap_store.load_bootstrap().map_err(|_| failed())?;
+        let binding = c.receiver.as_ref().ok_or_else(failed)?.verify_binding(bootstrap.original());
+        if binding.is_err() {
+            bootstrap.quarantine();
+            let _ = bootstrap_store.save_bootstrap(&bootstrap);
+            return Err(failed());
+        }
         let identities = [&r.publisher, &r.staging, &r.state].map(|root| {
             root.fd
                 .metadata()
@@ -201,7 +211,7 @@ pub async fn run() -> std::io::Result<()> {
                 return Err(failed());
             }
         }
-        _bootstrap_stores.push(bootstrap_store);
+        bootstrap_stores.push(bootstrap_store);
         let registration = journal.runtime.registration;
         let mut docker = runtime::DockerInspector;
         let pin =
@@ -261,11 +271,27 @@ pub async fn run() -> std::io::Result<()> {
     .map_err(|_| failed())?;
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o660))?;
     socket_root.fd.sync_all()?;
+    let mut configuration_fenced = false;
     loop {
         let (stream, _) = listener.accept().await?;
         // Admission remains serialized per registration. No task can outlive
         // the held journal/namespace FDs or race another operation on a target.
         let result = serve_frame(stream, c.host_agent_uid, |bytes| {
+            // A protected configuration edit, removal or read failure is a
+            // sticky fence, not a new command/profile for an old operation.
+            if configuration_fenced || !config().is_ok_and(|(current, _, _)| current == c) {
+                configuration_fenced = true;
+                for store in &bootstrap_stores {
+                    if let Ok(mut journal) = store.load_bootstrap() {
+                        journal.quarantine();
+                        let _ = store.save_bootstrap(&journal);
+                    }
+                }
+                for helper in helpers.values_mut() {
+                    let _ = helper.fence();
+                }
+                return Err(Reply::Quarantined);
+            }
             let e = decode_frame(bytes)?;
             helpers
                 .get_mut(&e.original.runtime.registration)
@@ -289,6 +315,10 @@ mod tests {
             "publisher_root": format!("/var/lib/terrarium-workspace-helper/publishers/{id}"),
             "staging_root": format!("/var/lib/terrarium-workspace-helper/staging/{id}"),
             "state_root": format!("/var/lib/terrarium-workspace-helper/registrations/{id}")}]});
+        // Operational registrations also require a protected specification.
+        assert!(parse_config(value.to_string().as_bytes()).is_err());
+        value["receiver"] = serde_json::json!({"image": format!("synthetic@sha256:{}", "a".repeat(64)), "command": ["/bin/sleep", "infinity"], "profile": {
+            "kernel":"synthetic", "engine":"synthetic", "runc":"synthetic", "seccomp_digest":"synthetic", "rootful":true, "same_mount_namespace":true, "propagation_proven":true, "userns_remap":false, "namespace_creation_blocked":true}});
         assert!(parse_config(value.to_string().as_bytes()).is_ok());
         for role in ["publisher_root", "staging_root", "state_root"] {
             let original = value["registrations"][0][role].clone();

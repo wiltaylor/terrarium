@@ -98,11 +98,18 @@ impl Specification {
     /// Matching protected configuration and a measured profile is necessary,
     /// not sufficient for activation. B5 approval and the disabled gate remain.
     pub fn verify(&self, request: &Request, measured: &Profile) -> Result<(), Reply> {
+        self.verify_binding(request)?;
+        self.profile.check(measured)
+    }
+
+    /// Configuration equality only. This deliberately makes no claim about a
+    /// measured runtime profile, which must be checked separately by verify.
+    pub(super) fn verify_binding(&self, request: &Request) -> Result<(), Reply> {
         Journal::new(request.clone())?;
         if request.configuration != self.digest()? {
             return Err(Reply::Conflict);
         }
-        self.profile.check(measured)
+        Ok(())
     }
 
     pub fn create_flags(

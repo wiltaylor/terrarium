@@ -77,6 +77,12 @@ impl<B: Backend> Helper<B> {
         &self.journal
     }
 
+    pub(super) fn fence(&mut self) -> Result<(), Reply> {
+        self.fenced = true;
+        self.journal.quarantined = true;
+        self.save()
+    }
+
     fn save(&mut self) -> Result<(), Reply> {
         if self.store.save(&self.journal).is_err() {
             self.fenced = true;

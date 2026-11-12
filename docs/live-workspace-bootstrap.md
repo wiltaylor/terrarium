@@ -44,6 +44,13 @@ target and exact runtime identity. All operational paths must be fixed ID-derive
 children, and pinned directory device/inode identities must match the bootstrap
 scaffold record. An administrator-provisioned normal journal alone is refused.
 This ownership check does not replace fresh configuration or runtime verification.
+Operational service configuration also requires a protected receiver specification
+whose digest matches the original bootstrap. Drift on startup attempts durable
+bootstrap quarantine and refuses service. Before each authenticated frame, the
+service rereads protected configuration. Any change or read failure permanently
+fences that process and attempts durable bootstrap and normal-journal quarantine.
+Restoring old configuration cannot clear those durable fences. This is not runtime
+profile measurement and does not make helper readiness true.
 
 The daemon first commits a FULL-synchronous immediate transaction recording its
 intent and reservation. The helper then syncs its immutable bootstrap intent
