@@ -74,7 +74,8 @@ mod bootstrap_tests {
         let store = Store::fixture(dir.path()).unwrap();
         assert!(matches!(Store::fixture(dir.path()), Err(Reply::Busy)));
         let first = initial();
-        store.save_bootstrap(&first).unwrap();
+        store.begin_bootstrap(&first).unwrap();
+        assert_eq!(store.begin_bootstrap(&first), Err(Reply::Conflict));
         assert_eq!(store.load_bootstrap().unwrap(), first);
         let mut next = first.clone();
         next.advance(scaffold()).unwrap();
@@ -227,6 +228,23 @@ impl Store {
 
     pub fn save(&self, journal: &Journal) -> Result<(), Reply> {
         self.save_named(journal, "journal.next", "journal.json")
+    }
+
+    /// Install ownership once under the lifetime lock. Even an identical
+    /// existing intent requires recovery, not another create attempt.
+    pub fn begin_bootstrap(
+        &self,
+        journal: &terrarium_core::live_workspace::bootstrap::Journal,
+    ) -> Result<(), Reply> {
+        match nix::sys::stat::fstatat(
+            &self.root.fd,
+            "bootstrap.json",
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        ) {
+            Err(nix::errno::Errno::ENOENT) => self.save_bootstrap(journal),
+            Ok(_) => Err(Reply::Conflict),
+            Err(_) => Err(Reply::Quarantined),
+        }
     }
 
     pub fn save_bootstrap(

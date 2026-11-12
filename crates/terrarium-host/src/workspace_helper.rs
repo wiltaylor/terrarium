@@ -5,6 +5,7 @@
 //! No kernel backend is selected by this module and hello never enables B4.
 
 mod confinement;
+pub mod bootstrap;
 pub mod kernel;
 pub mod mountinfo;
 pub mod mounts;
