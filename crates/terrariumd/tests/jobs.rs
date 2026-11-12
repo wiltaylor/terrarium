@@ -3160,6 +3160,7 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
     std::fs::write(&go, "go").unwrap();
     let spool = std::fs::read_dir(spool_root.join(".terrarium-runs"))
         .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
         .next()
         .unwrap()
         .unwrap()
@@ -3174,6 +3175,7 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
     lab.td.boot_with_ssh(None, None, Some(&ssh)).await;
     let spool_count = std::fs::read_dir(spool_root.join(".terrarium-runs"))
         .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
         .count();
     assert_eq!(spool_count, 1, "remote claim count after reboot");
     let jobs = lab.until_idle().await;

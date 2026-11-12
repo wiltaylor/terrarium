@@ -28,6 +28,24 @@ fn copy_binary(jail: &Path, binary: &str) {
     }
 }
 
+fn copy_python(jail: &Path) {
+    copy_binary(jail, "/usr/bin/python3");
+    // -S and the path helper use frozen os/stat/sys. Startup still needs the
+    // interpreter's encodings package. Copy only that package into the jail.
+    let encodings = std::process::Command::new("/usr/bin/python3")
+        .args(["-S", "-c", "import encodings; print(encodings.__path__[0])"])
+        .output().unwrap();
+    assert!(encodings.status.success());
+    let path = PathBuf::from(String::from_utf8(encodings.stdout).unwrap().trim());
+    let dest = jail.join(path.strip_prefix("/").unwrap());
+    std::fs::create_dir_all(&dest).unwrap();
+    for entry in std::fs::read_dir(path).unwrap().flatten() {
+        if entry.path().extension().is_some_and(|extension| extension == "py") {
+            std::fs::copy(entry.path(), dest.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
 pub(crate) struct Ssh {
     _dir: tempfile::TempDir,
     pub(crate) jail: PathBuf,
@@ -70,6 +88,7 @@ impl Ssh {
         ] {
             copy_binary(&jail, binary);
         }
+        copy_python(&jail);
         std::fs::rename(jail.join("usr/bin/rsync"), jail.join("usr/bin/rsync-real")).unwrap();
         std::fs::write(
             jail.join("usr/bin/rsync"),

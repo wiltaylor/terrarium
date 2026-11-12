@@ -7481,7 +7481,11 @@ and output even when the command finishes while the daemon is down. PTY and
 shell combinations are refused. Sending stdin `data` to a durable session
 is `422 invalid`. Input-fed queue setup and bundle transfer do not opt in.
 Ordinary execs, PTYs, and shells retain the previous interruption behavior.
-The private remote output spool is under `<work_root>/.terrarium-runs`,
+The private remote output spool is under the bound card agent's recorded
+owned root, or `<work_root>/.terrarium-runs` for other callers. The latter
+has a daemon-owned marker. No-follow directory-FD checks reject symlinks,
+foreign ownership and group/other writable components. Python 3 is required
+for these checks; missing tools are terminal errors, never installed. The spool
 retains the first 64 MiB per stream, and is removed after 24 hours of result
 retention (at most the command timeout plus 24 hours and two minutes).
 The remote lifetime is at most seven days, measured from the original

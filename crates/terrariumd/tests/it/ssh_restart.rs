@@ -165,6 +165,7 @@ async fn durable_ssh_finishes_offline_once_with_real_exit() {
     std::fs::write(root.join("go"), "go").unwrap();
     let spool = std::fs::read_dir(root.join(".terrarium-runs"))
         .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
         .next()
         .unwrap()
         .unwrap()
