@@ -472,8 +472,16 @@ fn rig() -> Rig {
 #[tokio::test]
 async fn retention_pass_forwards_previous_backup_to_the_private_worker() {
     let r = rig();
-    r.store.set_previous(&Previous { image: old_image(), spec: None, backup: Some(BACKUP.into()) }).unwrap();
-    let Response::Retained { detail } = r.updater.handle(Request::Retention { release: None }).await else {
+    r.store
+        .set_previous(&Previous {
+            image: old_image(),
+            spec: None,
+            backup: Some(BACKUP.into()),
+        })
+        .unwrap();
+    let Response::Retained { detail } =
+        r.updater.handle(Request::Retention { release: None }).await
+    else {
         panic!("retention did not complete");
     };
     assert_eq!(detail["protected"], serde_json::json!([BACKUP]));
