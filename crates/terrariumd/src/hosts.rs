@@ -1813,7 +1813,7 @@ async fn serve_link(
     // (docs/host-protocol.md, "Self-update").
     let stale = terrarium_version::is_stale(&hello.version, terrarium_version::FULL);
     let offer = if stale {
-        crate::api::install::update_offer(&state.web.install.dist_dir, &hello.arch).await
+        crate::api::install::update_offer_for_platform(&state.web.install.dist_dir, &hello.os, &hello.arch).await
     } else {
         None
     };

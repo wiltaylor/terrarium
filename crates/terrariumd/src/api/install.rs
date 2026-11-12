@@ -107,7 +107,15 @@ async fn binary_sha256(path: &Path) -> std::io::Result<String> {
 /// digit, so the line of `terrarium-host-helper-<version>-linux-<arch>`
 /// (the same release) is not taken.
 pub fn release_sum(sums: &str, arch: &str) -> Option<String> {
-    let suffix = format!("-linux-{arch}");
+    release_sum_for_platform(sums, "linux", arch)
+}
+
+fn release_sum_for_platform(sums: &str, os: &str, arch: &str) -> Option<String> {
+    let suffix = match os {
+        "linux" => format!("-linux-{arch}"),
+        "windows" => format!("-windows-{arch}.exe"),
+        _ => return None,
+    };
     sums.lines().find_map(|l| {
         let (hash, file) = l.trim().split_once(char::is_whitespace)?;
         let file = file.trim().trim_start_matches('*');
@@ -125,10 +133,18 @@ pub async fn update_offer(
     dist: &Path,
     arch: &str,
 ) -> Option<terrarium_host::protocol::UpdateOffer> {
+    update_offer_for_platform(dist, "linux", arch).await
+}
+
+pub async fn update_offer_for_platform(
+    dist: &Path,
+    os: &str,
+    arch: &str,
+) -> Option<terrarium_host::protocol::UpdateOffer> {
     if !ARCHES.contains(&arch) {
         return None;
     }
-    let path = binary_path(dist, arch)?;
+    let path = binary_path_for_platform(dist, os, arch)?;
     let sha256 = match binary_sha256(&path).await {
         Ok(h) => h,
         Err(e) => {
@@ -139,7 +155,10 @@ pub async fn update_offer(
     let release_sha256 = tokio::fs::read_to_string(dist.join(RELEASE_SUMS))
         .await
         .ok()
-        .and_then(|s| release_sum(&s, arch));
+        .and_then(|s| release_sum_for_platform(&s, os, arch));
+    // No Windows update until it is a release asset. Legacy Linux behavior
+    // stays compatible for local Linux host builds.
+    if os == "windows" && release_sha256.is_none() { return None; }
     if let Some(r) = &release_sha256
         && *r != sha256
     {
@@ -150,10 +169,11 @@ pub async fn update_offer(
         return None;
     }
     Some(terrarium_host::protocol::UpdateOffer {
-        os: Some("linux".into()),
+        os: Some(os.into()),
         arch: Some(arch.into()),
         version: VERSION.to_owned(),
-        path: format!("{BINARY_PATH}?arch={arch}"),
+        path: if os == "linux" { format!("{BINARY_PATH}?arch={arch}") }
+            else { format!("{BINARY_PATH}?arch={arch}&os={os}") },
         sha256,
         release_sha256,
     })
@@ -294,22 +314,33 @@ async fn script(State(state): State<Shared>, headers: HeaderMap) -> Response {
 #[derive(Debug, Deserialize)]
 struct ArchQuery {
     arch: Option<String>,
+    os: Option<String>,
 }
 
 /// The binary of an arch in the dist dir: `terrarium-host-<arch>-linux`,
 /// else `terrarium-host` when the arch is the daemon's own (the output of
 /// `just host::build`, for a daemon outside the image).
-fn binary_path(dist: &Path, arch: &str) -> Option<PathBuf> {
-    let named = dist.join(format!("terrarium-host-{arch}-linux"));
+fn binary_path_for_platform(dist: &Path, os: &str, arch: &str) -> Option<PathBuf> {
+    if !ARCHES.contains(&arch) { return None; }
+    let name = match os {
+        "linux" => format!("terrarium-host-{arch}-linux"),
+        "windows" => format!("terrarium-host-{arch}-windows.exe"),
+        _ => return None,
+    };
+    let named = dist.join(name);
     if named.is_file() {
         return Some(named);
     }
     let plain = dist.join("terrarium-host");
-    (arch == std::env::consts::ARCH && plain.is_file()).then_some(plain)
+    (os == "linux" && arch == std::env::consts::ARCH && plain.is_file()).then_some(plain)
 }
 
 /// The arch of the query, checked, or the refusal.
 fn pick(state: &Shared, q: &ArchQuery) -> Result<(String, PathBuf), Box<Response>> {
+    let os = q.os.as_deref().unwrap_or("linux");
+    if !matches!(os, "linux" | "windows") {
+        return Err(Box::new(text(StatusCode::NOT_FOUND, "unsupported host OS\n".into())));
+    }
     let have = ARCHES.join(", ");
     let Some(arch) = q.arch.as_deref().filter(|a| !a.is_empty()) else {
         return Err(Box::new(text(
@@ -329,7 +360,7 @@ fn pick(state: &Shared, q: &ArchQuery) -> Result<(String, PathBuf), Box<Response
             format!("no terrarium-host for arch `{shown}`: this daemon serves {have}\n"),
         )));
     }
-    match binary_path(&state.web.install.dist_dir, arch) {
+    match binary_path_for_platform(&state.web.install.dist_dir, os, arch) {
         Some(p) => Ok((arch.to_owned(), p)),
         None => {
             warn!(
@@ -373,7 +404,9 @@ async fn binary(State(state): State<Shared>, Query(q): Query<ArchQuery>) -> Resp
     );
     h.insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_static("attachment; filename=\"terrarium-host\""),
+        HeaderValue::from_static(if q.os.as_deref() == Some("windows") {
+            "attachment; filename=\"terrarium-host.exe\""
+        } else { "attachment; filename=\"terrarium-host\"" }),
     );
     h.insert(VERSION_HEADER, HeaderValue::from_static(VERSION));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -399,7 +432,8 @@ async fn checksum(State(state): State<Shared>, Query(q): Query<ArchQuery>) -> Re
     };
     text(
         StatusCode::OK,
-        format!("{hex}  terrarium-host-{arch}-linux\n"),
+        if q.os.as_deref() == Some("windows") { format!("{hex}  terrarium-host-{arch}-windows.exe\n") }
+        else { format!("{hex}  terrarium-host-{arch}-linux\n") },
     )
 }
 
@@ -409,6 +443,30 @@ mod tests {
     use super::*;
     use crate::hosts::HostListen;
     use crate::settings::InstallConfig;
+
+    #[tokio::test]
+    async fn windows_offer_never_falls_back_to_linux_and_requires_release_sum() {
+        let dist = tempfile::tempdir().unwrap();
+        std::fs::write(dist.path().join("terrarium-host"), b"linux plain").unwrap();
+        std::fs::write(dist.path().join("terrarium-host-x86_64-linux"), b"linux named").unwrap();
+        assert!(update_offer_for_platform(dist.path(), "windows", "x86_64").await.is_none());
+        assert!(binary_path_for_platform(dist.path(), "../linux", "x86_64").is_none());
+        assert!(binary_path_for_platform(dist.path(), "windows", "../x86_64").is_none());
+        let path = dist.path().join("terrarium-host-x86_64-windows.exe");
+        std::fs::write(&path, b"windows binary").unwrap();
+        assert!(update_offer_for_platform(dist.path(), "windows", "x86_64").await.is_none());
+        let sha = terrarium_host::transfer::sha256_hex(b"windows binary");
+        std::fs::write(dist.path().join(RELEASE_SUMS), format!("{sha}  terrarium-host-1.0.0-windows-x86_64.exe\n")).unwrap();
+        let offer = update_offer_for_platform(dist.path(), "windows", "x86_64").await.unwrap();
+        assert_eq!(offer.os.as_deref(), Some("windows"));
+        assert_eq!(offer.arch.as_deref(), Some("x86_64"));
+        assert_eq!(offer.sha256, sha);
+        assert_eq!(offer.release_sha256.as_deref(), Some(sha.as_str()));
+        assert!(offer.path.ends_with("arch=x86_64&os=windows"));
+        assert!(update_offer_for_platform(dist.path(), "windows", "aarch64").await.is_none());
+        std::fs::write(dist.path().join(RELEASE_SUMS), format!("{}  terrarium-host-1.0.0-windows-x86_64.exe\n", "0".repeat(64))).unwrap();
+        assert!(update_offer_for_platform(dist.path(), "windows", "x86_64").await.is_none());
+    }
 
     fn web(public: Option<&str>, listen: Option<HostListen>) -> WebConfig {
         WebConfig {
