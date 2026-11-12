@@ -50,7 +50,7 @@ pub struct Limits {
 
 /// One session's job. The last handle closing kills every descendant.
 #[derive(Debug)]
-pub struct Job(OwnedHandle);
+pub struct Job(OwnedHandle, std::sync::Mutex<bool>);
 
 impl PartialEq for Job {
     fn eq(&self, other: &Self) -> bool { self.0.as_raw_handle() == other.0.as_raw_handle() }
@@ -60,13 +60,14 @@ impl Eq for Job {}
 impl Job {
     pub fn new(limits: Limits) -> io::Result<Self> {
         // SAFETY: null security/name creates a fresh unnamed, non-inherited job.
-        let job = Self(owned(unsafe { CreateJobObjectW(null(), null()) })?);
+        let job = Self(owned(unsafe { CreateJobObjectW(null(), null()) })?, std::sync::Mutex::new(false));
         job.set_limits(limits)?;
         Ok(job)
     }
 
     /// Update the shared holder budget without replacing its job handle.
     pub fn set_limits(&self, limits: Limits) -> io::Result<()> {
+        let mut cpu_enabled = self.1.lock().unwrap_or_else(|e| e.into_inner());
         if limits.processes == Some(0) || limits.memory_bytes == Some(0)
             || limits.cpu_rate.is_some_and(|n| !(1..=10000).contains(&n)) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid job limit"));
@@ -85,7 +86,7 @@ impl Job {
         // SAFETY: live job and initialized info of the documented class and size.
         checked(unsafe { SetInformationJobObject(self.0.as_raw_handle(), JobObjectExtendedLimitInformation,
             (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(), size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32) })?;
-        {
+        if limits.cpu_rate.is_some() || *cpu_enabled {
             let info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
                 ControlFlags: if limits.cpu_rate.is_some() { JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP } else { 0 },
                 Anonymous: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0 { CpuRate: limits.cpu_rate.unwrap_or(0) },
@@ -93,6 +94,7 @@ impl Job {
             // SAFETY: live job and initialized CPU-rate POD with matching class/size.
             checked(unsafe { SetInformationJobObject(self.0.as_raw_handle(), JobObjectCpuRateControlInformation,
                 (&info as *const JOBOBJECT_CPU_RATE_CONTROL_INFORMATION).cast(), size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32) })?;
+            *cpu_enabled = limits.cpu_rate.is_some();
         }
         Ok(())
     }
