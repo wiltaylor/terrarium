@@ -6,6 +6,7 @@
 
 pub mod bootstrap;
 mod confinement;
+pub mod engine_codec;
 pub mod kernel;
 pub mod mountinfo;
 pub mod mounts;
