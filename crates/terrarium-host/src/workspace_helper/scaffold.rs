@@ -134,6 +134,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn foreign_paths_quarantine_before_any_mount_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = super::super::registration_roots::Roots::fixture(dir.path());
+        let request = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "operation": "00000000000000000000000001",
+            "provenance": {"daemon_instance": "00000000000000000000000002", "caller": "local_operator"},
+            "host": "00000000000000000000000003",
+            "target": "synthetic",
+            "registration": "00000000000000000000000004",
+            "incarnation": "00000000000000000000000005",
+            "domain": "00000000000000000000000006"
+        })).unwrap();
+        let store = roots.begin(request).unwrap();
+        let directories = roots.create_directories(&store).unwrap();
+        let pinned = directories.publisher.fd.try_clone().unwrap();
+        let before = mount_id(&pinned).unwrap();
+        assert!(matches!(build(&store, directories), Err(Reply::Unauthorized)));
+        assert_eq!(mount_id(&pinned).unwrap(), before);
+        assert!(store.load_bootstrap().unwrap().quarantined());
+    }
+
+    #[test]
     fn parent_propagation_must_be_private_before_first_attachment() {
         let namespace = terrarium_core::live_workspace::NamespaceIdentity { device: 1, inode: 2 };
         for optional in ["shared:9", "master:9", "shared:9 master:8", "unbindable"] {
