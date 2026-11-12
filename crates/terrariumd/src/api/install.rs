@@ -583,6 +583,9 @@ mod tests {
                 .is_none()
         );
         let sha = terrarium_host::transfer::sha256_hex(b"windows binary");
+        // TER-1016 also requires an available bundle before offering an asset.
+        // The host, not this transport/cache test, authenticates its contents.
+        std::fs::write(bundle_cache_path(&path, &sha), b"bundle").unwrap();
         std::fs::write(
             dist.path().join(RELEASE_SUMS),
             format!("{sha}  terrarium-host-1.0.0-windows-x86_64.exe\n"),
