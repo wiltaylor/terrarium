@@ -1262,7 +1262,9 @@ impl HostRegistry {
                         if terminal {
                             if lost {
                                 if let Some(c) = &e.conn {
-                                    let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release { session: id }));
+                                    let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release {
+                                        session: id,
+                                    }));
                                 }
                             } else {
                                 Self::ack_terminal(e, id, error);
@@ -2735,13 +2737,30 @@ mod tests {
             3
         );
         let deadline = reg.lock()["lab1"].pending_journal[&session.id()].deadline;
-        reg.lock().get_mut("lab1").unwrap().pending_journal.get_mut(&session.id()).unwrap().next = Instant::now();
+        reg.lock()
+            .get_mut("lab1")
+            .unwrap()
+            .pending_journal
+            .get_mut(&session.id())
+            .unwrap()
+            .next = Instant::now();
         reg.retry_journal("lab1", 1);
         assert!(outgoing.try_recv().is_err());
         assert!(session.rx.try_recv().is_err());
-        assert_eq!(reg.lock()["lab1"].pending_journal[&session.id()].events.len(), 3);
-        assert_eq!(reg.lock()["lab1"].pending_journal[&session.id()].deadline, deadline);
-        assert_eq!(reg.lock()["lab1"].pending_journal[&session.id()].backoff, Duration::from_millis(500));
+        assert_eq!(
+            reg.lock()["lab1"].pending_journal[&session.id()]
+                .events
+                .len(),
+            3
+        );
+        assert_eq!(
+            reg.lock()["lab1"].pending_journal[&session.id()].deadline,
+            deadline
+        );
+        assert_eq!(
+            reg.lock()["lab1"].pending_journal[&session.id()].backoff,
+            Duration::from_millis(500)
+        );
         conn.execute_batch("ROLLBACK").unwrap();
         for _ in 0..3 {
             reg.lock()
@@ -2824,18 +2843,33 @@ mod tests {
             let hello = Hello {
                 path_kind: terrarium_host::protocol::PathKind::Posix,
                 protocol: PROTOCOL_VERSION,
-                host: "lab1".into(), version: "test".into(),
-                os: "linux".into(), arch: "x86_64".into(),
-                capabilities: HostCapabilities::default(), max_sessions: 8,
-                max_running_targets: None, update_failed: None,
+                host: "lab1".into(),
+                version: "test".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                capabilities: HostCapabilities::default(),
+                max_sessions: 8,
+                max_running_targets: None,
+                update_failed: None,
                 resume: Some(terrarium_host::protocol::Resume {
                     token: "retry-token".into(),
                     sessions: vec![terrarium_host::protocol::ResumeOffer {
-                        session: session.id(), sent: 8, finished: false,
+                        session: session.id(),
+                        sent: 8,
+                        finished: false,
                     }],
                 }),
             };
-            let (welcome, _, count, _) = reg.attach(&host_row(), &hello, Conn { id: 2, tx: mpsc::unbounded_channel().0 }).unwrap();
+            let (welcome, _, count, _) = reg
+                .attach(
+                    &host_row(),
+                    &hello,
+                    Conn {
+                        id: 2,
+                        tx: mpsc::unbounded_channel().0,
+                    },
+                )
+                .unwrap();
             assert_eq!(count, 1);
             assert_eq!(welcome.resume[0].received, 0);
             // Replayed data starts at the unchanged committed offset.
