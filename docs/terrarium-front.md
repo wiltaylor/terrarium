@@ -28,8 +28,9 @@ new daemon HTTP route is added.
 ## First installation and updates
 
 This release requires the full container-swap procedure, not a hot swap.
-Install the new compose file, create `state/front` owned by the daemon UID and
-GID (mode 0700), then recreate the daemon and start the front together. Never
+Install the new compose file, create `state/front` (mode 0700) and
+`updater/state/front` owned by the daemon/updater UID and GID, then recreate
+the daemon and start the front together. Never
 start the front while an old daemon still publishes 8080/8083. The deploy helper
 and `just docker::volumes-init` create the directory for fresh installations.
 

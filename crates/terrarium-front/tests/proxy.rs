@@ -78,9 +78,42 @@ async fn outage_browser_api_webhook_and_recovery() {
         client.get(&url).send().await.unwrap().text().await.unwrap(),
         "dashboard"
     );
+    daemon.abort();
+    let _ = daemon.await;
+    // A replacement daemon can take arbitrarily long. The same front stays up.
+    for _ in 0..3 {
+        let waiting = client
+            .get(&url)
+            .header("accept", "text/html")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(waiting.status(), 503);
+        assert!(
+            waiting
+                .text()
+                .await
+                .unwrap()
+                .contains("Terrarium is restarting")
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let listener = TcpListener::bind(&upstream).await.unwrap();
+    let replacement = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/", get(|| async { "replacement dashboard" })),
+        )
+        .await
+        .unwrap();
+    });
+    assert_eq!(
+        client.get(&url).send().await.unwrap().text().await.unwrap(),
+        "replacement dashboard"
+    );
     task.abort();
     hook_task.abort();
-    daemon.abort();
+    replacement.abort();
 }
 
 #[tokio::test]
