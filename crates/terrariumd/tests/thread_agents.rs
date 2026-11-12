@@ -751,6 +751,32 @@ async fn request_reads_only_own_linked_cards_across_projects() {
     let shown = l.td.get_as(agent, &format!("/api/threads/{tid}")).await;
     assert_eq!(shown.body["cards"].as_array().unwrap().len(), 1);
     assert_eq!(shown.body["cards"][0]["card"], cards[0]);
+    for card in [cards[0].clone(), format!("p:{}", cards[0])] {
+        let denied = l
+            .td
+            .post_as(
+                agent,
+                &format!("/api/threads/{tid}/cards"),
+                json!({"card": card}),
+            )
+            .await;
+        assert_eq!(denied.status, 403, "{}", denied.body);
+        assert_eq!(
+            denied.body["error"]["message"],
+            format!(
+                "card p/{} is readable from this thread, but linking it needs project p or its lead",
+                cards[0]
+            )
+        );
+    }
+    l.td
+        .post_as(
+            &l.p_lead,
+            &format!("/api/threads/{}/cards", id(&second)),
+            json!({"card": cards[0]}),
+        )
+        .await
+        .ok();
     assert_eq!(
         l.td.post_as(
             agent,
