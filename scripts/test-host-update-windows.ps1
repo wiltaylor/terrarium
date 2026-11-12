@@ -50,7 +50,7 @@ try {
     $baseline=((Service).PathName -split '"')[1]
     $versions=Split-Path (Split-Path $baseline -Parent) -Parent
     $goodImage=Join-Path (Join-Path $versions $good) 'terrarium-host.exe'
-    $config=Start-Stub $GoodAsset $good 'accept' 18192
+    $config=Start-Stub $GoodAsset $good 'later-reject' 18192
     Set-Image ('"'+$baseline+'" --config "'+$config+'" service')
     Case 'offer_download_switch_restart_welcome' {
         Start-Service TerrariumHost
@@ -59,10 +59,14 @@ try {
         if (!(Read-Log).Contains(('DOWNLOAD '+$good))) { throw 'Download not observed.' }
         if (!(Test-Path $baseline)) { throw 'Old image collected too early.' }
     }
-    Case 'forced_exit_and_later_start_cleanup' {
+    Case 'failed_later_start_preserves_image_until_subsequent_welcome' {
         $before=[int](Service).ProcessId
         Stop-Process -Id $before -Force
-        Wait-For { (Service).State -eq 'Running' -and (Service).ProcessId -ne $before -and !(Test-Path $journal) } 60
+        Wait-For { (Read-Log).Contains(('WITHHELD '+$good)) } 60
+        if (!(Test-Path $baseline) -or !(Test-Path $journal)) { throw 'Later start collected old image before welcome.' }
+        # The failed later start reaches its health deadline, exits, and SCM
+        # starts it once more. Only that successful welcome may collect.
+        Wait-For { (Service).State -eq 'Running' -and (Service).ProcessId -ne $before -and !(Test-Path $journal) } 210
         if ((Test-Path $baseline) -or !(Test-Path $goodImage)) { throw 'Incorrect image cleanup.' }
     }
     Stop-Service TerrariumHost

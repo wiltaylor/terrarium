@@ -100,7 +100,9 @@ pub fn confirm(binary: &Path) -> Option<String> {
         return None;
     }
     if transaction.confirmed {
-        if !LATER_START.load(std::sync::atomic::Ordering::Relaxed) { return None; }
+        if !LATER_START.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
         transaction.collect_previous(&path).ok()?;
         return Some(transaction.version);
     }
@@ -147,6 +149,7 @@ pub fn startup(binary: &Path) -> io::Result<bool> {
 }
 
 pub fn checking() -> bool {
-    Journal::read(&journal_path()).is_ok_and(|journal| !journal.confirmed
-        || LATER_START.load(std::sync::atomic::Ordering::Relaxed))
+    Journal::read(&journal_path()).is_ok_and(|journal| {
+        !journal.confirmed || LATER_START.load(std::sync::atomic::Ordering::Relaxed)
+    })
 }

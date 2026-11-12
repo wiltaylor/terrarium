@@ -18,6 +18,8 @@ async fn main() -> anyhow::Result<()> {
     let asset = Arc::new(std::fs::read(&args[2])?);
     let version = args[3].clone();
     let reject = args[4] == "reject";
+    let reject_later = args[4] == "later-reject";
+    let replacement_hellos = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let sha = terrarium_host::transfer::sha256_hex(&asset);
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
     println!("READY {port}");
@@ -26,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
         let asset = asset.clone();
         let version = version.clone();
         let sha = sha.clone();
+        let replacement_hellos = replacement_hellos.clone();
         tokio::spawn(async move {
             let result: anyhow::Result<()> = async {
                 let mut head = [0; 2048];
@@ -52,7 +55,11 @@ async fn main() -> anyhow::Result<()> {
                     _ => anyhow::bail!("expected hello"),
                 };
                 println!("HELLO {}", hello.version);
-                if reject && hello.version == version {
+                let replacement_number = if hello.version == version {
+                    replacement_hellos.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                } else { usize::MAX };
+                if hello.version == version && (reject || (reject_later && replacement_number == 1)) {
+                    println!("WITHHELD {version}");
                     // The new image runs, but cannot finish its health check.
                     // Keep the socket open so SCM's bounded recovery is tested.
                     tokio::time::sleep(std::time::Duration::from_secs(180)).await;

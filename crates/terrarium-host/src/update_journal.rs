@@ -14,11 +14,20 @@ pub struct Journal {
 impl Journal {
     /// Called only by a successful welcome on a start after confirmation.
     pub fn collect_previous(&self, journal: &Path) -> io::Result<()> {
-        if !self.confirmed || self.previous == self.next
-            || self.previous.parent().and_then(Path::parent) != self.next.parent().and_then(Path::parent)
-        { return Err(io::Error::other("invalid confirmed cleanup transaction")); }
-        let directory = self.previous.parent().ok_or_else(|| io::Error::other("missing previous directory"))?;
-        if directory.exists() { std::fs::remove_dir_all(directory)?; }
+        if !self.confirmed
+            || self.previous == self.next
+            || self.previous.parent().and_then(Path::parent)
+                != self.next.parent().and_then(Path::parent)
+        {
+            return Err(io::Error::other("invalid confirmed cleanup transaction"));
+        }
+        let directory = self
+            .previous
+            .parent()
+            .ok_or_else(|| io::Error::other("missing previous directory"))?;
+        if directory.exists() {
+            std::fs::remove_dir_all(directory)?;
+        }
         std::fs::remove_file(journal)
     }
     pub fn read(path: &Path) -> io::Result<Self> {
