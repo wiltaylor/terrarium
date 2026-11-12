@@ -8,15 +8,23 @@ use terrarium_core::live_workspace::Enrollment;
 
 /// Authority is selected by daemon code, never deserialized from a request.
 pub enum WorkspaceUse<'a> {
-    OwnerSandbox { incarnation: &'a str },
-    Live { registration: &'a str, domain: &'a str },
+    OwnerSandbox {
+        incarnation: &'a str,
+    },
+    Live {
+        registration: &'a str,
+        domain: &'a str,
+    },
     Other,
 }
 
 /// Unlike operator_only, this has no remote dashboard route exceptions.
 pub fn no_link(t: &Tx<'_>) -> ApiResult<()> {
     if t.link.is_some() || crate::links::is_link_call() || t.actor.starts_with("link:") {
-        return Err(ApiError::new(Code::LinkForbidden, "link keys may not change or use live workspace authority"));
+        return Err(ApiError::new(
+            Code::LinkForbidden,
+            "link keys may not change or use live workspace authority",
+        ));
     }
     Ok(())
 }
@@ -24,46 +32,84 @@ pub fn no_link(t: &Tx<'_>) -> ApiResult<()> {
 fn durable(t: &Tx<'_>) -> ApiResult<()> {
     let mode: u32 = t.pragma_query_value(None, "synchronous", |r| r.get(0))?;
     if mode < 2 {
-        return Err(ApiError::internal("live workspace intent requires FULL synchronous durability"));
+        return Err(ApiError::internal(
+            "live workspace intent requires FULL synchronous durability",
+        ));
     }
     Ok(())
 }
 
 fn identity(t: &Tx<'_>, e: &Enrollment) -> ApiResult<String> {
-    let row = t.query_row(
-        "SELECT host_id, agent_id, project_hint, agent_hint, source_dev, source_ino, history
+    let row = t
+        .query_row(
+            "SELECT host_id, agent_id, project_hint, agent_hint, source_dev, source_ino, history
          FROM live_workspaces WHERE workspace_id = ?1",
-        [e.workspace.0.to_string()],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?)),
-    ).optional()?;
+            [e.workspace.0.to_string()],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()?;
     let Some((host, agent, project, name, dev, ino, history)) = row else {
-        return Err(ApiError::new(Code::Conflict, "workspace has no verified enrollment"));
+        return Err(ApiError::new(
+            Code::Conflict,
+            "workspace has no verified enrollment",
+        ));
     };
-    if host != e.host.to_string() || agent != e.agent.to_string() || project != e.project
-        || name != e.name || dev != e.source.device.to_string() || ino != e.source.inode.to_string()
-        || e.source.inode == 0 || !e.matches(e)
+    if host != e.host.to_string()
+        || agent != e.agent.to_string()
+        || project != e.project
+        || name != e.name
+        || dev != e.source.device.to_string()
+        || ino != e.source.inode.to_string()
+        || e.source.inode == 0
+        || !e.matches(e)
     {
-        return Err(ApiError::new(Code::Conflict, "workspace enrollment identity mismatch"));
+        return Err(ApiError::new(
+            Code::Conflict,
+            "workspace enrollment identity mismatch",
+        ));
     }
     Ok(history)
 }
 
 fn current_authority(t: &Tx<'_>, e: &Enrollment, registration: &str) -> ApiResult<bool> {
-    let target: String = t.query_row("SELECT target_id FROM live_workspace_targets WHERE registration_id = ?1",
-        [registration], |r| r.get(0))?;
-    let agent: Option<(String, String, bool)> = t.query_row(
-        "SELECT policy, status, paused FROM agents WHERE id = ?1", [e.agent.to_string()],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).optional()?;
-    let Some((policy, status, paused)) = agent else { return Ok(false) };
-    if paused || !matches!(status.as_str(), "starting" | "idle" | "working" | "blocked" | "restarting") {
+    let target: String = t.query_row(
+        "SELECT target_id FROM live_workspace_targets WHERE registration_id = ?1",
+        [registration],
+        |r| r.get(0),
+    )?;
+    let agent: Option<(String, String, bool)> = t
+        .query_row(
+            "SELECT policy, status, paused FROM agents WHERE id = ?1",
+            [e.agent.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((policy, status, paused)) = agent else {
+        return Ok(false);
+    };
+    if paused
+        || !matches!(
+            status.as_str(),
+            "starting" | "idle" | "working" | "blocked" | "restarting"
+        )
+    {
         return Ok(false);
     }
     let policy: terrarium_core::config::Policy = serde_json::from_str(&policy)
         .map_err(|_| ApiError::internal("invalid stored workspace authority policy"))?;
     Ok(policy.targets.contains(&target)
-        || super::leases::standing(t, &target, &e.agent.to_string())? == super::leases::Standing::Active)
+        || super::leases::standing(t, &target, &e.agent.to_string())?
+            == super::leases::Standing::Active)
 }
 
 /// Must share the FULL immediate intent transaction with operation allocation.
@@ -78,7 +124,10 @@ pub fn reserve(
     no_link(t)?;
     durable(t)?;
     if owning_sandbox.is_empty() || identity(t, e)? != "fresh" {
-        return Err(ApiError::new(Code::Conflict, "unknown workspace history or sandbox incarnation"));
+        return Err(ApiError::new(
+            Code::Conflict,
+            "unknown workspace history or sandbox incarnation",
+        ));
     }
     let valid: bool = t.query_row(
         "SELECT EXISTS(SELECT 1 FROM live_workspace_targets
@@ -86,56 +135,93 @@ pub fn reserve(
         params![registration, e.host.to_string(), domain], |r| r.get(0),
     )?;
     if !valid || !current_authority(t, e, registration)? {
-        return Err(ApiError::new(Code::Conflict, "registration is not verified for this host and domain"));
+        return Err(ApiError::new(
+            Code::Conflict,
+            "registration is not verified for this host and domain",
+        ));
     }
-    let existing: Option<(String, Option<String>, Option<String>)> = t.query_row(
-        "SELECT trust_domain_id, current_registration_id, owning_sandbox_incarnation
+    let existing: Option<(String, Option<String>, Option<String>)> = t
+        .query_row(
+            "SELECT trust_domain_id, current_registration_id, owning_sandbox_incarnation
          FROM workspace_reservations WHERE workspace_id = ?1",
-        [e.workspace.0.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).optional()?;
+            [e.workspace.0.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
     match existing {
         Some((sealed, current, sandbox)) => {
-            if sealed != domain || current.as_deref().is_some_and(|r| r != registration)
+            if sealed != domain
+                || current.as_deref().is_some_and(|r| r != registration)
                 || sandbox.as_deref().is_some_and(|s| s != owning_sandbox)
             {
-                return Err(ApiError::new(Code::Conflict, "workspace has a permanent domain seal or occupied registration"));
+                return Err(ApiError::new(
+                    Code::Conflict,
+                    "workspace has a permanent domain seal or occupied registration",
+                ));
             }
-            t.execute("UPDATE workspace_reservations SET current_registration_id = ?2,
+            t.execute(
+                "UPDATE workspace_reservations SET current_registration_id = ?2,
                 owning_sandbox_incarnation = ?3 WHERE workspace_id = ?1",
-                params![e.workspace.0.to_string(), registration, owning_sandbox])?;
+                params![e.workspace.0.to_string(), registration, owning_sandbox],
+            )?;
         }
         None => {
-            t.execute("INSERT INTO workspace_reservations VALUES (?1, ?2, ?3, ?4)",
-                params![e.workspace.0.to_string(), domain, registration, owning_sandbox])?;
+            t.execute(
+                "INSERT INTO workspace_reservations VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    e.workspace.0.to_string(),
+                    domain,
+                    registration,
+                    owning_sandbox
+                ],
+            )?;
         }
     }
-    t.audit("workspace.reserved", &e.workspace.0.to_string(), Some(&e.project),
-        json!({"registration": registration, "domain": domain, "owning_sandbox": owning_sandbox}))
+    t.audit(
+        "workspace.reserved",
+        &e.workspace.0.to_string(),
+        Some(&e.project),
+        json!({"registration": registration, "domain": domain, "owning_sandbox": owning_sandbox}),
+    )
 }
 
 /// Central check for an enrolled workspace. The caller must retain its
 /// admission serialization through the side effect, not perform a read/check
 /// and later reserve independently. Unknown identities fail closed.
-pub fn admit_workspace_use(t: &Tx<'_>, e: &Enrollment, use_kind: WorkspaceUse<'_>) -> ApiResult<()> {
+pub fn admit_workspace_use(
+    t: &Tx<'_>,
+    e: &Enrollment,
+    use_kind: WorkspaceUse<'_>,
+) -> ApiResult<()> {
     identity(t, e)?;
-    let reservation: Option<(String, Option<String>, Option<String>)> = t.query_row(
-        "SELECT trust_domain_id, current_registration_id, owning_sandbox_incarnation
+    let reservation: Option<(String, Option<String>, Option<String>)> = t
+        .query_row(
+            "SELECT trust_domain_id, current_registration_id, owning_sandbox_incarnation
          FROM workspace_reservations WHERE workspace_id = ?1",
-        [e.workspace.0.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).optional()?;
+            [e.workspace.0.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
     let Some((sealed, current, sandbox)) = reservation else {
         return match use_kind {
             WorkspaceUse::Other => Ok(()),
-            _ => Err(ApiError::new(Code::Conflict, "workspace has no reservation")),
+            _ => Err(ApiError::new(
+                Code::Conflict,
+                "workspace has no reservation",
+            )),
         };
     };
     no_link(t)?;
     match use_kind {
-        WorkspaceUse::OwnerSandbox { incarnation } if sandbox.as_deref() == Some(incarnation) => Ok(()),
-        WorkspaceUse::Live { registration, domain }
-            if sealed == domain && current.as_deref() == Some(registration) => {
-                no_link(t)?;
-                let verified: bool = t.query_row(
+        WorkspaceUse::OwnerSandbox { incarnation } if sandbox.as_deref() == Some(incarnation) => {
+            Ok(())
+        }
+        WorkspaceUse::Live {
+            registration,
+            domain,
+        } if sealed == domain && current.as_deref() == Some(registration) => {
+            no_link(t)?;
+            let verified: bool = t.query_row(
                     "SELECT EXISTS(SELECT 1 FROM live_workspace_targets r
                      JOIN live_workspace_attachments a ON a.registration_id = r.registration_id
                      WHERE r.registration_id = ?1 AND r.state = 'verified'
@@ -146,11 +232,19 @@ pub fn admit_workspace_use(t: &Tx<'_>, e: &Enrollment, use_kind: WorkspaceUse<'_
                          WHERE o.registration_id = r.registration_id AND o.phase != 'daemon_committed'))",
                     params![registration, e.workspace.0.to_string(), e.agent.to_string()], |r| r.get(0),
                 )?;
-                if verified && current_authority(t, e, registration)? { Ok(()) } else {
-                    Err(ApiError::new(Code::Conflict, "workspace attachment is pending, revoked or quarantined"))
-                }
+            if verified && current_authority(t, e, registration)? {
+                Ok(())
+            } else {
+                Err(ApiError::new(
+                    Code::Conflict,
+                    "workspace attachment is pending, revoked or quarantined",
+                ))
             }
-        _ => Err(ApiError::new(Code::Conflict, "workspace use conflicts with its permanent reservation")),
+        }
+        _ => Err(ApiError::new(
+            Code::Conflict,
+            "workspace use conflicts with its permanent reservation",
+        )),
     }
 }
 
@@ -158,14 +252,28 @@ pub fn admit_workspace_use(t: &Tx<'_>, e: &Enrollment, use_kind: WorkspaceUse<'_
 /// Revoked tombstones and permanent seals are intentionally untouched.
 pub fn quarantine_on_restart(t: &Tx<'_>) -> ApiResult<usize> {
     durable(t)?;
-    let changed = t.execute("UPDATE live_workspace_targets SET state = 'quarantined'
-        WHERE state NOT IN ('quarantined', 'destroyed')", [])?;
-    t.execute("UPDATE live_workspace_attachments SET state = 'quarantined'
-        WHERE state NOT IN ('quarantined', 'path_revoked_verified')", [])?;
-    t.execute("UPDATE live_workspace_operations SET phase = 'quarantined'
-        WHERE phase NOT IN ('quarantined', 'daemon_committed')", [])?;
+    let changed = t.execute(
+        "UPDATE live_workspace_targets SET state = 'quarantined'
+        WHERE state NOT IN ('quarantined', 'destroyed')",
+        [],
+    )?;
+    t.execute(
+        "UPDATE live_workspace_attachments SET state = 'quarantined'
+        WHERE state NOT IN ('quarantined', 'path_revoked_verified')",
+        [],
+    )?;
+    t.execute(
+        "UPDATE live_workspace_operations SET phase = 'quarantined'
+        WHERE phase NOT IN ('quarantined', 'daemon_committed')",
+        [],
+    )?;
     if changed > 0 {
-        t.audit("workspace.restart_quarantine", "live-workspaces", None, json!({"registrations": changed}))?;
+        t.audit(
+            "workspace.restart_quarantine",
+            "live-workspaces",
+            None,
+            json!({"registrations": changed}),
+        )?;
     }
     Ok(changed)
 }
@@ -184,8 +292,15 @@ mod tests {
         c.pragma_update(None, "synchronous", "NORMAL").unwrap();
         let db = Db::new(c, EventHub::default());
         let e = Enrollment {
-            workspace: WorkspaceId(Ulid::new()), host: Ulid::new(), agent: terrarium_core::AgentId::new(),
-            project: "fixture".into(), name: "holder".into(), source: SourceIdentity { device: 1, inode: 2 },
+            workspace: WorkspaceId(Ulid::new()),
+            host: Ulid::new(),
+            agent: terrarium_core::AgentId::new(),
+            project: "fixture".into(),
+            name: "holder".into(),
+            source: SourceIdentity {
+                device: 1,
+                inode: 2,
+            },
         };
         let enrollment = e.clone();
         db.write("system", move |t| {
@@ -210,14 +325,26 @@ mod tests {
     async fn reservation_requires_full_durability_and_real_identity() {
         let (_dir, db, e) = fixture().await;
         let normal = e.clone();
-        assert!(db.write("system", move |t| reserve(t, &normal, "r1", "d1", "sandbox")).await.is_err());
+        assert!(
+            db.write("system", move |t| reserve(
+                t, &normal, "r1", "d1", "sandbox"
+            ))
+            .await
+            .is_err()
+        );
         let mismatch = e.clone();
-        assert!(db.write_full("system", move |t| {
-            let mut mismatch = mismatch;
-            mismatch.source.inode += 1;
-            reserve(t, &mismatch, "r1", "d1", "sandbox")
-        }).await.is_err());
-        db.write_full("system", move |t| reserve(t, &e, "r1", "d1", "sandbox")).await.unwrap();
+        assert!(
+            db.write_full("system", move |t| {
+                let mut mismatch = mismatch;
+                mismatch.source.inode += 1;
+                reserve(t, &mismatch, "r1", "d1", "sandbox")
+            })
+            .await
+            .is_err()
+        );
+        db.write_full("system", move |t| reserve(t, &e, "r1", "d1", "sandbox"))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -226,9 +353,26 @@ mod tests {
         db.write_full("system", move |t| {
             reserve(t, &e, "r1", "d1", "sandbox")?;
             assert!(admit_workspace_use(t, &e, WorkspaceUse::Other).is_err());
-            assert!(admit_workspace_use(t, &e, WorkspaceUse::OwnerSandbox { incarnation: "other" }).is_err());
-            admit_workspace_use(t, &e, WorkspaceUse::OwnerSandbox { incarnation: "sandbox" })
-        }).await.unwrap();
+            assert!(
+                admit_workspace_use(
+                    t,
+                    &e,
+                    WorkspaceUse::OwnerSandbox {
+                        incarnation: "other"
+                    }
+                )
+                .is_err()
+            );
+            admit_workspace_use(
+                t,
+                &e,
+                WorkspaceUse::OwnerSandbox {
+                    incarnation: "sandbox",
+                },
+            )
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -252,20 +396,37 @@ mod tests {
         db.write_full("system", move |t| {
             assert!(reserve(t, &e, "r1", "d1", "").is_err());
             // The immutable enrollment cannot be rewritten to change history.
-            assert!(t.execute("UPDATE live_workspaces SET history = 'unknown'", []).is_err());
+            assert!(
+                t.execute("UPDATE live_workspaces SET history = 'unknown'", [])
+                    .is_err()
+            );
             let mut unknown = e.clone();
             unknown.workspace = WorkspaceId(Ulid::new());
             assert!(reserve(t, &unknown, "r1", "d1", "sandbox").is_err());
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn link_route_exception_never_authorizes_reservation() {
         let (_dir, db, e) = fixture().await;
-        let result = crate::links::OPERATOR_ROUTE.scope(true,
-            db.write_full("link:fixture", move |t| reserve(t, &e, "r1", "d1", "sandbox"))).await;
-        assert!(matches!(result, Err(ApiError { code: Code::LinkForbidden, .. })));
+        let result = crate::links::OPERATOR_ROUTE
+            .scope(
+                true,
+                db.write_full("link:fixture", move |t| {
+                    reserve(t, &e, "r1", "d1", "sandbox")
+                }),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ApiError {
+                code: Code::LinkForbidden,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -298,11 +459,26 @@ mod tests {
         db.write_full("system", move |t| {
             reserve(t, &e, "r1", "d1", "sandbox")?;
             assert_eq!(quarantine_on_restart(t)?, 2);
-            assert!(admit_workspace_use(t, &e, WorkspaceUse::Live { registration: "r1", domain: "d1" }).is_err());
+            assert!(
+                admit_workspace_use(
+                    t,
+                    &e,
+                    WorkspaceUse::Live {
+                        registration: "r1",
+                        domain: "d1"
+                    }
+                )
+                .is_err()
+            );
             assert!(admit_workspace_use(t, &e, WorkspaceUse::Other).is_err());
-            let count: u32 = t.query_row("SELECT count(*) FROM workspace_reservations", [], |r| r.get(0))?;
+            let count: u32 =
+                t.query_row("SELECT count(*) FROM workspace_reservations", [], |r| {
+                    r.get(0)
+                })?;
             assert_eq!(count, 1);
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 }
