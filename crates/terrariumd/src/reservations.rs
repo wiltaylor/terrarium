@@ -1179,6 +1179,7 @@ pub fn exec_budget(
             // The grant of a native session (TER-345). The executor drops it
             // unless the host agent enforces native GPU access.
             let native_gpu = Some(terrarium_host::protocol::NativeGpu {
+                prepare_root: None,
                 lease: Some(r.id.clone()),
                 exclusive: r.gpus.iter().filter(|g| g.exclusive).map(|g| g.uuid.clone()).collect(),
             });

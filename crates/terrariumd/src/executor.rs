@@ -414,6 +414,8 @@ pub fn pump_process(
 /// (a value can be a secret, TER-142).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct RemoteCmd {
+    /// Only daemon-owned root scripts may request helper provisioning.
+    pub prepare_root: Option<terrarium_host::native::OwnedRoot>,
     /// Durable queue-step identity, bound atomically to a host session.
     pub resume_key: Option<String>,
     /// The program and its arguments. Empty with `shell`.
@@ -1944,13 +1946,16 @@ pub(crate) fn start_cmd_locked(
                 Some(limits) => Some(limits),
                 None => exec_limits(def, caps.as_ref(), cmd.holder.as_deref())?,
             };
-            let limits = native_gpu_limits(
+            let mut limits = native_gpu_limits(
                 def,
                 caps.as_ref(),
                 cmd.holder.as_deref(),
                 cmd.operator,
                 limits,
             )?;
+            if let Some(native) = limits.as_mut().and_then(|l| l.native_gpu.as_mut()) {
+                native.prepare_root = cmd.prepare_root.clone();
+            }
             let shell = caps.and_then(|c| c.shell);
             let make = host_frame(def, shell.as_deref(), cmd, limits)?;
             Ok(pump_host(ex.hosts.open_bound(

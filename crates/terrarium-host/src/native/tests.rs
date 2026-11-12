@@ -1349,6 +1349,7 @@ fn an_exec_becomes_a_shim_call_with_the_request_in_the_environment() {
             ..Default::default()
         }),
         native_gpu: Some(crate::protocol::NativeGpu {
+            prepare_root: None,
             lease: Some("01RES".into()),
             exclusive: vec![A.into()],
         }),

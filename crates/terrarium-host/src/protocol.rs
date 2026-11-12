@@ -314,6 +314,9 @@ pub struct ExecLimits {
 /// The GPU grant of a native session.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeGpu {
+    /// Privileged provisioning for a daemon-owned target-root script.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepare_root: Option<crate::native::OwnedRoot>,
     /// The reservation that grants the exclusive GPUs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease: Option<String>,
