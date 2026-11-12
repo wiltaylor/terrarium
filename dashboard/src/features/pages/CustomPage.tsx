@@ -42,7 +42,8 @@ export default function CustomPage() {
   }
   function addWidget() {
     const k = kind();
-    const widget: PageWidget = { id: crypto.randomUUID(), kind: k, x: 0, y: Math.max(0, ...widgets().map(w => w.y + w.h)), w: 12, h: 3,
+    const id = [...crypto.getRandomValues(new Uint8Array(16))].map(byte => byte.toString(16).padStart(2, "0")).join("");
+    const widget: PageWidget = { id, kind: k, x: 0, y: Math.max(0, ...widgets().map(w => w.y + w.h)), w: 12, h: 3,
       ...(k === "markdown" ? { text: "" } : k === "wiki" ? { wiki: "index" } : { monitor: monitors.latest?.find(m => kindsFor(m.kind).includes(k))?.id ?? "" }) };
     setDraft(d => d && { ...d, widgets: [...d.widgets, widget] });
     setEditingWidget(widget.id);
