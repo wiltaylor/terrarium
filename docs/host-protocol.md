@@ -1268,12 +1268,12 @@ continuation checkpoints also use kill/requeue.
 
 ## Self-update
 
-Windows and Linux host agents currently authenticate update offers through
-the daemon's pinned-fingerprint TLS connection. They check the downloaded
-asset against the offered checksum and the matching release checksum, but
-do not independently verify a release signature at the host. Release-time
-signing is not host-side signature enforcement. Embedded-key signature
-verification for both platforms is tracked in TER-1016.
+Windows and Linux host agents authenticate the transport through the daemon's
+pinned-fingerprint TLS connection and independently verify the downloaded
+asset's cosign signature against the built-in release public key before
+staging it. Both platforms use the same offline verifier and refusal reasons.
+The offered and release checksums are additional integrity checks, not trust
+roots. A development build without a built-in key refuses self-update.
 
 **Windows service installation and recovery.** The installer places binaries
 under `C:\Program Files\Terrarium\host\versions\<version>\terrarium-host.exe`.
