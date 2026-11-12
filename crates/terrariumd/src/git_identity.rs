@@ -10,12 +10,27 @@ use crate::store::agents;
 pub const TRAILERS_FILE: &str = ".terrarium-git-trailers";
 pub const CONFIG_FILE: &str = ".terrarium-gitconfig";
 
-pub fn write_fallback_config(workspace: &std::path::Path, identity: &Identity) -> std::io::Result<()> {
+pub fn write_fallback_config(
+    workspace: &std::path::Path,
+    identity: &Identity,
+) -> std::io::Result<()> {
     use std::io::Write as _;
-    let quote = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\t', "\\t").replace('\r', "");
+    let quote = |v: &str| {
+        v.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\t', "\\t")
+            .replace('\r', "")
+    };
     let mut temp = tempfile::NamedTempFile::new_in(workspace)?;
-    write!(temp, "[user]\nname = \"{}\"\nemail = \"{}\"\n", quote(&identity.name), quote(&identity.email))?;
-    temp.persist(workspace.join(CONFIG_FILE)).map_err(|e| e.error)?;
+    write!(
+        temp,
+        "[user]\nname = \"{}\"\nemail = \"{}\"\n",
+        quote(&identity.name),
+        quote(&identity.email)
+    )?;
+    temp.persist(workspace.join(CONFIG_FILE))
+        .map_err(|e| e.error)?;
     Ok(())
 }
 
@@ -28,24 +43,40 @@ fn markers() -> &'static std::sync::Mutex<PushMarkers> {
 /// An authenticated, one-shot marker. It is not a security boundary: hooks
 /// can be skipped and the agent can call the endpoint itself.
 pub fn mark_push(repo: &str, agent: &str, updates: &str) -> ApiResult<()> {
-    if updates.len() > 65536 { return Err(crate::error::ApiError::invalid("too many push updates")); }
+    if updates.len() > 65536 {
+        return Err(crate::error::ApiError::invalid("too many push updates"));
+    }
     let mut refs = Vec::new();
     for line in updates.lines() {
         let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.len() != 4 { return Err(crate::error::ApiError::invalid("invalid push update")); }
+        if fields.len() != 4 {
+            return Err(crate::error::ApiError::invalid("invalid push update"));
+        }
         refs.push(format!("{} {} {}", fields[2], fields[3], fields[1]));
     }
     refs.sort();
-    let mut markers = markers().lock().map_err(|_| crate::error::ApiError::internal("push marker lock"))?;
+    let mut markers = markers()
+        .lock()
+        .map_err(|_| crate::error::ApiError::internal("push marker lock"))?;
     markers.retain(|_, at| at.elapsed().as_secs() < 60);
-    if markers.len() >= 256 { return Err(crate::error::ApiError::invalid("too many pending push checks")); }
-    markers.insert((repo.into(), agent.into(), refs.join("\n")), std::time::Instant::now());
+    if markers.len() >= 256 {
+        return Err(crate::error::ApiError::invalid(
+            "too many pending push checks",
+        ));
+    }
+    markers.insert(
+        (repo.into(), agent.into(), refs.join("\n")),
+        std::time::Instant::now(),
+    );
     Ok(())
 }
 
 pub fn take_push_marker(repo: &str, agent: &str, mut refs: Vec<String>) -> bool {
     refs.sort();
-    markers().lock().ok().and_then(|mut m| m.remove(&(repo.into(), agent.into(), refs.join("\n"))))
+    markers()
+        .lock()
+        .ok()
+        .and_then(|mut m| m.remove(&(repo.into(), agent.into(), refs.join("\n"))))
         .is_some_and(|at| at.elapsed().as_secs() < 60)
 }
 
@@ -60,44 +91,85 @@ pub struct Settings {
 
 pub fn settings(c: &rusqlite::Connection, repo: bool, id: &str) -> ApiResult<Settings> {
     use rusqlite::OptionalExtension as _;
-    let sql = if repo { "SELECT settings FROM repo_git_settings WHERE repo=?1" }
-        else { "SELECT settings FROM project_git_settings WHERE project=?1" };
+    let sql = if repo {
+        "SELECT settings FROM repo_git_settings WHERE repo=?1"
+    } else {
+        "SELECT settings FROM project_git_settings WHERE project=?1"
+    };
     let value: Option<String> = c.query_row(sql, [id], |r| r.get(0)).optional()?;
-    Ok(value.map(|v| serde_json::from_str(&v)).transpose()?.unwrap_or_default())
+    Ok(value
+        .map(|v| serde_json::from_str(&v))
+        .transpose()?
+        .unwrap_or_default())
 }
 
-pub fn save_settings(t: &mut crate::db::Tx<'_>, repo: bool, id: &str, patch: Settings) -> ApiResult<Settings> {
+pub fn save_settings(
+    t: &mut crate::db::Tx<'_>,
+    repo: bool,
+    id: &str,
+    patch: Settings,
+) -> ApiResult<Settings> {
     for value in [&patch.name, &patch.email].into_iter().flatten() {
         if value.trim().is_empty() || value.contains(['\n', '\r', '\0']) {
-            return Err(crate::error::ApiError::invalid("git identity must be nonempty and single-line"));
+            return Err(crate::error::ApiError::invalid(
+                "git identity must be nonempty and single-line",
+            ));
         }
     }
     let mut value = settings(t, repo, id)?;
-    if patch.provenance.is_some() { value.provenance = patch.provenance; }
-    if patch.name.is_some() { value.name = patch.name; }
-    if patch.email.is_some() { value.email = patch.email; }
-    if patch.warn_only.is_some() { value.warn_only = patch.warn_only; }
-    let sql = if repo { "INSERT INTO repo_git_settings(repo,settings) VALUES(?1,?2) ON CONFLICT(repo) DO UPDATE SET settings=excluded.settings" }
-        else { "INSERT INTO project_git_settings(project,settings) VALUES(?1,?2) ON CONFLICT(project) DO UPDATE SET settings=excluded.settings" };
+    if patch.provenance.is_some() {
+        value.provenance = patch.provenance;
+    }
+    if patch.name.is_some() {
+        value.name = patch.name;
+    }
+    if patch.email.is_some() {
+        value.email = patch.email;
+    }
+    if patch.warn_only.is_some() {
+        value.warn_only = patch.warn_only;
+    }
+    let sql = if repo {
+        "INSERT INTO repo_git_settings(repo,settings) VALUES(?1,?2) ON CONFLICT(repo) DO UPDATE SET settings=excluded.settings"
+    } else {
+        "INSERT INTO project_git_settings(project,settings) VALUES(?1,?2) ON CONFLICT(project) DO UPDATE SET settings=excluded.settings"
+    };
     t.execute(sql, rusqlite::params![id, serde_json::to_string(&value)?])?;
     Ok(value)
 }
 
-pub fn effective(c: &rusqlite::Connection, repo: &crate::store::repos::Repo) -> ApiResult<(bool, Identity, bool)> {
+pub fn effective(
+    c: &rusqlite::Connection,
+    repo: &crate::store::repos::Repo,
+) -> ApiResult<(bool, Identity, bool)> {
     let project = settings(c, false, &repo.project)?;
     let local = settings(c, true, &repo.id)?;
-    let own = repo.url.strip_prefix("git@github.com:")
+    let own = repo
+        .url
+        .strip_prefix("git@github.com:")
         .or_else(|| repo.url.strip_prefix("https://github.com/"))
         .or_else(|| repo.url.strip_prefix("ssh://git@github.com/"))
         .and_then(|s| s.split('/').next())
         .is_some_and(|owner| owner.eq_ignore_ascii_case("wiltaylor"));
     let mut identity = Identity::from_env();
-    if let Some(name) = local.name.or(project.name) { identity.name = name; }
-    if let Some(email) = local.email.or(project.email) { identity.email = email; }
-    Ok((local.provenance.or(project.provenance).unwrap_or(own), identity, local.warn_only.or(project.warn_only).unwrap_or(false)))
+    if let Some(name) = local.name.or(project.name) {
+        identity.name = name;
+    }
+    if let Some(email) = local.email.or(project.email) {
+        identity.email = email;
+    }
+    Ok((
+        local.provenance.or(project.provenance).unwrap_or(own),
+        identity,
+        local.warn_only.or(project.warn_only).unwrap_or(false),
+    ))
 }
 
-pub async fn for_repo(state: &Shared, id: &str, repo: &crate::store::repos::Repo) -> ApiResult<Provenance> {
+pub async fn for_repo(
+    state: &Shared,
+    id: &str,
+    repo: &crate::store::repos::Repo,
+) -> ApiResult<Provenance> {
     let mut p = provenance(state, id).await?;
     let repo_id = repo.id.clone();
     let repo = repo.clone();
@@ -105,7 +177,9 @@ pub async fn for_repo(state: &Shared, id: &str, repo: &crate::store::repos::Repo
     p.identity = identity;
     p.repo = Some(repo_id);
     p.warn_only = warn_only;
-    if !enabled { p.trailers.clear(); }
+    if !enabled {
+        p.trailers.clear();
+    }
     Ok(p)
 }
 
@@ -168,7 +242,12 @@ pub async fn provenance(state: &Shared, id: &str) -> ApiResult<Provenance> {
                 a.agent.harness,
                 clean(version.as_deref().unwrap_or("unknown")),
             );
-            if let Some(model) = a.agent.model.as_deref().filter(|m| !m.is_empty() && *m != "unknown") {
+            if let Some(model) = a
+                .agent
+                .model
+                .as_deref()
+                .filter(|m| !m.is_empty() && *m != "unknown")
+            {
                 trailers.push_str(&format!("Terrarium-Model: {}\n", clean(model)));
             }
             if let Some(card) = a.current_card {
@@ -199,7 +278,11 @@ impl Provenance {
                [ -n \"$trailer\" ] || continue\n\
                git interpret-trailers --in-place --if-exists replace --if-missing add --trailer \"$trailer\" \"$1\" || exit $?\n\
              done\n",
-            if self.trailers.is_empty() { "off" } else { "on" },
+            if self.trailers.is_empty() {
+                "off"
+            } else {
+                "on"
+            },
             sh_quote(&self.trailers)
         )
     }
@@ -279,30 +362,71 @@ mod tests {
     fn provenance_off_push_hook_refuses_metadata_and_allows_warn_override() {
         use std::io::Write as _;
         let tmp = tempfile::tempdir().unwrap();
-        let mut p = Provenance { repo: None, warn_only: false, identity: Identity { name: "User".into(), email: "user@example.test".into() }, trailers: String::new() };
+        let mut p = Provenance {
+            repo: None,
+            warn_only: false,
+            identity: Identity {
+                name: "User".into(),
+                email: "user@example.test".into(),
+            },
+            trailers: String::new(),
+        };
         git(tmp.path(), &["init", "-q"], &p);
         git(tmp.path(), &["config", "terrarium.provenance", "false"], &p);
         let hook = tmp.path().join("hook");
         std::fs::write(&hook, crate::git::push_deny_hook(&[])).unwrap();
-        for message in ["clean commit", "commit\n\nTerrarium-Agent: private", "default identity"] {
-            if message == "default identity" { p.identity.name = "Terrarium".into(); }
-            git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", message], &p);
+        for message in [
+            "clean commit",
+            "commit\n\nTerrarium-Agent: private",
+            "default identity",
+        ] {
+            if message == "default identity" {
+                p.identity.name = "Terrarium".into();
+            }
+            git(
+                tmp.path(),
+                &["commit", "-q", "--allow-empty", "-m", message],
+                &p,
+            );
             let oid = git(tmp.path(), &["rev-parse", "HEAD"], &p);
-            let input = format!("refs/heads/main {} refs/heads/main {}\n", oid.trim(), "0".repeat(40));
+            let input = format!(
+                "refs/heads/main {} refs/heads/main {}\n",
+                oid.trim(),
+                "0".repeat(40)
+            );
             let run = || {
-                let mut child = Command::new("sh").current_dir(tmp.path())
-                    .arg(&hook).args(["origin", "unused"])
-                    .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-                child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+                let mut child = Command::new("sh")
+                    .current_dir(tmp.path())
+                    .arg(&hook)
+                    .args(["origin", "unused"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(input.as_bytes())
+                    .unwrap();
                 child.wait_with_output().unwrap()
             };
             let out = run();
             assert_eq!(out.status.success(), message == "clean commit", "{out:?}");
             if message != "clean commit" {
                 assert!(String::from_utf8_lossy(&out.stderr).contains("provenance is off"));
-                git(tmp.path(), &["config", "terrarium.provenanceWarnOnly", "true"], &p);
+                git(
+                    tmp.path(),
+                    &["config", "terrarium.provenanceWarnOnly", "true"],
+                    &p,
+                );
                 assert!(run().status.success());
-                git(tmp.path(), &["config", "terrarium.provenanceWarnOnly", "false"], &p);
+                git(
+                    tmp.path(),
+                    &["config", "terrarium.provenanceWarnOnly", "false"],
+                    &p,
+                );
             }
         }
     }
@@ -310,7 +434,12 @@ mod tests {
     #[test]
     fn push_markers_are_scoped_and_consumed_once() {
         let refs = vec!["refs/heads/feature old new".into()];
-        mark_push("marker-test", "agent", "refs/heads/feature new refs/heads/feature old\n").unwrap();
+        mark_push(
+            "marker-test",
+            "agent",
+            "refs/heads/feature new refs/heads/feature old\n",
+        )
+        .unwrap();
         assert!(!take_push_marker("marker-test", "other", refs.clone()));
         assert!(take_push_marker("marker-test", "agent", refs.clone()));
         assert!(!take_push_marker("marker-test", "agent", refs));
@@ -319,17 +448,32 @@ mod tests {
     #[test]
     fn fallback_config_allows_local_identity_override() {
         let tmp = tempfile::tempdir().unwrap();
-        let identity = Identity { name: "Fallback \"Bot\"".into(), email: "fallback@example.test".into() };
+        let identity = Identity {
+            name: "Fallback \"Bot\"".into(),
+            email: "fallback@example.test".into(),
+        };
         write_fallback_config(tmp.path(), &identity).unwrap();
-        let p = Provenance { repo: None, warn_only: false, identity, trailers: String::new() };
+        let p = Provenance {
+            repo: None,
+            warn_only: false,
+            identity,
+            trailers: String::new(),
+        };
         git(tmp.path(), &["init", "-q"], &p);
         git(tmp.path(), &["config", "user.name", "Local Author"], &p);
-        let out = Command::new("git").current_dir(tmp.path())
+        let out = Command::new("git")
+            .current_dir(tmp.path())
             .args(["var", "GIT_AUTHOR_IDENT"])
-            .env_remove("GIT_AUTHOR_NAME").env_remove("GIT_AUTHOR_EMAIL")
-            .env("GIT_CONFIG_GLOBAL", tmp.path().join(CONFIG_FILE)).output().unwrap();
+            .env_remove("GIT_AUTHOR_NAME")
+            .env_remove("GIT_AUTHOR_EMAIL")
+            .env("GIT_CONFIG_GLOBAL", tmp.path().join(CONFIG_FILE))
+            .output()
+            .unwrap();
         assert!(out.status.success(), "{out:?}");
-        assert!(String::from_utf8_lossy(&out.stdout).starts_with("Local Author <fallback@example.test>"));
+        assert!(
+            String::from_utf8_lossy(&out.stdout)
+                .starts_with("Local Author <fallback@example.test>")
+        );
     }
 
     fn git(dir: &Path, args: &[&str], p: &Provenance) -> String {

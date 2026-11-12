@@ -55,7 +55,10 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             get(git_settings).patch(set_git_settings),
             &[
                 (axum::http::Method::GET, super::link_registry::Access::Link),
-                (axum::http::Method::PATCH, super::link_registry::Access::Link),
+                (
+                    axum::http::Method::PATCH,
+                    super::link_registry::Access::Link,
+                ),
             ],
         )
         .route(
@@ -66,36 +69,69 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
 }
 
 #[derive(Deserialize)]
-struct PushChecked { updates: String }
+struct PushChecked {
+    updates: String,
+}
 
-async fn push_checked(State(state): State<Shared>, actor: Actor, Path(id): Path<String>, ApiJson(body): ApiJson<PushChecked>) -> ApiResult<Json<serde_json::Value>> {
-    let agent = actor.agent().ok_or_else(|| ApiError::invalid("push check requires an agent"))?;
+async fn push_checked(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(body): ApiJson<PushChecked>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let agent = actor
+        .agent()
+        .ok_or_else(|| ApiError::invalid("push check requires an agent"))?;
     let context = agent.project.clone();
-    let repo = state.db.read(move |c| repos::resolve(c, &id, Some(&context))).await?;
-    if repo.project != agent.project { return Err(ApiError::invalid("push check requires the agent's project")); }
+    let repo = state
+        .db
+        .read(move |c| repos::resolve(c, &id, Some(&context)))
+        .await?;
+    if repo.project != agent.project {
+        return Err(ApiError::invalid("push check requires the agent's project"));
+    }
     policy::read_project(&actor, &repo.project)?;
     crate::git_identity::mark_push(&repo.id, &agent.id, &body.updates)?;
     Ok(Json(json!({"checked": true})))
 }
 
-async fn git_settings(State(state): State<Shared>, actor: Actor, Path(id): Path<String>) -> ApiResult<Json<crate::git_identity::Settings>> {
+async fn git_settings(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::git_identity::Settings>> {
     let context = actor.project().map(str::to_owned);
-    state.db.read(move |c| {
-        let repo = repos::resolve(c, &id, context.as_deref())?;
-        policy::read_project(&actor, &repo.project)?;
-        Ok(Json(crate::git_identity::settings(c, true, &repo.id)?))
-    }).await
+    state
+        .db
+        .read(move |c| {
+            let repo = repos::resolve(c, &id, context.as_deref())?;
+            policy::read_project(&actor, &repo.project)?;
+            Ok(Json(crate::git_identity::settings(c, true, &repo.id)?))
+        })
+        .await
 }
 
-async fn set_git_settings(State(state): State<Shared>, actor: Actor, Path(id): Path<String>, ApiJson(patch): ApiJson<crate::git_identity::Settings>) -> ApiResult<Json<crate::git_identity::Settings>> {
+async fn set_git_settings(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(patch): ApiJson<crate::git_identity::Settings>,
+) -> ApiResult<Json<crate::git_identity::Settings>> {
     let context = actor.project().map(str::to_owned);
     let label = actor.label();
-    state.db.write(label, move |t| {
-        let repo = repos::resolve(t, &id, context.as_deref())?;
-        policy::admin_project(&actor, &repo.project, "changing repo git settings")?;
-        if patch.warn_only.is_some() { policy::operator_only(&actor, "changing the provenance push override")?; }
-        Ok(Json(crate::git_identity::save_settings(t, true, &repo.id, patch)?))
-    }).await
+    state
+        .db
+        .write(label, move |t| {
+            let repo = repos::resolve(t, &id, context.as_deref())?;
+            policy::admin_project(&actor, &repo.project, "changing repo git settings")?;
+            if patch.warn_only.is_some() {
+                policy::operator_only(&actor, "changing the provenance push override")?;
+            }
+            Ok(Json(crate::git_identity::save_settings(
+                t, true, &repo.id, patch,
+            )?))
+        })
+        .await
 }
 
 /// The credential helper answers at most this many times per agent in

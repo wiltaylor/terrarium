@@ -2192,7 +2192,12 @@ async fn start_exec_secrets(
         && let Some(a) = actor.agent()
     {
         let p = crate::git_identity::provenance(state, &a.id).await?;
-        for key in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] {
+        for key in [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ] {
             cmd.env.remove(key);
         }
         cmd.env.insert("TERRARIUM_GIT_TRAILERS".into(), p.trailers);
@@ -5501,9 +5506,18 @@ pub async fn checkout_on_target(
     if let Some(a) = actor.agent() {
         let p = crate::git_identity::for_repo(state, &a.id, repo).await?;
         cmd.env.insert("TERRARIUM_REPO_ID".into(), repo.id.clone());
-        cmd.env.insert("TERRARIUM_PUSH_HOOK".into(), crate::git::push_deny_hook(&repo.push_deny));
-        cmd.env.insert("TERRARIUM_PROVENANCE".into(), (!p.trailers.is_empty()).to_string());
-        cmd.env.insert("TERRARIUM_PROVENANCE_WARN_ONLY".into(), p.warn_only.to_string());
+        cmd.env.insert(
+            "TERRARIUM_PUSH_HOOK".into(),
+            crate::git::push_deny_hook(&repo.push_deny),
+        );
+        cmd.env.insert(
+            "TERRARIUM_PROVENANCE".into(),
+            (!p.trailers.is_empty()).to_string(),
+        );
+        cmd.env.insert(
+            "TERRARIUM_PROVENANCE_WARN_ONLY".into(),
+            p.warn_only.to_string(),
+        );
         cmd.env.insert("TERRARIUM_COMMIT_HOOK".into(), p.hook());
         cmd.env
             .insert("TERRARIUM_COMMIT_NAME".into(), p.identity.name);

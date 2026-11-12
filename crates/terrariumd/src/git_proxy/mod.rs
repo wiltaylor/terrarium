@@ -1393,12 +1393,27 @@ async fn receive_pack(
     let all = capped(first.chain(idle_limited(stream)), MAX_PUSH, "the push");
     let url = forge_url(&ctx.base, "git-receive-pack", None);
     let repo_for_settings = ctx.repo.clone();
-    let enabled = match state.db.read(move |c| Ok(crate::git_identity::effective(c, &repo_for_settings)?.0)).await {
+    let enabled = match state
+        .db
+        .read(move |c| Ok(crate::git_identity::effective(c, &repo_for_settings)?.0))
+        .await
+    {
         Ok(enabled) => enabled,
-        Err(_) => return text(StatusCode::INTERNAL_SERVER_ERROR, "cannot read git provenance settings"),
+        Err(_) => {
+            return text(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot read git provenance settings",
+            );
+        }
     };
-    let checked = crate::git_identity::take_push_marker(&ctx.repo.id, &ctx.agent.id,
-        cmds.commands.iter().map(|c| format!("{} {} {}", c.refname, c.old, c.new)).collect());
+    let checked = crate::git_identity::take_push_marker(
+        &ctx.repo.id,
+        &ctx.agent.id,
+        cmds.commands
+            .iter()
+            .map(|c| format!("{} {} {}", c.refname, c.old, c.new))
+            .collect(),
+    );
     let warn = !enabled && !checked && !cmds.commands.is_empty();
     let sideband = cmds.has_cap("side-band-64k") || cmds.has_cap("side-band");
     if warn {
@@ -1413,13 +1428,20 @@ async fn receive_pack(
         "application/x-git-receive-pack-result",
     )
     .await;
-    if warn && sideband && response.status().is_success() && !response.headers().contains_key(header::CONTENT_ENCODING) {
+    if warn
+        && sideband
+        && response.status().is_success()
+        && !response.headers().contains_key(header::CONTENT_ENCODING)
+    {
         let line = "\x02Terrarium: provenance is off and no managed hook check was recorded; check outgoing identity and trailers.\n";
         let prefix = Bytes::from(format!("{:04x}{line}", line.len() + 4));
         response.headers_mut().remove(header::CONTENT_LENGTH);
         let (parts, body) = response.into_parts();
         let first = futures_util::stream::once(async move { Ok::<Bytes, axum::Error>(prefix) });
-        return Response::from_parts(parts, Body::from_stream(first.chain(body.into_data_stream())));
+        return Response::from_parts(
+            parts,
+            Body::from_stream(first.chain(body.into_data_stream())),
+        );
     }
     response
 }

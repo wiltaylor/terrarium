@@ -154,10 +154,7 @@ async fn agent_exec_leaves_git_identity_to_checkout_config_and_supplies_provenan
     })).await;
     let (out, err) = drain(&lab.td, Some(&lab.w1), &sid).await;
     assert!(err.is_empty(), "{err}");
-    assert!(
-        out.starts_with("\n\n\n\n"),
-        "{out}"
-    );
+    assert!(out.starts_with("\n\n\n\n"), "{out}");
     assert!(out.contains("Terrarium-Agent: p/w1"), "{out}");
     assert!(!out.contains("wrong"), "{out}");
 }

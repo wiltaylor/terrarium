@@ -210,7 +210,11 @@ const MAX_HOOKS: usize = 64;
 /// `terrarium_core::config::check_push_deny_glob`, so they are safe as
 /// shell `case` patterns.
 pub fn push_deny_hook(push_deny: &[String]) -> String {
-    let patterns = if push_deny.is_empty() { "terrarium-no-branch-matches".into() } else { push_deny.join("|") };
+    let patterns = if push_deny.is_empty() {
+        "terrarium-no-branch-matches".into()
+    } else {
+        push_deny.join("|")
+    };
     format!(
         r#"#!/bin/sh
 # Written by terrariumd from the repo's push_deny list. Each checkout by
@@ -311,9 +315,29 @@ fn install_hooks(c: &Checkout, r: &Runner) -> Result<Vec<String>, GitError> {
         files.push(("prepare-commit-msg".into(), p.hook().into_bytes()));
         r.quiet(&c.dest, &["config", "user.name", &p.identity.name])?;
         r.quiet(&c.dest, &["config", "user.email", &p.identity.email])?;
-        if let Some(repo) = &p.repo { r.quiet(&c.dest, &["config", "terrarium.repoId", repo])?; }
-        r.quiet(&c.dest, &["config", "terrarium.provenance", if p.trailers.is_empty() { "false" } else { "true" }])?;
-        r.quiet(&c.dest, &["config", "terrarium.provenanceWarnOnly", if p.warn_only { "true" } else { "false" }])?;
+        if let Some(repo) = &p.repo {
+            r.quiet(&c.dest, &["config", "terrarium.repoId", repo])?;
+        }
+        r.quiet(
+            &c.dest,
+            &[
+                "config",
+                "terrarium.provenance",
+                if p.trailers.is_empty() {
+                    "false"
+                } else {
+                    "true"
+                },
+            ],
+        )?;
+        r.quiet(
+            &c.dest,
+            &[
+                "config",
+                "terrarium.provenanceWarnOnly",
+                if p.warn_only { "true" } else { "false" },
+            ],
+        )?;
     }
     let git_dir = open_git_dir(&c.dest, false)?;
     let shown = Path::new(".git");

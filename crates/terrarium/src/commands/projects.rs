@@ -218,12 +218,27 @@ pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
             let name = ctx.project_or(name.as_deref()).await?;
             if provenance.is_some() || git_name.is_some() || git_email.is_some() {
                 let mut git = json!({});
-                if let Some(p) = provenance { git["provenance"] = (p == "on").into(); }
+                if let Some(p) = provenance {
+                    git["provenance"] = (p == "on").into();
+                }
                 set_opt(&mut git, "name", git_name.clone());
                 set_opt(&mut git, "email", git_email.clone());
-                let v = ctx.api.patch(&format!("{}/git", project_path(&name)), git).await?;
-                if description.is_none() && prefix.is_none() && idle_alert.is_none() && github_author.is_empty() && !github_authors_clear && home_board_columns.is_none() {
-                    return ctx.emit(&v, |c, _| c.line(format!("updated git settings of project {name}; refresh checkouts")));
+                let v = ctx
+                    .api
+                    .patch(&format!("{}/git", project_path(&name)), git)
+                    .await?;
+                if description.is_none()
+                    && prefix.is_none()
+                    && idle_alert.is_none()
+                    && github_author.is_empty()
+                    && !github_authors_clear
+                    && home_board_columns.is_none()
+                {
+                    return ctx.emit(&v, |c, _| {
+                        c.line(format!(
+                            "updated git settings of project {name}; refresh checkouts"
+                        ))
+                    });
                 }
             }
             let mut body = json!({});
@@ -307,18 +322,40 @@ pub async fn repo(ctx: &Ctx, cmd: &RepoCmd) -> anyhow::Result<()> {
             use std::io::Read as _;
             let mut updates = String::new();
             std::io::stdin().take(65537).read_to_string(&mut updates)?;
-            ctx.api.post(&format!("/api/repos/{}/push-checked", encode(repo)), Some(json!({"updates": updates}))).await?;
+            ctx.api
+                .post(
+                    &format!("/api/repos/{}/push-checked", encode(repo)),
+                    Some(json!({"updates": updates})),
+                )
+                .await?;
             Ok(())
         }
-        RepoCmd::Set { repo, provenance, git_name, git_email, warn_only } => {
+        RepoCmd::Set {
+            repo,
+            provenance,
+            git_name,
+            git_email,
+            warn_only,
+        } => {
             let id = repo;
             let mut body = json!({});
-            if let Some(p) = provenance { body["provenance"] = (p == "on").into(); }
+            if let Some(p) = provenance {
+                body["provenance"] = (p == "on").into();
+            }
             set_opt(&mut body, "name", git_name.clone());
             set_opt(&mut body, "email", git_email.clone());
-            if let Some(warn) = warn_only { body["warn_only"] = (*warn).into(); }
-            let v = ctx.api.patch(&format!("/api/repos/{}/git", encode(&id)), body).await?;
-            ctx.emit(&v, |c, _| c.line(format!("updated git settings of repo {repo}; refresh checkouts")))
+            if let Some(warn) = warn_only {
+                body["warn_only"] = (*warn).into();
+            }
+            let v = ctx
+                .api
+                .patch(&format!("/api/repos/{}/git", encode(&id)), body)
+                .await?;
+            ctx.emit(&v, |c, _| {
+                c.line(format!(
+                    "updated git settings of repo {repo}; refresh checkouts"
+                ))
+            })
         }
         RepoCmd::Ls => repos(ctx, None).await,
         RepoCmd::Add(a) => repo_add(ctx, a).await,

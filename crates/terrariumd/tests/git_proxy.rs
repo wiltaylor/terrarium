@@ -1163,17 +1163,54 @@ async fn provenance_bypass_warns_audits_and_notifies_card_or_lead() {
         forge_repo(forge_dir.path());
         let (addr, _) = start_forge_with(forge_dir.path(), "x-access-token", None).await;
         let helpers = tempfile::tempdir().unwrap();
-        let (td, ws, helper) = github_setup(&format!("http://{addr}/app.git"), helpers.path()).await;
-        td.agent("p", "lead", json!({"roles": ["project_admin"]})).await;
+        let (td, ws, helper) =
+            github_setup(&format!("http://{addr}/app.git"), helpers.path()).await;
+        td.agent("p", "lead", json!({"roles": ["project_admin"]}))
+            .await;
         let card = if bound {
-            let card = td.post("/api/projects/p/cards", json!({"title": "provenance", "column": "ready"})).await.ok()["id"].as_str().unwrap().to_owned();
-            td.post_as("p/w", &format!("/api/cards/{card}/claim"), json!({})).await.ok();
+            let card = td
+                .post(
+                    "/api/projects/p/cards",
+                    json!({"title": "provenance", "column": "ready"}),
+                )
+                .await
+                .ok()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            td.post_as("p/w", &format!("/api/cards/{card}/claim"), json!({}))
+                .await
+                .ok();
             Some(card)
-        } else { None };
-        git_ok(&ws, &["commit", "-q", "--allow-empty", "-m", "test: bypass", "-m", "Terrarium-Agent: private-agent-marker"]);
-        let out = agent_git(&ws, &helper, &["push", "--no-verify", "origin", "HEAD:refs/heads/bypass"]);
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        assert!(String::from_utf8_lossy(&out.stderr).contains("no managed hook check"), "{out:?}");
+        } else {
+            None
+        };
+        git_ok(
+            &ws,
+            &[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "test: bypass",
+                "-m",
+                "Terrarium-Agent: private-agent-marker",
+            ],
+        );
+        let out = agent_git(
+            &ws,
+            &helper,
+            &["push", "--no-verify", "origin", "HEAD:refs/heads/bypass"],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("no managed hook check"),
+            "{out:?}"
+        );
         let state = &td.daemon.as_ref().unwrap().state;
         state.db.read(move |c| {
             let detail: String = c.query_row("SELECT detail FROM audit WHERE action='git.provenance_warning'", [], |r| r.get(0))?;
@@ -1192,9 +1229,16 @@ async fn provenance_bypass_warns_audits_and_notifies_card_or_lead() {
         // the warning, but cannot suppress a later or different push.
         let oid = git_ok(&ws, &["rev-parse", "HEAD"]);
         td.post_as("p/w", "/api/repos/app/push-checked", json!({"updates": format!("refs/heads/main {oid} refs/heads/checked {}\n", "0".repeat(40))})).await.ok();
-        let out = agent_git(&ws, &helper, &["push", "--no-verify", "origin", "HEAD:refs/heads/checked"]);
+        let out = agent_git(
+            &ws,
+            &helper,
+            &["push", "--no-verify", "origin", "HEAD:refs/heads/checked"],
+        );
         assert!(out.status.success(), "{out:?}");
-        assert!(!String::from_utf8_lossy(&out.stderr).contains("no managed hook check"), "{out:?}");
+        assert!(
+            !String::from_utf8_lossy(&out.stderr).contains("no managed hook check"),
+            "{out:?}"
+        );
     }
 }
 
