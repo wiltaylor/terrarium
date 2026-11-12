@@ -239,8 +239,9 @@ pub fn spawn(program: &Path, args: &[String], cwd: Option<&Path>, env: &BTreeMap
 pub fn spawn_in_holder(program: &Path, args: &[String], cwd: Option<&Path>, env: &BTreeMap<String, String>,
     terminal: Option<Size>, limits: Limits, holder: Option<&Job>) -> io::Result<Child> {
     let job = Job::new(limits)?;
-    let program = wide(program.as_os_str())?;
-    let mut command = quote(OsStr::new(&String::from_utf16_lossy(&program[..program.len()-1])))?;
+    let executable = resolve_program(program, cwd, env)?;
+    let program = wide(executable.as_os_str())?;
+    let mut command = quote(executable.as_os_str())?;
     for arg in args { command.push(32); command.extend(quote(OsStr::new(arg))?); }
     command.push(0);
     let cwd = cwd.map(|p| wide(p.as_os_str())).transpose()?;
@@ -318,4 +319,22 @@ pub fn spawn_in_holder(program: &Path, args: &[String], cwd: Option<&Path>, env:
     let process = Process { handle: owned(result.hProcess)?, id: result.dwProcessId };
     drop(owned(result.hThread)?);
     Ok(Child { job, process, console, stdin: parent_in.into(), stdout: parent_out.into(), stderr: parent_err.map(File::from) })
+}
+
+fn resolve_program(program: &Path, cwd: Option<&Path>, env: &BTreeMap<String, String>) -> io::Result<std::path::PathBuf> {
+    let base = cwd.map(Path::to_path_buf).unwrap_or(std::env::current_dir()?);
+    let candidates = if program.components().count() > 1 || program.is_absolute() {
+        vec![base.join(program)]
+    } else {
+        let path = env.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+            .map(|(_, value)| std::ffi::OsString::from(value))
+            .or_else(|| std::env::var_os("PATH")).unwrap_or_default();
+        std::env::split_paths(&path).map(|dir| base.join(dir).join(program)).collect()
+    };
+    for mut candidate in candidates {
+        // CreateProcess executes images, not shell scripts or PATHEXT handlers.
+        if candidate.extension().is_none() { candidate.set_extension("exe"); }
+        if candidate.is_file() { return Ok(candidate); }
+    }
+    Err(io::Error::new(io::ErrorKind::NotFound, format!("executable not found: {}", program.display())))
 }

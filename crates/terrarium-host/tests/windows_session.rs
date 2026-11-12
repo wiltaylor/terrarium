@@ -70,3 +70,29 @@ async fn transfer_verifies_checksum_and_replaces_destination() {
         assert_eq!(std::fs::read(&path).unwrap(), data);
     }
 }
+
+#[test]
+fn service_update_replacement_never_removes_current_path() {
+    use terrarium_host::selfupdate::{self, sidecar};
+    let root = tempfile::tempdir().unwrap();
+    let binary = root.path().join("host.exe");
+    std::fs::write(&binary, b"old").unwrap();
+    std::fs::write(sidecar(&binary, selfupdate::NEW), b"new").unwrap();
+    selfupdate::windows_prepare_replacement(&binary, "test-new").unwrap();
+    assert_eq!(std::fs::read(&binary).unwrap(), b"old");
+    assert_eq!(std::fs::read(sidecar(&binary, selfupdate::PREV)).unwrap(), b"old");
+    assert_eq!(selfupdate::confirm(&binary), None);
+    selfupdate::windows_replace(&sidecar(&binary, selfupdate::NEW), &binary).unwrap();
+    assert_eq!(std::fs::read(&binary).unwrap(), b"new");
+    selfupdate::windows_replace(&sidecar(&binary, selfupdate::PREV), &binary).unwrap();
+    assert_eq!(std::fs::read(&binary).unwrap(), b"old");
+}
+
+#[tokio::test]
+async fn bare_program_resolves_from_request_path() {
+    let mut plan = plan("[Console]::WriteLine('bare-program-ok')");
+    plan.program = "powershell.exe".into();
+    let running = spawn(plan, Arc::new(Outbox::new(6, 65536))).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), running.done).await.unwrap().unwrap();
+    assert_eq!(result.code, Some(0));
+}

@@ -61,6 +61,9 @@ enum Cmd {
     #[cfg(windows)]
     #[command(hide = true)]
     ApplyServiceUpdate { binary: PathBuf, version: String },
+    #[cfg(windows)]
+    #[command(hide = true)]
+    ResumeServiceUpdate { binary: PathBuf, version: String },
     /// Run under the Windows Service Control Manager as LocalSystem.
     #[cfg(windows)]
     Service,
@@ -520,7 +523,11 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     #[cfg(windows)]
     if let Some(Cmd::ApplyServiceUpdate { binary, version }) = &args.command {
-        return windows_service_host::apply_update(binary, version);
+        return windows_service_host::apply_update(binary, version, false);
+    }
+    #[cfg(windows)]
+    if let Some(Cmd::ResumeServiceUpdate { binary, version }) = &args.command {
+        return windows_service_host::apply_update(binary, version, true);
     }
     let writer = tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stderr);
     #[cfg(windows)]
@@ -566,7 +573,7 @@ fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new().context("start the runtime")?;
     match args.command {
         #[cfg(windows)]
-        Some(Cmd::ApplyServiceUpdate { .. }) => unreachable!("handled before the runtime"),
+        Some(Cmd::ApplyServiceUpdate { .. } | Cmd::ResumeServiceUpdate { .. }) => unreachable!("handled before the runtime"),
         #[cfg(windows)]
         Some(Cmd::Service) => unreachable!("handled by the service dispatcher"),
         Some(Cmd::Check { json, probe }) => rt.block_on(check(&cfg, json, probe)),

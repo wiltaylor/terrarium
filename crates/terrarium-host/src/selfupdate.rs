@@ -105,6 +105,12 @@ pub fn failed_version(bin: &Path) -> Option<String> {
 pub fn confirm(bin: &Path) -> Option<String> {
     let pending = sidecar(bin, PENDING);
     let text = std::fs::read_to_string(&pending).ok()?;
+    // A crash before the replacement can restart the old build. Its welcome
+    // must not confirm a different executable's pending transaction.
+    #[cfg(windows)]
+    if first_line(&text).as_deref() != Some(terrarium_version::FULL) {
+        return None;
+    }
     let _ = std::fs::remove_file(&pending);
     let _ = std::fs::remove_file(sidecar(bin, FAILED));
     Some(first_line(&text).unwrap_or_default())
@@ -515,6 +521,35 @@ pub fn swap(bin: &Path, version: &str) -> Result<(), UpdateError> {
 
 /// A separate copy performs the replacement only after SCM reports the
 /// service stopped. Neither the service nor the updater overwrites itself.
+#[cfg(windows)]
+pub fn windows_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let until = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        match std::fs::rename(source, destination) {
+            Ok(()) => return Ok(()),
+            Err(_) if std::time::Instant::now() < until => std::thread::sleep(Duration::from_millis(200)),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Write the rollback copy and journal before atomically replacing the image.
+/// All files inherit the service directory's protected ACL.
+#[cfg(windows)]
+pub fn windows_prepare_replacement(bin: &Path, version: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let backup = sidecar(bin, "prev.tmp");
+    std::fs::copy(bin, &backup)?;
+    std::fs::OpenOptions::new().write(true).open(&backup)?.sync_all()?;
+    windows_replace(&backup, &sidecar(bin, PREV))?;
+    let pending = sidecar(bin, "pending.tmp");
+    let mut file = std::fs::File::create(&pending)?;
+    writeln!(file, "{version}")?;
+    file.sync_all()?;
+    drop(file);
+    windows_replace(&pending, &sidecar(bin, PENDING))
+}
+
 #[cfg(windows)]
 pub fn swap(bin: &Path, version: &str) -> Result<(), UpdateError> {
     let helper = sidecar(bin, "update-helper.exe");
