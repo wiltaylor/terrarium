@@ -5,7 +5,9 @@
 mod platform;
 
 #[cfg(unix)]
-fn main() -> anyhow::Result<()> { platform::run() }
+fn main() -> anyhow::Result<()> {
+    platform::run()
+}
 
 #[cfg(windows)]
 fn main() -> anyhow::Result<()> {

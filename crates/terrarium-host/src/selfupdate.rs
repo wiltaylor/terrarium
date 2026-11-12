@@ -121,13 +121,24 @@ pub fn confirm(bin: &Path) -> Option<String> {
 pub fn platform_support(offer: &UpdateOffer, os: &str, arch: &str) -> Result<(), String> {
     let offered_os = offer.os.as_deref().unwrap_or("linux");
     let offered_arch = offer.arch.as_deref().or_else(|| {
-        offer.path.split_once('?')?.1.split('&').find_map(|part| part.strip_prefix("arch="))
+        offer
+            .path
+            .split_once('?')?
+            .1
+            .split('&')
+            .find_map(|part| part.strip_prefix("arch="))
     });
     if offered_os != os || offered_arch != Some(arch) {
-        return Err(format!("foreign asset {} ({offered_os}/{offered_arch:?}), need {os}/{arch}", offer.path));
+        return Err(format!(
+            "foreign asset {} ({offered_os}/{offered_arch:?}), need {os}/{arch}",
+            offer.path
+        ));
     }
     if os == "windows" && offer.release_sha256.is_none() {
-        return Err(format!("Windows asset {} has no release checksum", offer.path));
+        return Err(format!(
+            "Windows asset {} has no release checksum",
+            offer.path
+        ));
     }
     Ok(())
 }
@@ -472,8 +483,7 @@ async fn run_version(path: &Path) -> std::io::Result<std::process::Output> {
             .await;
         match r {
             Err(e)
-                if cfg!(unix) && e.raw_os_error() == Some(26)
-                    && began.elapsed() < BUSY_RETRY =>
+                if cfg!(unix) && e.raw_os_error() == Some(26) && began.elapsed() < BUSY_RETRY =>
             {
                 tokio::time::sleep(BUSY_PAUSE).await;
             }
@@ -526,7 +536,9 @@ pub fn windows_replace(source: &Path, destination: &Path) -> std::io::Result<()>
     loop {
         match std::fs::rename(source, destination) {
             Ok(()) => return Ok(()),
-            Err(_) if std::time::Instant::now() < until => std::thread::sleep(Duration::from_millis(200)),
+            Err(_) if std::time::Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(200))
+            }
             Err(e) => return Err(e),
         }
     }
@@ -539,7 +551,10 @@ pub fn windows_prepare_replacement(bin: &Path, version: &str) -> std::io::Result
     use std::io::Write;
     let backup = sidecar(bin, "prev.tmp");
     std::fs::copy(bin, &backup)?;
-    std::fs::OpenOptions::new().write(true).open(&backup)?.sync_all()?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&backup)?
+        .sync_all()?;
     windows_replace(&backup, &sidecar(bin, PREV))?;
     let pending = sidecar(bin, "pending.tmp");
     let mut file = std::fs::File::create(&pending)?;
@@ -553,7 +568,9 @@ pub fn windows_prepare_replacement(bin: &Path, version: &str) -> std::io::Result
 pub fn swap(bin: &Path, version: &str) -> Result<(), UpdateError> {
     windows_prepare_replacement(bin, version).map_err(io_err(bin))?;
     let old = sidecar(bin, "old");
-    if old.exists() { std::fs::remove_file(&old).map_err(io_err(&old))?; }
+    if old.exists() {
+        std::fs::remove_file(&old).map_err(io_err(&old))?;
+    }
     // Windows permits renaming the mapped image, but not replacing it.
     std::fs::rename(bin, &old).map_err(io_err(bin))?;
     if let Err(source) = std::fs::rename(sidecar(bin, NEW), bin) {
@@ -570,7 +587,9 @@ pub fn windows_rollback(bin: &Path) -> std::io::Result<()> {
     let pending = sidecar(bin, PENDING);
     let version = std::fs::read(&pending)?;
     let rejected = sidecar(bin, "rejected");
-    if rejected.exists() { std::fs::remove_file(&rejected)?; }
+    if rejected.exists() {
+        std::fs::remove_file(&rejected)?;
+    }
     std::fs::rename(bin, &rejected)?;
     let old = sidecar(bin, "old");
     if let Err(error) = std::fs::rename(&old, bin) {

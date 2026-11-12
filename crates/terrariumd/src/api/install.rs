@@ -158,7 +158,9 @@ pub async fn update_offer_for_platform(
         .and_then(|s| release_sum_for_platform(&s, os, arch));
     // No Windows update until it is a release asset. Legacy Linux behavior
     // stays compatible for local Linux host builds.
-    if os == "windows" && release_sha256.is_none() { return None; }
+    if os == "windows" && release_sha256.is_none() {
+        return None;
+    }
     if let Some(r) = &release_sha256
         && *r != sha256
     {
@@ -172,8 +174,11 @@ pub async fn update_offer_for_platform(
         os: Some(os.into()),
         arch: Some(arch.into()),
         version: VERSION.to_owned(),
-        path: if os == "linux" { format!("{BINARY_PATH}?arch={arch}") }
-            else { format!("{BINARY_PATH}?arch={arch}&os={os}") },
+        path: if os == "linux" {
+            format!("{BINARY_PATH}?arch={arch}")
+        } else {
+            format!("{BINARY_PATH}?arch={arch}&os={os}")
+        },
         sha256,
         release_sha256,
     })
@@ -321,7 +326,9 @@ struct ArchQuery {
 /// else `terrarium-host` when the arch is the daemon's own (the output of
 /// `just host::build`, for a daemon outside the image).
 fn binary_path_for_platform(dist: &Path, os: &str, arch: &str) -> Option<PathBuf> {
-    if !ARCHES.contains(&arch) { return None; }
+    if !ARCHES.contains(&arch) {
+        return None;
+    }
     let name = match os {
         "linux" => format!("terrarium-host-{arch}-linux"),
         "windows" => format!("terrarium-host-{arch}-windows.exe"),
@@ -339,7 +346,10 @@ fn binary_path_for_platform(dist: &Path, os: &str, arch: &str) -> Option<PathBuf
 fn pick(state: &Shared, q: &ArchQuery) -> Result<(String, PathBuf), Box<Response>> {
     let os = q.os.as_deref().unwrap_or("linux");
     if !matches!(os, "linux" | "windows") {
-        return Err(Box::new(text(StatusCode::NOT_FOUND, "unsupported host OS\n".into())));
+        return Err(Box::new(text(
+            StatusCode::NOT_FOUND,
+            "unsupported host OS\n".into(),
+        )));
     }
     let have = ARCHES.join(", ");
     let Some(arch) = q.arch.as_deref().filter(|a| !a.is_empty()) else {
@@ -406,7 +416,9 @@ async fn binary(State(state): State<Shared>, Query(q): Query<ArchQuery>) -> Resp
         header::CONTENT_DISPOSITION,
         HeaderValue::from_static(if q.os.as_deref() == Some("windows") {
             "attachment; filename=\"terrarium-host.exe\""
-        } else { "attachment; filename=\"terrarium-host\"" }),
+        } else {
+            "attachment; filename=\"terrarium-host\""
+        }),
     );
     h.insert(VERSION_HEADER, HeaderValue::from_static(VERSION));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -432,8 +444,11 @@ async fn checksum(State(state): State<Shared>, Query(q): Query<ArchQuery>) -> Re
     };
     text(
         StatusCode::OK,
-        if q.os.as_deref() == Some("windows") { format!("{hex}  terrarium-host-{arch}-windows.exe\n") }
-        else { format!("{hex}  terrarium-host-{arch}-linux\n") },
+        if q.os.as_deref() == Some("windows") {
+            format!("{hex}  terrarium-host-{arch}-windows.exe\n")
+        } else {
+            format!("{hex}  terrarium-host-{arch}-linux\n")
+        },
     )
 }
 
@@ -448,24 +463,57 @@ mod tests {
     async fn windows_offer_never_falls_back_to_linux_and_requires_release_sum() {
         let dist = tempfile::tempdir().unwrap();
         std::fs::write(dist.path().join("terrarium-host"), b"linux plain").unwrap();
-        std::fs::write(dist.path().join("terrarium-host-x86_64-linux"), b"linux named").unwrap();
-        assert!(update_offer_for_platform(dist.path(), "windows", "x86_64").await.is_none());
+        std::fs::write(
+            dist.path().join("terrarium-host-x86_64-linux"),
+            b"linux named",
+        )
+        .unwrap();
+        assert!(
+            update_offer_for_platform(dist.path(), "windows", "x86_64")
+                .await
+                .is_none()
+        );
         assert!(binary_path_for_platform(dist.path(), "../linux", "x86_64").is_none());
         assert!(binary_path_for_platform(dist.path(), "windows", "../x86_64").is_none());
         let path = dist.path().join("terrarium-host-x86_64-windows.exe");
         std::fs::write(&path, b"windows binary").unwrap();
-        assert!(update_offer_for_platform(dist.path(), "windows", "x86_64").await.is_none());
+        assert!(
+            update_offer_for_platform(dist.path(), "windows", "x86_64")
+                .await
+                .is_none()
+        );
         let sha = terrarium_host::transfer::sha256_hex(b"windows binary");
-        std::fs::write(dist.path().join(RELEASE_SUMS), format!("{sha}  terrarium-host-1.0.0-windows-x86_64.exe\n")).unwrap();
-        let offer = update_offer_for_platform(dist.path(), "windows", "x86_64").await.unwrap();
+        std::fs::write(
+            dist.path().join(RELEASE_SUMS),
+            format!("{sha}  terrarium-host-1.0.0-windows-x86_64.exe\n"),
+        )
+        .unwrap();
+        let offer = update_offer_for_platform(dist.path(), "windows", "x86_64")
+            .await
+            .unwrap();
         assert_eq!(offer.os.as_deref(), Some("windows"));
         assert_eq!(offer.arch.as_deref(), Some("x86_64"));
         assert_eq!(offer.sha256, sha);
         assert_eq!(offer.release_sha256.as_deref(), Some(sha.as_str()));
         assert!(offer.path.ends_with("arch=x86_64&os=windows"));
-        assert!(update_offer_for_platform(dist.path(), "windows", "aarch64").await.is_none());
-        std::fs::write(dist.path().join(RELEASE_SUMS), format!("{}  terrarium-host-1.0.0-windows-x86_64.exe\n", "0".repeat(64))).unwrap();
-        assert!(update_offer_for_platform(dist.path(), "windows", "x86_64").await.is_none());
+        assert!(
+            update_offer_for_platform(dist.path(), "windows", "aarch64")
+                .await
+                .is_none()
+        );
+        std::fs::write(
+            dist.path().join(RELEASE_SUMS),
+            format!(
+                "{}  terrarium-host-1.0.0-windows-x86_64.exe\n",
+                "0".repeat(64)
+            ),
+        )
+        .unwrap();
+        assert!(
+            update_offer_for_platform(dist.path(), "windows", "x86_64")
+                .await
+                .is_none()
+        );
     }
 
     fn web(public: Option<&str>, listen: Option<HostListen>) -> WebConfig {

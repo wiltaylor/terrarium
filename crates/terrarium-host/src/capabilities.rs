@@ -98,7 +98,9 @@ pub fn detect_capacity(proc_root: &Path) -> Option<terrarium_core::resources::Ho
 /// `$SHELL` when it exists, else `/bin/sh`.
 pub fn detect_shell() -> Option<String> {
     #[cfg(windows)]
-    return Some(std::env::var("COMSPEC").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into()));
+    return Some(
+        std::env::var("COMSPEC").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into()),
+    );
     #[cfg(unix)]
     std::env::var("SHELL")
         .ok()

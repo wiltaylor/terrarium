@@ -390,7 +390,8 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let token = cfg.resolve_token()?;
     let name = cfg.resolve_name();
     let mut caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
-    caps.no_workspaces = cfg!(windows) || !terrarium_host::workspace::available(&cfg.paths().work_dir);
+    caps.no_workspaces =
+        cfg!(windows) || !terrarium_host::workspace::available(&cfg.paths().work_dir);
     if caps.no_workspaces {
         tracing::warn!(
             work_dir = %cfg.paths().work_dir.display(),
@@ -522,9 +523,14 @@ fn main() -> anyhow::Result<()> {
     let writer = if matches!(args.command, Some(Cmd::Service)) {
         let dir = terrarium_host::config::data_dir().join("host");
         terrarium_host::session::private_dir(&dir)?;
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("service.log"))?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("service.log"))?;
         tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::sync::Mutex::new(file))
-    } else { writer };
+    } else {
+        writer
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

@@ -13,11 +13,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::protocol::SessionSignal as Signal;
 #[cfg(unix)]
 use nix::sys::signal::killpg;
 #[cfg(unix)]
 use nix::unistd::Pid;
-use crate::protocol::SessionSignal as Signal;
 #[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -143,7 +143,10 @@ pub fn private_dir(dir: &Path) -> std::io::Result<()> {
     for ancestor in dir.ancestors().filter(|p| !p.as_os_str().is_empty()) {
         match std::fs::symlink_metadata(ancestor) {
             Ok(m) if !m.is_dir() || m.file_attributes() & 0x400 != 0 => {
-                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "private directory has a reparse point or non-directory ancestor"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "private directory has a reparse point or non-directory ancestor",
+                ));
             }
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -168,7 +171,10 @@ pub fn private_dir(dir: &Path) -> std::io::Result<()> {
         .stdout(std::process::Stdio::null())
         .status()?;
     if !status.success() {
-        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "cannot protect private directory ACL"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "cannot protect private directory ACL",
+        ));
     }
     Ok(())
 }

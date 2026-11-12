@@ -760,9 +760,18 @@ fn host_frame_paths(
     let def = def.clone();
     let cmd = cmd.clone();
     let windows = kind == terrarium_host::protocol::PathKind::Windows;
-    let shell = shell.unwrap_or(if windows { "cmd.exe" } else { "/bin/sh" }).to_owned();
+    let shell = shell
+        .unwrap_or(if windows { "cmd.exe" } else { "/bin/sh" })
+        .to_owned();
     let (program, args) = if cmd.shell && cmd.argv.is_empty() {
-        (shell, if windows { Vec::new() } else { vec!["-l".to_owned()] })
+        (
+            shell,
+            if windows {
+                Vec::new()
+            } else {
+                vec!["-l".to_owned()]
+            },
+        )
     } else {
         (cmd.argv[0].clone(), cmd.argv[1..].to_vec())
     };

@@ -397,14 +397,32 @@ mod tests {
 
     #[test]
     fn windows_job_capability_rejects_unenforceable_limits() {
-        let cap = LimitsCapability { job_objects: true, ..Default::default() };
-        let mut limits = Limits { cpu_millis: Some(1000), memory_bytes: Some(64 << 20), pids: Some(8), ..Default::default() };
+        let cap = LimitsCapability {
+            job_objects: true,
+            ..Default::default()
+        };
+        let mut limits = Limits {
+            cpu_millis: Some(1000),
+            memory_bytes: Some(64 << 20),
+            pids: Some(8),
+            ..Default::default()
+        };
         assert!(limits.host_support(Some(&cap)).is_ok());
         limits.swap_bytes = Some(0);
-        assert!(limits.host_support(Some(&cap)).unwrap_err().contains("swap"));
+        assert!(
+            limits
+                .host_support(Some(&cap))
+                .unwrap_err()
+                .contains("swap")
+        );
         limits.swap_bytes = None;
         limits.io_weight = Some(100);
-        assert!(limits.host_support(Some(&cap)).unwrap_err().contains("IO weight"));
+        assert!(
+            limits
+                .host_support(Some(&cap))
+                .unwrap_err()
+                .contains("IO weight")
+        );
         let old: LimitsCapability = serde_json::from_str(r#"{"systemd":false}"#).unwrap();
         assert!(!old.job_objects);
         assert!(limits.host_support(Some(&old)).is_err());

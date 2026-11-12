@@ -385,10 +385,18 @@ pub fn parse_units(text: &str, prefix: &str) -> Vec<String> {
 #[cfg(windows)]
 pub async fn detect() -> LimitsCapability {
     match terrarium_winapi::Job::new(terrarium_winapi::Limits {
-        memory_bytes: Some(64 * 1024 * 1024), processes: Some(1), cpu_rate: Some(10000),
+        memory_bytes: Some(64 * 1024 * 1024),
+        processes: Some(1),
+        cpu_rate: Some(10000),
     }) {
-        Ok(_) => LimitsCapability { job_objects: true, ..Default::default() },
-        Err(e) => LimitsCapability { reason: Some(format!("Job Object limits unavailable: {e}")), ..Default::default() },
+        Ok(_) => LimitsCapability {
+            job_objects: true,
+            ..Default::default()
+        },
+        Err(e) => LimitsCapability {
+            reason: Some(format!("Job Object limits unavailable: {e}")),
+            ..Default::default()
+        },
     }
 }
 

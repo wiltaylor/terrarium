@@ -3,8 +3,12 @@ use std::ffi::OsString;
 use std::time::Duration;
 use windows_service::{
     define_windows_service,
-    service::{ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType},
-    service_control_handler::{self, ServiceControlHandlerResult}, service_dispatcher,
+    service::{
+        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+        ServiceType,
+    },
+    service_control_handler::{self, ServiceControlHandlerResult},
+    service_dispatcher,
 };
 
 pub const NAME: &str = "TerrariumHost";
@@ -17,17 +21,24 @@ pub fn dispatch() -> anyhow::Result<()> {
 
 fn status(state: ServiceState, code: u32) -> ServiceStatus {
     ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS, current_state: state,
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: state,
         controls_accepted: if state == ServiceState::Running {
             ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN
-        } else { ServiceControlAccept::empty() },
-        exit_code: ServiceExitCode::Win32(code), checkpoint: 0,
-        wait_hint: Duration::from_secs(10), process_id: None,
+        } else {
+            ServiceControlAccept::empty()
+        },
+        exit_code: ServiceExitCode::Win32(code),
+        checkpoint: 0,
+        wait_hint: Duration::from_secs(10),
+        process_id: None,
     }
 }
 
 fn service_main(_: Vec<OsString>) {
-    if let Err(error) = serve() { tracing::error!(%error, "Windows service failed"); }
+    if let Err(error) = serve() {
+        tracing::error!(%error, "Windows service failed");
+    }
 }
 
 fn serve() -> anyhow::Result<()> {
@@ -36,7 +47,8 @@ fn serve() -> anyhow::Result<()> {
     let handle = service_control_handler::register(NAME, move |event| match event {
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
         ServiceControl::Stop | ServiceControl::Shutdown => {
-            let _ = shutdown.try_send(()); ServiceControlHandlerResult::NoError
+            let _ = shutdown.try_send(());
+            ServiceControlHandlerResult::NoError
         }
         _ => ServiceControlHandlerResult::NotImplemented,
     })?;

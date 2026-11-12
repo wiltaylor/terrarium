@@ -974,7 +974,6 @@ mod tests {
     use super::*;
     use std::process::Command;
 
-
     /// TER-566: the error of a failed python3 probe says why.
     #[test]
     fn a_failed_python_probe_carries_its_error_output() {

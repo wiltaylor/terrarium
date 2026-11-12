@@ -101,14 +101,24 @@ async fn windows_round_trip(no_workspaces: bool) {
     let DaemonFrame::Exec(exec) = frame else {
         panic!("{frame:?}")
     };
-    assert_eq!(exec.cmd, "cmd.exe", "native Windows argv must not be wrapped in sh");
+    assert_eq!(
+        exec.cmd, "cmd.exe",
+        "native Windows argv must not be wrapped in sh"
+    );
     assert_eq!(exec.args, ["/c", "echo"]);
     assert_eq!(exec.cwd.unwrap().to_str(), Some(cwd));
     // Named runs use this same exec start path. Neither ordinary commands
     // nor explicit shell sessions may receive the POSIX kill wrapper.
-    td.post("/api/targets/p-win/exec", json!({"shell":true})).await.ok();
-    let frame = tokio::time::timeout(Duration::from_secs(30), received.recv()).await.unwrap().unwrap();
-    let DaemonFrame::Exec(shell) = frame else { panic!("{frame:?}") };
+    td.post("/api/targets/p-win/exec", json!({"shell":true}))
+        .await
+        .ok();
+    let frame = tokio::time::timeout(Duration::from_secs(30), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let DaemonFrame::Exec(shell) = frame else {
+        panic!("{frame:?}")
+    };
     assert_eq!(shell.cmd, "cmd.exe");
     assert!(shell.args.is_empty());
     assert!(shell.pty.is_some());
@@ -168,8 +178,14 @@ async fn windows_round_trip(no_workspaces: bool) {
         assert!(!exec.env.contains_key("RESULTS_DIR"));
         assert!(!exec.env.contains_key("CARGO_TARGET_DIR"));
     } else {
-        assert_eq!(exec.cwd.unwrap().to_str(), Some(r"C:\Terrarium\work\p\worker"));
-        assert_eq!(exec.env["RESULTS_DIR"], r"C:\Terrarium\work\p\worker\results");
+        assert_eq!(
+            exec.cwd.unwrap().to_str(),
+            Some(r"C:\Terrarium\work\p\worker")
+        );
+        assert_eq!(
+            exec.env["RESULTS_DIR"],
+            r"C:\Terrarium\work\p\worker\results"
+        );
     }
     td.post_as(
         aid,

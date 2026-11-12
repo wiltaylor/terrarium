@@ -1366,16 +1366,24 @@ impl Client {
         {
             let _ = session;
             if l.reservation.is_some() {
-                return Err(refuse("Windows resource reservations are unsupported".into()));
+                return Err(refuse(
+                    "Windows resource reservations are unsupported".into(),
+                ));
             }
             let limits = crate::session_windows::budget(&l.limits).map_err(refuse)?;
-            let mut jobs = self.shared.windows_jobs.lock().unwrap_or_else(|e| e.into_inner());
+            let mut jobs = self
+                .shared
+                .windows_jobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let key = (l.target.clone(), l.holder.clone());
             let job = if let Some(job) = jobs.get(&key) {
                 job.set_limits(limits).map_err(|e| refuse(e.to_string()))?;
                 job.clone()
             } else {
-                let job = Arc::new(terrarium_winapi::Job::new(limits).map_err(|e| refuse(e.to_string()))?);
+                let job = Arc::new(
+                    terrarium_winapi::Job::new(limits).map_err(|e| refuse(e.to_string()))?,
+                );
                 jobs.insert(key, job.clone());
                 job
             };
@@ -1384,24 +1392,24 @@ impl Client {
         }
         #[cfg(unix)]
         {
-        let slice = crate::limits::slice_name(&l.target, &l.holder);
-        let applied = if let Some(reservation) = &l.reservation {
-            reservation
-                .host_support(self.opts.capabilities.limits.as_ref())
-                .map_err(refuse)?;
-            crate::limits::apply_reservation(&l.target, &l.holder, reservation).await
-        } else {
-            crate::limits::apply_slice(&slice, &l.limits).await
-        };
-        applied.map_err(|e| BuildError {
-            code: ErrorCode::SpawnFailed,
-            message: format!("cannot set the resource limits on {slice}: {e}"),
-        })?;
-        #[allow(clippy::cast_possible_truncation)]
-        let scope = crate::limits::scope_name(&self.opts.name, session, random_u64() as u32);
-        tracing::info!(session, %slice, %scope, limits = %l.limits.summary(), "limited session");
-        crate::limits::wrap(&mut plan.exec, &slice, &scope);
-        Ok(plan)
+            let slice = crate::limits::slice_name(&l.target, &l.holder);
+            let applied = if let Some(reservation) = &l.reservation {
+                reservation
+                    .host_support(self.opts.capabilities.limits.as_ref())
+                    .map_err(refuse)?;
+                crate::limits::apply_reservation(&l.target, &l.holder, reservation).await
+            } else {
+                crate::limits::apply_slice(&slice, &l.limits).await
+            };
+            applied.map_err(|e| BuildError {
+                code: ErrorCode::SpawnFailed,
+                message: format!("cannot set the resource limits on {slice}: {e}"),
+            })?;
+            #[allow(clippy::cast_possible_truncation)]
+            let scope = crate::limits::scope_name(&self.opts.name, session, random_u64() as u32);
+            tracing::info!(session, %slice, %scope, limits = %l.limits.summary(), "limited session");
+            crate::limits::wrap(&mut plan.exec, &slice, &scope);
+            Ok(plan)
         }
     }
 
@@ -1455,7 +1463,9 @@ impl Client {
     ) -> Result<VerbPlan, BuildError> {
         #[cfg(windows)]
         if self.opts.native.is_some() {
-            return Err(BuildError::bad("native GPU isolation is unavailable on Windows"));
+            return Err(BuildError::bad(
+                "native GPU isolation is unavailable on Windows",
+            ));
         }
         #[cfg(windows)]
         return crate::limits::reservation_stop_plan(&r.target, &r.holder);
