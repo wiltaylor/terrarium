@@ -846,6 +846,8 @@ pub struct ExecSession {
 
 #[derive(Serialize, Deserialize)]
 struct SavedExec {
+    #[serde(default)]
+    durable: bool,
     id: String,
     target: String,
     owner: Option<String>,
@@ -873,7 +875,7 @@ pub fn restore_sessions(state: &Shared) -> ApiResult<()> {
             .id = saved.id;
         session
             .takes_stdin
-            .store(saved.remote_key.is_none(), Ordering::SeqCst);
+            .store(!saved.durable, Ordering::SeqCst);
         if let Some((host, id)) = saved.host_session {
             let hs = state
                 .executor
@@ -2253,6 +2255,7 @@ async fn start_exec_secrets(
     sess.set_kill_report(report);
     sess.takes_stdin.store(!cmd.durable, Ordering::SeqCst);
     let saved = SavedExec {
+        durable: cmd.durable,
         remote_key: if cmd.durable && matches!(def.kind, TargetKind::Ssh | TargetKind::Exedev) {
             cmd.resume_key.clone()
         } else {

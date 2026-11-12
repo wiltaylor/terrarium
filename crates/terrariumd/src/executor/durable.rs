@@ -5,6 +5,36 @@ use super::*;
 const RETAIN: u64 = 86400;
 const MAX_RUN: u64 = 7 * 86400;
 
+/// A launch can be journaled just before the daemon dies, without acquiring
+/// its exec owner. Drop only expired, unowned checkpoints, never a job's
+/// expired binding (which must continue to prohibit relaunch).
+pub(crate) fn spawn_cleanup(state: &Shared) -> tokio::task::JoinHandle<()> {
+    let weak = Arc::downgrade(state);
+    tokio::spawn(async move {
+        loop {
+            let Some(state) = weak.upgrade() else { return };
+            if let Err(error) = prune(&state) { warn!(%error, "cannot prune durable SSH checkpoints"); }
+            drop(state);
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    })
+}
+
+fn prune(state: &Shared) -> ApiResult<()> {
+    #[derive(Deserialize)]
+    struct Owner { #[serde(default)] remote_key: Option<String> }
+    #[derive(Deserialize)]
+    struct Created { created: i64 }
+    let j = journal(state);
+    let mut owned: std::collections::HashSet<_> = j.scan::<Owner>("exec/")?.into_iter()
+        .filter_map(|(_, owner)| owner.remote_key.map(|key| format!("ssh/{key}"))).collect();
+    owned.extend(j.scan::<Value>("recipe/")?.into_iter().map(|(key, _)| format!("ssh/{key}")));
+    let before = chrono::Utc::now().timestamp() - (MAX_RUN + RETAIN) as i64;
+    let old: Vec<_> = j.scan::<Created>("ssh/")?.into_iter()
+        .filter(|(key, value)| value.created < before && !owned.contains(key)).map(|(key, _)| key).collect();
+    j.replace(&[], &old, &[])
+}
+
 #[derive(Serialize, Deserialize)]
 struct Checkpoint {
     def: TargetDef,
@@ -37,6 +67,7 @@ pub(super) fn start(
     mut plan: SshPlan,
     guard: Option<Box<dyn Send>>,
 ) -> ApiResult<Running> {
+    crate::target_roots::check_base(def.work_root.as_deref().unwrap_or(crate::target_roots::DEFAULT_BASE))?;
     let key = cmd
         .resume_key
         .as_deref()
@@ -120,7 +151,7 @@ pub(super) fn start(
                                     .map(|bytes| Ev::Data(if line[0] == b'O' { Stream::Stdout } else { Stream::Stderr }, bytes)),
                                 b'X' => std::str::from_utf8(payload).ok().and_then(|s| s.parse::<i32>().ok())
                                     .map(|code| Ev::End(End::Exit { code: Some(code), signal: None, reason: "exited".into() })),
-                                b'L' => Some(Ev::End(End::error("expired", "durable SSH output retention expired"))),
+                                b'L' => Some(Ev::End(End::error("durable_expired", "durable SSH output retention expired"))),
                                 _ => None,
                             };
                             if let Some(event) = event {

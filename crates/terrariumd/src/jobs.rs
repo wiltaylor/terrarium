@@ -2091,6 +2091,7 @@ pub fn set_lost_runs(job: &str, n: u32) {
 /// broke. A cancelled job is never lost: the caller checks [`killed`].
 fn lost_run(end: Option<&End>, stderr: &[u8], ssh_host: Option<&str>) -> Option<String> {
     match end {
+        Some(End::Error { code, .. }) if code == "durable_expired" => None,
         None => Some("the run ended without an end".into()),
         Some(End::Error { code, .. }) if FIXED_ERRORS.contains(&code.as_str()) => None,
         Some(End::Error { code, message }) => Some(format!("error {code}: {message}")),

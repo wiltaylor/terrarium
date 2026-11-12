@@ -282,6 +282,34 @@ async fn durable_exedev_finishes_offline_once_with_real_exit() {
     super::ssh_restart::completed(&td, &aid, &wid, &root).await;
 }
 
+#[tokio::test]
+async fn durable_expired_checkpoint_does_not_relaunch_or_prevent_boot() {
+    let (mut td, _fake, _, url, ssh) = daemon().await;
+    let root = td.dir.path().join("expired-spool");
+    let _cleanup = super::ssh_restart::RemoteCleanup(root.clone());
+    let mut def = target("expired-ex", 8 * 3600);
+    def["work_root"] = json!(root);
+    td.post("/api/targets", def).await.ok();
+    td.post_empty("/api/targets/expired-ex/up").await.ok();
+    let command = format!("echo once >> '{}'; echo retained; exit 17", root.join("launches").display());
+    let opened = td.post("/api/targets/expired-ex/exec", json!({"cmd":["sh","-c",command],"durable":true})).await;
+    let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
+    let (stdout, end) = output(&td, "expired-ex", &sid).await;
+    assert_eq!(stdout, "retained\n");
+    assert_eq!(end["code"], 17);
+    let journal = terrariumd::hosts::resume::Journal::new(&td.state);
+    let mut checkpoints = journal.scan::<Value>("ssh/").unwrap();
+    assert_eq!(checkpoints.len(), 1);
+    let (key, checkpoint) = checkpoints.first_mut().unwrap();
+    checkpoint["created"] = json!((chrono::Utc::now() - chrono::Duration::days(9)).timestamp());
+    journal.save(key, checkpoint).unwrap();
+    reboot(&mut td, &url, &ssh).await;
+    let (_, end) = output(&td, "expired-ex", &sid).await;
+    assert_eq!(end["type"], "error");
+    assert_eq!(end["code"], "interrupted");
+    assert_eq!(std::fs::read_to_string(root.join("launches")).unwrap(), "once\n");
+}
+
 fn db(td: &TestDaemon) -> rusqlite::Connection {
     terrariumd::db::open(&td.state.join("terrarium.db")).unwrap()
 }

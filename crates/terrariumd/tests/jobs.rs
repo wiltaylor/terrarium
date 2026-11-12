@@ -3098,7 +3098,7 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
     let started = marks.path().join("started");
     let xml = marks.path().join("junit.xml");
     let recipe = format!(
-        "echo started >> '{}'; printf '<testsuite tests=\"1\"><testcase name=\"kept\"/></testsuite>' > '{}'; while [ ! -e '{}' ]; do sleep 0.02; done; echo offline-queue-tail; exit 7",
+        "echo \"$TERRARIUM_JOB_ID\" >> '{}'; printf '<testsuite tests=\"1\"><testcase name=\"kept\"/></testsuite>' > '{}'; while [ ! -e '{}' ]; do sleep 0.02; done; echo offline-queue-tail; exit 7",
         started.display(),
         xml.display(),
         go.display()
@@ -3113,7 +3113,7 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
     let jid = queued.ok()["job"]["id"].as_str().unwrap().to_owned();
     crate::ssh_restart::wait_file(&xml).await;
     let original = lab.td.get(&format!("/api/jobs/{jid}")).await.body;
-    assert_eq!(std::fs::read_to_string(&started).unwrap(), "started\n", "initial launch");
+    assert_eq!(std::fs::read_to_string(&started).unwrap(), format!("{jid}\n"), "initial launch");
     let journal = terrariumd::hosts::resume::Journal::new(&lab.td.state);
     let prefix = format!("ssh/recipe/{jid}/");
     let bindings = journal.scan::<Value>(&prefix).unwrap();
@@ -3130,7 +3130,7 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
         .path();
     crate::ssh_restart::wait_file(&spool.join("exit")).await;
     assert_eq!(std::fs::read_to_string(spool.join("exit")).unwrap(), "7\n");
-    assert_eq!(std::fs::read_to_string(&started).unwrap(), "started\n", "offline completion");
+    assert_eq!(std::fs::read_to_string(&started).unwrap(), format!("{jid}\n"), "offline completion");
     lab.td.boot_with_ssh(None, None, Some(&ssh)).await;
     let spool_count = std::fs::read_dir(spool_root.join(".terrarium-runs")).unwrap().count();
     assert_eq!(spool_count, 1, "remote claim count after reboot");
@@ -3146,7 +3146,11 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
     for field in ["attempt", "slot", "started_at"] {
         assert_eq!(ended[field], original[field], "{field}");
     }
-    assert_eq!(std::fs::read_to_string(started).unwrap(), "started\n");
+    // A failed merge intentionally queues a new job for attempt 2. That is
+    // not a restart of this job. Count launches by their durable job ID.
+    let launches = std::fs::read_to_string(started).unwrap();
+    assert_eq!(launches.lines().filter(|line| *line == jid).count(), 1, "{launches}");
+    assert_eq!(jobs.len(), 2, "the failed merge's intentional retry");
     let card = lab.td.get(&format!("/api/cards/{card}")).await;
     let notifications = card.ok()["comments"]
         .as_array()
