@@ -16,7 +16,7 @@ export function ForumPost(props: {
   let post!: HTMLElement;
   const location = useLocation();
   const instance = useInstance();
-  const agent = () => instance.agents?.state.agents.find((a) => a.id === props.authorId?.replace(/^agent:/, ""));
+  const agent = () => instance.agents?.state?.agents?.find((a) => a.id === props.authorId?.replace(/^agent:/, ""));
   createEffect(() => {
     if (location.hash === `#${props.id}`) queueMicrotask(() => post.scrollIntoView?.({ block: "start" }));
   });
