@@ -4,8 +4,14 @@ use tracing::{Level, Metadata, Subscriber};
 use tracing_subscriber::{EnvFilter, fmt::MakeWriter, prelude::*};
 
 const TRANSPORTS: &[&str] = &[
-    "tungstenite", "tokio_tungstenite", "hyper", "hyper_util", "h2",
-    "axum", "reqwest", "tower_http",
+    "tungstenite",
+    "tokio_tungstenite",
+    "hyper",
+    "hyper_util",
+    "h2",
+    "axum",
+    "reqwest",
+    "tower_http",
 ];
 
 fn safe_transport_level(metadata: &Metadata<'_>) -> bool {
@@ -16,7 +22,10 @@ fn safe_transport_level(metadata: &Metadata<'_>) -> bool {
     *metadata.level() <= Level::INFO
         || !TRANSPORTS.iter().any(|name| {
             metadata.target() == *name
-                || metadata.target().strip_prefix(*name).is_some_and(|tail| tail.starts_with("::"))
+                || metadata
+                    .target()
+                    .strip_prefix(*name)
+                    .is_some_and(|tail| tail.starts_with("::"))
         })
 }
 
@@ -31,10 +40,18 @@ where
     for name in TRANSPORTS {
         // Fixed directives follow the environment filter. The independent
         // metadata filter above covers more-specific environment directives.
-        env = env.add_directive(format!("{name}=info").parse().expect("fixed logging directive"));
+        env = env.add_directive(
+            format!("{name}=info")
+                .parse()
+                .expect("fixed logging directive"),
+        );
     }
     tracing_subscriber::registry()
         .with(tracing_subscriber::filter::filter_fn(safe_transport_level))
         .with(env)
-        .with(tracing_subscriber::fmt::layer().with_writer(writer).with_ansi(ansi))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .with_ansi(ansi),
+        )
 }

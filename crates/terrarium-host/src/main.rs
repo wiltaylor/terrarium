@@ -503,7 +503,7 @@ fn main() -> anyhow::Result<()> {
         std::io::stderr,
         std::io::IsTerminal::is_terminal(&std::io::stderr()),
     )
-        .init();
+    .init();
     match &args.command {
         Some(Cmd::TokenFile { path }) => return write_token_file(path),
         Some(Cmd::Cert { names, out, force }) => return write_cert(names, out, *force),

@@ -35,7 +35,7 @@ async fn daemon_main() -> anyhow::Result<()> {
         std::io::stdout,
         std::io::IsTerminal::is_terminal(&std::io::stdout()),
     )
-        .init();
+    .init();
 
     let settings = Settings::parse();
     if matches!(settings.command, Some(Command::RequiredTemplatesCheck)) {
