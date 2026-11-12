@@ -684,10 +684,21 @@ async fn stalled_front_writer_cannot_delay_hold_deadline_recovery() {
         .unwrap();
     tokio::time::pause();
     let started = tokio::time::Instant::now();
-    let run = tokio::time::timeout(Duration::from_secs(13), work)
-        .await
-        .expect("stalled projection must not delay recovery")
-        .unwrap();
+    let recovery = tokio::time::timeout(Duration::from_secs(13), work);
+    tokio::pin!(recovery);
+    let run = loop {
+        tokio::select! {
+            biased;
+            result = &mut recovery => {
+                break result.expect("stalled projection must not delay recovery").unwrap();
+            }
+            _ = tokio::task::yield_now() => {
+                // A live spawn_blocking writer prevents Tokio's automatic
+                // time advance. Drive the clock while it remains stalled.
+                tokio::time::advance(Duration::from_millis(10)).await;
+            }
+        }
+    };
     assert!(started.elapsed() < Duration::from_millis(12500));
     assert_eq!(run.outcome, Outcome::RecoveryFailed);
     assert!(
