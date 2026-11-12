@@ -56,7 +56,7 @@ crash-test: up require-uv
 # Create config/*, state/, tools/, repos/, work/, and the definition directories, owned by you
 [group('config')]
 volumes-init:
-	mkdir -p config/claude config/codex config/copilot config/pi state/front tools config/terrarium projects agents targets subscriptions fleets repos work config/tls updater/run updater/state
+	mkdir -p config/claude config/codex config/copilot config/pi state state/front tools config/terrarium projects agents targets subscriptions fleets repos work config/tls updater/run updater/state updater/state/front
 
 # Open the bind-mounted home of one harness (claude, codex, copilot, pi) in $EDITOR
 [group('config')]

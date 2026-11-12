@@ -16,7 +16,7 @@ services:
       - "${TERRARIUM_INGEST_PORT:-8083}:8083"
     volumes:
       - ${TERRARIUM_DATA_DIR:-.}/state/front:/front:ro
-      - ${TERRARIUM_DATA_DIR:-.}/updater/state:/updater:ro
+      - ${TERRARIUM_DATA_DIR:-.}/updater/state/front:/progress:ro
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]

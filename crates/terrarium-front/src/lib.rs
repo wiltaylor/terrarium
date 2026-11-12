@@ -1,6 +1,6 @@
 //! Byte-streaming front. No credentials, request logging, or writable state.
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -18,20 +18,20 @@ const DEADLINE: Duration = Duration::from_secs(2);
 
 pub struct Front {
     pub upstream: String,
-    pub history: PathBuf,
+    pub status: PathBuf,
     pub sessions: PathBuf,
     pub webhook: bool,
-    started: Instant,
+    outage: Mutex<Option<Instant>>,
 }
 
 impl Front {
-    pub fn new(upstream: String, history: PathBuf, sessions: PathBuf, webhook: bool) -> Self {
+    pub fn new(upstream: String, status: PathBuf, sessions: PathBuf, webhook: bool) -> Self {
         Self {
             upstream,
-            history,
+            status,
             sessions,
             webhook,
-            started: Instant::now(),
+            outage: Mutex::new(None),
         }
     }
     pub fn router(self) -> axum::Router {
@@ -70,6 +70,9 @@ async fn proxy(State(front): State<Arc<Front>>, mut req: Request) -> Response {
     .await;
     match response {
         Ok(Ok(mut response)) => {
+            if let Ok(mut outage) = front.outage.lock() {
+                *outage = None;
+            }
             if response.status() == StatusCode::SWITCHING_PROTOCOLS {
                 let upstream = hyper::upgrade::on(&mut response);
                 tokio::spawn(async move {
@@ -144,12 +147,17 @@ impl Front {
                 &tokio::fs::read(&self.sessions).await.unwrap_or_default(),
                 now,
             );
-        let history = tokio::fs::read(&self.history).await.unwrap_or_default();
-        let data: Value = serde_json::from_slice(&history).unwrap_or(Value::Null);
-        let run = data.as_array().and_then(|a| a.first());
+        let current = tokio::fs::read(&self.status).await.unwrap_or_default();
+        let current: Value = serde_json::from_slice(&current).unwrap_or(Value::Null);
+        let run = current.is_object().then_some(&current);
         let running = run.is_some_and(|r| r["outcome"] == "running");
+        let elapsed = self
+            .outage
+            .lock()
+            .map(|mut o| o.get_or_insert_with(Instant::now).elapsed().as_secs())
+            .unwrap_or(0);
         let mut value = json!({"maintenance": true, "message": if running { "Terrarium is updating" } else { "Terrarium is restarting" },
-            "step": null, "elapsed_seconds": self.started.elapsed().as_secs()});
+            "step": null, "elapsed_seconds": elapsed});
         if let Some(run) = run {
             if running {
                 let step = run["steps"]
@@ -201,6 +209,14 @@ const PUBLIC_STEPS: &[&str] = &[
     "switch",
     "start-daemon",
     "resume",
+    "activation",
+    "commit",
+    "drain-jobs",
+    "environment",
+    "hot-swap-eligibility",
+    "pause-daemon",
+    "remove",
+    "stage",
 ];
 const PAGE: &str = r#"<!doctype html><html><head><meta charset="utf-8"><title>Terrarium maintenance</title></head>
 <body><h1>Terrarium is restarting</h1><p id="progress"></p><pre id="details"></pre>
@@ -257,14 +273,14 @@ mod tests {
     #[tokio::test]
     async fn public_projection_hides_details_and_private_projection_shows_them() {
         let dir = tempfile::tempdir().unwrap();
-        let history = dir.path().join("history.json");
+        let current = dir.path().join("current-run.json");
         let sessions = dir.path().join("sessions.json");
         let now = chrono::Utc::now();
         tokio::fs::write(
-            &history,
-            json!([{"outcome":"running", "started_at": now.to_rfc3339(),
+            &current,
+            json!({"outcome":"running", "started_at": now.to_rfc3339(),
             "steps":[{"name":"backup","at":now.to_rfc3339(),"detail":"secret-step-detail"}],
-            "from":"private-version", "to":"next-version", "error":"private-error"}])
+            "from":"private-version", "to":"next-version", "error":"private-error"})
             .to_string(),
         )
         .await
@@ -280,7 +296,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let front = Front::new("unused".into(), history, sessions, false);
+        let front = Front::new("unused".into(), current, sessions, false);
         let body = |r: Response| async {
             String::from_utf8(
                 axum::body::to_bytes(r.into_body(), 100000)

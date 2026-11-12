@@ -8,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
     let make = |port, webhook| {
         Front::new(
             format!("terrarium:{port}"),
-            PathBuf::from("/updater/history.json"),
+            PathBuf::from("/progress/current-run.json"),
             PathBuf::from("/front/sessions.json"),
             webhook,
         )

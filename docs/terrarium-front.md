@@ -10,8 +10,10 @@ and webhook requests receive JSON. The page polls every two seconds and reloads
 when the daemon answers. A timeout does not prove a mutating request was not
 applied. Clients must not blindly replay non-idempotent requests.
 
-The updater's `history.json` is mounted read-only, never its socket or Docker
-socket. Only known step names and elapsed time are public. An existing browser
+Only the updater's `front/current-run.json` export directory is mounted read-only,
+never its socket, Docker socket, or main state directory (which contains private
+container settings). The export retains the last run marked ended after it
+finishes. Only known step names and elapsed time are public. An existing browser
 operator session can also see the step list, versions, and errors. The daemon
 exports SHA-256 hashes of validated browser tokens, with their expiration, to
 `state/front/sessions.json` using atomic rename and mode 0600. Logout removes

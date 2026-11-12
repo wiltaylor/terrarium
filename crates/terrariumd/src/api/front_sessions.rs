@@ -10,6 +10,7 @@ use std::sync::{Mutex, OnceLock};
 #[derive(Default)]
 struct Cache {
     pv: u64,
+    written_at: i64,
     entries: HashMap<String, Entry>,
     revoked: HashMap<String, i64>,
 }
@@ -29,7 +30,7 @@ fn hash(value: &str) -> String {
 static CACHES: OnceLock<Mutex<HashMap<PathBuf, Cache>>> = OnceLock::new();
 
 // Serialize export updates with logout tombstones and password-version checks.
-fn change(op: &OperatorAuth, f: impl FnOnce(&mut Cache, i64)) {
+fn change(op: &OperatorAuth, f: impl FnOnce(&mut Cache, i64) -> bool) {
     let Some(parent) = op.store.path().parent() else {
         return;
     };
@@ -51,10 +52,15 @@ fn change(op: &OperatorAuth, f: impl FnOnce(&mut Cache, i64)) {
     let now = chrono::Utc::now().timestamp();
     cache.entries.retain(|_, e| e.exp > now);
     cache.revoked.retain(|_, exp| *exp > now);
-    f(cache, now);
+    let changed = f(cache, now);
+    if !changed && now >= cache.written_at && now - cache.written_at < 5 {
+        return;
+    }
     if write(&dir, cache, now).is_err() {
         let _ = std::fs::remove_file(dir.join("sessions.json"));
         tracing::warn!("cannot export front session hashes");
+    } else {
+        cache.written_at = now;
     }
 }
 fn write(dir: &std::path::Path, cache: &Cache, now: i64) -> anyhow::Result<()> {
@@ -81,6 +87,9 @@ pub(super) fn observe(op: &OperatorAuth, s: &Session) {
         let sid = hash(&s.claims.sid);
         if s.claims.pv == c.pv && !c.revoked.contains_key(&sid) && c.entries.len() < 1024 {
             let h = hash(&s.token);
+            if c.entries.contains_key(&h) {
+                return false;
+            }
             c.entries.insert(
                 h.clone(),
                 Entry {
@@ -89,7 +98,9 @@ pub(super) fn observe(op: &OperatorAuth, s: &Session) {
                     sid,
                 },
             );
+            return true;
         }
+        false
     });
 }
 pub(super) fn revoke(op: &OperatorAuth, s: &Session, exp: i64) {
@@ -97,10 +108,14 @@ pub(super) fn revoke(op: &OperatorAuth, s: &Session, exp: i64) {
         let sid = hash(&s.claims.sid);
         c.entries.retain(|_, e| e.sid != sid);
         c.revoked.insert(sid, exp);
+        true
     });
 }
 pub(super) fn clear(op: &OperatorAuth) {
-    change(op, |c, _| c.entries.clear());
+    change(op, |c, _| {
+        c.entries.clear();
+        true
+    });
 }
 
 #[cfg(test)]

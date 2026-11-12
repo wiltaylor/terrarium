@@ -159,6 +159,8 @@ async fn headers_streams_and_websocket_survive() {
             .is_some()
     );
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    assert!(stream.chunk().await.unwrap().is_some());
     let mut req = format!("ws://{address}/ws").into_client_request().unwrap();
     req.headers_mut()
         .insert("sec-websocket-protocol", "test-protocol".parse().unwrap());
