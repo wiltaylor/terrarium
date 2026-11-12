@@ -369,7 +369,7 @@ fn docker_nsfs_records_do_not_qualify_as_publishers() {
     receiver.mountpoint = "/work".into();
     receiver.optional_fields = vec!["master:216".into()];
     receiver.vfs_flags = vec!["ro".into(), "nosuid".into(), "nodev".into()];
-    assert!(mountinfo::publisher(&host, &receiver, &[host.clone()]).is_err());
+    assert!(mountinfo::publisher(&host, &receiver, std::slice::from_ref(&host)).is_err());
     for kind in [
         "cgroup",
         "ipc",
@@ -383,7 +383,7 @@ fn docker_nsfs_records_do_not_qualify_as_publishers() {
         "uts",
     ] {
         let accepted = evidence(&line.replace("net:[", &format!("{kind}:[")), 1);
-        assert!(mountinfo::publisher(&accepted, &receiver, &[accepted.clone()]).is_err());
+        assert!(mountinfo::publisher(&accepted, &receiver, std::slice::from_ref(&accepted)).is_err());
         let mut host_publisher = accepted.clone();
         host_publisher.root = "/directory".into();
         // A namespace pseudo-root cannot serve as a receiver either.
