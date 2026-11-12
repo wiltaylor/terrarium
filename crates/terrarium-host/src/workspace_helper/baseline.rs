@@ -4,6 +4,7 @@ use nix::fcntl::{OFlag, open, openat};
 use nix::sys::stat::Mode;
 use std::fs::File;
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use terrarium_core::live_workspace::Reply;
 
 const LIMIT: usize = 512;
@@ -85,25 +86,11 @@ pub fn collect_local() -> Result<HostBaseline, Reply> {
     let kernel = child(&sys, "kernel", true)?;
     let random = child(&kernel, "random", true)?;
     let before = boot_id(&read(&random, "boot_id")?)?;
-    // SAFETY: uname writes only to the provided, correctly sized utsname.
-    let mut uts = std::mem::MaybeUninit::<nix::libc::utsname>::uninit();
-    if unsafe { nix::libc::uname(uts.as_mut_ptr()) } != 0 {
-        return Err(Reply::Unsupported);
-    }
-    // SAFETY: successful uname initialized all fields, including terminating NULs.
-    let uts = unsafe { uts.assume_init() };
-    let field = |chars: &[nix::libc::c_char]| {
-        let bytes: Vec<u8> = chars
-            .iter()
-            .take_while(|c| **c != 0)
-            .map(|c| *c as u8)
-            .collect();
-        text(&bytes)
-    };
+    let uts = nix::sys::utsname::uname().map_err(|_| Reply::Unsupported)?;
     let observed = HostBaseline {
-        kernel_release: field(&uts.release)?,
-        kernel_build: field(&uts.version)?,
-        architecture: field(&uts.machine)?,
+        kernel_release: text(uts.release().as_bytes())?,
+        kernel_build: text(uts.version().as_bytes())?,
+        architecture: text(uts.machine().as_bytes())?,
         boot_id: before,
     };
     if observed.kernel_release != text(&read(&kernel, "osrelease")?)?
