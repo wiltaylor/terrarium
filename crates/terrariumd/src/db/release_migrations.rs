@@ -80,7 +80,8 @@ fn seeded_previous_release() -> Connection {
     migrate_with(&mut conn, MIGRATIONS).unwrap();
     // Shipped named files have occasionally been edited. Use the actual
     // previous release SQL, not today's contents for the same filenames.
-    conn.execute_batch(include_str!("baseline_v055.sql")).unwrap();
+    conn.execute_batch(include_str!("baseline_v055.sql"))
+        .unwrap();
     let baseline: Vec<_> = BASELINE.iter().map(|name| (*name, "")).collect();
     migrate_named(&mut conn, &baseline).unwrap();
     // Disable FK enforcement only during the unordered synthetic inserts.
