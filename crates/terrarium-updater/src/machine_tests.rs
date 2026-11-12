@@ -491,8 +491,14 @@ async fn real_docker_startup_health() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     // The fixtures are started after the epoch. This exercises dockerd's
     // fractional UNIX timestamp parser as well as the real health/exec path.
-    updater.wait_hot_healthy_until(&healthy, deadline, Some("0.000000000")).await.unwrap();
-    let reason = updater.wait_hot_healthy_until(&crashed, deadline, Some("0.000000000")).await.unwrap_err();
+    updater
+        .wait_hot_healthy_until(&healthy, deadline, Some("0.000000000"))
+        .await
+        .unwrap();
+    let reason = updater
+        .wait_hot_healthy_until(&crashed, deadline, Some("0.000000000"))
+        .await
+        .unwrap_err();
     assert!(reason.contains("FOREIGN KEY constraint failed"), "{reason}");
     assert!(!reason.contains("private-fixture-value"));
 }
@@ -631,11 +637,29 @@ async fn unreadable_startup_log_does_not_replace_health_checks() {
         if !healthy {
             r.fake.fail(&format!("health:{}", new_ref()));
         }
-        let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
-        assert_eq!(run.outcome, if healthy { Outcome::Succeeded } else { Outcome::RolledBack }, "{run:#?}");
-        let warnings: Vec<_> = run.steps.iter().filter(|s| s.name == "startup-log-warning").collect();
+        let run = r
+            .updater
+            .run_now(RunKind::Update, "latest", "operator")
+            .await;
+        assert_eq!(
+            run.outcome,
+            if healthy {
+                Outcome::Succeeded
+            } else {
+                Outcome::RolledBack
+            },
+            "{run:#?}"
+        );
+        let warnings: Vec<_> = run
+            .steps
+            .iter()
+            .filter(|s| s.name == "startup-log-warning")
+            .collect();
         assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].detail, "cannot read daemon startup log (values hidden); continuing health checks");
+        assert_eq!(
+            warnings[0].detail,
+            "cannot read daemon startup log (values hidden); continuing health checks"
+        );
     }
 }
 
