@@ -34,6 +34,7 @@
 //! socket or holds the state lock, and holds that lock while it runs).
 
 pub mod schedule;
+pub mod retention;
 pub mod seal;
 
 use std::collections::{BTreeMap, HashSet};
@@ -423,6 +424,8 @@ fn file_name(dir: &Path, kind: Kind, at: DateTime<Utc>) -> String {
 pub fn create(roots: &Roots, opts: &CreateOptions) -> anyhow::Result<Created> {
     let dir = &opts.dir;
     fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    // The updater's retention worker takes the same flock, across processes.
+    let _retention_lock = retention_lock(dir)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
         .with_context(|| format!("cannot set the mode of {}", dir.display()))?;
     let id = ulid::Ulid::new().to_string();
@@ -679,6 +682,14 @@ pub fn create(roots: &Roots, opts: &CreateOptions) -> anyhow::Result<Created> {
         size,
         header,
     })
+}
+
+pub fn retention_lock(dir: &Path) -> anyhow::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new().write(true).create(true).truncate(false)
+        .mode(0o600).custom_flags(libc::O_NOFOLLOW).open(dir.join(".retention.lock"))?;
+    file.lock()?;
+    Ok(file)
 }
 
 fn file_name_of(path: &Path) -> String {
@@ -1216,48 +1227,6 @@ pub fn restore(path: &Path, roots: &Roots, opts: &RestoreOptions) -> anyhow::Res
     })
 }
 
-/// Delete the old backups in `dir`: keep the newest `keep_full` full
-/// backups and the diffs of them. Answers the deleted names.
-///
-/// `verified_full` is the ID of a full backup that a verify just passed.
-/// It must be the newest full backup in `dir`: nothing is deleted before
-/// a newer full backup is known to be good (docs/api.md §32.4).
-pub fn prune(dir: &Path, keep_full: usize, verified_full: &str) -> anyhow::Result<Vec<String>> {
-    let all = list(dir)?;
-    let fulls: Vec<&Listed> = all
-        .iter()
-        .filter(|l| l.header.as_ref().is_some_and(|h| h.kind == Kind::Full))
-        .collect();
-    let newest = fulls
-        .last()
-        .and_then(|l| l.header.as_ref())
-        .map(|h| h.id.as_str());
-    if newest != Some(verified_full) {
-        bail!(
-            "no prune: the verified full backup {verified_full} is not the newest full backup in {}",
-            dir.display()
-        );
-    }
-    let keep_full = keep_full.max(1);
-    if fulls.len() <= keep_full {
-        return Ok(Vec::new());
-    }
-    let drop: HashSet<String> = fulls[..fulls.len() - keep_full]
-        .iter()
-        .filter_map(|l| l.header.as_ref().map(|h| h.id.clone()))
-        .collect();
-    let mut removed = Vec::new();
-    for l in &all {
-        let Some(h) = &l.header else { continue };
-        let gone = drop.contains(&h.id) || h.base.as_ref().is_some_and(|b| drop.contains(&b.id));
-        if gone {
-            fs::remove_file(dir.join(&l.name))
-                .with_context(|| format!("cannot delete {}", l.name))?;
-            removed.push(l.name.clone());
-        }
-    }
-    Ok(removed)
-}
 
 /// The prefix of a drill dir in the backup dir. The walk of a backup
 /// skips the backup dir, and [`list`] skips names with a dot.

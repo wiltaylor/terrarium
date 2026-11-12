@@ -264,6 +264,7 @@ impl Updater {
     /// Answer one request. An update or a rollback runs in the background.
     pub async fn handle(self: &Arc<Self>, req: Request) -> Response {
         let (kind, target, actor) = match req {
+            Request::Retention { release } => return self.retention(release.as_deref()).await,
             Request::Status => return Response::Status(Box::new(self.status().await)),
             Request::Update { target, actor } => (RunKind::Update, target, actor),
             Request::Rollback { actor } => (RunKind::Rollback, "previous".to_owned(), actor),
@@ -319,6 +320,9 @@ impl Updater {
             started_at: now(),
             ended_at: None,
         };
+        if let Err(e) = self.store.retention_begin(&run) {
+            return Err(Response::Error { message: format!("cannot protect update backups: {e}"), busy: false });
+        }
         *self.running() = Some(run.clone());
         Ok((run, guard))
     }
@@ -364,8 +368,27 @@ impl Updater {
         tracing::info!(run = %id, outcome = done.outcome.as_str(), error = ?done.error, "run ends");
         if let Err(e) = self.store.push(&done) {
             tracing::warn!("cannot write the history: {e}");
+        } else if let Err(e) = self.store.retention_finish(&done) {
+            tracing::warn!("cannot release update retention hold: {e}");
         }
         done
+    }
+
+    async fn retention(&self, release: Option<&str>) -> Response {
+        let Ok(_guard) = self.busy.clone().try_lock_owned() else {
+            return Response::Error { message: "update or rollback in progress: retention deferred".into(), busy: true };
+        };
+        let result = async {
+            let protected = self.store.retention_protected(release).map_err(|e| e.to_string())?;
+            let cur = self.engine.target().await?;
+            let protected = serde_json::to_string(&protected).map_err(|e| e.to_string())?;
+            let out = self.exec_ok(&cur.id, hot_argv("retain-backups", &[&protected])).await?;
+            serde_json::from_str(&out).map_err(|e| format!("bad retention receipt: {e}"))
+        }.await;
+        match result {
+            Ok(detail) => Response::Retained { detail },
+            Err(message) => Response::Error { message, busy: false },
+        }
     }
 
     /// Change the record of the run in progress.

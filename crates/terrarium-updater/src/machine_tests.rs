@@ -468,6 +468,40 @@ fn rig() -> Rig {
 }
 
 #[tokio::test]
+async fn retention_refuses_active_update_even_before_backup_is_recorded() {
+    let r = rig();
+    let (_run, guard) = r.updater.begin(RunKind::Update, "latest", "operator").unwrap();
+    for backup in [None, Some(BACKUP.to_owned())] {
+        r.updater.with_run(|run| run.backup = backup);
+        assert!(matches!(r.updater.handle(Request::Retention { release: None }).await,
+            Response::Error { busy: true, .. }));
+    }
+    drop(guard);
+    // A crashed updater loses its mutex, but not its durable pending hold.
+    assert!(r.store.retention_protected(None).unwrap_err().to_string().contains("unfinished update"));
+    assert!(r.fake.calls().is_empty());
+}
+
+#[test]
+fn retention_protects_previous_and_recovery_after_history_rotation_until_release() {
+    let r = rig();
+    let (mut run, guard) = r.updater.begin(RunKind::Update, "latest", "operator").unwrap();
+    run.outcome = Outcome::RecoveryFailed;
+    run.backup = Some(BACKUP.into());
+    r.store.retention_finish(&run).unwrap();
+    drop(guard);
+    // No history entry: protection is independent of history truncation.
+    assert_eq!(r.store.retention_protected(None).unwrap(), vec![BACKUP]);
+    r.store.set_previous(&Previous { image: old_image(), spec: None, backup: Some("previous.zip".into()) }).unwrap();
+    let protected = r.store.retention_protected(Some(&run.id)).unwrap();
+    assert_eq!(protected, vec!["previous.zip"]);
+    assert!(std::fs::read_to_string(r.store.dir().join("retention-audit.jsonl")).unwrap().contains(&run.id));
+    assert!(r.store.retention_protected(Some("unknown")).is_err());
+    std::fs::write(r.store.dir().join("previous.json"), b"broken").unwrap();
+    assert!(r.store.retention_protected(None).is_err());
+}
+
+#[tokio::test]
 async fn missing_jobs_endpoint_warns_without_exposing_values_and_continues() {
     let r = rig();
     r.fake.fail("drain-jobs");

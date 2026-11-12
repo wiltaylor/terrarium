@@ -15,6 +15,102 @@ import socket
 import sqlite3
 import sys
 import time
+import datetime
+import fcntl
+import re
+import stat
+import zipfile
+
+
+def retain_backups(protected, now=None):
+    """Called only by the updater with its update/rollback lock held.
+
+    The directory flock is also held by every ZIP creator. Never follow a
+    backup symlink, and never derive a deletion path from archive contents.
+    A durable local journal records intent and outcome for each exact file.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    root, _ = paths()
+    directory = Path(os.environ.get("TERRARIUM_BACKUP_DIR", str(root.parent / "backups")))
+    if not directory.exists():
+        return {"removed": []}
+    removed = []
+    lock_fd = os.open(directory / ".retention.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(lock_fd, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            full = []
+            bases = set()
+            names = os.listdir(fd)
+            pattern = r"terrarium-backup-(\d{8}T\d{6}Z)-(full|diff)(?:-[2-9]\d*|-[1-9]\d+)?\.zip"
+            for name in names:
+                match = re.fullmatch(pattern, name)
+                if not match:
+                    continue
+                source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                with os.fdopen(source, "rb") as stream:
+                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                        continue
+                    try:
+                        with zipfile.ZipFile(stream) as archive:
+                            entry = archive.getinfo("backup.json")
+                            if entry.file_size > 65536:
+                                continue
+                            header = json.loads(archive.read(entry))
+                        created = datetime.datetime.fromisoformat(header["created_at"].replace("Z", "+00:00"))
+                        if (header["format"] != "terrarium-backup" or header["version"] != 1
+                                or header["kind"] != match[2] or not created.tzinfo
+                                or created.astimezone(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ") != match[1]):
+                            continue
+                        if match[2] == "diff":
+                            bases.add(header["base"]["name"])
+                        else:
+                            full.append((created, name))
+                    except (ValueError, KeyError, TypeError, zipfile.BadZipFile):
+                        # Unknown archives are never permission to delete.
+                        continue
+            full.sort(reverse=True)
+            keep = {name for _, name in full[:5]} | bases
+            keep.update(Path(path).name for path in protected)
+            days = set()
+            for created, name in full:
+                age = (now.date() - created.astimezone(datetime.timezone.utc).date()).days
+                day = created.astimezone(datetime.timezone.utc).date()
+                if 0 <= age < 14 and day not in days:
+                    keep.add(name)
+                    days.add(day)
+                if age < 0:
+                    keep.add(name)
+            audit_fd = os.open(".retention-audit.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+            with os.fdopen(audit_fd, "a") as audit:
+                for _, name in reversed(full):
+                    if name in keep:
+                        continue
+                    pair = [name + ".hot-swap.sqlite", name]
+                    # Bounded file deletion, never split a pair across passes.
+                    if len(removed) + len(pair) > 32:
+                        break
+                    for item in pair:
+                        try:
+                            metadata = os.stat(item, dir_fd=fd, follow_symlinks=False)
+                        except FileNotFoundError:
+                            continue
+                        if not stat.S_ISREG(metadata.st_mode):
+                            raise RuntimeError("retention refuses non-regular file: " + item)
+                        record = {"name": item, "size": metadata.st_size, "at": now.isoformat(), "actor": "system:updater"}
+                        audit.write(json.dumps({**record, "action": "backup.prune.intent"}) + "\n")
+                        audit.flush()
+                        os.fsync(audit.fileno())
+                        os.unlink(item, dir_fd=fd)
+                        os.fsync(fd)
+                        audit.write(json.dumps({**record, "action": "backup.prune"}) + "\n")
+                        audit.flush()
+                        os.fsync(audit.fileno())
+                        removed.append(record)
+        finally:
+            os.close(fd)
+    return {"removed": removed}
 
 
 def paths():
@@ -126,6 +222,8 @@ def main(argv):
             (release / "image.json").unlink(missing_ok=True)
             select(root, release)
             initialized.touch()
+    elif command == "retain-backups":
+        print(json.dumps(retain_backups(json.loads(argv[1]))))
     elif command == "stage":
         print(stage(root, json.loads(argv[1])).name)
     elif command == "begin":

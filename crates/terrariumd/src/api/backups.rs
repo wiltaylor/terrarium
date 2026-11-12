@@ -54,6 +54,11 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             ],
         )
         .route(
+            "/backups/recovery-release",
+            axum::routing::post(recovery_release),
+            &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)],
+        )
+        .route(
             "/backups/{name}",
             get(download),
             &[(
@@ -195,7 +200,18 @@ async fn create_locked(state: &Shared, body: CreateBody, actor: &str) -> ApiResu
         tracing::warn!("cannot write the audit row of backup.create: {}", e.message);
     }
     tracing::info!(name = %created.name, kind = %created.header.kind, size = created.size, "backup made");
+    backup::retention::after_backup().await;
     Ok(created)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseBody { run: String }
+
+async fn recovery_release(actor: Actor, Json(body): Json<ReleaseBody>) -> ApiResult<Json<serde_json::Value>> {
+    policy::operator_only(&actor, "releasing a recovery backup")?;
+    backup::retention::request(Some(body.run)).await.map(Json)
+        .map_err(ApiError::invalid)
 }
 
 /// `POST /api/backups`: make a backup now.

@@ -734,13 +734,13 @@ pub async fn request(state: &Shared, req: Request, actor: &str) -> ApiResult<Str
     let (action, target) = match &req {
         Request::Update { target, .. } => ("system.update", target.clone()),
         Request::Rollback { .. } => ("system.rollback", "previous".to_owned()),
-        Request::Status => return Err(ApiError::bad_request("not an action")),
+        Request::Status | Request::Retention { .. } => return Err(ApiError::bad_request("not an update action")),
     };
     let answer = ask(state, &req).await.map_err(updater_error)?;
     let (run, ok, error) = match answer {
         Response::Accepted { run } => (Some(run), true, None),
         Response::Error { message, .. } => (None, false, Some(message)),
-        Response::Status(_) => (None, false, Some("unexpected answer".to_owned())),
+        Response::Status(_) | Response::Retained { .. } => (None, false, Some("unexpected answer".to_owned())),
     };
     let detail = json!({"target": target, "run": run, "ok": ok, "error": error,
                         "from": terrarium_version::FULL});

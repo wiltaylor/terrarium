@@ -723,7 +723,7 @@ async fn run_once(
         None,
     )
     .await;
-    let mut report = Report {
+    let report = Report {
         kind,
         name: Some(created.name.clone()),
         verified: true,
@@ -731,30 +731,8 @@ async fn run_once(
         error: None,
         mailed: false,
     };
-    if kind != Kind::Full {
-        return Ok(report);
-    }
-    let (keep, id) = (cfg.keep, verified.id.clone());
-    let removed = tokio::task::spawn_blocking(move || super::prune(&dir, keep, &id))
-        .await
-        .map_err(|e| (kind, format!("the prune task failed: {e}")))?
-        .map_err(|e| (kind, format!("cannot delete the old backups: {e:#}")))?;
-    if !removed.is_empty() {
-        tracing::info!(removed = ?removed, "old backups deleted");
-        record(
-            state,
-            "backup.prune",
-            json!({"removed": removed, "verified": verified.id}),
-            EventDraft::new(
-                EVENT,
-                format!("{} old backups deleted", removed.len()),
-                json!({"change": "pruned", "removed": removed, "verified": verified.id}),
-            ),
-            None,
-        )
-        .await;
-    }
-    report.removed = removed;
+    // The updater is the only deletion owner. create_held already requested
+    // retention. No updater, busy updater, or uncertain recovery means keep all.
     drop(held);
     Ok(report)
 }
