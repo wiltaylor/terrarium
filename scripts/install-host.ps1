@@ -84,7 +84,8 @@ foreach ($path in @($stateParent, $programParent)) { if (Test-Path -LiteralPath 
 Assert-TrustedTree $root
 Assert-TrustedTree $programRoot
 foreach ($path in @($stateParent, $root, $programParent, $programRoot)) { New-TrustedDirectory $path }
-$version = ((& $BinaryPath --version | Select-Object -First 1) -split '\s+')[1]
+$versionOutput = @(& $BinaryPath --version)
+$version = ($versionOutput[0] -split '\s+')[1]
 if ($LASTEXITCODE -ne 0 -or $version -notmatch '^[a-zA-Z0-9.+_-]+$') { throw 'Invalid binary version.' }
 $versions = Join-Path $programRoot 'versions'
 New-TrustedDirectory $versions

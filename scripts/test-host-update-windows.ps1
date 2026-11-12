@@ -20,9 +20,9 @@ function Set-Image([string]$command) {
     if ($changed.ReturnValue -ne 0) { throw 'SCM config failed.' }
 }
 function Version([string]$image) {
-    $text=& $image --version | Select-Object -First 1
+    $output=@(& $image --version)
     if ($LASTEXITCODE -ne 0) { throw 'Fixture version failed.' }
-    return ($text -split '\s+')[1]
+    return ($output[0] -split '\s+')[1]
 }
 function Start-Stub([string]$asset,[string]$version,[string]$mode,[int]$port) {
     $script:log=Join-Path $root ($mode+'.log')
