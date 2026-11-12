@@ -684,7 +684,8 @@ pub fn create(roots: &Roots, opts: &CreateOptions) -> anyhow::Result<Created> {
     })
 }
 
-pub fn retention_lock(dir: &Path) -> anyhow::Result<fs::File> {
+pub fn retention_lock(dir: &Path) -> anyhow::Result<nix::fcntl::Flock<fs::File>> {
+    use nix::fcntl::{Flock, FlockArg};
     use std::os::unix::fs::OpenOptionsExt;
     let file = fs::OpenOptions::new()
         .write(true)
@@ -696,8 +697,7 @@ pub fn retention_lock(dir: &Path) -> anyhow::Result<fs::File> {
     if !file.metadata()?.is_file() {
         bail!("backup lock is not a regular file");
     }
-    file.lock()?;
-    Ok(file)
+    Flock::lock(file, FlockArg::LockExclusive).map_err(|(_, e)| anyhow::Error::from(e))
 }
 
 fn file_name_of(path: &Path) -> String {
