@@ -1197,6 +1197,13 @@ daemon without continuation checkpoints also use kill/requeue.
 
 ## Self-update
 
+Windows and Linux host agents currently authenticate update offers through
+the daemon's pinned-fingerprint TLS connection. They check the downloaded
+asset against the offered checksum and the matching release checksum, but
+do not independently verify a release signature at the host. Release-time
+signing is not host-side signature enforcement. Embedded-key signature
+verification for both platforms is tracked in TER-1016.
+
 A host agent follows the daemon's build. When the daemon gets a new build
 (for example a new release image), each host agent replaces itself at its
 next connect. The code is `crates/terrarium-host/src/selfupdate.rs` (the

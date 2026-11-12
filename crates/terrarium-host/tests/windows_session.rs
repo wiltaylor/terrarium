@@ -180,3 +180,28 @@ async fn bare_program_resolves_from_request_path() {
         .unwrap();
     assert_eq!(result.code, Some(0));
 }
+
+#[tokio::test]
+async fn delayed_stdin_reader_receives_more_than_eight_chunks() {
+    let running = spawn(plan("Start-Sleep -Seconds 2; $data=[Console]::In.ReadToEnd(); [Console]::WriteLine($data.Length); exit 23"), Arc::new(Outbox::new(20, 65536))).unwrap();
+    for _ in 0..64 {
+        running.input.send(SessionInput::Stdin(vec![b'a'; 4096])).unwrap();
+    }
+    running.input.send(SessionInput::Eof).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(20), running.done).await.unwrap().unwrap();
+    assert_eq!(result.code, Some(23));
+    assert_eq!(result.reason, ExitReason::Exited);
+    assert!(String::from_utf8_lossy(&result.stdout).contains("262144"));
+}
+
+#[tokio::test]
+async fn kill_bypasses_full_stdin_queue() {
+    let running = spawn(plan("Start-Sleep -Seconds 120"), Arc::new(Outbox::new(21, 65536))).unwrap();
+    for _ in 0..64 {
+        running.input.send(SessionInput::Stdin(vec![b'a'; 4096])).unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    running.input.send(SessionInput::Kill(ExitReason::Timeout)).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), running.done).await.unwrap().unwrap();
+    assert_eq!(result.reason, ExitReason::Timeout);
+}

@@ -247,7 +247,7 @@ enum PushMsg {
 
 struct Entry {
     outbox: Arc<Outbox>,
-    input: Option<mpsc::UnboundedSender<SessionInput>>,
+    input: Option<crate::session::InputSender>,
     push: Option<mpsc::Sender<PushMsg>>,
     detached_since: Option<Instant>,
 }

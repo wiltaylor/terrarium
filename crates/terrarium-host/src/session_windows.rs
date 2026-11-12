@@ -10,6 +10,22 @@ use crate::protocol::{CHUNK_SIZE, ExitReason, StreamTag};
 use crate::session::{CAPTURE_LIMIT, ExecPlan, ExitInfo, Running, SessionInput, SpawnError};
 use terrarium_winapi::{Child, Limits, Size};
 
+/// Control messages bypass queued stdin, so backpressure never delays stop.
+#[derive(Clone, Debug)]
+pub struct InputSender {
+    data: mpsc::UnboundedSender<SessionInput>,
+    control: mpsc::UnboundedSender<SessionInput>,
+}
+
+impl InputSender {
+    pub fn send(&self, message: SessionInput) -> Result<(), mpsc::error::SendError<SessionInput>> {
+        match message {
+            SessionInput::Stdin(_) | SessionInput::Eof => self.data.send(message),
+            _ => self.control.send(message),
+        }
+    }
+}
+
 /// Convert cores to the machine-wide Job Object hard-cap rate. Round down
 /// rather than grant more CPU than requested. Unsupported limits fail closed.
 pub fn budget(limits: &crate::protocol::Limits) -> Result<Limits, String> {
@@ -110,16 +126,18 @@ pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
         overflow.clone(),
     );
     let error = stderr.map(|file| reader(file, StreamTag::Stderr, outbox, None, overflow.clone()));
-    let (write, writes) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(8);
+    let (write, mut writes) = mpsc::channel::<Vec<u8>>(8);
     let writer = tokio::task::spawn_blocking(move || {
         let mut stdin = stdin;
-        while let Ok(Some(data)) = writes.recv() {
+        while let Some(data) = writes.blocking_recv() {
             if stdin.write_all(&data).and_then(|()| stdin.flush()).is_err() {
                 break;
             }
         }
     });
-    let (input, mut messages) = mpsc::unbounded_channel();
+    let (data, mut messages) = mpsc::unbounded_channel();
+    let (control, mut controls) = mpsc::unbounded_channel();
+    let input = InputSender { data, control };
     let done = tokio::spawn(async move {
         // Declaration order guarantees tree termination before console close,
         // including when this future is cancelled by runtime shutdown.
@@ -139,6 +157,8 @@ pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
         tokio::pin!(deadline);
         let mut tick = tokio::time::interval(Duration::from_millis(20));
         let mut write = Some(write);
+        let mut pending = None;
+        let mut eof = false;
         let mut info = ExitInfo {
             code: None,
             signal: None,
@@ -154,11 +174,26 @@ pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
                 },
                 () = &mut deadline => { info.reason = ExitReason::Timeout; break; }
                 Some(()) = overflow_rx.recv() => { info.reason = ExitReason::OutputOverflow; break; }
-                message = messages.recv() => match message {
-                    Some(SessionInput::Stdin(data)) => {
-                        if write.as_ref().is_some_and(|w| w.try_send(Some(data)).is_err()) { break; }
+                permit = async {
+                    match &write {
+                        Some(write) => write.reserve().await,
+                        None => std::future::pending().await,
                     }
-                    Some(SessionInput::Eof) => { write.take(); }
+                },
+                    if pending.is_some() && write.is_some() => {
+                    match permit {
+                        Ok(permit) => { if let Some(data) = pending.take() { permit.send(data); } }
+                        Err(_) => { pending.take(); write.take(); }
+                    }
+                },
+                message = messages.recv(), if pending.is_none() && !eof => match message {
+                    Some(SessionInput::Stdin(data)) => {
+                        if write.is_some() { pending = Some(data); }
+                    }
+                    Some(SessionInput::Eof) | None => { eof = true; write.take(); }
+                    _ => unreachable!("control messages have a separate queue"),
+                },
+                message = controls.recv() => match message {
                     Some(SessionInput::Resize(size)) => {
                         if let Some(console) = &containment.console {
                             if let Err(e) = console.resize(Size { cols: size.cols, rows: size.rows }) {
@@ -171,6 +206,7 @@ pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
                     }
                     Some(SessionInput::Kill(reason)) => { info.reason = reason; break; }
                     None => break,
+                    _ => unreachable!("stdin has a separate queue"),
                 }
             }
         }

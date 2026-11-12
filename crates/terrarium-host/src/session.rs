@@ -232,9 +232,14 @@ pub struct ExitInfo {
 }
 
 /// A started session.
+#[cfg(unix)]
+pub type InputSender = mpsc::UnboundedSender<SessionInput>;
+#[cfg(windows)]
+pub use crate::session_windows::InputSender;
+
 pub struct Running {
     pub pid: Option<u32>,
-    pub input: mpsc::UnboundedSender<SessionInput>,
+    pub input: InputSender,
     pub done: JoinHandle<ExitInfo>,
 }
 
