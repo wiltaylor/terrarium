@@ -2223,7 +2223,14 @@ async fn start_exec_secrets(
         && let Some(a) = actor.agent()
     {
         let p = crate::git_identity::provenance(state, &a.id).await?;
-        p.identity.env(&mut cmd.env);
+        for key in [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ] {
+            cmd.env.remove(key);
+        }
         cmd.env.insert("TERRARIUM_GIT_TRAILERS".into(), p.trailers);
         cmd.env.remove("TERRARIUM_GIT_TRAILERS_FILE");
     }
@@ -5398,6 +5405,20 @@ if [ -n "${TERRARIUM_COMMIT_HOOK:-}" ] && [ "$action" != not_updated ]; then
   mv -f "$hook_tmp" "$dest/.git/hooks/prepare-commit-msg"
   G -C "$dest" config user.name "$TERRARIUM_COMMIT_NAME"
   G -C "$dest" config user.email "$TERRARIUM_COMMIT_EMAIL"
+  if [ -n "${TERRARIUM_PUSH_HOOK:-}" ]; then
+    push_hook="$dest/.git/hooks/pre-push"
+    if [ -e "$push_hook" ] && ! grep -q '^# Written by terrariumd' "$push_hook"; then
+      [ ! -e "$push_hook.repo" ] && [ ! -L "$push_hook.repo" ] || exit 2
+      mv "$push_hook" "$push_hook.repo"
+    fi
+    push_tmp=$(mktemp "$dest/.git/hooks/.terrarium-push.XXXXXX")
+    printf '%s' "$TERRARIUM_PUSH_HOOK" > "$push_tmp"
+    chmod 755 "$push_tmp"
+    mv -f "$push_tmp" "$push_hook"
+    G -C "$dest" config terrarium.provenance "$TERRARIUM_PROVENANCE"
+    G -C "$dest" config terrarium.provenanceWarnOnly "$TERRARIUM_PROVENANCE_WARN_ONLY"
+    G -C "$dest" config terrarium.repoId "$TERRARIUM_REPO_ID"
+  fi
 fi
 head=$(G -C "$dest" rev-parse -q --verify HEAD || true)
 cur=$(G -C "$dest" symbolic-ref --short -q HEAD || true)
@@ -5508,6 +5529,7 @@ pub async fn checkout_on_target(
     state: &Shared,
     actor: &Actor,
     row: &TargetRow,
+    repo: &crate::store::repos::Repo,
     url: &str,
     dest: &str,
     branch: Option<&str>,
@@ -5524,7 +5546,20 @@ pub async fn checkout_on_target(
     let _root_guard = crate::target_roots::lock_card(state, actor, &row.def.name).await?;
     crate::target_roots::prepare(state, actor, &row.def, Some(dest)).await?;
     if let Some(a) = actor.agent() {
-        let p = crate::git_identity::provenance(state, &a.id).await?;
+        let p = crate::git_identity::for_repo(state, &a.id, repo).await?;
+        cmd.env.insert("TERRARIUM_REPO_ID".into(), repo.id.clone());
+        cmd.env.insert(
+            "TERRARIUM_PUSH_HOOK".into(),
+            crate::git::push_deny_hook(&repo.push_deny),
+        );
+        cmd.env.insert(
+            "TERRARIUM_PROVENANCE".into(),
+            (!p.trailers.is_empty()).to_string(),
+        );
+        cmd.env.insert(
+            "TERRARIUM_PROVENANCE_WARN_ONLY".into(),
+            p.warn_only.to_string(),
+        );
         cmd.env.insert("TERRARIUM_COMMIT_HOOK".into(), p.hook());
         cmd.env
             .insert("TERRARIUM_COMMIT_NAME".into(), p.identity.name);
@@ -5882,6 +5917,8 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         let p = crate::git_identity::Provenance {
+            repo: None,
+            warn_only: false,
             identity: crate::git_identity::Identity::from_env(),
             trailers: "Terrarium-Agent: test/worker\n".into(),
         };

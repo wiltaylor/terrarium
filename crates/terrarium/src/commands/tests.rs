@@ -499,6 +499,45 @@ async fn daemon_and_system() {
 }
 
 /// TER-140: the operator sets the GitHub author gate with `project set`.
+#[tokio::test]
+async fn project_and_repo_git_settings() {
+    ok(
+        true,
+        &["project", "set", "--provenance", "off", "--git-name", "Project Author", "--git-email", "project@example.test"],
+        vec![(200, json!({"provenance": false}))],
+        vec![(Patch, "/api/projects/terra/git", vec![], Some(json!({"provenance": false, "name": "Project Author", "email": "project@example.test"})))],
+    ).await;
+    ok(
+        true,
+        &[
+            "repo",
+            "set",
+            "app",
+            "--provenance",
+            "off",
+            "--git-name",
+            "Repo Author",
+            "--warn-only",
+            "false",
+        ],
+        vec![
+            (200, json!([{"id": "R1", "name": "app"}])),
+            (200, json!({"provenance": false})),
+        ],
+        vec![
+            req(Get, "/api/projects/terra/repos"),
+            (
+                Patch,
+                "/api/repos/R1/git",
+                vec![],
+                Some(json!({"provenance": false, "name": "Repo Author", "warn_only": false})),
+            ),
+        ],
+    )
+    .await;
+}
+
+/// TER-140: the operator sets the GitHub author gate with `project set`.
 /// The list replaces the whole list, `--github-authors-clear` sends `[]`,
 /// the two flags do not combine, and `project show` lists the logins.
 #[tokio::test]

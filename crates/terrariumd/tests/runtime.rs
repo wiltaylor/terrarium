@@ -1180,8 +1180,11 @@ async fn local_repos_bind_into_the_sandbox_of_their_project_only() {
         );
         let line = a.join(" ");
         assert!(!line.contains(&outside.display().to_string()), "{line}");
-        assert_eq!(spec.env["GIT_AUTHOR_NAME"], "Terrarium");
-        assert_eq!(spec.env["GIT_COMMITTER_EMAIL"], "terrarium@localhost");
+        assert!(!spec.env.contains_key("GIT_AUTHOR_NAME"));
+        assert!(!spec.env.contains_key("GIT_COMMITTER_EMAIL"));
+        assert!(spec.env["GIT_CONFIG_GLOBAL"].ends_with(".terrarium-gitconfig"));
+        let config = std::fs::read_to_string(agent.workspace.join(".terrarium-gitconfig")).unwrap();
+        assert!(config.contains("Terrarium") && config.contains("terrarium@localhost"));
     }
 }
 
