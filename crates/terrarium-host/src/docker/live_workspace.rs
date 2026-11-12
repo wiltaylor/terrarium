@@ -77,6 +77,8 @@ fn create_flags(
         || req.image.is_empty()
         || req.image.starts_with('-')
         || !safe_publisher(&registration.publisher)
+        || registration.publisher.rsplit('/').next()
+            != Some(registration.runtime.registration.0.to_string().as_str())
     {
         return Err(Reply::Unauthorized);
     }
@@ -89,7 +91,6 @@ fn create_flags(
         "--security-opt=no-new-privileges:true",
         "--network=none",
         "--ipc=private",
-        "--pid=private",
         "--cgroupns=private",
         "--mount",
     ]
@@ -207,8 +208,8 @@ mod tests {
             image: "synthetic@sha256:abc".into(),
             command: vec!["sleep".into(), "600".into()],
         };
-        let row = json!({"Id":"a".repeat(64), "State":{"Running":true}, "HostConfig":{
-            "Privileged":false, "RestartPolicy":{"Name":"no"}, "NetworkMode":"none", "IpcMode":"private", "PidMode":"private", "CgroupnsMode":"private", "UsernsMode":"", "CapAdd":[], "CapDrop":["ALL"], "SecurityOpt":["no-new-privileges:true"], "Devices":[], "DeviceRequests":[], "Binds":null, "VolumesFrom":null, "Runtime":"runc", "ReadonlyPaths":["/proc/bus","/proc/fs","/proc/irq","/proc/sys","/proc/sysrq-trigger"], "MaskedPaths":["/proc/acpi","/proc/asound","/proc/interrupts","/proc/kcore","/proc/keys","/proc/latency_stats","/proc/timer_list","/proc/timer_stats","/proc/sched_debug","/proc/scsi","/sys/firmware","/sys/devices/virtual/powercap"]
+        let row = json!({"Id":"a".repeat(64), "Config":{"Labels":{"terrarium.workspace.registration":registration.runtime.registration.0.to_string(), "terrarium.workspace.runtime":registration.runtime.incarnation.0.to_string()}}, "State":{"Running":true}, "HostConfig":{
+            "Privileged":false, "RestartPolicy":{"Name":"no"}, "NetworkMode":"none", "IpcMode":"private", "PidMode":"", "CgroupnsMode":"private", "UsernsMode":"", "CapAdd":[], "CapDrop":["ALL"], "SecurityOpt":["no-new-privileges:true"], "Devices":[], "DeviceRequests":[], "Binds":null, "VolumesFrom":null, "Runtime":"runc"
         }, "Mounts":[{"Type":"bind", "Source":registration.publisher, "Destination":"/work", "RW":false, "Propagation":"rslave"}]});
         (registration, req, row)
     }
@@ -416,12 +417,16 @@ pub fn parse_verified_inspect(
     let h = &row["HostConfig"];
     let mounts = row["Mounts"].as_array().ok_or(Reply::Quarantined)?;
     if row["Id"] != registration.runtime.container_id
+        || row["Config"]["Labels"]["terrarium.workspace.registration"]
+            != registration.runtime.registration.0.to_string()
+        || row["Config"]["Labels"]["terrarium.workspace.runtime"]
+            != registration.runtime.incarnation.0.to_string()
         || row["State"]["Running"] != true
         || h["Privileged"] != false
         || h["RestartPolicy"]["Name"] != "no"
         || h["NetworkMode"] != "none"
         || h["IpcMode"] != "private"
-        || h["PidMode"] != "private"
+        || h["PidMode"] != ""
         || h["CgroupnsMode"] != "private"
         || h["UsernsMode"] != ""
         || !empty_list(&h["CapAdd"])
