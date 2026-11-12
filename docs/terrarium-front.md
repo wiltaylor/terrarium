@@ -13,12 +13,12 @@ applied. Clients must not blindly replay non-idempotent requests.
 Only the updater's `front/current-run.json` export directory is mounted read-only,
 never its socket, Docker socket, or main state directory (which contains private
 container settings). The export retains the last run marked ended after it
-finishes. Only known step names and elapsed time are public. An existing browser
+finishes. Only known step names and elapsed time are public. The logged-in
 operator sees sanitized failures, never command output or container settings.
 Detailed diagnostics remain in authenticated updater status. The updater pin
 must be advanced with this release to provide the atomic live progress export.
-An existing browser
-operator session can also see the step list, versions, and errors. The daemon
+An existing browser operator session can also see the step list, versions,
+and errors. The daemon
 exports SHA-256 hashes of validated browser tokens, with their expiration, to
 `state/front/sessions.json` using atomic rename and mode 0600. Logout removes
 all exported tokens of that session. Password changes clear the export. No

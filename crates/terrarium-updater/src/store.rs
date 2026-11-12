@@ -48,12 +48,18 @@ impl Store {
     /// Isolated, read-only maintenance projection. Never export command output,
     /// container settings, backup paths, actor names, or image specs.
     pub fn export_front(&self, run: &Run) -> std::io::Result<()> {
-        let steps: Vec<_> = run.steps.iter().map(|step| serde_json::json!({
-            "name": step.name, "state": step.state, "at": step.at,
-            "detail": if step.state == crate::protocol::StepState::Failed {
-                "Step failed (details available in updater status)"
-            } else { "" },
-        })).collect();
+        let steps: Vec<_> = run
+            .steps
+            .iter()
+            .map(|step| {
+                serde_json::json!({
+                    "name": step.name, "state": step.state, "at": step.at,
+                    "detail": if step.state == crate::protocol::StepState::Failed {
+                        "Step failed (details available in updater status)"
+                    } else { "" },
+                })
+            })
+            .collect();
         let error = run.error.as_ref().map(|_| {
             if run.outcome == crate::protocol::Outcome::RecoveryFailed {
                 "Recovery failed. Do not restart. Manual database verification and restore required."
@@ -61,12 +67,15 @@ impl Store {
                 "Update failed. See authenticated updater status for details."
             }
         });
-        write_json(&self.dir.join("front").join(FRONT_RUN), &serde_json::json!({
-            "started_at": run.started_at, "ended_at": run.ended_at,
-            "outcome": run.outcome, "steps": steps, "error": error,
-            "from": run.from.as_ref().and_then(|image| image.version.as_ref()),
-            "to": run.to.as_ref().and_then(|image| image.version.as_ref()),
-        }))
+        write_json(
+            &self.dir.join("front").join(FRONT_RUN),
+            &serde_json::json!({
+                "started_at": run.started_at, "ended_at": run.ended_at,
+                "outcome": run.outcome, "steps": steps, "error": error,
+                "from": run.from.as_ref().and_then(|image| image.version.as_ref()),
+                "to": run.to.as_ref().and_then(|image| image.version.as_ref()),
+            }),
+        )
     }
 
     pub fn new(dir: impl Into<PathBuf>, keep: usize) -> Self {
@@ -140,7 +149,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let tmp = dir.join(format!(".{name}.tmp"));
-    let mode = if name == IMAGE || name == FRONT_RUN { 0o644 } else { 0o600 };
+    let mode = if name == IMAGE || name == FRONT_RUN {
+        0o644
+    } else {
+        0o600
+    };
     {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
@@ -204,17 +217,31 @@ mod tests {
     fn front_export_excludes_private_state_for_every_outcome() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path(), 2);
-        store.set_previous(&Previous {
-            image: Image::default(), backup: Some("private-backup".into()),
-            spec: Some(serde_json::json!({"PRIVATE_KEY": "private-value"})),
-        }).unwrap();
-        for outcome in [Outcome::Running, Outcome::Succeeded, Outcome::Current,
-            Outcome::Failed, Outcome::RolledBack, Outcome::RollbackFailed, Outcome::RecoveryFailed] {
+        store
+            .set_previous(&Previous {
+                image: Image::default(),
+                backup: Some("private-backup".into()),
+                spec: Some(serde_json::json!({"PRIVATE_KEY": "private-value"})),
+            })
+            .unwrap();
+        for outcome in [
+            Outcome::Running,
+            Outcome::Succeeded,
+            Outcome::Current,
+            Outcome::Failed,
+            Outcome::RolledBack,
+            Outcome::RollbackFailed,
+            Outcome::RecoveryFailed,
+        ] {
             let mut run = run("private-id");
             run.outcome = outcome;
             run.error = Some("private-command-output".into());
             run.backup = Some("private-backup".into());
-            run.from = Some(Image { version: Some("1.0.0".into()), reference: "private-image".into(), ..Image::default() });
+            run.from = Some(Image {
+                version: Some("1.0.0".into()),
+                reference: "private-image".into(),
+                ..Image::default()
+            });
             store.export_front(&run).unwrap();
             let path = dir.path().join("front").join(FRONT_RUN);
             let bytes = std::fs::read(&path).unwrap();
@@ -227,9 +254,13 @@ mod tests {
             if outcome == Outcome::RecoveryFailed {
                 assert!(value["error"].as_str().unwrap().contains("Do not restart"));
             }
-            #[cfg(unix)] {
+            #[cfg(unix)]
+            {
                 use std::os::unix::fs::PermissionsExt;
-                assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o644);
+                assert_eq!(
+                    std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    0o644
+                );
             }
         }
     }

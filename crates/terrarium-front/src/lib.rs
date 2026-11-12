@@ -206,6 +206,7 @@ const PUBLIC_STEPS: &[&str] = &[
     "rollback",
     "pause",
     "snapshot",
+    "snapshot-database",
     "switch",
     "start-daemon",
     "resume",
