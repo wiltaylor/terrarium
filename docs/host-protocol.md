@@ -7,7 +7,7 @@
 `hello.os = "windows"` and this capability before opening or sending a run-as
 password. It rechecks the connected host under the session admission lock.
 
-For a target with `[windows_run_as]`, each `exec` control frame carries
+For a target with `[windows_run_as]`, each `exec`, `cp_push`, or `cp_pull` control frame carries
 `"windows_run_as": {"account": "DOMAIN\\\\NAME", "password": "..."}`.
 The field is omitted for ordinary exec sessions and for older peers. The
 daemon resolves the configured login secret at session start, not at target

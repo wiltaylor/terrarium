@@ -199,7 +199,9 @@ pub fn validate(def: &TargetDef) -> ApiResult<()> {
             || run_as.account.len() > 256
             || run_as.account.chars().any(char::is_control)
         {
-            return Err(ApiError::invalid("windows_run_as.account must be NAME or DOMAIN\\NAME without control characters"));
+            return Err(ApiError::invalid(
+                "windows_run_as.account must be NAME or DOMAIN\\NAME without control characters",
+            ));
         }
         check_name("secret", &run_as.password_secret)?;
     }

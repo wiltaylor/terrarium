@@ -1535,6 +1535,10 @@ impl Client {
     }
 
     async fn start_push(&self, req: CpPush, tx: &Link) {
+        if req.windows_run_as.is_some() {
+            send_error(tx, req.session, ErrorCode::BadRequest, "Windows run-as logon is not supported by this host".into());
+            return;
+        }
         let session = req.session;
         if !self.admit(session, tx) {
             return;
@@ -1610,6 +1614,10 @@ impl Client {
     }
 
     fn start_pull(&self, req: CpPull, tx: &Link) {
+        if req.windows_run_as.is_some() {
+            send_error(tx, req.session, ErrorCode::BadRequest, "Windows run-as logon is not supported by this host".into());
+            return;
+        }
         let session = req.session;
         if !self.admit(session, tx) {
             return;

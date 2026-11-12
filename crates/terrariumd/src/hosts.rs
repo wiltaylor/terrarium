@@ -824,9 +824,10 @@ impl HostRegistry {
 
     pub fn supports_windows_run_as(&self, host: &str) -> bool {
         self.lock().get(host).is_some_and(|e| {
-            e.conn.is_some() && e.info.as_ref().is_some_and(|i| {
-                i.os == "windows" && i.capabilities.windows_run_as
-            })
+            e.conn.is_some()
+                && e.info
+                    .as_ref()
+                    .is_some_and(|i| i.os == "windows" && i.capabilities.windows_run_as)
         })
     }
 
@@ -869,8 +870,17 @@ impl HostRegistry {
         };
         let (tx, rx) = mpsc::unbounded_channel();
         let frame = make(id);
-        if matches!(&frame, DaemonFrame::Exec(req) if req.windows_run_as.is_some())
-            && !e.info.as_ref().is_some_and(|i| i.os == "windows" && i.capabilities.windows_run_as)
+        let has_run_as = match &frame {
+            DaemonFrame::Exec(req) => req.windows_run_as.is_some(),
+            DaemonFrame::CpPush(req) => req.windows_run_as.is_some(),
+            DaemonFrame::CpPull(req) => req.windows_run_as.is_some(),
+            _ => false,
+        };
+        if has_run_as
+            && !e
+                .info
+                .as_ref()
+                .is_some_and(|i| i.os == "windows" && i.capabilities.windows_run_as)
         {
             return Err(HostError::WindowsRunAsUnsupported);
         }

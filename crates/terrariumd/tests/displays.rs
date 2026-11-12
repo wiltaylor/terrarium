@@ -73,6 +73,7 @@ impl Lab {
         let token = r.body["token"].as_str().unwrap().to_owned();
         let mut o = ClientOptions::new(format!("ws://{}/hosts/connect", self.addr), token, name);
         o.capabilities = HostCapabilities {
+            windows_run_as: false,
             gpus: vec![],
             gpu_reservations: false,
             docker: ToolCapability {

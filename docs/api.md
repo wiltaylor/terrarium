@@ -6843,7 +6843,8 @@ on older hosts. Only then does the daemon open the secret, using the target's
 normal project/global secret grant rules. Missing, ungranted, or non-login
 secrets refuse the session. Neither API target responses nor audit records
 contain the password. The host receives it only in that session's `exec`
-frame. This protocol support does not implement Windows logon itself.
+frame (or `cp_push`/`cp_pull` for a transfer). This protocol support does not
+implement Windows logon itself.
 
 A target comes from `targets/<name>.toml` (`source: "file"`), from
 `POST /api/targets` (`source: "api"`), or from a fleet file
