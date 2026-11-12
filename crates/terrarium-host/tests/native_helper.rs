@@ -90,7 +90,11 @@ impl Fake {
 
     async fn with(rights: Vec<Right>, agent_uid: u32, gpu: Result<(), String>) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
+        let root = if nix::unistd::geteuid().is_root() {
+            tempfile::tempdir_in("/run").unwrap()
+        } else {
+            tempfile::tempdir().unwrap()
+        };
         let d = dir.path();
         script(
             &d.join("systemd-run"),

@@ -415,8 +415,11 @@ not run it on a shared target or a DGX Spark without that decision.
    --release --locked -p terrarium-host --bin terrarium-host-helper`.
 
 4. **The workspace**: a shared group for agent-root contents, but protected
-   root-owned base and project directories. Pool users must not own or have
-   write permission on either parent, even with a sticky bit. The helper
+   root-owned base and project directories. Every ancestor from `/` to the
+   workspace base must also be root-owned without group/other write, even
+   with a sticky bit. The helper resolves each component through no-follow
+   directory FDs and rejects intermediate symlinks. Pool users must not own or have
+   write permission on any ancestor. The helper
    refuses unsafe existing parents rather than repairing them in place.
 
    ```sh
@@ -438,8 +441,11 @@ not run it on a shared target or a DGX Spark without that decision.
    **Existing-host migration (including helios)**: schedule a maintenance
    window and stop new native sessions. Wait for live sessions to end and
    let the old daemon clean up ended card-agent roots before replacing the
-   helper. Inventory the exact workspace and project paths and verify that
-   none is a symlink. With administrator approval, change only the base
+   helper. Inventory the exact workspace and project paths and every
+   ancestor from `/`. Verify that none is a symlink and each ancestor is
+   root-owned without group/other write. On helios this includes `/srv`.
+   Obtain administrator approval for any required ancestor migration, or
+   choose a secure workspace location. With administrator approval, change only the base
    and each project parent to root:terrarium-ws, mode 0755. For helios,
    these are `/srv/terrarium-native` and
    `/srv/terrarium-native/terrarium`. Do not recursively chown or chmod

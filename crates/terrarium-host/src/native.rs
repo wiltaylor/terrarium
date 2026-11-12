@@ -268,8 +268,48 @@ pub struct OwnedRoot {
 
 /// No repair of an unsafe existing parent: it may already contain attacker
 /// controlled entries. All child operations are relative to no-follow FDs.
-pub fn provision_root(workspace: &Path, root: &OwnedRoot) -> Result<(), Refusal> {
+fn open_owned_workspace(workspace: &Path) -> Result<std::fs::File, Refusal> {
     use nix::fcntl::{OFlag, open, openat};
+    use nix::sys::stat::Mode;
+    use std::fs::File;
+    use std::path::Component;
+
+    let invalid = |path: &Path, reason: String| Refusal::invalid(format!(
+        "unsafe workspace ancestor {}: {reason}; administrator migration required: every ancestor must be a real root-owned directory without group/other write permission",
+        path.display()
+    ));
+    if !workspace.is_absolute() {
+        return Err(invalid(workspace, "expected an absolute path".into()));
+    }
+    let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let mut path = PathBuf::from("/");
+    let mut fd = File::from(open(path.as_path(), flags, Mode::empty())
+        .map_err(|e| invalid(&path, e.to_string()))?);
+    let check = |fd: &File, path: &Path| -> Result<(), Refusal> {
+        let meta = fd.metadata().map_err(|e| invalid(path, e.to_string()))?;
+        if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+            return Err(invalid(path, "not root-owned or writable by group/others".into()));
+        }
+        Ok(())
+    };
+    check(&fd, &path)?;
+    for part in workspace.components() {
+        match part {
+            Component::RootDir => continue,
+            Component::Normal(name) => {
+                path.push(name);
+                fd = File::from(openat(&fd, name, flags, Mode::empty())
+                    .map_err(|e| invalid(&path, e.to_string()))?);
+                check(&fd, &path)?;
+            }
+            _ => return Err(invalid(&path, "dot or parent component".into())),
+        }
+    }
+    Ok(fd)
+}
+
+pub fn provision_root(workspace: &Path, root: &OwnedRoot) -> Result<(), Refusal> {
+    use nix::fcntl::{OFlag, openat};
     use nix::sys::stat::{Mode, mkdirat};
     use nix::unistd::{Gid, fchown};
     use std::fs::File;
@@ -298,8 +338,7 @@ pub fn provision_root(workspace: &Path, root: &OwnedRoot) -> Result<(), Refusal>
         ));
     }
     let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
-    let base =
-        File::from(open(workspace, flags, Mode::empty()).map_err(|e| invalid(e.to_string()))?);
+    let base = open_owned_workspace(workspace)?;
     let safe_parent = |file: &File| -> Result<(), Refusal> {
         let meta = file.metadata().map_err(|e| invalid(e.to_string()))?;
         if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
@@ -402,7 +441,7 @@ pub fn provision_root(workspace: &Path, root: &OwnedRoot) -> Result<(), Refusal>
 /// The unprivileged clear script leaves the marker. Only the helper may
 /// remove the directory entry from the protected project parent.
 pub fn remove_empty_root(workspace: &Path, root: &OwnedRoot) -> Result<(), Refusal> {
-    use nix::fcntl::{OFlag, open, openat};
+    use nix::fcntl::{OFlag, openat};
     use nix::sys::stat::Mode;
     use nix::unistd::{UnlinkatFlags, unlinkat};
     use std::fs::File;
@@ -412,7 +451,7 @@ pub fn remove_empty_root(workspace: &Path, root: &OwnedRoot) -> Result<(), Refus
     provision_root(workspace, root)?;
     let invalid = |e| Refusal::invalid(format!("cannot remove empty owned root: {e}"));
     let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
-    let base = open(workspace, flags, Mode::empty()).map_err(|e| invalid(e.to_string()))?;
+    let base = open_owned_workspace(workspace)?;
     let project = openat(&base, root.project.as_str(), flags, Mode::empty())
         .map_err(|e| invalid(e.to_string()))?;
     let owned = openat(&project, root.name.as_str(), flags, Mode::empty())
