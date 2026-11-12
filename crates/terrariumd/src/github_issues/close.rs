@@ -35,8 +35,16 @@ pub async fn close_done(
 ) -> ApiResult<Vec<Closure>> {
     match &actor {
         Actor::Operator => (),
-        Actor::Agent(a) if a.project == project && a.roles.contains(&terrarium_core::Role::ProjectAdmin) => (),
-        _ => return Err(ApiError::forbidden("closing GitHub issues requires the operator or this project's project_admin")),
+        Actor::Agent(a)
+            if a.project == project && a.roles.contains(&terrarium_core::Role::ProjectAdmin) =>
+        {
+            ()
+        }
+        _ => {
+            return Err(ApiError::forbidden(
+                "closing GitHub issues requires the operator or this project's project_admin",
+            ));
+        }
     }
     if project != "terrarium" {
         return Err(ApiError::invalid(
