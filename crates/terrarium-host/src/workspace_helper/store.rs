@@ -18,7 +18,6 @@ pub struct Store {
     owner: u32,
 }
 
-
 fn checked(file: &File, owner: u32) -> Result<(), Reply> {
     let m = file.metadata().map_err(|_| Reply::Failed)?;
     if !m.is_file() || m.uid() != owner || m.mode() & 0o077 != 0 || m.nlink() != 1 {

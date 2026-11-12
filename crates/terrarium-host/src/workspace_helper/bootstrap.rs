@@ -32,7 +32,6 @@ pub trait Backend {
     -> Result<(), Reply>;
 }
 
-
 /// Owns the exclusive store lock throughout all external actions and syncs.
 pub struct Bootstrap<B> {
     store: Store,
