@@ -176,7 +176,7 @@ mod tests {
         RuntimeId, RuntimeIdentity,
     };
 
-    fn insert(t: &Tx<'_>) -> ApiResult<Envelope> {
+    fn insert(t: &mut Tx<'_>) -> ApiResult<Envelope> {
         let r = Request {
             version: PROTOCOL_VERSION,
             provenance: Provenance {
