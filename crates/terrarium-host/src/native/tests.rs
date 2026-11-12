@@ -1366,8 +1366,8 @@ fn an_exec_becomes_a_shim_call_with_the_request_in_the_environment() {
     assert_eq!(req.exclusive_gpus, [A]);
     assert_eq!(req.lease.as_deref(), Some("01RES"));
     assert_eq!(
-        req.prepare_root,
-        l.native_gpu.as_ref().unwrap().prepare_root
+        req.prepare_root.as_deref(),
+        l.native_gpu.as_ref().unwrap().prepare_root.as_ref()
     );
     assert_eq!(req.pty, Some((30, 100)));
     assert_eq!(req.cwd, "/work/terra/w-1");

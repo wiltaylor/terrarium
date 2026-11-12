@@ -251,13 +251,13 @@ async fn owned_roots_require_operator_scope_and_cleanup_runs_before_success() {
     }
     let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
     let mut req = f.start("p/a", None, &[], &[], &["true"]);
-    req.prepare_root = Some(native::OwnedRoot {
+    req.prepare_root = Some(Box::new(native::OwnedRoot {
         cleanup: false,
         base: f.root.path().to_str().unwrap().into(),
         project: "p".into(),
         name: "a".into(),
         agent: "id-a".into(),
-    });
+    }));
     let (_, r) = send(&f.socket, &Request::Start(req.clone())).await;
     assert_eq!(code(&r), Some(ErrorKind::Invalid));
     assert!(!f.root.path().join("p").exists());

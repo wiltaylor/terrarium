@@ -225,7 +225,7 @@ pub struct ApplyRequest {
 pub struct StartRequest {
     /// Daemon-owned root provisioning, permitted only in operator scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prepare_root: Option<OwnedRoot>,
+    pub prepare_root: Option<Box<OwnedRoot>>,
     /// The session ID of the host agent.
     pub session: u32,
     /// The target and the holder: the slice is
@@ -2477,7 +2477,7 @@ pub fn start_request(
         })
     });
     StartRequest {
-        prepare_root: native.prepare_root,
+        prepare_root: native.prepare_root.map(Box::new),
         session,
         target: l.map(|l| l.target.clone()).unwrap_or_default(),
         holder: l
