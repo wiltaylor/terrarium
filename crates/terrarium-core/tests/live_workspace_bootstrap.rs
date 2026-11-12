@@ -27,7 +27,7 @@ fn request() -> Request {
 fn normal_journal_requires_exact_committed_bootstrap_ownership() {
     let r = request();
     let all = steps(&r);
-    let Step::ReceiverVerified(runtime) = &all[4] else {
+    let Step::ReceiverVerified(runtime) = &all[5] else {
         panic!("fixture")
     };
     let normal = terrarium_core::live_workspace::Journal {
@@ -80,6 +80,7 @@ fn steps(r: &Request) -> Vec<Step> {
         }),
         Step::CreatePending,
         Step::ContainerBound("a".repeat(64)),
+        Step::StartPending("a".repeat(64)),
         Step::ReceiverVerified(RuntimeIdentity {
             registration: r.registration,
             incarnation: r.incarnation,
@@ -102,6 +103,30 @@ fn missing_and_zero_configuration_digests_are_not_bootstrap_requests() {
     let mut zero = r;
     zero.configuration = [0; 32];
     assert!(Journal::new(zero).is_err());
+}
+
+#[test]
+fn old_missing_and_unknown_journal_versions_are_refused() {
+    let value = serde_json::to_value(Journal::new(request()).unwrap()).unwrap();
+    for version in [0, 1, 3, u32::MAX] {
+        let mut changed = value.clone();
+        changed["journal_version"] = version.into();
+        assert!(serde_json::from_value::<Journal>(changed).is_err());
+    }
+    let mut missing = value;
+    missing.as_object_mut().unwrap().remove("journal_version");
+    assert!(serde_json::from_value::<Journal>(missing).is_err());
+}
+
+#[test]
+fn start_intent_is_bound_to_the_already_recorded_id() {
+    let r = request();
+    let mut journal = Journal::new(r.clone()).unwrap();
+    for step in &steps(&r)[1..4] {
+        journal.advance(step.clone()).unwrap();
+    }
+    assert!(journal.advance(Step::StartPending("b".repeat(64))).is_err());
+    assert!(journal.advance(Step::StartPending("a".repeat(64))).is_ok());
 }
 
 #[test]
@@ -146,10 +171,10 @@ fn immutable_request_and_bound_runtime_cannot_be_substituted() {
     let r = request();
     let all = steps(&r);
     let mut j = Journal::new(r.clone()).unwrap();
-    for step in &all[1..4] {
+    for step in &all[1..5] {
         j.advance(step.clone()).unwrap();
     }
-    let Step::ReceiverVerified(runtime) = &all[4] else {
+    let Step::ReceiverVerified(runtime) = &all[5] else {
         panic!()
     };
     for field in 0..4 {
@@ -162,7 +187,7 @@ fn immutable_request_and_bound_runtime_cannot_be_substituted() {
         }
         assert!(j.advance(Step::ReceiverVerified(wrong)).is_err());
     }
-    j.advance(all[4].clone()).unwrap();
+    j.advance(all[5].clone()).unwrap();
     j.advance(Step::Committed).unwrap();
     assert!(j.retry(&r).is_ok());
     for field in 0..8 {
@@ -256,7 +281,13 @@ fn scaffold_aliases_zero_identity_and_short_container_ids_are_refused() {
     let mut j = Journal::new(r).unwrap();
     j.advance(all[1].clone()).unwrap();
     j.advance(Step::CreatePending).unwrap();
-    for id in ["", "name", &"g".repeat(64), &"a".repeat(63)] {
+    for id in [
+        "",
+        "name",
+        &"g".repeat(64),
+        &"a".repeat(63),
+        &"A".repeat(64),
+    ] {
         assert!(j.advance(Step::ContainerBound(id.into())).is_err());
     }
 }

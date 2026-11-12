@@ -83,7 +83,8 @@ impl<B: Backend> Bootstrap<B> {
     }
 
     /// No automatic recovery adoption is implemented. A committed duplicate
-    /// returns only its stored identity, never invokes the backend again.
+    /// reports historical completion only, not current runtime admission.
+    /// Configuration is rechecked, but no create/start action is repeated.
     pub fn retry(&mut self, request: &Request) -> Result<(), Reply> {
         if self.fenced {
             return Err(Reply::Quarantined);
@@ -145,6 +146,7 @@ impl<B: Backend> Bootstrap<B> {
             self.advance(&mut journal, Step::CreatePending)?;
             let container = self.backend.create_receiver(&request, &scaffold)?;
             self.advance(&mut journal, Step::ContainerBound(container.clone()))?;
+            self.advance(&mut journal, Step::StartPending(container.clone()))?;
             let runtime = self
                 .backend
                 .start_and_verify(&request, &scaffold, &container)?;
@@ -177,6 +179,7 @@ mod tests {
         configuration_changed: bool,
         post_effect: bool,
         effects: usize,
+        journal_path: Option<std::path::PathBuf>,
     }
 
     impl Fake {
@@ -187,6 +190,7 @@ mod tests {
                 configuration_changed: false,
                 post_effect: false,
                 effects: 0,
+                journal_path: None,
             }
         }
         fn action(&mut self) -> Result<(), Reply> {
@@ -240,6 +244,14 @@ mod tests {
             _: &Scaffold,
             id: &str,
         ) -> Result<RuntimeIdentity, Reply> {
+            if let Some(path) = &self.journal_path {
+                let disk: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                assert_eq!(
+                    disk["steps"].as_array().unwrap().last().unwrap(),
+                    &serde_json::json!({"start_pending": id})
+                );
+            }
             self.action()?;
             Ok(RuntimeIdentity {
                 registration: r.registration,
@@ -271,12 +283,22 @@ mod tests {
     }
 
     #[test]
+    fn start_observes_the_exact_durable_start_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fake = Fake::fresh(0);
+        fake.journal_path = Some(dir.path().join("bootstrap.json"));
+        let mut bootstrap = Bootstrap::new(Store::fixture(dir.path()).unwrap(), fake);
+        bootstrap.create(request()).unwrap();
+        assert_eq!(bootstrap.backend.calls, 4);
+    }
+
+    #[test]
     fn every_persistence_boundary_refuses_replay_after_error_or_process_restart() {
         // Seven boundaries for each of intent, scaffold, create-pending,
-        // container binding, receiver verification and final commit. These
+        // container binding, start intent, receiver verification and final commit. These
         // are process interruptions / I/O errors, not power-loss durability proof.
         for crash in [false, true] {
-            for boundary in 1..=42 {
+            for boundary in 1..=49 {
                 let dir = tempfile::tempdir().unwrap();
                 let store = Store::fixture(dir.path()).unwrap();
                 store.fault.set(Some((boundary, crash)));
@@ -285,6 +307,12 @@ mod tests {
                 let outcome =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.create(r.clone())));
                 assert_eq!(outcome.is_err(), crash, "boundary {boundary}");
+                if boundary <= 35 {
+                    assert!(
+                        b.backend.calls <= 2,
+                        "start before synced StartPending: {boundary}"
+                    );
+                }
                 if !crash {
                     // Initial intent errors propagate their I/O failure.
                     // The instance is fenced before that write regardless.

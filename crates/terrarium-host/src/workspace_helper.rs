@@ -4,6 +4,7 @@
 //! B4 must admit and serialize daemon operations before forwarding them here.
 //! No kernel backend is selected by this module and hello never enables B4.
 
+pub mod baseline;
 pub mod bootstrap;
 mod confinement;
 pub mod kernel;

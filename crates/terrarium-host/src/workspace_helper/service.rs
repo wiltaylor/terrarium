@@ -399,6 +399,7 @@ mod tests {
                 }),
                 Step::CreatePending,
                 Step::ContainerBound(runtime.container_id.clone()),
+                Step::StartPending(runtime.container_id.clone()),
                 Step::ReceiverVerified(runtime),
                 Step::Committed,
             ] {
