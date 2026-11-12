@@ -142,10 +142,9 @@ pub fn startup(binary: &Path) -> io::Result<bool> {
         if transaction.previous.parent().and_then(Path::parent)
             == binary.parent().and_then(Path::parent)
             && transaction.previous != binary
+            && let Some(directory) = transaction.previous.parent()
         {
-            if let Some(directory) = transaction.previous.parent() {
-                std::fs::remove_dir_all(directory)?;
-            }
+            std::fs::remove_dir_all(directory)?;
         }
         std::fs::remove_file(path)?;
         Ok(false)

@@ -196,10 +196,9 @@ pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
                 },
                 message = controls.recv() => match message {
                     Some(SessionInput::Resize(size)) => {
-                        if let Some(console) = &containment.console {
-                            if let Err(e) = console.resize(Size { cols: size.cols, rows: size.rows }) {
-                                tracing::warn!(error = %e, "Windows terminal resize failed");
-                            }
+                        if let Some(console) = &containment.console
+                            && let Err(e) = console.resize(Size { cols: size.cols, rows: size.rows }) {
+                            tracing::warn!(error = %e, "Windows terminal resize failed");
                         }
                     }
                     Some(SessionInput::Signal(signal)) => {

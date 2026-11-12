@@ -1388,7 +1388,7 @@ impl Client {
                 job
             };
             plan.exec.windows_holder = Some(job);
-            return Ok(plan);
+            Ok(plan)
         }
         #[cfg(unix)]
         {
