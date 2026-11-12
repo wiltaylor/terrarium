@@ -7,6 +7,8 @@ import foundry from "../assets/providers/foundry.svg";
 import gcp from "../assets/providers/gcp.svg";
 import githubDark from "../assets/providers/github-dark.svg";
 import githubLight from "../assets/providers/github-light.svg";
+import litellmDark from "../assets/providers/litellm-dark.svg";
+import litellmLight from "../assets/providers/litellm-light.svg";
 import moonshotDark from "../assets/providers/moonshot-dark.svg";
 import moonshotLight from "../assets/providers/moonshot-light.svg";
 import openaiDark from "../assets/providers/openai-dark.svg";
@@ -31,6 +33,7 @@ const both = (src: string): ProviderMark => ({ light: src, dark: src });
  * letter tile. bedrock, gcp and foundry are the cloud kinds of TER-630.
  */
 export const PROVIDER_MARKS: Record<string, ProviderMark> = {
+  litellm: { light: litellmLight, dark: litellmDark },
   anthropic: both(anthropic),
   openai: { light: openaiLight, dark: openaiDark },
   zai: both(zai),
