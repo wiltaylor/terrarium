@@ -195,7 +195,10 @@ async fn parked_turns_and_explicit_starts_refuse_visibly() {
     let before = sessions(&td, &eph).await.len();
     for raw in [false, true] {
         let r = td
-            .post(&format!("/api/agents/{eph}/send"), json!({"text": "ping", "raw": raw}))
+            .post(
+                &format!("/api/agents/{eph}/send"),
+                json!({"text": "ping", "raw": raw}),
+            )
             .await;
         assert_eq!(r.status, 409, "{}", r.body);
         let message = r.body["error"]["message"].as_str().unwrap();
@@ -210,15 +213,26 @@ async fn parked_turns_and_explicit_starts_refuse_visibly() {
     // System mail follows the park rule too, even after an explicit
     // restart attempt. It remains queued rather than starting a turn.
     let key = eph.clone();
-    state(&td).db.write("system", move |t| {
-        use terrariumd::store::mail::{self, Address, Outgoing};
-        let to = mail::resolve(t, &key, None)?;
-        mail::send(t, Outgoing {
-            from: &Address::System, to: &to, subject: "system notice",
-            body: "wait for the card", thread: None, in_reply_to: None,
-        })?;
-        Ok(())
-    }).await.unwrap();
+    state(&td)
+        .db
+        .write("system", move |t| {
+            use terrariumd::store::mail::{self, Address, Outgoing};
+            let to = mail::resolve(t, &key, None)?;
+            mail::send(
+                t,
+                Outgoing {
+                    from: &Address::System,
+                    to: &to,
+                    subject: "system notice",
+                    body: "wait for the card",
+                    thread: None,
+                    in_reply_to: None,
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     let a = agent(&td, &eph).await;
     assert_eq!(a["status"], "stopped");
@@ -241,16 +255,21 @@ async fn bound_close_reports_each_queued_turn_and_notifies_operator() {
         parked(&td, &eph).await;
         // Legacy queued work, or work accepted before the card parked.
         let key = eph.clone();
-        state(&td).db.write("system", move |t| {
-            use terrariumd::store::agents::queue_turn;
-            queue_turn(t, &key, "[User] ping")?;
-            queue_turn(t, &key, "[User] second ping")?;
-            queue_turn(t, &key, "[System:schedule check] scheduled work")?;
-            Ok(())
-        }).await.unwrap();
+        state(&td)
+            .db
+            .write("system", move |t| {
+                use terrariumd::store::agents::queue_turn;
+                queue_turn(t, &key, "[User] ping")?;
+                queue_turn(t, &key, "[User] second ping")?;
+                queue_turn(t, &key, "[System:schedule check] scheduled work")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         assert_eq!(agent(&td, &eph).await["queued"], 3);
         terrariumd::spawn::close(&state(&td), &eph, outcome, None, false)
-            .await.unwrap();
+            .await
+            .unwrap();
         let key = eph.clone();
         let (events, notices, remaining) = state(&td).db.read(move |db| {
             let mut stmt = db.prepare("SELECT payload FROM events WHERE agent_id = ?1 AND kind = 'agent.turn_dropped' ORDER BY seq")?;
@@ -261,11 +280,18 @@ async fn bound_close_reports_each_queued_turn_and_notifies_operator() {
             Ok((rows, notices, remaining))
         }).await.unwrap();
         assert_eq!(events.len(), 3, "{events:?}");
-        let events: Vec<Value> = events.iter().map(|e| serde_json::from_str(e).unwrap()).collect();
+        let events: Vec<Value> = events
+            .iter()
+            .map(|e| serde_json::from_str(e).unwrap())
+            .collect();
         assert_eq!(events[0]["source"]["source"], "user");
         assert_eq!(events[1]["source"]["source"], "user");
         assert_eq!(events[2]["source"]["source"], "system");
-        assert!(events.iter().all(|e| e["outcome"] == outcome && e["queue"] == "store"));
+        assert!(
+            events
+                .iter()
+                .all(|e| e["outcome"] == outcome && e["queue"] == "store")
+        );
         assert_eq!(notices, 2);
         assert_eq!(remaining, 0);
     }
