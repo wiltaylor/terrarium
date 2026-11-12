@@ -615,7 +615,10 @@ async fn deliver_selected_turns(state: &Shared, id: AgentId, operator_only: bool
     let lock = state.lifecycle.turn_lock(id);
     for t in turns {
         if operator_only
-            && !matches!(terrarium_core::turn_tag::parse_first(&t.text), Some(terrarium_core::turn_tag::PartSource::User))
+            && !matches!(
+                terrarium_core::turn_tag::parse_first(&t.text),
+                Some(terrarium_core::turn_tag::PartSource::User)
+            )
         {
             continue;
         }

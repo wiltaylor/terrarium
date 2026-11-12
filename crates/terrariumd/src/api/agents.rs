@@ -648,7 +648,9 @@ pub(super) async fn start(
     policy::admin_project(&actor, &a.agent.project, "starting an agent")?;
     refuse_paused(&a, "start")?;
     let parked = explicit_start_park(&state, &actor, &a).await?;
-    let _wake = parked.as_ref().and_then(|_| crate::lifecycle::WakeGuard::take(&state.lifecycle, agent_id(&a)));
+    let _wake = parked
+        .as_ref()
+        .and_then(|_| crate::lifecycle::WakeGuard::take(&state.lifecycle, agent_id(&a)));
     refuse_disabled(&state, &a).await?;
     if state
         .supervisor
@@ -720,9 +722,15 @@ async fn refuse_disabled(state: &Shared, a: &AgentView) -> ApiResult<()> {
 }
 
 /// The operator may deliberately run one recovery turn without unparking.
-async fn explicit_start_park(state: &Shared, actor: &Actor, a: &AgentView) -> ApiResult<Option<String>> {
+async fn explicit_start_park(
+    state: &Shared,
+    actor: &Actor,
+    a: &AgentView,
+) -> ApiResult<Option<String>> {
     let parked = parked_reason(state, a).await?;
-    if !actor.is_operator() && let Some(why) = &parked {
+    if !actor.is_operator()
+        && let Some(why) = &parked
+    {
         return Err(ApiError::conflict(why.clone()));
     }
     Ok(parked)
@@ -745,8 +753,12 @@ async fn parked_reason(state: &Shared, a: &AgentView) -> ApiResult<Option<String
                 && sp.parked_at.is_some()
             {
                 if let Some(card) = sp.bound.as_deref().and_then(|b| b.strip_prefix("card:")) {
-                    let column = sp.park_reason.as_deref().unwrap_or("waiting on others")
-                        .strip_prefix("card in ").unwrap_or("a waiting column");
+                    let column = sp
+                        .park_reason
+                        .as_deref()
+                        .unwrap_or("waiting on others")
+                        .strip_prefix("card in ")
+                        .unwrap_or("a waiting column");
                     return Ok(Some(format!("parked: card {card} is in {column}")));
                 }
                 return Ok(Some(format!(
@@ -1073,7 +1085,9 @@ pub(super) async fn restart(
     policy::admin_project(&actor, &a.agent.project, "restarting an agent")?;
     refuse_paused(&a, "restart")?;
     let parked = explicit_start_park(&state, &actor, &a).await?;
-    let _wake = parked.as_ref().and_then(|_| crate::lifecycle::WakeGuard::take(&state.lifecycle, agent_id(&a)));
+    let _wake = parked
+        .as_ref()
+        .and_then(|_| crate::lifecycle::WakeGuard::take(&state.lifecycle, agent_id(&a)));
     refuse_disabled(&state, &a).await?;
     let live = state
         .supervisor

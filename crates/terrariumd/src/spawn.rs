@@ -1115,7 +1115,10 @@ pub async fn close(
                     t.emit(
                         EventDraft::new(
                             "agent.turn_dropped",
-                            format!("{}: queued turn {turn_id} dropped on close ({outcome})", sp.name),
+                            format!(
+                                "{}: queued turn {turn_id} dropped on close ({outcome})",
+                                sp.name
+                            ),
                             json!({"turn_id": turn_id, "queue": queue, "source": source,
                                    "bound": sp.bound, "outcome": outcome}),
                         )
@@ -1128,11 +1131,16 @@ pub async fn close(
                             mail::Outgoing {
                                 from: &mail::Address::System,
                                 to: &mail::Address::Operator,
-                                subject: &format!("{}: queued operator turn not delivered", sp.name),
+                                subject: &format!(
+                                    "{}: queued operator turn not delivered",
+                                    sp.name
+                                ),
                                 body: &format!(
                                     "Agent {}/{} ended ({outcome}). Your queued turn {turn_id} \
                                      was not delivered and has been removed. Binding: {}.",
-                                    sp.project, sp.name, sp.bound.as_deref().unwrap_or_default()
+                                    sp.project,
+                                    sp.name,
+                                    sp.bound.as_deref().unwrap_or_default()
                                 ),
                                 thread: None,
                                 in_reply_to: None,

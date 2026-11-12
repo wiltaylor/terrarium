@@ -202,7 +202,10 @@ async fn parked_turns_and_agent_starts_refuse_visibly() {
             .await;
         assert_eq!(r.status, 409, "{}", r.body);
         let message = r.body["error"]["message"].as_str().unwrap();
-        assert!(message.contains(&format!("parked: card {c} is in review")), "{message}");
+        assert!(
+            message.contains(&format!("parked: card {c} is in review")),
+            "{message}"
+        );
     }
     for verb in ["start", "restart"] {
         td.post_as(&lead, &format!("/api/agents/{eph}/{verb}"), json!({}))
@@ -253,20 +256,34 @@ async fn operator_recovery_delivers_waiting_user_turns_without_unparking() {
         mv(&td, &c, "review", None).await;
         parked(&td, &eph).await;
         let key = eph.clone();
-        state(&td).db.write("system", move |t| {
-            use terrariumd::store::agents::queue_turn;
-            queue_turn(t, &key, "[System:card P-1] return work must wait")?;
-            queue_turn(t, &key, "[User] recovery ping")?;
-            queue_turn(t, &key, "[User] second recovery ping")?;
-            Ok(())
-        }).await.unwrap();
-        let r = td.post(&format!("/api/agents/{eph}/{verb}"), json!({})).await;
+        state(&td)
+            .db
+            .write("system", move |t| {
+                use terrariumd::store::agents::queue_turn;
+                queue_turn(t, &key, "[System:card P-1] return work must wait")?;
+                queue_turn(t, &key, "[User] recovery ping")?;
+                queue_turn(t, &key, "[User] second recovery ping")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let r = td
+            .post(&format!("/api/agents/{eph}/{verb}"), json!({}))
+            .await;
         assert_eq!(r.status, 202, "{}", r.body);
-        assert!(r.body["parked"].as_str().unwrap().contains(&c), "{}", r.body);
+        assert!(
+            r.body["parked"].as_str().unwrap().contains(&c),
+            "{}",
+            r.body
+        );
         let aid: AgentId = eph.parse().unwrap();
         until("operator recovery turns", || async {
-            td.sup.prompts(aid).iter().any(|p| p == "[User] second recovery ping")
-        }).await;
+            td.sup
+                .prompts(aid)
+                .iter()
+                .any(|p| p == "[User] second recovery ping")
+        })
+        .await;
         let prompts = td.sup.prompts(aid);
         assert!(prompts.iter().any(|p| p == "[User] recovery ping"));
         assert!(!prompts.iter().any(|p| p.contains("return work must wait")));
