@@ -51,6 +51,18 @@ try {
         assert.equal(state.behavior, "contain");
         if (width > 760) assert.equal(state.gutter, "stable");
         const drawer = page.locator(".drawer");
+        if (width > 760) {
+          await drawer.evaluate(el => { el.scrollTop = 0; });
+          const box = await drawer.boundingBox();
+          const gutter = await drawer.evaluate(el => el.offsetWidth - el.clientWidth - 1);
+          assert.ok(gutter > 0, "browser must expose a draggable classic scrollbar");
+          await page.mouse.move(box.x + box.width - gutter / 2, box.y + 30);
+          await page.mouse.down();
+          await page.mouse.move(box.x + box.width - gutter / 2, box.y + 300, { steps: 20 });
+          await page.mouse.up();
+          assert.ok(await drawer.evaluate(el => el.scrollTop > 0), "scrollbar thumb drag scrolls the drawer");
+          assert.equal(await page.evaluate(() => window.scrollY), state.y);
+        }
         await drawer.hover();
         await page.mouse.wheel(0, 600);
         await page.waitForTimeout(200);
@@ -60,11 +72,11 @@ try {
         await page.waitForTimeout(200);
         assert.equal(await page.evaluate(() => window.scrollY), state.y);
         await page.screenshot({ path: `${output}/${key}-after.png` });
-        await page.locator(".drawer-scrim").click({ position: { x: 2, y: 2 }, force: true });
+        await page.keyboard.press("Escape");
         await page.waitForTimeout(100);
         assert.equal(await drawer.count(), 0);
         assert.equal(await page.evaluate(() => window.scrollY), state.y);
-        await page.mouse.move(800, 500);
+        await page.mouse.move(width / 2, 500);
         await page.mouse.wheel(0, 300);
         await page.waitForTimeout(200);
         assert.ok(await page.evaluate(() => window.scrollY) > state.y);
