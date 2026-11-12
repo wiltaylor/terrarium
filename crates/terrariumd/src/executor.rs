@@ -1942,10 +1942,16 @@ pub(crate) fn start_cmd_locked(
             let host = host_of(def)?;
             let caps = ex.hosts.capabilities(host);
             if cmd.prepare_root.is_some()
-                && caps.as_ref().and_then(|c| c.native_gpu.as_ref())
-                    .is_none_or(|n| !n.enforced || n.version < terrarium_host::native::PROTOCOL_VERSION)
+                && caps
+                    .as_ref()
+                    .and_then(|c| c.native_gpu.as_ref())
+                    .is_none_or(|n| {
+                        !n.enforced || n.version < terrarium_host::native::PROTOCOL_VERSION
+                    })
             {
-                return Err(ApiError::invalid("owned native roots require matching host agent and helper protocol 2; install both before retrying"));
+                return Err(ApiError::invalid(
+                    "owned native roots require matching host agent and helper protocol 2; install both before retrying",
+                ));
             }
             let limits = match crate::reservations::exec_budget(state, def, cmd.holder.as_deref())?
             {

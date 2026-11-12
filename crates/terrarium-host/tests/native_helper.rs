@@ -246,7 +246,9 @@ fn code(reply: &Reply) -> Option<ErrorKind> {
 
 #[tokio::test]
 async fn owned_roots_require_operator_scope_and_cleanup_runs_before_success() {
-    if !nix::unistd::geteuid().is_root() { return; }
+    if !nix::unistd::geteuid().is_root() {
+        return;
+    }
     let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
     let mut req = f.start("p/a", None, &[], &[], &["true"]);
     req.prepare_root = Some(native::OwnedRoot {
@@ -273,7 +275,10 @@ async fn owned_roots_require_operator_scope_and_cleanup_runs_before_success() {
             }
         };
         assert_eq!(exit.code, Some(0));
-        assert_eq!(f.root.path().join("p/a/.terrarium-owner").exists(), !cleanup);
+        assert_eq!(
+            f.root.path().join("p/a/.terrarium-owner").exists(),
+            !cleanup
+        );
         f.wait_idle().await;
     }
     assert!(f.root.path().join("p").is_dir());
