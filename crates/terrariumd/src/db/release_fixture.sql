@@ -409,3 +409,7 @@ UPDATE thread_cards SET project = 'projects_name_2' WHERE card = 'cards_id_2';
 INSERT INTO thread_cards(thread, project, card, linked_by, linked_at) VALUES
 ('threads_id_1', 'projects_name_1', 'fixture-card-3', 'operator', '2026-01-01T00:00:00Z'),
 ('threads_id_1', 'projects_name_1', 'fixture-card-4', 'operator', '2026-01-01T00:00:00Z');
+-- The archive updates above fire card_dispatch_retry_cleanup. Seed these
+-- transient retry rows last so every baseline table remains populated.
+INSERT INTO card_dispatch_retries(card, failures, retry_at) VALUES
+('cards_id_1', 1, 1), ('cards_id_2', 2, 2);
