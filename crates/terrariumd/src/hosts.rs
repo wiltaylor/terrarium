@@ -80,6 +80,10 @@ const MAX_MESSAGE: usize = 2 * 1024 * 1024;
 const JOURNAL_RETRY_DEADLINE: Duration = Duration::from_secs(30);
 const JOURNAL_RETRY_EVENTS: usize = 64;
 const JOURNAL_RETRY_BYTES: usize = 4 * 1024 * 1024;
+// Drain retained chunks without inserting gaps larger than the exec
+// redactor's idle flush (200 ms). Sustained contention still backs off.
+const JOURNAL_RETRY_TICK: Duration = Duration::from_millis(10);
+const JOURNAL_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 
 // Metadata calls do not have a host event to retain. Retry the whole
 // operation after its registry guard has gone, never sleeping under it.
@@ -122,8 +126,8 @@ impl PendingJournal {
             events: VecDeque::new(),
             bytes: 0,
             deadline: now + JOURNAL_RETRY_DEADLINE,
-            next: now + Duration::from_millis(250),
-            backoff: Duration::from_millis(250),
+            next: now + JOURNAL_RETRY_TICK,
+            backoff: JOURNAL_RETRY_TICK,
             exhausted: false,
         }
     }
@@ -1104,14 +1108,14 @@ impl HostRegistry {
         }
         resume.sort_by_key(|r| r.session);
         for id in lost {
-            if !self.deliver(
+            if !self.try_deliver(
                 &row.name,
                 e,
                 id,
-                SessionEvent::Lost {
+                &SessionEvent::Lost {
                     message: "the host agent no longer holds the session".into(),
                 },
-            ) {
+            )? {
                 return Err(ApiError::internal("cannot persist missing host session"));
             }
         }
@@ -1260,21 +1264,37 @@ impl HostRegistry {
             }
             return false;
         }
-        self.deliver_committed(host, entry, id, event)
+        match self.try_deliver(host, entry, id, &event) {
+            Ok(committed) => committed,
+            Err(error) => {
+                if error.code == Code::ResourceBusy {
+                    let pending = entry.pending_journal.entry(id).or_insert_with(PendingJournal::new);
+                    if pending.push(event) {
+                        warn!(host, session = id, "host journal busy; retaining event without acknowledgement");
+                        return false;
+                    }
+                }
+                if let Some(c) = &entry.conn {
+                    let _ = c.tx.send(Outgoing::Close(None));
+                }
+                warn!(host, session = id, "host journal commit failed; closing without acknowledgement");
+                false
+            }
+        }
     }
 
-    fn deliver_committed(
+    fn try_deliver(
         &self,
         host: &str,
         entry: &mut Entry,
         id: SessionId,
-        event: SessionEvent,
-    ) -> bool {
+        event: &SessionEvent,
+    ) -> crate::error::ApiResult<bool> {
         let Some(s) = entry.sessions.get_mut(&id) else {
-            return false;
+            return Ok(false);
         };
         if s.terminal {
-            return false;
+            return Ok(false);
         }
         let old = (s.received, s.held, s.events, s.terminal, s.ended_at);
         s.events += 1;
@@ -1285,58 +1305,36 @@ impl HostRegistry {
         if matches!(event, SessionEvent::Started { .. }) {
             s.held = true;
         }
-        if let SessionEvent::Data { bytes, .. } = &event {
+        if let SessionEvent::Data { bytes, .. } = event {
             s.received += bytes.len() as u64;
         }
         let output = matches!(
-            &event,
+            event,
             SessionEvent::Data {
                 stream: StreamTag::Stdout | StreamTag::Stderr,
                 ..
             }
         );
-        if output && let SessionEvent::Data { bytes, .. } = &event {
+        if output && let SessionEvent::Data { bytes, .. } = event {
             s.output_events.push_back((s.events, bytes.len()));
         }
-        if let Err(error) = self.persist(host, entry, Some((id, &event))) {
+        if let Err(error) = self.persist(host, entry, Some((id, event))) {
             let Some(s) = entry.sessions.get_mut(&id) else {
-                return false;
+                return Err(error);
             };
             (s.received, s.held, s.events, s.terminal, s.ended_at) = old;
             if output {
                 s.output_events.pop_back();
             }
-            if error.code == Code::ResourceBusy {
-                let pending = entry
-                    .pending_journal
-                    .entry(id)
-                    .or_insert_with(PendingJournal::new);
-                if pending.push(event) {
-                    warn!(
-                        host,
-                        session = id,
-                        "host journal busy; retaining event without acknowledgement"
-                    );
-                    return false;
-                }
-            }
-            if let Some(c) = &entry.conn {
-                let _ = c.tx.send(Outgoing::Close(None));
-            }
-            warn!(
-                host,
-                session = id,
-                "host journal commit failed; closing without acknowledgement"
-            );
-            return false;
+            return Err(error);
         }
         let Some(s) = entry.sessions.get_mut(&id) else {
-            return false;
+            return Ok(false);
         };
         let prune = s.prune_count();
         s.output_events.drain(..prune);
-        let _ = entry.sessions[&id].tx.send(event);
-        true
+        let _ = entry.sessions[&id].tx.send(event.clone());
+        Ok(true)
     }
 
     fn retry_journal(&self, host: &str, conn_id: u64) {
@@ -1365,7 +1363,9 @@ impl HostRegistry {
                     let terminal = event.is_terminal();
                     let error = matches!(event, SessionEvent::Error { .. });
                     let lost = matches!(event, SessionEvent::Lost { .. });
-                    if self.deliver_committed(host, e, id, event) {
+                    match self.try_deliver(host, e, id, &event) {
+                    Ok(committed) => {
+                        pending.backoff = JOURNAL_RETRY_TICK;
                         pending.events.pop_front();
                         // Recalculate after removing an event, keeping the byte bound exact.
                         pending.bytes = pending
@@ -1373,7 +1373,7 @@ impl HostRegistry {
                             .iter()
                             .map(|v| serde_json::to_vec(v).map_or(0, |v| v.len()))
                             .sum();
-                        if terminal {
+                        if committed && terminal {
                             if lost {
                                 if let Some(c) = &e.conn {
                                     let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release {
@@ -1384,11 +1384,14 @@ impl HostRegistry {
                                 Self::ack_terminal(e, id, error);
                             }
                         }
-                    } else {
-                        // deliver_committed retained a second copy on busy. The
-                        // original queue owns the event and its original deadline.
-                        e.pending_journal.remove(&id);
-                        pending.backoff = (pending.backoff * 2).min(Duration::from_secs(2));
+                    }
+                    Err(error) => {
+                        if error.code != Code::ResourceBusy {
+                            pending.exhausted = true;
+                            if let Some(c) = &e.conn { let _ = c.tx.send(Outgoing::Close(None)); }
+                        }
+                        pending.backoff = (pending.backoff * 2).min(JOURNAL_RETRY_BACKOFF);
+                    }
                     }
                 }
                 pending.next = Instant::now() + pending.backoff;
@@ -2206,7 +2209,7 @@ async fn serve_link(
     let hb = reg.heartbeat.max(Duration::from_millis(10));
     let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + hb, hb);
     let mut last_rx = Instant::now();
-    let mut journal_retry = tokio::time::interval(Duration::from_millis(250));
+    let mut journal_retry = tokio::time::interval(JOURNAL_RETRY_TICK);
     let mut nonce = 0u64;
     let why = loop {
         tokio::select! {
@@ -2873,7 +2876,7 @@ mod tests {
         );
         assert_eq!(
             reg.lock()["lab1"].pending_journal[&session.id()].backoff,
-            Duration::from_millis(500)
+            Duration::from_millis(20)
         );
         conn.execute_batch("ROLLBACK").unwrap();
         for _ in 0..3 {
@@ -3259,6 +3262,39 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn contended_reconnect_commits_missing_session_without_an_undriven_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore_with_db(dir.path(), db.clone()).unwrap();
+        let mut session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        reg.detach("lab1", 1).unwrap();
+        let hello = Hello {
+            path_kind: terrarium_host::protocol::PathKind::Posix,
+            protocol: PROTOCOL_VERSION, host: "lab1".into(), version: "test".into(),
+            os: "linux".into(), arch: "x86_64".into(), capabilities: HostCapabilities::default(),
+            max_sessions: 8, max_running_targets: None, update_failed: None, resume: None,
+        };
+        let (release, writer) = hold_writer(db);
+        let r = reg.clone();
+        let attaching = std::thread::spawn(move || r.attach(&host_row(), &hello, Conn { id: 2, tx: mpsc::unbounded_channel().0 }));
+        metadata_retry_started(&reg);
+        assert!(reg.lock()["lab1"].conn.is_none());
+        assert!(!reg.lock()["lab1"].sessions[&session.id()].terminal);
+        assert!(reg.lock()["lab1"].pending_journal.is_empty());
+        assert!(session.rx.try_recv().is_err());
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        attaching.join().unwrap().unwrap();
+        assert!(reg.is_online("lab1"));
+        assert!(matches!(session.rx.try_recv().unwrap(), SessionEvent::Lost { .. }));
+        assert!(session.rx.try_recv().is_err());
+        assert!(reg.lock()["lab1"].pending_journal.is_empty());
     }
 
     #[test]
