@@ -2066,6 +2066,7 @@ fn windows_run_as(
     let Some(config) = &def.windows_run_as else {
         return Ok(None);
     };
+    crate::links::refuse_for_link("use a Windows run-as target")?;
     crate::store::targets::validate(def)?;
     if !state.executor.hosts.supports_windows_run_as(host_of(def)?) {
         return Err(ApiError::invalid(

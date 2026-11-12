@@ -18,6 +18,12 @@ password after logon or echo it in an error. Windows logon implementation
 is separate from this protocol addition. Current hosts advertise `false`
 and refuse an unexpected run-as request rather than run under their own user.
 
+Both daemon and host production subscribers cap WebSocket/HTTP transport
+dependencies at INFO, including their log-to-tracing bridge. This cap is
+independent of the environment filter: even a more-specific `RUST_LOG=trace`
+directive cannot enable frame payload dumps, which can contain recoverable
+password bytes in hexadecimal. Link keys cannot use a Windows run-as target.
+
 This document is the wire contract between the daemon (`terrariumd`) and the
 host agent (`terrarium-host`). It closes [PLAN §22](PLAN.md#22-open-items)
 item 4 (framing, reconnection, and the output buffer). The design is in

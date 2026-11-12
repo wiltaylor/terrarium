@@ -76,6 +76,10 @@ struct Lab {
     server: tokio::task::JoinHandle<()>,
     trace: Trace,
     captures: Vec<String>,
+    addr: std::net::SocketAddr,
+    token: String,
+    resume_token: String,
+    hold: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Lab {
@@ -88,7 +92,7 @@ impl Lab {
             .unwrap();
         let registered = td.post("/api/hosts", json!({"name": "win"})).await;
         registered.ok();
-        let token = registered.body["token"].as_str().unwrap();
+        let mut token = registered.body["token"].as_str().unwrap().to_owned();
         let mut request = format!("ws://{addr}/hosts/connect")
             .into_client_request()
             .unwrap();
@@ -113,8 +117,12 @@ impl Lab {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert!(matches!(welcome, Message::Text(_)));
+        let DaemonFrame::Welcome(welcome) = serde_json::from_str(welcome.to_text().unwrap()).unwrap() else { panic!("expected welcome") };
+        if let Some(new_token) = welcome.token { token = new_token; }
+        let resume_token = welcome.resume_token;
         let (tx, frames) = tokio::sync::mpsc::unbounded_channel();
+        let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hold_session = hold.clone();
         let host = tokio::spawn(async move {
             while let Some(Ok(message)) = socket.next().await {
                 let Message::Text(text) = message else {
@@ -143,13 +151,15 @@ impl Lab {
                         .send(Message::Text(started.to_string().into()))
                         .await
                         .unwrap();
-                    // A logon failure must use a static message, never the credentials.
-                    let ended = json!({"type": "error", "session": session,
+                    if !hold_session.load(std::sync::atomic::Ordering::SeqCst) {
+                        // A logon failure must use a static message, never the credentials.
+                        let ended = json!({"type": "error", "session": session,
                             "code": "bad_request", "message": "logon refused"});
-                    socket
+                        socket
                         .send(Message::Text(ended.to_string().into()))
                         .await
                         .unwrap();
+                    }
                 }
                 tx.send(frame).unwrap();
             }
@@ -172,6 +182,10 @@ impl Lab {
             server,
             trace,
             captures: vec![],
+            addr,
+            token,
+            resume_token,
+            hold,
         }
     }
 
@@ -200,6 +214,22 @@ impl Lab {
             .await;
         r.ok();
         self.captures.push(r.body.to_string());
+    }
+
+    async fn replacement(&mut self, os: &str, capability: bool, resume: serde_json::Value) -> (
+        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        terrarium_host::protocol::Welcome,
+    ) {
+        let mut request = format!("ws://{}/hosts/connect", self.addr).into_client_request().unwrap();
+        request.headers_mut().insert("authorization", format!("Bearer {}", self.token).parse().unwrap());
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        socket.send(Message::Text(json!({"type":"hello", "protocol":1, "host":"win", "version":"test",
+            "os":os, "arch":"x86_64", "max_sessions":8, "resume":resume,
+            "capabilities":{"windows_run_as":capability,"no_workspaces":true}}).to_string().into())).await.unwrap();
+        let welcome = tokio::time::timeout(Duration::from_secs(30), socket.next()).await.unwrap().unwrap().unwrap();
+        let DaemonFrame::Welcome(welcome) = serde_json::from_str(welcome.to_text().unwrap()).unwrap() else { panic!("expected welcome") };
+        self.captures.push(format!("{welcome:?}"));
+        (socket, welcome)
     }
 
     async fn target(&mut self, secret: &str) {
@@ -417,9 +447,124 @@ fn target_validation_accepts_only_host_accounts_with_both_fields() {
     )
     .unwrap();
     assert!(terrariumd::store::targets::validate(&def).is_err());
+    for kind in ["ssh", "exedev"] {
+        let def = serde_json::from_value(json!({"name":"box", "kind":kind, "address":"example.invalid",
+            "windows_run_as":{"account":"worker","password_secret":"login"}})).unwrap();
+        assert!(terrariumd::store::targets::validate(&def).is_err(), "SSH spools must not accept run-as passwords");
+    }
     assert!(
         serde_json::from_value::<terrarium_core::config::TargetDef>(json!({"kind": "host",
         "windows_run_as": {"account": "worker"}}))
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn link_keys_and_cross_project_agents_cannot_start_run_as_sessions() {
+    if trace_child("link_keys_and_cross_project_agents_cannot_start_run_as_sessions").await { return }
+    use terrariumd::api::{LinkAuth, TokenAuth, tcp_router_with};
+    use tower::ServiceExt;
+    let mut lab = Lab::new("windows", true).await;
+    lab.secret(PASSWORD).await;
+    lab.td.project("p").await;
+    lab.td.project("q").await;
+    let r = lab.td.post("/api/targets", json!({"name":"box", "project":"p", "kind":"host", "host":"win",
+        "windows_run_as":{"account":"worker", "password_secret":"win-login"}})).await;
+    r.ok();
+    lab.captures.push(r.body.to_string());
+    let agent = lab.td.agent("q", "other", json!({"policy":{"targets":["p-box"]}})).await;
+    let aid = agent["id"].as_str().unwrap();
+    let r = lab.td.post_as(aid, "/api/targets/p-box/exec", json!({"cmd":["whoami"]})).await;
+    assert_eq!(r.status, 403);
+    lab.captures.push(r.body.to_string());
+    let link = lab.td.post("/api/links", json!({"label":"home", "read_only":false})).await.ok().clone();
+    let paired = lab.td.post("/api/links/pair", json!({"code":link["code"],
+        "home_instance_id":ulid::Ulid::new().to_string(), "home_name":"home"})).await.ok().clone();
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let app = tcp_router_with(state.clone(), TokenAuth::new("operator-test-token".into(), false)
+        .with_links(LinkAuth {db:state.db.clone(), runtime:state.links.clone()}), false);
+    for (path, body) in [("exec", json!({"cmd":["whoami"]})), ("cp", json!({"direction":"pull", "path":"/test-file"}))] {
+        let request = axum::http::Request::builder().method("POST").uri(format!("/api/targets/p-box/{path}"))
+            .header("authorization", format!("Bearer {}", paired["key"].as_str().unwrap()))
+            .header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 403);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        lab.captures.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    assert!(tokio::time::timeout(Duration::from_millis(100), lab.next_exec()).await.is_err());
+    lab.scan().await;
+}
+
+#[tokio::test]
+async fn replacing_capability_after_password_resolution_refuses_admission() {
+    if trace_child("replacing_capability_after_password_resolution_refuses_admission").await { return }
+    let mut lab = Lab::new("windows", true).await;
+    lab.secret(PASSWORD).await;
+    lab.target("win-login").await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    assert!(state.executor.hosts.supports_windows_run_as("win"));
+    let secret = terrariumd::secrets::load_now(&state, terrariumd::secrets::Owner::Global, "win-login").unwrap();
+    let terrariumd::secrets::Secret::Login {password, ..} = secret else { panic!("login") };
+    // Deterministically replace the connection in the resolution/admission gap.
+    lab.host.abort();
+    let (mut socket, _) = lab.replacement("linux", true, serde_json::Value::Null).await;
+    let result = state.executor.hosts.open("win", move |session| {
+        serde_json::from_value(json!({"type":"exec", "session":session, "cmd":"whoami",
+            "windows_run_as":{"account":"worker", "password":password.as_str()}})).unwrap()
+    });
+    assert!(matches!(result, Err(terrariumd::hosts::HostError::WindowsRunAsUnsupported)));
+    assert!(tokio::time::timeout(Duration::from_millis(100), socket.next()).await.is_err(), "replacement host received a session");
+    lab.scan().await;
+}
+
+#[tokio::test]
+async fn durable_run_resume_never_replays_credentials() {
+    if trace_child("durable_run_resume_never_replays_credentials").await { return }
+    let mut lab = Lab::new("windows", true).await;
+    lab.secret(PASSWORD).await;
+    lab.target("win-login").await;
+    lab.td.project("p").await;
+    let agent = lab.td.agent("p", "worker", json!({"policy":{"targets":["box"]}})).await;
+    let aid = agent["id"].as_str().unwrap();
+    lab.hold.store(true, std::sync::atomic::Ordering::SeqCst);
+    let run = lab.td.post_as(aid, &format!("/api/agents/{aid}/run"), json!({"target":"box", "name":"logon", "cmd":["whoami"]})).await;
+    run.ok();
+    lab.captures.push(run.body.to_string());
+    let wid = run.body["wait"]["id"].as_str().unwrap().to_owned();
+    let frame = lab.next_exec().await;
+    lab.captures.push(format!("{frame:?}"));
+    let DaemonFrame::Exec(req) = frame else { panic!("exec") };
+    let session = req.session;
+    assert!(req.windows_run_as.unwrap().password == PASSWORD);
+    // Read the live session before reconnect, including its durable wait/log.
+    lab.captures.push(lab.td.get(&format!("/api/waits/{wid}")).await.body.to_string());
+    lab.captures.push(lab.td.get(&format!("/api/waits/{wid}/log")).await.body.to_string());
+    lab.scan().await;
+    lab.host.abort();
+    let offer = json!({"token":lab.resume_token, "sessions":[{"session":session, "sent":0}]});
+    let (mut socket, welcome) = lab.replacement("windows", true, offer).await;
+    assert!(welcome.resume.iter().any(|s| s.session == session), "session was not resumed");
+    // A resumed connection gets acknowledgements/control only, not another
+    // session start and not the already-delivered password.
+    socket.send(Message::Text(json!({"type":"exit", "session":session,
+        "code":0, "signal":null, "reason":"exited"}).to_string().into())).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let wait = lab.td.get(&format!("/api/waits/{wid}")).await;
+            lab.captures.push(wait.body.to_string());
+            if wait.body["state"] == "resolved" { break }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    while let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_millis(100), socket.next()).await {
+        if let Message::Text(text) = message {
+            assert_no_password(text.as_bytes());
+            let frame: DaemonFrame = serde_json::from_str(&text).unwrap();
+            assert!(!matches!(frame, DaemonFrame::Exec(_) | DaemonFrame::CpPush(_) | DaemonFrame::CpPull(_)));
+            lab.captures.push(format!("{frame:?}"));
+        }
+    }
+    lab.captures.push(lab.td.get(&format!("/api/waits/{wid}/log")).await.body.to_string());
+    lab.scan().await;
 }

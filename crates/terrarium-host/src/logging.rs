@@ -16,7 +16,7 @@ fn safe_transport_level(metadata: &Metadata<'_>) -> bool {
     *metadata.level() <= Level::INFO
         || !TRANSPORTS.iter().any(|name| {
             metadata.target() == *name
-                || metadata.target().strip_prefix(name).is_some_and(|tail| tail.starts_with("::"))
+                || metadata.target().strip_prefix(*name).is_some_and(|tail| tail.starts_with("::"))
         })
 }
 

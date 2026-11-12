@@ -1898,6 +1898,7 @@ async fn serve_link(
     welcome.update = offer;
     match encode_control(&DaemonFrame::Welcome(welcome.clone())) {
         Ok(t) => {
+            tracing::trace!("host transport frame send");
             if socket.send(WsMessage::Text(t.into())).await.is_err() {
                 reg.detach(&row.name, conn_id);
                 return;
