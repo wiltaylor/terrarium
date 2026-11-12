@@ -54,7 +54,12 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
   return (
     // Route links, not an ARIA tablist: every tab is a page.
     <nav ref={tabs} class="tabs project-tabs" aria-label="Project">
-      <For each={pages.latest?.items}>{page => <A href={`${props.base}/pages/${page.slug}`} class={props.active(`pages/${page.slug}`) ? "active" : undefined} activeClass="" inactiveClass="">{page.title}</A>}</For>
+      <For each={pages.latest?.items}>{page => {
+        const badge = () => page.slug === (pages.latest?.dashboard_slug ?? "dashboard") ? props.badge?.("dashboard") : null;
+        return <A href={`${props.base}/pages/${page.slug}`} class={props.active(`pages/${page.slug}`) ? "active" : undefined} activeClass="" inactiveClass="" title={badge()?.text}>
+          {page.title}<Show when={badge()}>{b => <><span class={b().cls} aria-hidden="true">{b().n}</span><span class="sr-only">, {b().text}</span></>}</Show>
+        </A>;
+      }}</For>
       <For each={PROJECT_TABS}>
         {(tab) => (
           <A

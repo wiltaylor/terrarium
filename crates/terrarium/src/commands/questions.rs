@@ -306,6 +306,8 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
     match cmd {
         QuestionCmd::Ask {
             text,
+            test_request,
+            thread,
             options,
             multi_select,
             context,
@@ -323,6 +325,10 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
             }
             let me = ctx.me().await?;
             let mut body = json!({"text": ctx.text(text)?});
+            if *test_request {
+                body["test_request"] = json!(true);
+            }
+            super::set_opt(&mut body, "thread", thread.clone());
             if *multi_select {
                 body["multi_select"] = json!(true);
             }

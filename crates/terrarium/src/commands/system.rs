@@ -25,6 +25,50 @@ pub fn format_uptime(secs: u64) -> String {
     }
 }
 
+pub async fn admin_backup(ctx: &Ctx, cmd: &crate::cli::AdminBackupCmd) -> anyhow::Result<()> {
+    let crate::cli::AdminBackupCmd::Retention { command } = cmd;
+    let (endpoint, body, confirm) = match command {
+        crate::cli::RetentionCmd::Init {
+            confirm,
+            no_rollback_reference,
+        } => (
+            "/api/backups/retention/init",
+            json!({"confirm":confirm, "no_rollback_reference":no_rollback_reference}),
+            confirm,
+        ),
+        crate::cli::RetentionCmd::Repair { confirm } => (
+            "/api/backups/retention/repair",
+            json!({"confirm":confirm}),
+            confirm,
+        ),
+    };
+    let detail = ctx.api.post(endpoint, Some(body)).await?;
+    ctx.emit(&detail, |c, r| {
+        if let Some(holds) = r["holds"].as_object() {
+            for (key, path) in holds {
+                c.line(format!("Recovery hold {key}: {path}"));
+            }
+        }
+        for item in r["preview"].as_array().into_iter().flatten() {
+            c.line(format!(
+                "{}  {}  {} bytes",
+                item["name"].as_str().unwrap_or_default(),
+                item["created_at"].as_str().unwrap_or_default(),
+                item["size"]
+            ));
+        }
+        c.line(format!(
+            "Total: {} files, {} bytes",
+            r["total_files"], r["total_bytes"]
+        ));
+        c.line(if *confirm {
+            "Retention initialized"
+        } else {
+            "Preview only. Run with --confirm to enable retention"
+        });
+    })
+}
+
 pub async fn daemon(ctx: &Ctx, cmd: &DaemonCmd) -> anyhow::Result<()> {
     match cmd {
         DaemonCmd::Status => {
@@ -65,6 +109,15 @@ pub async fn daemon(ctx: &Ctx, cmd: &DaemonCmd) -> anyhow::Result<()> {
 /// `terrarium daemon backup ...` (docs/cli.md, "Backups").
 async fn backup(ctx: &Ctx, cmd: &BackupCmd) -> anyhow::Result<()> {
     match cmd {
+        BackupCmd::ReleaseRecovery { run } => {
+            let r = ctx
+                .api
+                .post("/api/backups/recovery-release", Some(json!({"run":run})))
+                .await?;
+            ctx.emit(&r, |c, _| {
+                c.line(format!("recovery protection released for {run}"))
+            })
+        }
         BackupCmd::Create {
             kind,
             work,

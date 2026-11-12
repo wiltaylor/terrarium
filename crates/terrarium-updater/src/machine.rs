@@ -289,10 +289,22 @@ impl Updater {
     /// Answer one request. An update or a rollback runs in the background.
     pub async fn handle(self: &Arc<Self>, req: Request) -> Response {
         let (kind, target, actor) = match req {
+            Request::RetentionRepair { confirm } => return self.retention_repair(confirm).await,
+            Request::RetentionInit {
+                confirm,
+                no_rollback_reference,
+            } => return self.retention_init(confirm, no_rollback_reference).await,
+            Request::Retention { release } => return self.retention(release.as_deref()).await,
             Request::Status => return Response::Status(Box::new(self.status().await)),
             Request::Update { target, actor } => (RunKind::Update, target, actor),
             Request::Rollback { actor } => (RunKind::Rollback, "previous".to_owned(), actor),
         };
+        if let Err(message) = self.reconcile_retention().await {
+            return Response::Error {
+                message,
+                busy: true,
+            };
+        }
         match self.begin(kind, &target, &actor) {
             Ok((run, guard)) => {
                 let me = self.clone();
@@ -344,6 +356,12 @@ impl Updater {
             started_at: now(),
             ended_at: None,
         };
+        if let Err(e) = self.store.retention_begin(&run) {
+            return Err(Response::Error {
+                message: format!("cannot protect update backups: {e}"),
+                busy: false,
+            });
+        }
         *self.running() = Some(run.clone());
         self.export_front(&run);
         Ok((run, guard))
@@ -391,8 +409,315 @@ impl Updater {
         tracing::info!(run = %id, outcome = done.outcome.as_str(), error = ?done.error, "run ends");
         if let Err(e) = self.store.push(&done) {
             tracing::warn!("cannot write the history: {e}");
+        } else if let Err(e) = self.store.retention_finish(&done) {
+            tracing::warn!("cannot release update retention hold: {e}");
         }
         done
+    }
+
+    async fn retention_repair(&self, confirm: bool) -> Response {
+        let Ok(_guard) = self.busy.clone().try_lock_owned() else {
+            return Response::Error {
+                message: "update or rollback in progress".into(),
+                busy: true,
+            };
+        };
+        let result = async {
+            let cur = self.engine.target().await?;
+            let helpers = self.engine.running_retention_helpers(&cur.id).await?;
+            if !helpers.is_empty() {
+                return Err(format!(
+                    "retention helper still running: {}",
+                    helpers.join(", ")
+                ));
+            }
+            let out = self
+                .exec_ok(&cur.id, hot_argv("retention-inventory", &[]))
+                .await?;
+            let inventory: std::collections::BTreeMap<String, String> =
+                serde_json::from_str(&out).map_err(|e| format!("bad retention inventory: {e}"))?;
+            let protected = self
+                .store
+                .retention_repair(false, &inventory, Vec::new())
+                .map_err(|e| e.to_string())?;
+            let arg = serde_json::to_string(&protected).map_err(|e| e.to_string())?;
+            let out = self
+                .exec_ok(&cur.id, hot_argv("preview-backups", &[&arg]))
+                .await?;
+            let mut detail: serde_json::Value =
+                serde_json::from_str(&out).map_err(|e| format!("bad retention preview: {e}"))?;
+            let names = detail["preview"]
+                .as_array()
+                .ok_or("retention preview omitted file list")?
+                .iter()
+                .map(|entry| {
+                    entry["name"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or("retention preview omitted name")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if confirm {
+                // Reinspect after the preview, before replacing lost identities.
+                if !self
+                    .engine
+                    .running_retention_helpers(&cur.id)
+                    .await?
+                    .is_empty()
+                {
+                    return Err("retention helper still running".into());
+                }
+                // Revoke a created-but-not-started helper too. A delayed start
+                // must not race repaired update admission.
+                self.exec_ok(&cur.id, hot_argv("retention-repair-revoke", &[]))
+                    .await?;
+                self.store
+                    .retention_repair(true, &inventory, names)
+                    .map_err(|e| e.to_string())?;
+            }
+            detail["holds"] = serde_json::to_value(inventory).map_err(|e| e.to_string())?;
+            detail["initialized"] = confirm.into();
+            Ok(detail)
+        }
+        .await;
+        match result {
+            Ok(detail) => Response::Retained { detail },
+            Err(message) => Response::Error {
+                message,
+                busy: false,
+            },
+        }
+    }
+
+    async fn retention_init(&self, confirm: bool, no_rollback: bool) -> Response {
+        let Ok(_guard) = self.busy.clone().try_lock_owned() else {
+            return Response::Error {
+                message: "update or rollback in progress".into(),
+                busy: true,
+            };
+        };
+        let result = async {
+            let protected = self
+                .store
+                .retention_init(false, no_rollback)
+                .map_err(|e| e.to_string())?;
+            let cur = self.engine.target().await?;
+            let protected = serde_json::to_string(&protected).map_err(|e| e.to_string())?;
+            let out = self
+                .exec_ok(&cur.id, hot_argv("preview-backups", &[&protected]))
+                .await?;
+            let mut detail: serde_json::Value =
+                serde_json::from_str(&out).map_err(|e| format!("bad retention preview: {e}"))?;
+            if confirm {
+                let names = detail["preview"]
+                    .as_array()
+                    .ok_or("retention preview omitted file list")?
+                    .iter()
+                    .map(|entry| {
+                        entry["name"]
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or("retention preview omitted name")
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.store
+                    .retention_confirm(no_rollback, names)
+                    .map_err(|e| e.to_string())?;
+            }
+            detail["initialized"] = confirm.into();
+            detail["confirmation"] =
+                "Run with --confirm to initialize retention and enable bounded deletion passes"
+                    .into();
+            Ok(detail)
+        }
+        .await;
+        match result {
+            Ok(detail) => Response::Retained { detail },
+            Err(message) => Response::Error {
+                message,
+                busy: false,
+            },
+        }
+    }
+
+    async fn retention_control(
+        &self,
+        container: &str,
+        action: &str,
+        value: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let arg = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+        let out = self
+            .exec_ok(container, hot_argv("retention-control", &[action, &arg]))
+            .await?;
+        serde_json::from_str(&out).map_err(|e| format!("bad retention control response: {e}"))
+    }
+
+    /// Startup and update admission use the same durable reconciliation path.
+    pub async fn reconcile_retention(&self) -> Result<(), String> {
+        let _guard = self
+            .busy
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| "update or retention in progress".to_owned())?;
+        self.reconcile_retention_locked().await
+    }
+
+    async fn reconcile_retention_locked(&self) -> Result<(), String> {
+        let Some(running) = self.store.retention_running().map_err(|e| e.to_string())? else {
+            return Ok(());
+        };
+        // First revoke the token durably. A delayed exec start or prepare can
+        // never restore it. The control command kills only its exact pidfd.
+        self.retention_control(
+            &running.container,
+            "cancel",
+            serde_json::json!({"token":running.token}),
+        )
+        .await?;
+        for _ in 0..20 {
+            let info = self.engine.exec_inspect(&running.exec_id).await?;
+            if !info.running {
+                return self
+                    .store
+                    .set_retention_running(None)
+                    .map_err(|e| e.to_string());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Err("retention helper still running: update admission remains blocked".into())
+    }
+
+    async fn retention_execute(
+        &self,
+        container: &str,
+        _protected: Vec<String>,
+    ) -> Result<serde_json::Value, String> {
+        let token = ulid::Ulid::new().to_string();
+        let exec_id = self
+            .engine
+            .exec_create(container, hot_argv("retain-backups", &[&token]))
+            .await?;
+        let mut running = crate::store::RetentionRunning {
+            container: container.into(),
+            exec_id,
+            token: token.clone(),
+            pid: None,
+            worker_pid: None,
+            worker_start: None,
+        };
+        self.store
+            .set_retention_running(Some(running.clone()))
+            .map_err(|e| e.to_string())?;
+        let execution = async {
+            self.retention_control(
+                container,
+                "prepare",
+                self.store
+                    .retention_authorization(&running)
+                    .map_err(|e| e.to_string())?,
+            )
+            .await?;
+            self.engine.exec_start(&running.exec_id).await?;
+            let mut renewed = tokio::time::Instant::now();
+            loop {
+                if renewed.elapsed() >= Duration::from_secs(2) {
+                    let authorization = self
+                        .store
+                        .retention_authorization(&running)
+                        .map_err(|e| e.to_string())?;
+                    self.retention_control(container, "renew", authorization)
+                        .await?;
+                    renewed = tokio::time::Instant::now();
+                }
+                let info = self.engine.exec_inspect(&running.exec_id).await?;
+                if info.pid != 0 {
+                    running.pid = Some(info.pid);
+                }
+                let identity = self
+                    .retention_control(container, "status", serde_json::json!({"token":token}))
+                    .await?;
+                running.worker_pid = identity["pid"].as_u64();
+                running.worker_start = identity["start"].as_str().map(str::to_owned);
+                self.store
+                    .set_retention_running(Some(running.clone()))
+                    .map_err(|e| e.to_string())?;
+                if !info.running {
+                    if info.code != 0 {
+                        return Err(format!("retention helper exit {}", info.code));
+                    }
+                    return self
+                        .retention_control(container, "receipt", serde_json::json!({"token":token}))
+                        .await;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        let result = tokio::time::timeout(Duration::from_secs(900), execution)
+            .await
+            .unwrap_or_else(|_| Err("retention helper timed out".into()));
+        if result.is_err() && self.store.retention_running().is_err() {
+            // Safety state itself may have disappeared. Revoke using the exact
+            // identity already held in memory, even if rereading it now fails.
+            self.retention_control(container, "cancel", serde_json::json!({"token":token}))
+                .await?;
+        }
+        // Even success revokes the token before clearing the durable hold.
+        // On any failure to revoke/inspect/stop, the interlock stays on disk.
+        self.reconcile_retention_locked().await?;
+        if result
+            .as_ref()
+            .is_ok_and(|detail| detail["stopped"] != true)
+        {
+            self.store
+                .retention_pass_finished()
+                .map_err(|e| e.to_string())?;
+        }
+        result
+    }
+
+    async fn retention(&self, release: Option<&str>) -> Response {
+        let Ok(_guard) = self.busy.clone().try_lock_owned() else {
+            return Response::Error {
+                message: "update or rollback in progress: retention deferred".into(),
+                busy: true,
+            };
+        };
+        let result = async {
+            self.reconcile_retention_locked().await?;
+            let protected = self
+                .store
+                .retention_protected(release)
+                .map_err(|e| e.to_string())?;
+            if let Some(id) = release {
+                return Ok(serde_json::json!({"released": id, "removed": []}));
+            }
+            let cur = self.engine.target().await?;
+            // A read-only preview avoids generating permanent revocation
+            // tombstones every minute when there is nothing eligible to prune.
+            let arg = serde_json::to_string(&protected).map_err(|e| e.to_string())?;
+            let preview = self
+                .exec_ok(&cur.id, hot_argv("preview-backups", &[&arg]))
+                .await?;
+            let preview: serde_json::Value = serde_json::from_str(&preview)
+                .map_err(|e| format!("bad retention preview: {e}"))?;
+            if preview["preview"]
+                .as_array()
+                .ok_or("retention preview omitted file list")?
+                .is_empty()
+            {
+                return Ok(serde_json::json!({"removed":[]}));
+            }
+            self.retention_execute(&cur.id, protected).await
+        }
+        .await;
+        match result {
+            Ok(detail) => Response::Retained { detail },
+            Err(message) => Response::Error {
+                message,
+                busy: false,
+            },
+        }
     }
 
     /// Change the record of the run in progress.

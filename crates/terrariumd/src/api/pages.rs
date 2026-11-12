@@ -42,8 +42,17 @@ async fn list(
 ) -> ApiResult<Json<Value>> {
     policy::read_project(&actor, &project)?;
     let can_edit = policy::admin_project(&actor, &project, "editing project pages").is_ok();
-    let items = s.db.read(move |c| pages::list(c, &project)).await?;
-    Ok(Json(json!({"items": items, "can_edit": can_edit})))
+    let (items, dashboard_slug) =
+        s.db.read(move |c| {
+            Ok((
+                pages::list(c, &project)?,
+                pages::dashboard_slug(c, &project)?,
+            ))
+        })
+        .await?;
+    Ok(Json(
+        json!({"items": items, "can_edit": can_edit, "dashboard_slug": dashboard_slug}),
+    ))
 }
 
 async fn show(

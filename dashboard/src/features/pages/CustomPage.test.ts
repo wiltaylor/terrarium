@@ -45,6 +45,26 @@ it("keeps an edit draft when another editor emits page.updated", async () => {
   } finally { dispose(); }
 });
 
+it("renders migrated system widgets and retains their DOM during a live reload", async () => {
+  const { host, dispose } = await mount([
+    { id: "summary", kind: "monitor_summary", x: 0, y: 0, w: 12, h: 2 },
+    { id: "note", kind: "markdown", x: 0, y: 2, w: 3, h: 4, text: "Migrated note" },
+  ]);
+  try {
+    await waitFor(() => expect(host.textContent).toContain("Migrated note"));
+    const summary = host.querySelector(".dash-summary");
+    expect(summary).not.toBeNull();
+    const previous = await api.pages.get("terrarium", "overview");
+    let resolve!: (value: typeof previous) => void;
+    vi.spyOn(api.pages, "get").mockImplementation(() => new Promise(r => { resolve = r; }));
+    listeners.forEach(fn => fn(pageEvent()));
+    expect(host.querySelector(".dash-summary")).toBe(summary);
+    expect(host.textContent).toContain("Migrated note");
+    resolve(previous);
+    await waitFor(() => expect(host.querySelector(".dash-summary")).toBe(summary));
+  } finally { dispose(); }
+});
+
 it("hides write controls for a reader", async () => {
   vi.spyOn(api.pages, "list").mockResolvedValue({ items: [], can_edit: false });
   const { host, dispose } = await mount();

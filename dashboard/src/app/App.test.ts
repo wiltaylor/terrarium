@@ -9,13 +9,14 @@ import { waitFor } from "../test/wait";
 import { MOVED_ROUTES, movedTo, PROJECT_TABS } from "./nav";
 
 const { stub } = vi.hoisted(() => ({ stub: (label: string) => () => label }));
+const dashboardRoute = vi.hoisted(() => ({ slug: "dashboard" }));
 
 vi.mock("../api", () => ({ isMock: false }));
 // The project shell reads the tab counts (TER-154): no agent, no count.
 vi.mock("../stores", async () => { const { instanceTestStores } = await import("../test/instance"); return instanceTestStores(({
   auth: { mode: () => "operator", token: () => null, csrf: () => null },
   agents: { inProject: () => [] },
-  api: { projects: { counts: async () => ({ blocked_cards: 0, questions: null }) }, pages: { list: async () => ({ items: [], can_edit: false }) } },
+  api: { projects: { counts: async () => ({ blocked_cards: 0, questions: null }) }, pages: { list: async () => ({ items: [], can_edit: false, dashboard_slug: dashboardRoute.slug }) } },
   events: { on: () => () => {} },
 })); });
 vi.mock("./Layout", () => ({ Layout: (props: { children?: unknown }) => props.children }));
@@ -26,7 +27,8 @@ vi.mock("../features/agents/AgentDetail", () => ({ default: stub("Agent page") }
 vi.mock("../features/board/BoardPage", () => ({ BoardPage: stub("Cards page"), DoneCardsPage: stub("Done cards page") }));
 vi.mock("../features/projects/ProjectsPage", () => ({ default: stub("Projects page") }));
 vi.mock("../features/projects/ProjectSettings", () => ({ default: stub("General page") }));
-vi.mock("../features/dashboard/DashboardPage", () => ({ default: stub("Dashboard page") }));
+vi.mock("../features/pages/CustomPage", () => ({ default: stub("Custom page") }));
+vi.mock("../features/dashboard/MonitorsSettings", () => ({ default: stub("Monitors page") }));
 vi.mock("../features/pipelines/PipelinesPage", () => ({ default: stub("Pipelines page") }));
 vi.mock("../features/calendar/CalendarPage", () => ({ default: stub("Calendar page") }));
 vi.mock("../features/repos/ReposPage", () => ({ default: stub("Repos page") }));
@@ -63,6 +65,7 @@ const { App } = await import("./App");
 let dispose: (() => void) | undefined;
 
 afterEach(() => {
+  dashboardRoute.slug = "dashboard";
   dispose?.();
   dispose = undefined;
   document.body.replaceChildren();
@@ -127,7 +130,6 @@ describe("App project routes", () => {
       ["/p/my%20app/tests", "Tests page"],
       ["/p/my%20app/schedules", "Schedules page"],
       ["/p/my%20app/rules", "Rules page"],
-      ["/p/my%20app/dashboard", "Dashboard page"],
       ["/p/my%20app/agents", "Agents page"],
       ["/p/my%20app/repos", "Repos page"],
       ["/p/my%20app/knowledge/wiki/a/b", "Wiki page"],
@@ -147,11 +149,25 @@ describe("App project routes", () => {
     }
   });
 
+  it("redirects the former Dashboard route to its custom page", async () => {
+    const root = mount("/p/my%20app/dashboard");
+    await waitFor(() => expect(root.textContent).toContain("Custom page"));
+    expect(window.location.pathname).toBe("/p/my%20app/pages/dashboard");
+  });
+
+  it("uses the recorded fallback slug when a user already owns dashboard", async () => {
+    dashboardRoute.slug = "dashboard-legacy-2";
+    const root = mount("/p/my%20app/dashboard");
+    await waitFor(() => expect(root.textContent).toContain("Custom page"));
+    expect(window.location.pathname).toBe("/p/my%20app/pages/dashboard-legacy-2");
+  });
+
   it("keeps the nested tab rows encoded and active on deep paths", async () => {
     const cases = [
       ["/p/my%20app/knowledge/wiki/a/b", "Wiki page", "Knowledge", "Wiki", "/p/my%20app/knowledge/wiki"],
       ["/p/my%20app/logs/mail", "Mail page", "Logs", "Mail", "/p/my%20app/logs/mail"],
       ["/p/my%20app/settings/secrets", "Secrets page", "Settings", "Secrets", "/p/my%20app/settings/secrets"],
+      ["/p/my%20app/dashboard?tab=monitors", "Monitors page", "Settings", "Monitors", "/p/my%20app/settings/monitors"],
     ] as const;
     for (const [path, page, label, tab, href] of cases) {
       const root = mount(path);

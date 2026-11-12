@@ -66,7 +66,18 @@ async fn daemon_main() -> anyhow::Result<()> {
         return config_command(command);
     }
     if let Some(Command::Backup { command }) = &settings.command {
-        return backup_command(&settings, command);
+        backup_command(&settings, command)?;
+        if matches!(command, BackupCommand::Create { .. })
+            && let Err(e) = terrariumd::backup::retention::request(None).await
+        {
+            // Keep --json stdout machine-readable, including when the
+            // optional updater is absent or busy with this very update.
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("backup retention deferred: {e}");
+            }
+        }
+        return Ok(());
     }
     // TERRARIUM_PASSWORD(_FILE): set the first password now, then start
     // again without the two variables, so no child process (a harness, git,
@@ -283,6 +294,7 @@ async fn daemon_main() -> anyhow::Result<()> {
     let backup_cfg =
         terrariumd::backup::schedule::Config::from_env().map_err(anyhow::Error::msg)?;
     let backup_task = terrariumd::backup::schedule::spawn(daemon.state.clone(), backup_cfg);
+    let _retention_task = terrariumd::backup::retention::spawn();
     let hints_state = std::sync::Arc::downgrade(&daemon.state);
     tokio::spawn(async move {
         loop {

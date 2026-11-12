@@ -259,6 +259,65 @@ pub(super) fn evaluate(t: &mut Tx<'_>, id: &str, broken: bool) -> ApiResult<()> 
     Ok(())
 }
 
+/// Recheck completed waits without undoing an action that has already run.
+pub(super) fn on_dependency_reopened(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
+    let mut after = String::new();
+    loop {
+        let mut stmt = t.prepare(
+            "SELECT d.card FROM card_deps d JOIN card_waits w ON w.card=d.card
+             WHERE d.depends_on=?1 AND d.card>?2 AND w.met_at IS NOT NULL
+             ORDER BY d.card LIMIT 128",
+        )?;
+        let page = stmt
+            .query_map(params![id, after], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        if page.is_empty() {
+            break;
+        }
+        for card in &page {
+            // The blocked-by view deliberately hides latched waits. Check the
+            // live conditions directly before deciding whether to unlatch one.
+            let pending: bool = t.query_row(
+                "SELECT CASE w.mode WHEN 'any' THEN min(NOT (
+                   CASE WHEN d.target IS NULL THEN coalesce(k.role,k.name) IN ('accepted','done')
+                   ELSE k.name=d.target OR coalesce(k.role=d.target,0) END))
+                 ELSE max(NOT (
+                   CASE WHEN d.target IS NULL THEN coalesce(k.role,k.name) IN ('accepted','done')
+                   ELSE k.name=d.target OR coalesce(k.role=d.target,0) END)) END
+                 FROM card_waits w JOIN card_deps d ON d.card=w.card
+                 JOIN cards c ON c.id=d.depends_on
+                 JOIN board_columns k ON k.id=c.column_id
+                 WHERE w.card=?1 AND c.archived=0",
+                [card],
+                |r| Ok(r.get::<_, Option<bool>>(0)?.unwrap_or(false)),
+            )?;
+            if !pending {
+                continue;
+            }
+            let cleared = t.execute(
+                "UPDATE card_waits SET met_at=NULL, broken=0 WHERE card=?1 AND acted_at IS NULL",
+                [card],
+            )?;
+            let row = find_row(t, card)?;
+            let actor = crate::rules_engine::rule_actor(&row.project, "card-wait-met");
+            let state = if cleared > 0 {
+                "wait pending again"
+            } else {
+                "wait action already ran, state unchanged"
+            };
+            add_comment(
+                t,
+                &actor,
+                card,
+                &format!("Dependency {id} moved back out of accepted or done: {state}."),
+            )?;
+        }
+        after = page.last().cloned().unwrap_or_default();
+    }
+    Ok(())
+}
+
 pub(super) fn on_dependency_changed(t: &mut Tx<'_>, id: &str, broken: bool) -> ApiResult<()> {
     // Keyset pages use the reverse index. Do not load the whole board.
     let mut after = String::new();
