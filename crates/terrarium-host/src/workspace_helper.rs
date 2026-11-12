@@ -230,6 +230,7 @@ fn crash(point: &str) {
         && std::env::var("TERRARIUM_B2_CRASH_POINT").as_deref() == Ok(point)
     {
         let _ = nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0);
+        eprintln!("B2_CRASH_POINT={point}");
         std::process::abort();
     }
 }
