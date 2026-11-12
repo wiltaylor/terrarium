@@ -106,18 +106,18 @@ impl Lab {
                     _ => None,
                 };
                 if let Some(session) = session {
-                        let started = json!({"type": "started", "session": session, "pid": 42});
-                        socket
-                            .send(Message::Text(started.to_string().into()))
-                            .await
-                            .unwrap();
-                        // A logon failure must use a static message, never the credentials.
-                        let ended = json!({"type": "error", "session": session,
+                    let started = json!({"type": "started", "session": session, "pid": 42});
+                    socket
+                        .send(Message::Text(started.to_string().into()))
+                        .await
+                        .unwrap();
+                    // A logon failure must use a static message, never the credentials.
+                    let ended = json!({"type": "error", "session": session,
                             "code": "bad_request", "message": "logon refused"});
-                        socket
-                            .send(Message::Text(ended.to_string().into()))
-                            .await
-                            .unwrap();
+                    socket
+                        .send(Message::Text(ended.to_string().into()))
+                        .await
+                        .unwrap();
                 }
                 tx.send(frame).unwrap();
             }
@@ -183,7 +183,10 @@ impl Lab {
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let frame = self.frames.recv().await.unwrap();
-                if matches!(frame, DaemonFrame::Exec(_) | DaemonFrame::CpPush(_) | DaemonFrame::CpPull(_)) {
+                if matches!(
+                    frame,
+                    DaemonFrame::Exec(_) | DaemonFrame::CpPush(_) | DaemonFrame::CpPull(_)
+                ) {
                     return frame;
                 }
             }
@@ -278,8 +281,13 @@ async fn transfer_sessions_receive_the_same_one_session_credentials() {
     lab.secret(PASSWORD).await;
     lab.target("win-login").await;
     for direction in ["push", "pull"] {
-        let response = lab.td.post("/api/targets/box/cp",
-            json!({"direction": direction, "path": "/test-file"})).await;
+        let response = lab
+            .td
+            .post(
+                "/api/targets/box/cp",
+                json!({"direction": direction, "path": "/test-file"}),
+            )
+            .await;
         response.ok();
         lab.captures.push(response.body.to_string());
         let frame = lab.next_exec().await;
@@ -288,7 +296,8 @@ async fn transfer_sessions_receive_the_same_one_session_credentials() {
             DaemonFrame::CpPush(req) => req.windows_run_as,
             DaemonFrame::CpPull(req) => req.windows_run_as,
             _ => panic!("expected a transfer session"),
-        }.unwrap();
+        }
+        .unwrap();
         assert!(credentials.password == PASSWORD);
         assert_eq!(credentials.account, "DOMAIN\\worker");
     }

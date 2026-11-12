@@ -2744,7 +2744,11 @@ pub async fn start_cp(
                 })?
             } else {
                 state.executor.hosts.open(host, move |session| {
-                    DaemonFrame::CpPull(CpPull { session, path, windows_run_as: run_as })
+                    DaemonFrame::CpPull(CpPull {
+                        session,
+                        path,
+                        windows_run_as: run_as,
+                    })
                 })?
             };
             tokio::spawn(attach(pump_host(hs), sess.clone(), ctl, push, !push));
