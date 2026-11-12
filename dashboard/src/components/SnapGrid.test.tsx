@@ -14,7 +14,7 @@ it("snaps drags and resize deltas to whole cells, clamping to the grid", () => {
   expect(snapDelta(151, 100)).toBe(2);
   const items = [widget("a")];
   expect(placeWidget(items, "a", { x: 20, y: -3, w: 7.3, h: 0 })[0]).toMatchObject({ x: 5, y: 0, w: 7, h: 1 });
-  expect(items[0].x).toBe(0);
+  expect(items[0]!.x).toBe(0);
 });
 
 it("pushes overlapping widgets down in a deterministic cascade, preserving other columns", () => {
@@ -40,9 +40,9 @@ function mount(editing = true) {
 it("moves with arrows and resizes with Shift+arrows, leaving read mode inert", () => {
   const { root, widgets } = mount();
   root.querySelector('button')!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-  expect(widgets()[0].x).toBe(1);
+  expect(widgets()[0]!.x).toBe(1);
   root.querySelector('button')!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", shiftKey: true, bubbles: true }));
-  expect(widgets()[0].h).toBe(3);
+  expect(widgets()[0]!.h).toBe(3);
 });
 
 it("has no editing controls in read mode", () => {
@@ -67,7 +67,7 @@ it("expands content into whole rows and pushes lower widgets without changing sa
   dispose = render(() => <SnapGrid widgets={items} renderWidget={(item) => <p>{item.id}</p>} />, document.body);
   await Promise.resolve();
   const sections = document.querySelectorAll<HTMLElement>("section");
-  expect(sections[0].style.gridRow).toBe("1 / span 3");
-  expect(sections[1].style.gridRow).toBe("4 / span 2");
-  expect(items[1].y).toBe(2);
+  expect(sections[0]!.style.gridRow).toBe("1 / span 3");
+  expect(sections[1]!.style.gridRow).toBe("4 / span 2");
+  expect(items[1]!.y).toBe(2);
 });

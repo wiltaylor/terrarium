@@ -15,7 +15,7 @@ export function SnapGrid<T extends GridWidget>(props: SnapGridProps<T>) {
   const [heights, setHeights] = createSignal<Record<string, number>>({});
   const layout = createMemo(() => {
     const widgets = props.widgets.map((widget) => autoHeight(widget) && heights()[widget.id]
-      ? { ...widget, h: Math.max(widget.h, heights()[widget.id]) } : widget);
+      ? { ...widget, h: Math.max(widget.h, heights()[widget.id]!) } : widget);
     return readingOrder(placeWidget(widgets, readingOrder(widgets)[0]?.id ?? "", {}));
   });
   function measure(element: HTMLDivElement, widget: T) {
@@ -52,7 +52,7 @@ export function SnapGrid<T extends GridWidget>(props: SnapGridProps<T>) {
   }
   function key(event: KeyboardEvent, widget: T) {
     if (!props.editing) return;
-    const delta = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[event.key];
+    const delta = ({ ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] } as Record<string, readonly [number, number]>)[event.key];
     if (!delta) return;
     event.preventDefault();
     props.onChange?.(placeWidget(props.widgets, widget.id, event.shiftKey
@@ -60,13 +60,16 @@ export function SnapGrid<T extends GridWidget>(props: SnapGridProps<T>) {
       : { x: widget.x + delta[0], y: widget.y + delta[1] }));
   }
   return <div ref={grid} class="snap-grid" aria-label="Widget layout">
-    <For each={layout()}>{(widget) => <section class="snap-grid-item" data-widget-id={widget.id} data-auto={autoHeight(widget)}
-      style={{ "grid-column": `${widget.x + 1} / span ${widget.w}`, "grid-row": `${widget.y + 1} / span ${widget.h}` }}>
+    <For each={layout().map((widget) => widget.id)}>{(id) => {
+      const widget = () => layout().find((item) => item.id === id)!;
+      return <section class="snap-grid-item" data-widget-id={id} data-auto={autoHeight(widget())}
+      style={{ "grid-column": `${widget().x + 1} / span ${widget().w}`, "grid-row": `${widget().y + 1} / span ${widget().h}` }}>
       <Show when={props.editing}><div class="snap-grid-controls">
-        <button type="button" aria-label={`Move ${widget.id}`} onKeyDown={(event) => key(event, widget)} onPointerDown={(event) => start(event, widget.id, false)} onPointerUp={finish} onPointerCancel={() => { gesture = undefined; }}>Move</button>
-        <button type="button" aria-label={`Resize ${widget.id}`} onKeyDown={(event) => key(event, widget)} onPointerDown={(event) => start(event, widget.id, true)} onPointerUp={finish} onPointerCancel={() => { gesture = undefined; }}>Resize</button>
+        <button type="button" aria-label={`Move ${id}`} onKeyDown={(event) => key(event, widget())} onPointerDown={(event) => start(event, id, false)} onPointerUp={finish} onPointerCancel={() => { gesture = undefined; }}>Move</button>
+        <button type="button" aria-label={`Resize ${id}`} onKeyDown={(event) => key(event, widget())} onPointerDown={(event) => start(event, id, true)} onPointerUp={finish} onPointerCancel={() => { gesture = undefined; }}>Resize</button>
       </div></Show>
-      <div class="snap-grid-content"><div ref={(element) => measure(element, widget)}>{props.renderWidget(widget)}</div></div>
-    </section>}</For>
+      <div class="snap-grid-content"><div ref={(element) => measure(element, widget())}>{props.renderWidget(widget())}</div></div>
+    </section>;
+    }}</For>
   </div>;
 }
