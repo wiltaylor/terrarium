@@ -2273,6 +2273,101 @@ async fn goodbye(socket: &mut WebSocket, reason: &str, message: String) {
     let _ = socket.send(WsMessage::Close(None)).await;
 }
 
+async fn drive_link(
+    socket: WebSocket,
+    reg: &Arc<HostRegistry>,
+    host: &str,
+    conn_id: u64,
+    tx: mpsc::UnboundedSender<Outgoing>,
+    mut rx: mpsc::UnboundedReceiver<Outgoing>,
+) -> &'static str {
+    let (mut sink, mut stream) = socket.split();
+    let hb = reg.heartbeat.max(Duration::from_millis(10));
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + hb, hb);
+    let mut last_rx = Instant::now();
+    let mut journal_retry = tokio::time::interval(JOURNAL_RETRY_TICK);
+    let mut journal_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut nonce = 0u64;
+    let why = loop {
+        tokio::select! {
+            _ = journal_retry.tick() => {
+                if journal_task.as_ref().is_none_or(|task| task.is_finished()) {
+                    let registry = reg.clone();
+                    let host = host.to_owned();
+                    journal_task = Some(tokio::task::spawn_blocking(move || registry.retry_journal(&host, conn_id)));
+                }
+            },
+            msg = stream.next(), if !reg.journal_backpressured(host) => {
+                last_rx = Instant::now();
+                match msg {
+                    Some(Ok(WsMessage::Text(t))) => match decode_control::<HostFrame>(t.as_str()) {
+                        Ok(HostFrame::Ping { nonce }) => {
+                            let _ = tx.send(Outgoing::frame(DaemonFrame::Pong { nonce }));
+                        }
+                        Ok(HostFrame::Pong { .. }) => {}
+                        Ok(HostFrame::Hello(_)) => warn!(host = %host, "a second hello; ignored"),
+                        Ok(HostFrame::Metrics(m)) => reg.record_metrics(host, *m, Instant::now()),
+                        Ok(f) => reg.on_session_frame(host, f),
+                        Err(e) => warn!(host = %host, "bad control frame: {e}"),
+                    },
+                    Some(Ok(WsMessage::Binary(b))) => match DataFrame::decode(&b) {
+                        Ok(f) => reg.on_data(host, f),
+                        Err(e) => warn!(host = %host, "bad data frame: {e}"),
+                    },
+                    Some(Ok(WsMessage::Close(_))) | None => break "closed by the host",
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        debug!(host = %host, "link error: {e}");
+                        break "link error";
+                    }
+                }
+            }
+            out = rx.recv() => {
+                let msg = match out {
+                    Some(Outgoing::Frame(f)) => match encode_control(&f) {
+                        Ok(t) => WsMessage::Text(t.into()),
+                        Err(e) => {
+                            warn!("cannot encode a frame: {e}");
+                            continue;
+                        }
+                    },
+                    Some(Outgoing::Data(d)) => WsMessage::Binary(d.encode().into()),
+                    Some(Outgoing::Close(reason)) => {
+                        if let Some((reason, message)) = reason {
+                            let f = DaemonFrame::Goodbye { reason: reason.to_owned(), message: Some(message) };
+                            if let Ok(t) = encode_control(&f) {
+                                let _ = sink.send(WsMessage::Text(t.into())).await;
+                            }
+                        }
+                        let _ = sink.send(WsMessage::Close(None)).await;
+                        break "closed by the daemon";
+                    }
+                    None => break "no sender",
+                };
+                if sink.send(msg).await.is_err() {
+                    break "send failed";
+                }
+            }
+            _ = ticker.tick() => {
+                if reg.journal_backpressured(host) {
+                    last_rx = Instant::now();
+                }
+                if last_rx.elapsed() > hb * MISSED_HEARTBEATS {
+                    break "heartbeat timeout";
+                }
+                nonce += 1;
+                if sink.send(WsMessage::Text(
+                    encode_control(&DaemonFrame::Ping { nonce }).unwrap_or_default().into(),
+                )).await.is_err() {
+                    break "send failed";
+                }
+            }
+        }
+    };
+    let _ = sink.close().await;
+    why
+}
+
 async fn serve_link(
     state: Shared,
     mut socket: WebSocket,
@@ -2370,7 +2465,7 @@ async fn serve_link(
     let conn_id = reg
         .next_conn
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let (tx, mut rx) = mpsc::unbounded_channel::<Outgoing>();
+    let (tx, rx) = mpsc::unbounded_channel::<Outgoing>();
     state.executor.set_resource_pending(&row.name, true);
     let attached = reg.attach(
         &row,
@@ -2468,90 +2563,7 @@ async fn serve_link(
         });
     }
 
-    let (mut sink, mut stream) = socket.split();
-    let hb = reg.heartbeat.max(Duration::from_millis(10));
-    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + hb, hb);
-    let mut last_rx = Instant::now();
-    let mut journal_retry = tokio::time::interval(JOURNAL_RETRY_TICK);
-    let mut journal_task: Option<tokio::task::JoinHandle<()>> = None;
-    let mut nonce = 0u64;
-    let why = loop {
-        tokio::select! {
-            _ = journal_retry.tick() => {
-                if journal_task.as_ref().is_none_or(|task| task.is_finished()) {
-                    let registry = reg.clone();
-                    let host = row.name.clone();
-                    journal_task = Some(tokio::task::spawn_blocking(move || registry.retry_journal(&host, conn_id)));
-                }
-            },
-            msg = stream.next(), if !reg.journal_backpressured(&row.name) => {
-                last_rx = Instant::now();
-                match msg {
-                    Some(Ok(WsMessage::Text(t))) => match decode_control::<HostFrame>(t.as_str()) {
-                        Ok(HostFrame::Ping { nonce }) => {
-                            let _ = tx.send(Outgoing::frame(DaemonFrame::Pong { nonce }));
-                        }
-                        Ok(HostFrame::Pong { .. }) => {}
-                        Ok(HostFrame::Hello(_)) => warn!(host = %row.name, "a second hello; ignored"),
-                        Ok(HostFrame::Metrics(m)) => reg.record_metrics(&row.name, *m, Instant::now()),
-                        Ok(f) => reg.on_session_frame(&row.name, f),
-                        Err(e) => warn!(host = %row.name, "bad control frame: {e}"),
-                    },
-                    Some(Ok(WsMessage::Binary(b))) => match DataFrame::decode(&b) {
-                        Ok(f) => reg.on_data(&row.name, f),
-                        Err(e) => warn!(host = %row.name, "bad data frame: {e}"),
-                    },
-                    Some(Ok(WsMessage::Close(_))) | None => break "closed by the host",
-                    Some(Ok(_)) => {}
-                    Some(Err(e)) => {
-                        debug!(host = %row.name, "link error: {e}");
-                        break "link error";
-                    }
-                }
-            }
-            out = rx.recv() => {
-                let msg = match out {
-                    Some(Outgoing::Frame(f)) => match encode_control(&f) {
-                        Ok(t) => WsMessage::Text(t.into()),
-                        Err(e) => {
-                            warn!("cannot encode a frame: {e}");
-                            continue;
-                        }
-                    },
-                    Some(Outgoing::Data(d)) => WsMessage::Binary(d.encode().into()),
-                    Some(Outgoing::Close(reason)) => {
-                        if let Some((reason, message)) = reason {
-                            let f = DaemonFrame::Goodbye { reason: reason.to_owned(), message: Some(message) };
-                            if let Ok(t) = encode_control(&f) {
-                                let _ = sink.send(WsMessage::Text(t.into())).await;
-                            }
-                        }
-                        let _ = sink.send(WsMessage::Close(None)).await;
-                        break "closed by the daemon";
-                    }
-                    None => break "no sender",
-                };
-                if sink.send(msg).await.is_err() {
-                    break "send failed";
-                }
-            }
-            _ = ticker.tick() => {
-                if reg.journal_backpressured(&row.name) {
-                    last_rx = Instant::now();
-                }
-                if last_rx.elapsed() > hb * MISSED_HEARTBEATS {
-                    break "heartbeat timeout";
-                }
-                nonce += 1;
-                if sink.send(WsMessage::Text(
-                    encode_control(&DaemonFrame::Ping { nonce }).unwrap_or_default().into(),
-                )).await.is_err() {
-                    break "send failed";
-                }
-            }
-        }
-    };
-    let _ = sink.close().await;
+    let why = drive_link(socket, &reg, &row.name, conn_id, tx, rx).await;
     if let Some(generation) = reg.detach(&row.name, conn_id) {
         info!(host = %row.name, why, "host agent disconnected");
         reg.note_error(&row.name, format!("disconnected: {why}"));
@@ -3269,6 +3281,122 @@ mod tests {
             stream: StreamTag::Stdout,
             bytes: vec![0; JOURNAL_RETRY_BYTES]
         }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn journal_websocket_pauses_reads_but_keeps_outgoing_frames_live() {
+        use tokio_tungstenite::tungstenite::Message;
+
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        let mut registry = registry("lab1", true);
+        registry.heartbeat = Duration::from_millis(50);
+        let reg = Arc::new(registry);
+        reg.restore_with_db(dir.path(), db.clone()).unwrap();
+        let mut session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let completed = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        reg.on_session_frame("lab1", HostFrame::Exit { session: completed.id(), code: Some(0), signal: None, reason: ExitReason::Exited });
+        let route_reg = reg.clone();
+        let app = axum::Router::new().route("/", axum::routing::get(move |upgrade: WebSocketUpgrade| {
+            let registry = route_reg.clone();
+            async move {
+                let (tx, rx) = mpsc::unbounded_channel();
+                registry.lock().get_mut("lab1").unwrap().conn = Some(Conn { id: 77, tx: tx.clone() });
+                upgrade.on_upgrade(move |socket| async move {
+                    drive_link(socket, &registry, "lab1", 77, tx, rx).await;
+                })
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/")).await.unwrap();
+        let writer_db = db.clone();
+        let (acquired, ready) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let writer = tokio::task::spawn_blocking(move || writer_db.read_now(|_| {
+            acquired.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(10)).unwrap();
+            Ok(())
+        }).unwrap());
+        ready.await.unwrap();
+        for offset in 0..128u32 {
+            ws.send(Message::Binary(DataFrame::new(session.id(), StreamTag::Stdout, offset.to_le_bytes().to_vec()).encode().into())).await.unwrap();
+        }
+        ws.send(Message::Text(encode_control(&HostFrame::Exit { session: session.id(), code: Some(0), signal: None, reason: ExitReason::Exited }).unwrap().into())).await.unwrap();
+        ws.send(Message::Text(encode_control(&HostFrame::Ping { nonce: 999 }).unwrap().into())).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !reg.journal_backpressured("lab1") {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        // These concern an already committed terminal session. The transport
+        // must send them even while incoming output is backpressured.
+        reg.send("lab1", Outgoing::frame(DaemonFrame::Ack { session: completed.id(), bytes: 0 }));
+        reg.send("lab1", Outgoing::frame(DaemonFrame::Release { session: completed.id() }));
+        let mut heartbeats = 0;
+        let mut ack = false;
+        let mut released_frame = false;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while heartbeats < 5 || !ack || !released_frame {
+                match ws.next().await.unwrap().unwrap() {
+                    Message::Text(text) => match decode_control::<DaemonFrame>(&text).unwrap() {
+                        DaemonFrame::Ping { .. } => heartbeats += 1,
+                        DaemonFrame::Ack { session, bytes: 0 } if session == completed.id() => ack = true,
+                        DaemonFrame::Release { session } if session == completed.id() => released_frame = true,
+                        other => panic!("unexpected frame while paused: {other:?}"),
+                    },
+                    other => panic!("unexpected websocket frame: {other:?}"),
+                }
+            }
+        }).await.unwrap();
+        // Paused longer than three heartbeat intervals without a Pong. The
+        // outgoing Pings keep the real host's receive deadline alive too.
+        assert_eq!(reg.lock()["lab1"].pending_journal[&session.id()].events.len(), JOURNAL_RETRY_EVENTS);
+        assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 0);
+        assert!(session.rx.try_recv().is_err());
+        release.send(()).unwrap();
+        writer.await.unwrap();
+        let consumer = tokio::spawn(async move {
+            for offset in 0..128u32 {
+                assert_eq!(session.recv().await.unwrap(), SessionEvent::Data { stream: StreamTag::Stdout, bytes: offset.to_le_bytes().to_vec() });
+            }
+            assert!(matches!(session.recv().await, Some(SessionEvent::Exit { .. })));
+        });
+        let journal = resume::Journal::with_db(dir.path(), db);
+        let mut final_ack = false;
+        let mut final_release = false;
+        let mut pong = false;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !final_ack || !final_release || !pong {
+                match ws.next().await.unwrap().unwrap() {
+                    Message::Text(text) => match decode_control::<DaemonFrame>(&text).unwrap() {
+                        DaemonFrame::Ping { nonce } => ws.send(Message::Text(encode_control(&HostFrame::Pong { nonce }).unwrap().into())).await.unwrap(),
+                        DaemonFrame::Ack { session, bytes } => {
+                            let saved = journal.load::<SavedHost>("host/lab1").unwrap().unwrap();
+                            assert_eq!(bytes, 512);
+                            assert_eq!(saved.sessions[&session].received, bytes);
+                            final_ack = true;
+                        }
+                        DaemonFrame::Release { .. } => final_release = true,
+                        DaemonFrame::Pong { nonce: 999 } => pong = true,
+                        other => panic!("unexpected frame after resume: {other:?}"),
+                    },
+                    other => panic!("unexpected websocket frame: {other:?}"),
+                }
+            }
+        }).await.unwrap();
+        consumer.await.unwrap();
+        let events = journal.scan::<SessionEvent>(&format!("event/lab1/{}/", reg.lock()["lab1"].sessions.keys().find(|&&id| id != completed.id()).unwrap())).unwrap();
+        assert_eq!(events.len(), 129);
+        for (offset, (_, event)) in events.iter().take(128).enumerate() {
+            assert_eq!(event, &SessionEvent::Data { stream: StreamTag::Stdout, bytes: (offset as u32).to_le_bytes().to_vec() });
+        }
+        assert_eq!(reg.lock()["lab1"].conn.as_ref().unwrap().id, 77);
+        ws.close(None).await.unwrap();
+        server.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
