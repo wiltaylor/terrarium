@@ -43,6 +43,30 @@ fn directory(parent: &File, path: &Path, no_xdev: bool) -> Result<File, Reply> {
 }
 
 impl ProtectedRoot {
+    /// An administrative child is created once, never adopted. Registration
+    /// IDs are typed, not caller paths. Sync both child and parent before use.
+    pub(super) fn create_registration_child(
+        &self,
+        registration: terrarium_core::live_workspace::RegistrationId,
+        owner: u32,
+    ) -> Result<Self, Reply> {
+        protected_owner(&self.fd, owner)?;
+        let name = registration.0.to_string();
+        nix::sys::stat::mkdirat(&self.fd, name.as_str(), Mode::S_IRWXU)
+            .map_err(|_| Reply::Conflict)?;
+        self.fd.sync_all().map_err(|_| Reply::Quarantined)?;
+        let child = directory(&self.fd, Path::new(&name), true)?;
+        protected_owner(&child, owner)?;
+        if mount_id(&child)? != mount_id(&self.fd)? {
+            return Err(Reply::Quarantined);
+        }
+        empty(&child)?;
+        child.sync_all().map_err(|_| Reply::Quarantined)?;
+        let mut ancestors = self.try_clone()?.ancestors;
+        ancestors.push(self.fd.try_clone().map_err(|_| Reply::Failed)?);
+        Ok(Self { fd: child, ancestors })
+    }
+
     pub fn open(path: &Path) -> Result<Self, Reply> {
         if !path.is_absolute() {
             return Err(Reply::Unauthorized);

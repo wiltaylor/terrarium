@@ -20,6 +20,14 @@ and containing directory before creating anything. Every externally observed
 transition has its own synced record. Runtime attachment state is committed
 only after an exact helper acknowledgement and renewed daemon authority check.
 
+The bootstrap journal itself needs an administrative directory. That directory
+is an exclusively created, ID-derived child of the fixed bootstrap parent, not
+an operational scaffold. Its parent is synced before opening the locked Store.
+The initial intent is synced there before any publisher, staging, registration
+child or runtime is created. A crash before intent leaves an unknown child:
+subsequent allocation refuses it, even if it is empty. No automatic adoption or
+repair is permitted. This makes the metadata-creation crash window fail closed.
+
 The initial request cannot contain a Docker container ID: that ID does not
 exist before create. A separate immutable binding records the full container ID
 after create and before start. The registration and incarnation IDs must appear

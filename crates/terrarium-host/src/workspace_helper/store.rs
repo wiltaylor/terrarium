@@ -140,7 +140,7 @@ impl Store {
         Self::open_owned(root, 0)
     }
 
-    fn open_owned(root: ProtectedRoot, owner: u32) -> Result<Self, Reply> {
+    pub(super) fn open_owned(root: ProtectedRoot, owner: u32) -> Result<Self, Reply> {
         let file = File::from(
             openat(
                 &root.fd,
