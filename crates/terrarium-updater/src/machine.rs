@@ -65,7 +65,7 @@ async fn recovery_before_deadline<T>(
     deadline: tokio::time::Instant,
     work: impl std::future::Future<Output = Res<T>>,
 ) -> Res<T> {
-    tokio::time::timeout_at(deadline, work).await.map_err(|_| {
+    tokio::time::timeout_at(deadline + Duration::from_secs(30), work).await.map_err(|_| {
         "recovery exceeded the remaining runner hold budget; completion uncertain".to_owned()
     })?
 }

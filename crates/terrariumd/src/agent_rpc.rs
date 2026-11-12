@@ -478,7 +478,9 @@ async fn journaled(
             Ok(None)
         }).await.map_err(internal)?;
     if let Some(answer) = cached {
-        return answer;
+        if !answer.as_ref().is_err_and(|e| e.code == "indeterminate") {
+            return answer;
+        }
     }
     let answer = effect.await;
     // Respect no-store even for a future write endpoint. Its effect is still
