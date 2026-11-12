@@ -76,6 +76,8 @@ fn assert_no_link(row: &Value) {
 async fn thread_messages_link_to_the_authors_session() {
     let td = TestDaemon::start().await;
     td.project("p").await;
+    td.agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await;
     let (aid, sid) = started(&td, "p", "w").await;
     let thread = td
         .post(
