@@ -12111,7 +12111,7 @@ The settings are daemon env vars:
 |---|---|---|
 | `TERRARIUM_BACKUP_SCHEDULE` | `off` | `daily`, `weekly`, or a duration of `1h` or more. |
 | `TERRARIUM_BACKUP_FULL_EVERY` | `7d` | The longest time between two full backups. |
-| `TERRARIUM_BACKUP_KEEP` | `4` | The full backups to keep, each with its diffs. |
+| `TERRARIUM_BACKUP_KEEP` | `5` | Legacy setting, accepted but ignored. Retention uses the operator-approved rule below. |
 | `TERRARIUM_BACKUP_WORK` | `off` | `on`: add the workspaces. |
 | `TERRARIUM_BACKUP_KEY_SECRET` | `backup-key` | The global secret with the passphrase. |
 | `TERRARIUM_BACKUP_PASSPHRASE_FILE` | none | A file whose first line is the passphrase. It wins over the secret. The daemon user must own it, and only the owner may read it (mode `0600` or `0400`); else each run fails. |
@@ -12139,8 +12139,7 @@ secret with it.
 
 **Rotation.** Set a new value on the secret. The next run is a full backup
 with the new key. The older backups keep the old key: keep the old
-passphrase until the retention deletes the last of them (after
-`TERRARIUM_BACKUP_KEEP` newer full backups). Restore or verify an old
+passphrase until retention deletes the last of them. Restore or verify an old
 backup with the old passphrase (`--passphrase-file`).
 
 **Verify and record.** Each run reads the new backup back and checks each
@@ -12155,10 +12154,81 @@ writes a global event of the kind `backup` with `change`: `verified`,
 backup. When the move fails the run deletes the file; when that fails
 too, the error mail says to delete it by hand.
 
-**Retention.** Only a full backup that verified prunes the dir: it keeps
-the newest `TERRARIUM_BACKUP_KEEP` full backups and their diffs, and
-deletes the rest. Nothing is deleted before a newer full backup is
-verified, and nothing is deleted while the runs fail.
+**Retention.** The operator's rule is to keep the newest **5**
+daemon-written full ZIPs plus the latest backup on each of the last **14
+UTC calendar days**, including today. Deletion stays off until explicit
+operator initialization: `terrarium admin backup retention init` shows the
+first bounded pass's exact names, dates, byte sizes and total. Re-run with
+`--confirm` to initialize and enable passes. The operator-only API is
+`POST /api/backups/retention/init` with `confirm` and
+`no_rollback_reference` booleans (both default false). Missing or unreadable
+`history.json` or `previous.json` refuses initialization and names the file
+needing repair. Only a never-updated installation may explicitly establish
+an empty baseline with `--no-rollback-reference --confirm`. Initialization
+and that flag are durably audited. No fresh installation is inferred from
+missing files. Later missing/unreadable safety files, or a missing initialized
+marker in `retention.json`, always prevent deletion. Missing retention state
+also prevents update admission until repaired. An independent initialization
+epoch in `history.json` survives run rotation. Ordinary init cannot replace
+lost initialized state. `terrarium admin backup retention repair` previews
+conservative recovery holds and the deletion list. `--confirm` audits and
+writes a new epoch. Its operator-only endpoint is
+`POST /api/backups/retention/repair` with `confirm` (default false).
+Repair inspects every Docker ExecID and refuses while an exact retention
+helper is running. Every leftover `.hot-swap.sqlite` and its ZIP becomes a
+named hold until explicit recovery release. The response prints release keys.
+Repair requires readable history and previous state, not an inferred empty
+rollback baseline. Init and repair atomically store confirmed names in the
+initialized state. The first pass only deletes confirmed names still eligible
+under the directory lock. New backups never expand that first-pass list.
+
+Helper authorization expires after ten seconds. The updater renews only
+after strict rereads of all three safety files, a matching initialization
+epoch and current exec/token interlock. Failure revokes the token and stops
+renewal. A paused helper checks expiry before each unlink, so missing state
+stops deletion within ten seconds, within the 32-file pass cap.
+
+The updater is the only deletion
+owner and serializes retention with updates and rollbacks. API, CLI and
+scheduled creates request a pass after backup creation. The daemon also
+requests a pass at startup and every minute, including when scheduling
+is off. With no reachable updater, or while an update is running, no
+retention occurs and a warning reports the deferral.
+
+An active update (even before its backup path is recorded), the rollback
+backup in `previous.json`, and failed-recovery ZIPs and snapshots are
+protected. An interrupted updater leaves a durable hold in
+`<updater-state>/retention.json`, blocking deletion and new updates until
+the operator has recovered the run and releases it. Recovery holds survive
+history rotation. Full backups referenced by retained diffs are also kept.
+Unknown names, invalid headers, and future-dated backups are not deleted.
+
+Before helper launch the updater persists a `retention_running` interlock
+with the Docker exec ID and a unique token, then records the observed host
+PID and helper PID/start time. Updates refuse while that interlock remains.
+Startup and uncertain execution revoke the token, terminate the exact helper
+using its container PID/start time and pidfd, then inspect the exact Docker
+exec to prove it stopped before clearing the interlock. An inspection or
+cancellation failure keeps admission blocked. A delayed start cannot reuse
+a revoked token. The helper re-reads the mirrored token and protections
+under the directory lock immediately before each unlink. Private control,
+identity, receipt and permanent revocation files live in the backup directory.
+
+A paused `<ZIP>.hot-swap.sqlite` belongs to its ZIP and is deleted with
+it, unless already removed by hot-swap commit. Each pass deletes at most
+32 files, by exact names inside the backup directory. A cross-process
+directory lock serializes creation and deletion. The durable
+`<backup-dir>/.retention-audit.jsonl` records each deletion's intent and
+completion, exact name and byte size. No deletion proceeds if journaling
+fails. These journals are not included in backups.
+
+After manual recovery, the operator can run
+`terrarium daemon backup release-recovery <run-id>`
+(`POST /api/backups/recovery-release`, body `{"run":"<run-id>"}`). Agents,
+including sysadmins, cannot release a hold. Release is irreversible and
+audited in `<updater-state>/retention-audit.jsonl` before it takes effect.
+It permits retention, not necessarily immediate deletion: the five/daily
+rule and the previous rollback target still apply.
 
 **Alerts.** The first failed run of a streak mails the operator from
 `system` (subject `Scheduled backup failed`, with the error). The next

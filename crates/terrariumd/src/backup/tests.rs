@@ -568,7 +568,7 @@ fn a_backup_skips_the_secret_run_dirs() {
 }
 
 #[test]
-fn list_and_prune_keep_the_newest_fulls_and_their_diffs() {
+fn listing_does_not_delete_fulls_or_diffs() {
     let fx = fixture();
     let f1 = fx.make(Kind::Full, false, None);
     let d1 = fx.make(Kind::Diff, false, None);
@@ -577,12 +577,8 @@ fn list_and_prune_keep_the_newest_fulls_and_their_diffs() {
     assert_eq!(d2.header.base.as_ref().unwrap().id, f2.header.id);
     let l = list(&fx.dir).unwrap();
     assert_eq!(l.len(), 4);
-    // Nothing goes before the newest full backup is verified.
-    assert!(prune(&fx.dir, 1, &f1.header.id).is_err());
     assert_eq!(list(&fx.dir).unwrap().len(), 4);
-    let removed = prune(&fx.dir, 1, &f2.header.id).unwrap();
-    assert_eq!(removed.len(), 2);
-    assert!(removed.contains(&f1.name) && removed.contains(&d1.name));
+    assert!(f1.path.exists() && d1.path.exists());
     assert!(f2.path.exists() && d2.path.exists());
     assert!(is_backup_name(&f2.name));
     assert!(!is_backup_name("../x.zip") && !is_backup_name(".x.zip.partial"));

@@ -36,6 +36,13 @@ pub struct ExecOut {
     pub stderr: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecState {
+    pub running: bool,
+    pub pid: u64,
+    pub code: i64,
+}
+
 impl ExecOut {
     /// The last line of stderr, else of stdout: the reason of a failure.
     pub fn reason(&self) -> String {
@@ -85,6 +92,19 @@ pub trait Engine: Send + Sync {
     fn pull<'a>(&'a self, reference: &'a str) -> BoxFut<'a, Res<Image>>;
     /// Run `argv` in the running container `id`.
     fn exec<'a>(&'a self, id: &'a str, argv: Vec<String>) -> BoxFut<'a, Res<ExecOut>>;
+    /// Two-phase exec for deletion: caller durably records identity before start.
+    fn exec_create<'a>(&'a self, _id: &'a str, _argv: Vec<String>) -> BoxFut<'a, Res<String>> {
+        Box::pin(async { Err("durable exec unsupported".into()) })
+    }
+    fn exec_start<'a>(&'a self, _id: &'a str) -> BoxFut<'a, Res<()>> {
+        Box::pin(async { Err("durable exec unsupported".into()) })
+    }
+    fn exec_inspect<'a>(&'a self, _id: &'a str) -> BoxFut<'a, Res<ExecState>> {
+        Box::pin(async { Err("durable exec inspection unsupported".into()) })
+    }
+    fn running_retention_helpers<'a>(&'a self, _id: &'a str) -> BoxFut<'a, Res<Vec<String>>> {
+        Box::pin(async { Err("retention helper inventory unsupported".into()) })
+    }
     /// Stop the container gracefully (its stop timeout).
     fn stop<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>>;
     /// Stop without allowing a daemon to restart on an unverified database.

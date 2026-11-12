@@ -427,6 +427,8 @@ pub enum DaemonCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum BackupCmd {
+    /// Release a failed update's recovery backup from retention protection (operator)
+    ReleaseRecovery { run: String },
     /// Make a backup in the daemon's backup dir now
     Create {
         /// `full`, or `diff` (the files that changed since the newest full backup)
@@ -3436,6 +3438,11 @@ pub struct SnapshotOn {
 
 #[derive(Debug, Subcommand)]
 pub enum AdminCmd {
+    /// Operator-only backup retention initialization
+    Backup {
+        #[command(subcommand)]
+        command: AdminBackupCmd,
+    },
     /// Operator-only job maintenance
     Job {
         #[command(subcommand)]
@@ -3527,6 +3534,31 @@ pub enum AdminCmd {
     Password {
         #[command(subcommand)]
         command: PasswordCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AdminBackupCmd {
+    Retention {
+        #[command(subcommand)]
+        command: RetentionCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RetentionCmd {
+    /// Rebuild lost safety state conservatively. Requires --confirm.
+    Repair {
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Preview the first deletion pass. Requires --confirm to enable retention.
+    Init {
+        #[arg(long)]
+        confirm: bool,
+        /// Explicitly establish an empty rollback baseline on a never-updated installation
+        #[arg(long)]
+        no_rollback_reference: bool,
     },
 }
 

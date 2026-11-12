@@ -34,6 +34,9 @@ pub fn bind(path: &Path) -> std::io::Result<UnixListener> {
 
 /// Serve requests until the task ends.
 pub async fn serve(listener: UnixListener, path: &Path, updater: Arc<Updater>) {
+    if let Err(error) = updater.reconcile_retention().await {
+        tracing::warn!("retention startup reconciliation refused: {error}");
+    }
     let owner = std::fs::metadata(path).map(|m| m.uid()).ok();
     loop {
         let stream = match listener.accept().await {
