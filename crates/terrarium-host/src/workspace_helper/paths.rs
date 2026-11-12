@@ -12,8 +12,12 @@ pub struct ProtectedRoot {
 }
 
 fn protected(fd: &File) -> Result<(), Reply> {
+    protected_owner(fd, 0)
+}
+
+fn protected_owner(fd: &File, owner: u32) -> Result<(), Reply> {
     let m = fd.metadata().map_err(|_| Reply::Failed)?;
-    if !m.is_dir() || m.uid() != 0 || m.mode() & 0o022 != 0 {
+    if !m.is_dir() || m.uid() != owner || m.mode() & 0o022 != 0 {
         return Err(Reply::Unauthorized);
     }
     Ok(())
@@ -108,6 +112,85 @@ pub fn scan_source(source: &File) -> Result<(), Reply> {
     let expected = mount_id(source)?;
     let mut budget = 100_000usize;
     scan(source, expected, 0, &mut budget)
+}
+
+/// Helper-created placeholder pinned beneath protected mapping parents. The
+/// source is never mounted onto a pre-existing caller/container directory.
+pub struct Destination {
+    parent: File,
+    name: String,
+    slot: File,
+    owner: u32,
+}
+
+fn empty(fd: &File) -> Result<(), Reply> {
+    let reopened = directory(fd, Path::new("."), true)?;
+    let mut dir = nix::dir::Dir::from_fd(reopened.into()).map_err(|_| Reply::Failed)?;
+    for entry in dir.iter() {
+        let entry = entry.map_err(|_| Reply::Failed)?;
+        if !matches!(entry.file_name().to_bytes(), b"." | b"..") { return Err(Reply::Conflict); }
+    }
+    Ok(())
+}
+
+impl ProtectedRoot {
+    /// `self` is the verified per-registration publisher or private staging
+    /// root, not the common workspace root. Its namespace topology is checked
+    /// independently before this method is used.
+    pub fn destination(&self, enrollment: &Enrollment) -> Result<Destination, Reply> {
+        self.destination_as(enrollment, 0)
+    }
+
+    fn destination_as(&self, enrollment: &Enrollment, owner: u32) -> Result<Destination, Reply> {
+        use nix::sys::stat::mkdirat;
+        if !enrollment.matches(enrollment) { return Err(Reply::Unauthorized); }
+        match mkdirat(&self.fd, enrollment.project.as_str(), Mode::S_IRWXU | Mode::S_IRGRP | Mode::S_IXGRP | Mode::S_IROTH | Mode::S_IXOTH) {
+            Ok(()) => self.fd.sync_all().map_err(|_| Reply::Failed)?,
+            Err(nix::errno::Errno::EEXIST) => {},
+            Err(_) => return Err(Reply::Failed),
+        }
+        let parent = directory(&self.fd, Path::new(&enrollment.project), true)?;
+        protected_owner(&parent, owner)?;
+        mkdirat(&parent, enrollment.name.as_str(), Mode::S_IRWXU | Mode::S_IRGRP | Mode::S_IXGRP | Mode::S_IROTH | Mode::S_IXOTH).map_err(|_| Reply::Conflict)?;
+        parent.sync_all().map_err(|_| Reply::Failed)?;
+        let slot = directory(&parent, Path::new(&enrollment.name), true)?;
+        protected_owner(&slot, owner)?;
+        empty(&slot)?;
+        Ok(Destination { parent, name: enrollment.name.clone(), slot, owner })
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture_destination(&self, enrollment: &Enrollment) -> Result<Destination, Reply> {
+        self.destination_as(enrollment, nix::unistd::geteuid().as_raw())
+    }
+}
+
+impl Destination {
+    pub fn placeholder(&self) -> Result<&File, Reply> {
+        let current = directory(&self.parent, Path::new(&self.name), true)?;
+        protected_owner(&current, self.owner)?;
+        let expected = self.slot.metadata().map_err(|_| Reply::Failed)?;
+        let actual = current.metadata().map_err(|_| Reply::Failed)?;
+        if (expected.dev(), expected.ino()) != (actual.dev(), actual.ino()) || mount_id(&current)? != mount_id(&self.parent)? { return Err(Reply::Conflict); }
+        empty(&current)?;
+        Ok(&self.slot)
+    }
+
+    /// After publication, the reopened FD refers to the new mounted tree, not
+    /// the underlying placeholder. Kernel evidence must match its mount ID.
+    pub fn mounted(&self) -> Result<File, Reply> {
+        let current = directory(&self.parent, Path::new(&self.name), false)?;
+        if mount_id(&current)? == mount_id(&self.parent)? { return Err(Reply::Quarantined); }
+        Ok(current)
+    }
+
+    /// Use only after observing ordinary unmount or lazy detach. Never create
+    /// a missing placeholder during revoke recovery or remove an unknown mount.
+    pub fn remove(self) -> Result<(), Reply> {
+        self.placeholder()?;
+        nix::unistd::unlinkat(&self.parent, self.name.as_str(), nix::unistd::UnlinkatFlags::RemoveDir).map_err(|_| Reply::Failed)?;
+        self.parent.sync_all().map_err(|_| Reply::Failed)
+    }
 }
 
 fn scan(parent: &File, expected: u64, depth: usize, budget: &mut usize) -> Result<(), Reply> {

@@ -150,8 +150,8 @@ pub fn publisher(
         || receiver.optional_fields != vec![format!("master:{shared}")]
         || !has(&receiver.vfs_flags, "ro")
         || has(&receiver.vfs_flags, "rw")
-        || !has(&host.vfs_flags, "ro")
-        || has(&host.vfs_flags, "rw")
+        || !has(&host.vfs_flags, "rw")
+        || has(&host.vfs_flags, "ro")
         || host_view
             .iter()
             .filter(|m| m.namespace == host.namespace && group(m, "shared:") == Some(shared))
@@ -182,5 +182,39 @@ pub fn exact_children(
     {
         return Err(Reply::Quarantined);
     }
+    Ok(())
+}
+
+/// Verify a propagated writable submount against the enrolled source and both
+/// publisher views. Host and receiver parent IDs are checked locally only.
+pub fn workspace(
+    host: &MountEvidence,
+    receiver: &MountEvidence,
+    host_publisher: &MountEvidence,
+    receiver_publisher: &MountEvidence,
+    root: &str,
+    device: &str,
+) -> Result<(), Reply> {
+    let shared = group(host, "shared:").ok_or(Reply::Quarantined)?;
+    if host.namespace != host_publisher.namespace
+        || receiver.namespace != receiver_publisher.namespace
+        || host.namespace == receiver.namespace
+        || host.parent_id != host_publisher.mount_id
+        || receiver.parent_id != receiver_publisher.mount_id
+        || host.mount_id == host.parent_id || receiver.mount_id == receiver.parent_id
+        || host.optional_fields != vec![format!("shared:{shared}")]
+        || receiver.optional_fields != vec![format!("master:{shared}")]
+    { return Err(Reply::Quarantined); }
+    for mount in [host, receiver] {
+        if mount.root != root || mount.major_minor != device
+            || !has(&mount.vfs_flags, "rw") || has(&mount.vfs_flags, "ro")
+            || !has(&mount.vfs_flags, "nosuid") || !has(&mount.vfs_flags, "nodev")
+            || has(&mount.vfs_flags, "noexec") || has(&mount.super_flags, "ro") {
+            return Err(Reply::Quarantined);
+        }
+    }
+    let host_suffix = host.mountpoint.strip_prefix(&format!("{}/", host_publisher.mountpoint)).ok_or(Reply::Quarantined)?;
+    let receiver_suffix = receiver.mountpoint.strip_prefix("/work/").ok_or(Reply::Quarantined)?;
+    if host_suffix != receiver_suffix || host_suffix.split('/').count() != 2 { return Err(Reply::Quarantined); }
     Ok(())
 }

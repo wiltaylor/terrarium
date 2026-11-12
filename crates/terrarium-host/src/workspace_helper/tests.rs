@@ -293,7 +293,7 @@ fn evidence(line: &str, inode: u64) -> MountEvidence {
 
 #[test]
 fn namespace_scoped_publisher_and_private_stage_verification() {
-    let host = evidence("10 1 8:1 /reg/work /publisher ro - ext4 /dev/a rw", 1);
+    let host = evidence("10 1 8:1 /reg/work /publisher rw - ext4 /dev/a rw", 1);
     let mut host_shared = host.clone();
     host_shared.optional_fields = vec!["shared:42".into()];
     // Equal mount IDs across namespaces are neither proof nor a mismatch.
@@ -394,4 +394,100 @@ fn runtime_pin_rejects_restart_namespace_and_docker_identity_changes() {
     docker.snapshot.identity = expected.clone();
     docker.snapshot.identity.container_id = "b".repeat(64);
     assert!(PinnedRuntime::acquire(&mut docker, &expected).is_err());
+}
+
+#[test]
+fn all_durable_inflight_phases_quarantine_after_reopen() {
+    for (kind, phases) in [
+        (Kind::Grant, vec![Phase::Staged, Phase::StageVerified, Phase::Published, Phase::Verified]),
+        (Kind::Revoke, vec![Phase::OrdinaryUnmountObserved, Phase::LazyDetachObserved, Phase::PlaceholderRemoved, Phase::Verified]),
+    ] {
+        for stop in 0..=phases.len() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::fixture(dir.path()).unwrap();
+            let mut j = journal();
+            let e = envelope(1, kind);
+            j.prepare(e.clone()).unwrap();
+            for phase in &phases[..stop] { j.advance(e.original.operation, *phase).unwrap(); }
+            store.save(&j).unwrap();
+            drop(store);
+            let mut h = Helper::open(Store::fixture(dir.path()).unwrap(), Fake::default()).unwrap();
+            assert!(h.journal.quarantined, "{kind:?} {stop}");
+            assert_eq!(h.apply(&bytes(&e)), Err(Reply::Quarantined));
+            assert_eq!(*h.backend.calls.borrow(), vec!["reconcile"]);
+            if kind == Kind::Revoke { assert!(h.journal.tombstones.contains_key(&id(7))); }
+        }
+    }
+}
+
+#[test]
+fn failed_journal_write_fences_helper_before_kernel_action() {
+    let (dir, mut h) = helper(Fake::default());
+    std::fs::write(dir.path().join("journal.next"), b"foreign-or-incomplete").unwrap();
+    assert_eq!(h.apply(&bytes(&envelope(1, Kind::Grant))), Err(Reply::Quarantined));
+    assert_eq!(*h.backend.calls.borrow(), vec!["reconcile"]);
+    // Even if somebody removes the failed-write marker, this process stays
+    // fenced, and it never reports a non-durable in-memory commit as success.
+    std::fs::remove_file(dir.path().join("journal.next")).unwrap();
+    assert_eq!(h.apply(&bytes(&envelope(1, Kind::Grant))), Err(Reply::Quarantined));
+    assert_eq!(*h.backend.calls.borrow(), vec!["reconcile"]);
+}
+
+#[test]
+fn propagated_workspace_flags_source_and_parent_are_checked_locally() {
+    let hp = evidence("10 1 8:1 /reg/work /publisher rw shared:42 - ext4 /dev/a rw", 1);
+    let rp = evidence("20 1 8:1 /reg/work /work ro master:42 - ext4 /dev/a rw", 2);
+    let host = evidence("11 10 8:1 /project/agent /publisher/project/agent rw,nosuid,nodev shared:43 - ext4 /dev/a rw", 1);
+    let receiver = evidence("21 20 8:1 /project/agent /work/project/agent rw,nosuid,nodev master:43 - ext4 /dev/a rw", 2);
+    let check = |r: &MountEvidence| mountinfo::workspace(&host, r, &hp, &rp, "/project/agent", "8:1");
+    assert_eq!(check(&receiver), Ok(()));
+    for flag in ["nosuid", "nodev", "rw"] {
+        let mut bad = receiver.clone(); bad.vfs_flags.retain(|f| f != flag);
+        assert!(check(&bad).is_err());
+    }
+    let mut bad = receiver.clone(); bad.parent_id = hp.mount_id;
+    assert!(check(&bad).is_err());
+    bad = receiver.clone(); bad.root = "/other".into(); assert!(check(&bad).is_err());
+    bad = receiver.clone(); bad.major_minor = "8:2".into(); assert!(check(&bad).is_err());
+    bad = receiver.clone(); bad.namespace = hp.namespace.clone(); assert!(check(&bad).is_err());
+    bad = receiver; bad.mountpoint = "/work/other/agent".into(); assert!(check(&bad).is_err());
+}
+
+#[tokio::test]
+async fn valid_peer_acknowledges_only_durable_result() {
+    let (_dir, mut h) = helper(Fake::default());
+    let (server, mut client) = UnixStream::pair().unwrap();
+    let request = bytes(&envelope(1, Kind::Grant));
+    client.write_u32(request.len() as u32).await.unwrap();
+    client.write_all(&request).await.unwrap();
+    serve_connection(&mut h, server, nix::unistd::geteuid().as_raw()).await.unwrap();
+    let size = client.read_u32().await.unwrap();
+    let mut response = vec![0; size as usize];
+    client.read_exact(&mut response).await.unwrap();
+    assert_eq!(serde_json::from_slice::<Reply>(&response).unwrap(), Reply::Applied);
+    assert_eq!(h.store.load().unwrap().last_contiguous_revision, 1);
+}
+
+#[test]
+fn destination_substitution_and_nonempty_scaffold_are_refused() {
+    use std::fs::File;
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = ProtectedRoot { fd: File::open(dir.path()).unwrap() };
+    let e = envelope(1, Kind::Grant).original.holder.unwrap().enrollment;
+    let dest = root.fixture_destination(&e).unwrap();
+    assert!(dest.placeholder().is_ok());
+    assert!(root.fixture_destination(&e).is_err());
+    let path = dir.path().join("project/agent");
+    std::fs::write(path.join("foreign"), b"canary").unwrap();
+    assert!(dest.placeholder().is_err());
+    std::fs::remove_file(path.join("foreign")).unwrap();
+    std::fs::rename(&path, dir.path().join("project/original")).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(dest.placeholder().is_err());
+    std::fs::remove_dir(&path).unwrap();
+    symlink("original", &path).unwrap();
+    assert!(dest.placeholder().is_err());
+    assert!(dest.remove().is_err());
+    assert!(dir.path().join("project/original").is_dir());
 }

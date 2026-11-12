@@ -6,10 +6,11 @@
 
 pub mod mountinfo;
 pub mod runtime;
+pub mod mounts;
 mod paths;
 mod store;
 
-pub use paths::{ProtectedRoot, mount_id, scan_source};
+pub use paths::{Destination, ProtectedRoot, mount_id, scan_source};
 pub use store::Store;
 
 use terrarium_core::live_workspace::{
