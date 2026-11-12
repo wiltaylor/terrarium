@@ -140,6 +140,32 @@ fn release_migrations_upgrade_populated_previous_release() {
 }
 
 #[test]
+fn dashboard_page_migrates_saved_sml_order_and_defaults() {
+    use serde_json::{Value, json};
+    let mut conn = seeded_previous_release();
+    let blocks = json!({"blocks":[
+        {"id":"small","kind":"note","size":"s","text":"small"},
+        {"id":"medium","kind":"note","size":"m","text":"medium"},
+        {"id":"large","kind":"note","size":"l","text":"large"},
+        {"id":"last","kind":"note","size":"s","text":"last"}
+    ]});
+    conn.execute("UPDATE dashboards SET layout=?1", [blocks.to_string()]).unwrap();
+    migrate(&mut conn).unwrap();
+    let widgets: String = conn.query_row("SELECT widgets FROM project_pages WHERE slug='dashboard' LIMIT 1", [], |r| r.get(0)).unwrap();
+    let widgets: Vec<Value> = serde_json::from_str(&widgets).unwrap();
+    assert_eq!(widgets.iter().map(|w| w["kind"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["actions","monitor_summary","job_queue","eta_accuracy","markdown","markdown","markdown","markdown"]);
+    assert_eq!(widgets[4..].iter().map(|w| (w["id"].as_str().unwrap(), w["w"].as_u64().unwrap(), w["x"].as_u64().unwrap(), w["y"].as_u64().unwrap())).collect::<Vec<_>>(),
+        [("small",3,0,14),("medium",6,3,14),("large",12,0,18),("last",3,0,22)]);
+    assert_eq!(widgets[4]["text"], "small");
+    conn.execute("INSERT INTO projects(name,created_at,updated_at) VALUES('new-page-project','now','now')", []).unwrap();
+    let count: i64 = conn.query_row("SELECT json_array_length(widgets) FROM project_pages WHERE project='new-page-project'", [], |r| r.get(0)).unwrap();
+    assert_eq!(count,4);
+    assert_eq!(migrate(&mut conn).unwrap(),0);
+    check_database(&conn);
+}
+
+#[test]
 fn fixture_rejects_unfixed_v057_card_wait_migration() {
     let mut conn = seeded_previous_release();
     let error = migrate_named(
