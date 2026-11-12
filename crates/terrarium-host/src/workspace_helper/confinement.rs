@@ -12,6 +12,7 @@ fn identity(fd: &File) -> Result<Identity, Reply> {
     Ok((m.dev(), m.ino()))
 }
 
+#[derive(Clone)]
 struct Location {
     identity: Identity,
     path: PathBuf,
@@ -72,9 +73,14 @@ pub(super) fn validate(data: &[&ProtectedRoot], controls: &[&ProtectedRoot]) -> 
                 return Err(Reply::Unauthorized);
             }
         }
-        // A control directory/file may be bound into a descendant workspace,
-        // not just aliased at a configured tree root. Inspect every mounted
-        // descendant before allowing any store or helper to mutate state.
+    }
+    let mut exported = data_locations.clone();
+    let mut protected = control_locations.clone();
+    // Inspect BOTH sides. A journal/config/socket file can itself be a bind
+    // mount sourced from a normal workspace file while its control parent is
+    // otherwise separated. Also catch two aliases of the same outside object.
+    for (roots, locations, expanded) in [(data, &data_locations, &mut exported), (controls, &control_locations, &mut protected)] {
+      for (tree, tree_location) in roots.iter().zip(locations) {
         for mount in &view {
             let Ok(relative) =
                 std::path::Path::new(&mount.mountpoint).strip_prefix(&tree_location.path)
@@ -102,14 +108,12 @@ pub(super) fn validate(data: &[&ProtectedRoot], controls: &[&ProtectedRoot]) -> 
             if mount_id(&fd)? != mount.mount_id {
                 return Err(Reply::Unauthorized);
             }
-            let child = location(&fd, &view)?;
-            if control_locations
-                .iter()
-                .any(|control| overlap(&child, control))
-            {
-                return Err(Reply::Unauthorized);
-            }
+            expanded.push(location(&fd, &view)?);
         }
+      }
+    }
+    for tree in &exported {
+        if protected.iter().any(|control| overlap(tree, control)) { return Err(Reply::Unauthorized); }
     }
     Ok(())
 }

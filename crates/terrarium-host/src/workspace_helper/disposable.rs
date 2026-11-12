@@ -930,6 +930,7 @@ fn control_state_aliases_refused_before_receiver_export() {
         "below",
         "bind_subtree_alias",
         "bound_into_workspace",
+        "bound_control_file",
     ] {
         let root = tempfile::Builder::new()
             .prefix("ter925-confinement-")
@@ -980,6 +981,18 @@ fn control_state_aliases_refused_before_receiver_export() {
             mounts::make_private(&alias).unwrap();
             cleanup.0.push(alias);
         }
+        if case == "bound_control_file" {
+            let source_path = root.path().join("source/project/agent/journal-source");
+            std::fs::write(&source_path, &canary).unwrap();
+            std::fs::set_permissions(&source_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let source = File::open(&source_path).unwrap();
+            let slot = File::open(state_path.join("journal.json")).unwrap();
+            mounts::attach(&mounts::clone_nonrecursive(&source).unwrap(), &slot).unwrap();
+            let alias = File::open(state_path.join("journal.json")).unwrap();
+            mounts::make_private(&alias).unwrap();
+            assert_eq!(alias.metadata().unwrap().nlink(), 1); // bind does not trip hard-link guards
+            cleanup.0.push(alias);
+        }
         let data: Vec<_> = ["source", "publisher", "staging"]
             .iter()
             .map(|p| ProtectedRoot::open(&root.path().join(p)).unwrap())
@@ -993,7 +1006,7 @@ fn control_state_aliases_refused_before_receiver_export() {
         // Model the export gate: no receiver construction or store mutation is
         // allowed until this exact read-only startup preflight has succeeded.
         if admission.is_ok() {
-            let source = File::open(if case == "bound_into_workspace" {
+            let source = File::open(if matches!(case, "bound_into_workspace" | "bound_control_file") {
                 root.path().join("source/project/agent")
             } else {
                 root.path().join("publisher")
@@ -1009,6 +1022,7 @@ fn control_state_aliases_refused_before_receiver_export() {
         assert!(!root.path().join("receiver/journal.json").exists());
         assert!(!root.path().join("receiver/state/journal.json").exists());
         assert!(!root.path().join("receiver/control/journal.json").exists());
+        assert!(!root.path().join("receiver/journal-source").exists());
         assert_eq!(
             std::fs::read(state_path.join("journal.json")).unwrap(),
             canary

@@ -125,7 +125,8 @@ configuration. State, config and socket directories must be disjoint from all
 work, publisher and staging trees. This checks pinned root/ancestor dev+inode
 identities in both directions, namespace paths, and filesystem-relative mount
 roots. It also inspects mounted descendants for aliases of control directories
-or files into a workspace. A bind alias of a state subtree cannot evade the
+or files in both directions, including a control file bound from a workspace
+file despite having only one hard link. A bind alias of a state subtree cannot evade the
 check by having a different administrative pathname. No helper is constructed
 and no startup snapshot is written before every registration passes.
 
