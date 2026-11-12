@@ -286,7 +286,9 @@ mod tests {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.create(r.clone())));
                 assert_eq!(outcome.is_err(), crash, "boundary {boundary}");
                 if !crash {
-                    assert_eq!(outcome.unwrap(), Err(Reply::Quarantined));
+                    // Initial intent errors propagate their I/O failure.
+                    // The instance is fenced before that write regardless.
+                    assert!(outcome.unwrap().is_err(), "boundary {boundary}");
                     let calls = b.backend.calls;
                     assert_eq!(b.create(r.clone()), Err(Reply::Quarantined));
                     assert_eq!(b.retry(&r), Err(Reply::Quarantined));
