@@ -32,10 +32,22 @@ pub struct PinnedRuntime {
 }
 
 fn read_at(parent: &File, name: &str, limit: u64) -> Result<Vec<u8>, Reply> {
-    let file = File::from(openat(parent, name, OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK, Mode::empty()).map_err(|_| Reply::Quarantined)?);
+    let file = File::from(
+        openat(
+            parent,
+            name,
+            OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|_| Reply::Quarantined)?,
+    );
     let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes).map_err(|_| Reply::Quarantined)?;
-    if bytes.len() as u64 > limit { return Err(Reply::Quarantined); }
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Reply::Quarantined)?;
+    if bytes.len() as u64 > limit {
+        return Err(Reply::Quarantined);
+    }
     Ok(bytes)
 }
 
@@ -44,38 +56,113 @@ fn ticks(proc: &File) -> Result<u64, Reply> {
     let text = std::str::from_utf8(&bytes).map_err(|_| Reply::Quarantined)?;
     let (_, tail) = text.rsplit_once(')').ok_or(Reply::Quarantined)?;
     // tail begins at field 3 (state). starttime is field 22.
-    tail.split_whitespace().nth(19).ok_or(Reply::Quarantined)?.parse().map_err(|_| Reply::Quarantined)
+    tail.split_whitespace()
+        .nth(19)
+        .ok_or(Reply::Quarantined)?
+        .parse()
+        .map_err(|_| Reply::Quarantined)
 }
 
 fn identity(fd: &File) -> Result<NamespaceIdentity, Reply> {
     let m = fd.metadata().map_err(|_| Reply::Quarantined)?;
-    Ok(NamespaceIdentity { device: m.dev(), inode: m.ino() })
+    Ok(NamespaceIdentity {
+        device: m.dev(),
+        inode: m.ino(),
+    })
 }
 
 impl PinnedRuntime {
-    pub fn acquire(inspector: &mut impl Inspector, expected: &RuntimeIdentity) -> Result<Self, Reply> {
-        if expected.container_id.len() != 64 || !expected.container_id.bytes().all(|b| b.is_ascii_hexdigit()) { return Err(Reply::Unauthorized); }
+    pub fn acquire(
+        inspector: &mut impl Inspector,
+        expected: &RuntimeIdentity,
+    ) -> Result<Self, Reply> {
+        if expected.container_id.len() != 64
+            || !expected.container_id.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(Reply::Unauthorized);
+        }
         let first = inspector.inspect(&expected.container_id)?;
-        if first.identity != *expected || !first.running || first.pid == 0 || first.started_at.is_empty() || first.started_at.len() > 128 { return Err(Reply::Quarantined); }
+        if first.identity != *expected
+            || !first.running
+            || first.pid == 0
+            || first.started_at.is_empty()
+            || first.started_at.len() > 128
+        {
+            return Err(Reply::Quarantined);
+        }
         let proc_root = File::open("/proc").map_err(|_| Reply::Failed)?;
-        if nix::sys::statfs::fstatfs(&proc_root).map_err(|_| Reply::Failed)?.filesystem_type() != nix::sys::statfs::PROC_SUPER_MAGIC { return Err(Reply::Quarantined); }
-        let proc = File::from(openat(&proc_root, first.pid.to_string().as_str(), OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW, Mode::empty()).map_err(|_| Reply::Quarantined)?);
+        if nix::sys::statfs::fstatfs(&proc_root)
+            .map_err(|_| Reply::Failed)?
+            .filesystem_type()
+            != nix::sys::statfs::PROC_SUPER_MAGIC
+        {
+            return Err(Reply::Quarantined);
+        }
+        let proc = File::from(
+            openat(
+                &proc_root,
+                first.pid.to_string().as_str(),
+                OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+                Mode::empty(),
+            )
+            .map_err(|_| Reply::Quarantined)?,
+        );
         let start_ticks = ticks(&proc)?;
         // These two magic links are kernel-provided inside the pinned procfs
         // directory, never workspace paths. No user-selected namespace path.
-        let namespace = File::from(openat(&proc, "ns/mnt", OFlag::O_RDONLY | OFlag::O_CLOEXEC, Mode::empty()).map_err(|_| Reply::Quarantined)?);
-        let root = File::from(openat(&proc, "root", OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC, Mode::empty()).map_err(|_| Reply::Quarantined)?);
-        let pin = Self { namespace, root, proc, snapshot: first, start_ticks };
+        let namespace = File::from(
+            openat(
+                &proc,
+                "ns/mnt",
+                OFlag::O_RDONLY | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| Reply::Quarantined)?,
+        );
+        let root = File::from(
+            openat(
+                &proc,
+                "root",
+                OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| Reply::Quarantined)?,
+        );
+        let pin = Self {
+            namespace,
+            root,
+            proc,
+            snapshot: first,
+            start_ticks,
+        };
         pin.recheck(inspector, expected)?;
         Ok(pin)
     }
 
-    pub fn recheck(&self, inspector: &mut impl Inspector, expected: &RuntimeIdentity) -> Result<(), Reply> {
+    pub fn recheck(
+        &self,
+        inspector: &mut impl Inspector,
+        expected: &RuntimeIdentity,
+    ) -> Result<(), Reply> {
         let current = inspector.inspect(&expected.container_id)?;
-        let live_ns = File::from(openat(&self.proc, "ns/mnt", OFlag::O_RDONLY | OFlag::O_CLOEXEC, Mode::empty()).map_err(|_| Reply::Quarantined)?);
-        if current != self.snapshot || current.identity != *expected || !current.running
-            || ticks(&self.proc)? != self.start_ticks || identity(&self.namespace)? != expected.namespace
-            || identity(&live_ns)? != expected.namespace { return Err(Reply::Quarantined); }
+        let live_ns = File::from(
+            openat(
+                &self.proc,
+                "ns/mnt",
+                OFlag::O_RDONLY | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| Reply::Quarantined)?,
+        );
+        if current != self.snapshot
+            || current.identity != *expected
+            || !current.running
+            || ticks(&self.proc)? != self.start_ticks
+            || identity(&self.namespace)? != expected.namespace
+            || identity(&live_ns)? != expected.namespace
+        {
+            return Err(Reply::Quarantined);
+        }
         Ok(())
     }
 
@@ -100,58 +187,140 @@ impl DockerInspector {
         use std::os::fd::AsRawFd;
         use std::process::{Command, Stdio};
         use std::time::{Duration, Instant};
-        if container_id.len() != 64 || !container_id.bytes().all(|b| b.is_ascii_hexdigit()) { return Err(Reply::Unauthorized); }
+        if container_id.len() != 64 || !container_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Reply::Unauthorized);
+        }
         let bin = super::ProtectedRoot::open(std::path::Path::new("/usr/bin"))?;
-        let executable = File::from(openat(&bin.fd, "docker", OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK, Mode::empty()).map_err(|_| Reply::Unsupported)?);
+        let executable = File::from(
+            openat(
+                &bin.fd,
+                "docker",
+                OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )
+            .map_err(|_| Reply::Unsupported)?,
+        );
         let m = executable.metadata().map_err(|_| Reply::Failed)?;
-        if !m.is_file() || m.uid() != 0 || m.mode() & 0o022 != 0 || m.mode() & 0o111 == 0 { return Err(Reply::Unauthorized); }
+        if !m.is_file() || m.uid() != 0 || m.mode() & 0o022 != 0 || m.mode() & 0o111 == 0 {
+            return Err(Reply::Unauthorized);
+        }
         let mut child = Command::new(format!("/proc/self/fd/{}", executable.as_raw_fd()))
-            .args(["--host", "unix:///var/run/docker.sock", "inspect", "--type", "container", container_id])
-            .env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
-            .spawn().map_err(|_| Reply::Failed)?;
+            .args([
+                "--host",
+                "unix:///var/run/docker.sock",
+                "inspect",
+                "--type",
+                "container",
+                container_id,
+            ])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| Reply::Failed)?;
         let result = (|| {
             let mut stdout = child.stdout.take().ok_or(Reply::Failed)?;
-            let flags = OFlag::from_bits_truncate(nix::fcntl::fcntl(&stdout, nix::fcntl::FcntlArg::F_GETFL).map_err(|_| Reply::Failed)?);
-            nix::fcntl::fcntl(&stdout, nix::fcntl::FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).map_err(|_| Reply::Failed)?;
+            let flags = OFlag::from_bits_truncate(
+                nix::fcntl::fcntl(&stdout, nix::fcntl::FcntlArg::F_GETFL)
+                    .map_err(|_| Reply::Failed)?,
+            );
+            nix::fcntl::fcntl(
+                &stdout,
+                nix::fcntl::FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK),
+            )
+            .map_err(|_| Reply::Failed)?;
             let deadline = Instant::now() + Duration::from_secs(5);
             let mut out = Vec::new();
             let mut buffer = [0; 4096];
             loop {
-                if Instant::now() >= deadline { return Err(Reply::Failed); }
+                if Instant::now() >= deadline {
+                    return Err(Reply::Failed);
+                }
                 match stdout.read(&mut buffer) {
                     Ok(0) => break,
-                    Ok(n) => { out.extend_from_slice(&buffer[..n]); if out.len() > 256 * 1024 { return Err(Reply::Failed); } },
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(5)),
+                    Ok(n) => {
+                        out.extend_from_slice(&buffer[..n]);
+                        if out.len() > 256 * 1024 {
+                            return Err(Reply::Failed);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
                     Err(_) => return Err(Reply::Failed),
                 }
             }
             loop {
                 if let Some(status) = child.try_wait().map_err(|_| Reply::Failed)? {
-                    return if status.success() { Ok(out) } else { Err(Reply::Failed) };
+                    return if status.success() {
+                        Ok(out)
+                    } else {
+                        Err(Reply::Failed)
+                    };
                 }
-                if Instant::now() >= deadline { return Err(Reply::Failed); }
+                if Instant::now() >= deadline {
+                    return Err(Reply::Failed);
+                }
                 std::thread::sleep(Duration::from_millis(5));
             }
         })();
-        if result.is_err() { let _ = child.kill(); let _ = child.wait(); }
+        if result.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         result
     }
 
     fn parse(bytes: &[u8], container_id: &str) -> Result<Snapshot, Reply> {
-        let values: Vec<serde_json::Value> = serde_json::from_slice(bytes).map_err(|_| Reply::Failed)?;
-        if values.len() != 1 { return Err(Reply::Quarantined); }
+        let values: Vec<serde_json::Value> =
+            serde_json::from_slice(bytes).map_err(|_| Reply::Failed)?;
+        if values.len() != 1 {
+            return Err(Reply::Quarantined);
+        }
         let v = &values[0];
         let id = v["Id"].as_str().ok_or(Reply::Failed)?;
-        if id != container_id || id.len() != 64 { return Err(Reply::Quarantined); }
+        if id != container_id || id.len() != 64 {
+            return Err(Reply::Quarantined);
+        }
         let labels = &v["Config"]["Labels"];
-        let registration = serde_json::from_value(labels["terrarium.workspace.registration"].clone()).map_err(|_| Reply::Quarantined)?;
-        let incarnation = serde_json::from_value(labels["terrarium.workspace.runtime"].clone()).map_err(|_| Reply::Quarantined)?;
-        let pid = u32::try_from(v["State"]["Pid"].as_u64().ok_or(Reply::Quarantined)?).map_err(|_| Reply::Quarantined)?;
-        if pid == 0 || v["State"]["Running"] != true || v["State"]["Paused"] != false || v["State"]["Restarting"] != false { return Err(Reply::Quarantined); }
-        let ns = std::fs::metadata(format!("/proc/{pid}/ns/mnt")).map_err(|_| Reply::Quarantined)?;
-        let started_at = v["State"]["StartedAt"].as_str().ok_or(Reply::Quarantined)?.to_owned();
-        if started_at.is_empty() || started_at.len() > 128 { return Err(Reply::Quarantined); }
-        Ok(Snapshot { identity: RuntimeIdentity { registration, incarnation, container_id: id.into(), namespace: NamespaceIdentity { device: ns.dev(), inode: ns.ino() } }, pid, started_at, running: true })
+        let registration =
+            serde_json::from_value(labels["terrarium.workspace.registration"].clone())
+                .map_err(|_| Reply::Quarantined)?;
+        let incarnation = serde_json::from_value(labels["terrarium.workspace.runtime"].clone())
+            .map_err(|_| Reply::Quarantined)?;
+        let pid = u32::try_from(v["State"]["Pid"].as_u64().ok_or(Reply::Quarantined)?)
+            .map_err(|_| Reply::Quarantined)?;
+        if pid == 0
+            || v["State"]["Running"] != true
+            || v["State"]["Paused"] != false
+            || v["State"]["Restarting"] != false
+        {
+            return Err(Reply::Quarantined);
+        }
+        let ns =
+            std::fs::metadata(format!("/proc/{pid}/ns/mnt")).map_err(|_| Reply::Quarantined)?;
+        let started_at = v["State"]["StartedAt"]
+            .as_str()
+            .ok_or(Reply::Quarantined)?
+            .to_owned();
+        if started_at.is_empty() || started_at.len() > 128 {
+            return Err(Reply::Quarantined);
+        }
+        Ok(Snapshot {
+            identity: RuntimeIdentity {
+                registration,
+                incarnation,
+                container_id: id.into(),
+                namespace: NamespaceIdentity {
+                    device: ns.dev(),
+                    inode: ns.ino(),
+                },
+            },
+            pid,
+            started_at,
+            running: true,
+        })
     }
 }
 

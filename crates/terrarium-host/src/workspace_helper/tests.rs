@@ -7,7 +7,7 @@ fn id<T: serde::de::DeserializeOwned>(n: u64) -> T {
     serde_json::from_str(&format!("\"{n:026}\"")).unwrap()
 }
 
-fn envelope(revision: u64, kind: Kind) -> Envelope {
+pub(super) fn envelope(revision: u64, kind: Kind) -> Envelope {
     let request = Request {
         version: PROTOCOL_VERSION,
         provenance: Provenance {
@@ -374,16 +374,30 @@ fn source_scan_never_follows_symlinks_and_refuses_special_objects() {
 
 #[test]
 fn runtime_pin_rejects_restart_namespace_and_docker_identity_changes() {
-    use runtime::{Inspector, Snapshot, PinnedRuntime};
+    use runtime::{Inspector, PinnedRuntime, Snapshot};
     use std::os::unix::fs::MetadataExt;
-    struct Docker { snapshot: Snapshot }
+    struct Docker {
+        snapshot: Snapshot,
+    }
     impl Inspector for Docker {
-        fn inspect(&mut self, _: &str) -> Result<Snapshot, Reply> { Ok(self.snapshot.clone()) }
+        fn inspect(&mut self, _: &str) -> Result<Snapshot, Reply> {
+            Ok(self.snapshot.clone())
+        }
     }
     let mut expected = envelope(1, Kind::Grant).original.runtime;
     let ns = std::fs::metadata("/proc/self/ns/mnt").unwrap();
-    expected.namespace = NamespaceIdentity { device: ns.dev(), inode: ns.ino() };
-    let mut docker = Docker { snapshot: Snapshot { identity: expected.clone(), pid: std::process::id(), started_at: "fixture-start".into(), running: true } };
+    expected.namespace = NamespaceIdentity {
+        device: ns.dev(),
+        inode: ns.ino(),
+    };
+    let mut docker = Docker {
+        snapshot: Snapshot {
+            identity: expected.clone(),
+            pid: std::process::id(),
+            started_at: "fixture-start".into(),
+            running: true,
+        },
+    };
     let pin = PinnedRuntime::acquire(&mut docker, &expected).unwrap();
     assert!(!pin.mountinfo(&mut docker).unwrap().is_empty());
     docker.snapshot.started_at = "restarted".into();
@@ -399,8 +413,24 @@ fn runtime_pin_rejects_restart_namespace_and_docker_identity_changes() {
 #[test]
 fn all_durable_inflight_phases_quarantine_after_reopen() {
     for (kind, phases) in [
-        (Kind::Grant, vec![Phase::Staged, Phase::StageVerified, Phase::Published, Phase::Verified]),
-        (Kind::Revoke, vec![Phase::OrdinaryUnmountObserved, Phase::LazyDetachObserved, Phase::PlaceholderRemoved, Phase::Verified]),
+        (
+            Kind::Grant,
+            vec![
+                Phase::Staged,
+                Phase::StageVerified,
+                Phase::Published,
+                Phase::Verified,
+            ],
+        ),
+        (
+            Kind::Revoke,
+            vec![
+                Phase::OrdinaryUnmountObserved,
+                Phase::LazyDetachObserved,
+                Phase::PlaceholderRemoved,
+                Phase::Verified,
+            ],
+        ),
     ] {
         for stop in 0..=phases.len() {
             let dir = tempfile::tempdir().unwrap();
@@ -408,14 +438,18 @@ fn all_durable_inflight_phases_quarantine_after_reopen() {
             let mut j = journal();
             let e = envelope(1, kind);
             j.prepare(e.clone()).unwrap();
-            for phase in &phases[..stop] { j.advance(e.original.operation, *phase).unwrap(); }
+            for phase in &phases[..stop] {
+                j.advance(e.original.operation, *phase).unwrap();
+            }
             store.save(&j).unwrap();
             drop(store);
             let mut h = Helper::open(Store::fixture(dir.path()).unwrap(), Fake::default()).unwrap();
             assert!(h.journal.quarantined, "{kind:?} {stop}");
             assert_eq!(h.apply(&bytes(&e)), Err(Reply::Quarantined));
             assert_eq!(*h.backend.calls.borrow(), vec!["reconcile"]);
-            if kind == Kind::Revoke { assert!(h.journal.tombstones.contains_key(&id(7))); }
+            if kind == Kind::Revoke {
+                assert!(h.journal.tombstones.contains_key(&id(7)));
+            }
         }
     }
 }
@@ -424,33 +458,59 @@ fn all_durable_inflight_phases_quarantine_after_reopen() {
 fn failed_journal_write_fences_helper_before_kernel_action() {
     let (dir, mut h) = helper(Fake::default());
     std::fs::write(dir.path().join("journal.next"), b"foreign-or-incomplete").unwrap();
-    assert_eq!(h.apply(&bytes(&envelope(1, Kind::Grant))), Err(Reply::Quarantined));
+    assert_eq!(
+        h.apply(&bytes(&envelope(1, Kind::Grant))),
+        Err(Reply::Quarantined)
+    );
     assert_eq!(*h.backend.calls.borrow(), vec!["reconcile"]);
     // Even if somebody removes the failed-write marker, this process stays
     // fenced, and it never reports a non-durable in-memory commit as success.
     std::fs::remove_file(dir.path().join("journal.next")).unwrap();
-    assert_eq!(h.apply(&bytes(&envelope(1, Kind::Grant))), Err(Reply::Quarantined));
+    assert_eq!(
+        h.apply(&bytes(&envelope(1, Kind::Grant))),
+        Err(Reply::Quarantined)
+    );
     assert_eq!(*h.backend.calls.borrow(), vec!["reconcile"]);
 }
 
 #[test]
 fn propagated_workspace_flags_source_and_parent_are_checked_locally() {
-    let hp = evidence("10 1 8:1 /reg/work /publisher rw shared:42 - ext4 /dev/a rw", 1);
+    let hp = evidence(
+        "10 1 8:1 /reg/work /publisher rw shared:42 - ext4 /dev/a rw",
+        1,
+    );
     let rp = evidence("20 1 8:1 /reg/work /work ro master:42 - ext4 /dev/a rw", 2);
-    let host = evidence("11 10 8:1 /project/agent /publisher/project/agent rw,nosuid,nodev shared:43 - ext4 /dev/a rw", 1);
-    let receiver = evidence("21 20 8:1 /project/agent /work/project/agent rw,nosuid,nodev master:43 - ext4 /dev/a rw", 2);
-    let check = |r: &MountEvidence| mountinfo::workspace(&host, r, &hp, &rp, "/project/agent", "8:1");
+    let host = evidence(
+        "11 10 8:1 /project/agent /publisher/project/agent rw,nosuid,nodev shared:43 - ext4 /dev/a rw",
+        1,
+    );
+    let receiver = evidence(
+        "21 20 8:1 /project/agent /work/project/agent rw,nosuid,nodev master:43 - ext4 /dev/a rw",
+        2,
+    );
+    let check =
+        |r: &MountEvidence| mountinfo::workspace(&host, r, &hp, &rp, "/project/agent", "8:1");
     assert_eq!(check(&receiver), Ok(()));
     for flag in ["nosuid", "nodev", "rw"] {
-        let mut bad = receiver.clone(); bad.vfs_flags.retain(|f| f != flag);
+        let mut bad = receiver.clone();
+        bad.vfs_flags.retain(|f| f != flag);
         assert!(check(&bad).is_err());
     }
-    let mut bad = receiver.clone(); bad.parent_id = hp.mount_id;
+    let mut bad = receiver.clone();
+    bad.parent_id = hp.mount_id;
     assert!(check(&bad).is_err());
-    bad = receiver.clone(); bad.root = "/other".into(); assert!(check(&bad).is_err());
-    bad = receiver.clone(); bad.major_minor = "8:2".into(); assert!(check(&bad).is_err());
-    bad = receiver.clone(); bad.namespace = hp.namespace.clone(); assert!(check(&bad).is_err());
-    bad = receiver; bad.mountpoint = "/work/other/agent".into(); assert!(check(&bad).is_err());
+    bad = receiver.clone();
+    bad.root = "/other".into();
+    assert!(check(&bad).is_err());
+    bad = receiver.clone();
+    bad.major_minor = "8:2".into();
+    assert!(check(&bad).is_err());
+    bad = receiver.clone();
+    bad.namespace = hp.namespace.clone();
+    assert!(check(&bad).is_err());
+    bad = receiver;
+    bad.mountpoint = "/work/other/agent".into();
+    assert!(check(&bad).is_err());
 }
 
 #[tokio::test]
@@ -460,11 +520,16 @@ async fn valid_peer_acknowledges_only_durable_result() {
     let request = bytes(&envelope(1, Kind::Grant));
     client.write_u32(request.len() as u32).await.unwrap();
     client.write_all(&request).await.unwrap();
-    serve_connection(&mut h, server, nix::unistd::geteuid().as_raw()).await.unwrap();
+    serve_connection(&mut h, server, nix::unistd::geteuid().as_raw())
+        .await
+        .unwrap();
     let size = client.read_u32().await.unwrap();
     let mut response = vec![0; size as usize];
     client.read_exact(&mut response).await.unwrap();
-    assert_eq!(serde_json::from_slice::<Reply>(&response).unwrap(), Reply::Applied);
+    assert_eq!(
+        serde_json::from_slice::<Reply>(&response).unwrap(),
+        Reply::Applied
+    );
     assert_eq!(h.store.load().unwrap().last_contiguous_revision, 1);
 }
 
@@ -473,7 +538,9 @@ fn destination_substitution_and_nonempty_scaffold_are_refused() {
     use std::fs::File;
     use std::os::unix::fs::symlink;
     let dir = tempfile::tempdir().unwrap();
-    let root = ProtectedRoot { fd: File::open(dir.path()).unwrap() };
+    let root = ProtectedRoot {
+        fd: File::open(dir.path()).unwrap(),
+    };
     let e = envelope(1, Kind::Grant).original.holder.unwrap().enrollment;
     let dest = root.fixture_destination(&e).unwrap();
     assert!(dest.placeholder().is_ok());
@@ -490,4 +557,35 @@ fn destination_substitution_and_nonempty_scaffold_are_refused() {
     assert!(dest.placeholder().is_err());
     assert!(dest.remove().is_err());
     assert!(dir.path().join("project/original").is_dir());
+}
+
+#[test]
+fn unsafe_exception_is_confined_to_sys_crate() {
+    fn walk(path: &std::path::Path, manifests: &mut Vec<std::path::PathBuf>, sources: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().unwrap() == "terrarium-sys" { continue; }
+            if path.is_dir() { walk(&path, manifests, sources); }
+            else if path.file_name().unwrap() == "Cargo.toml" { manifests.push(path); }
+            else if path.extension().is_some_and(|e| e == "rs") { sources.push(path); }
+        }
+    }
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+    let root: toml::Value = std::fs::read_to_string(repo.join("Cargo.toml")).unwrap().parse().unwrap();
+    assert_eq!(root["workspace"]["lints"]["rust"]["unsafe_code"].as_str(), Some("forbid"));
+    let mut manifests = vec![];
+    let mut sources = vec![];
+    walk(&repo.join("crates"), &mut manifests, &mut sources);
+    assert!(!manifests.is_empty());
+    for path in manifests {
+        let m: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(m["lints"]["workspace"].as_bool(), Some(true), "{}", path.display());
+    }
+    // Cargo's inherited forbid is authoritative. Also reject explicit source
+    // allowances rather than relying on rustc to reject the override later.
+    let disallowed = [concat!("allow(", "unsafe_code"), concat!("warn(", "unsafe_code"), concat!("deny(", "unsafe_code")];
+    for path in sources {
+        let s: String = std::fs::read_to_string(&path).unwrap().chars().filter(|c| !c.is_whitespace()).collect();
+        for pattern in disallowed { assert!(!s.contains(pattern), "{}", path.display()); }
+    }
 }

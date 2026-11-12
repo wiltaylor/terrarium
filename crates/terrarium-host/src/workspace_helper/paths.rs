@@ -97,10 +97,20 @@ pub fn mount_id(fd: &File) -> Result<u64, Reply> {
     use std::os::fd::AsRawFd;
     let mut text = String::new();
     File::open(format!("/proc/self/fdinfo/{}", fd.as_raw_fd()))
-        .map_err(|_| Reply::Failed)?.take(4097).read_to_string(&mut text).map_err(|_| Reply::Failed)?;
-    if text.len() > 4096 { return Err(Reply::Failed); }
-    let values: Vec<_> = text.lines().filter_map(|l| l.strip_prefix("mnt_id:")).collect();
-    if values.len() != 1 { return Err(Reply::Failed); }
+        .map_err(|_| Reply::Failed)?
+        .take(4097)
+        .read_to_string(&mut text)
+        .map_err(|_| Reply::Failed)?;
+    if text.len() > 4096 {
+        return Err(Reply::Failed);
+    }
+    let values: Vec<_> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("mnt_id:"))
+        .collect();
+    if values.len() != 1 {
+        return Err(Reply::Failed);
+    }
     values[0].trim().parse().map_err(|_| Reply::Failed)
 }
 
@@ -128,7 +138,9 @@ fn empty(fd: &File) -> Result<(), Reply> {
     let mut dir = nix::dir::Dir::from_fd(reopened.into()).map_err(|_| Reply::Failed)?;
     for entry in dir.iter() {
         let entry = entry.map_err(|_| Reply::Failed)?;
-        if !matches!(entry.file_name().to_bytes(), b"." | b"..") { return Err(Reply::Conflict); }
+        if !matches!(entry.file_name().to_bytes(), b"." | b"..") {
+            return Err(Reply::Conflict);
+        }
     }
     Ok(())
 }
@@ -143,24 +155,43 @@ impl ProtectedRoot {
 
     fn destination_as(&self, enrollment: &Enrollment, owner: u32) -> Result<Destination, Reply> {
         use nix::sys::stat::mkdirat;
-        if !enrollment.matches(enrollment) { return Err(Reply::Unauthorized); }
-        match mkdirat(&self.fd, enrollment.project.as_str(), Mode::S_IRWXU | Mode::S_IRGRP | Mode::S_IXGRP | Mode::S_IROTH | Mode::S_IXOTH) {
+        if !enrollment.matches(enrollment) {
+            return Err(Reply::Unauthorized);
+        }
+        match mkdirat(
+            &self.fd,
+            enrollment.project.as_str(),
+            Mode::S_IRWXU | Mode::S_IRGRP | Mode::S_IXGRP | Mode::S_IROTH | Mode::S_IXOTH,
+        ) {
             Ok(()) => self.fd.sync_all().map_err(|_| Reply::Failed)?,
-            Err(nix::errno::Errno::EEXIST) => {},
+            Err(nix::errno::Errno::EEXIST) => {}
             Err(_) => return Err(Reply::Failed),
         }
         let parent = directory(&self.fd, Path::new(&enrollment.project), true)?;
         protected_owner(&parent, owner)?;
-        mkdirat(&parent, enrollment.name.as_str(), Mode::S_IRWXU | Mode::S_IRGRP | Mode::S_IXGRP | Mode::S_IROTH | Mode::S_IXOTH).map_err(|_| Reply::Conflict)?;
+        mkdirat(
+            &parent,
+            enrollment.name.as_str(),
+            Mode::S_IRWXU | Mode::S_IRGRP | Mode::S_IXGRP | Mode::S_IROTH | Mode::S_IXOTH,
+        )
+        .map_err(|_| Reply::Conflict)?;
         parent.sync_all().map_err(|_| Reply::Failed)?;
         let slot = directory(&parent, Path::new(&enrollment.name), true)?;
         protected_owner(&slot, owner)?;
         empty(&slot)?;
-        Ok(Destination { parent, name: enrollment.name.clone(), slot, owner })
+        Ok(Destination {
+            parent,
+            name: enrollment.name.clone(),
+            slot,
+            owner,
+        })
     }
 
     #[cfg(test)]
-    pub(super) fn fixture_destination(&self, enrollment: &Enrollment) -> Result<Destination, Reply> {
+    pub(super) fn fixture_destination(
+        &self,
+        enrollment: &Enrollment,
+    ) -> Result<Destination, Reply> {
         self.destination_as(enrollment, nix::unistd::geteuid().as_raw())
     }
 }
@@ -171,7 +202,11 @@ impl Destination {
         protected_owner(&current, self.owner)?;
         let expected = self.slot.metadata().map_err(|_| Reply::Failed)?;
         let actual = current.metadata().map_err(|_| Reply::Failed)?;
-        if (expected.dev(), expected.ino()) != (actual.dev(), actual.ino()) || mount_id(&current)? != mount_id(&self.parent)? { return Err(Reply::Conflict); }
+        if (expected.dev(), expected.ino()) != (actual.dev(), actual.ino())
+            || mount_id(&current)? != mount_id(&self.parent)?
+        {
+            return Err(Reply::Conflict);
+        }
         empty(&current)?;
         Ok(&self.slot)
     }
@@ -180,7 +215,9 @@ impl Destination {
     /// the underlying placeholder. Kernel evidence must match its mount ID.
     pub fn mounted(&self) -> Result<File, Reply> {
         let current = directory(&self.parent, Path::new(&self.name), false)?;
-        if mount_id(&current)? == mount_id(&self.parent)? { return Err(Reply::Quarantined); }
+        if mount_id(&current)? == mount_id(&self.parent)? {
+            return Err(Reply::Quarantined);
+        }
         Ok(current)
     }
 
@@ -188,26 +225,48 @@ impl Destination {
     /// a missing placeholder during revoke recovery or remove an unknown mount.
     pub fn remove(self) -> Result<(), Reply> {
         self.placeholder()?;
-        nix::unistd::unlinkat(&self.parent, self.name.as_str(), nix::unistd::UnlinkatFlags::RemoveDir).map_err(|_| Reply::Failed)?;
+        nix::unistd::unlinkat(
+            &self.parent,
+            self.name.as_str(),
+            nix::unistd::UnlinkatFlags::RemoveDir,
+        )
+        .map_err(|_| Reply::Failed)?;
         self.parent.sync_all().map_err(|_| Reply::Failed)
     }
 }
 
 fn scan(parent: &File, expected: u64, depth: usize, budget: &mut usize) -> Result<(), Reply> {
-    if depth > 64 || mount_id(parent)? != expected { return Err(Reply::Unauthorized); }
+    if depth > 64 || mount_id(parent)? != expected {
+        return Err(Reply::Unauthorized);
+    }
     let fd = directory(parent, Path::new("."), true)?;
     let mut dir = nix::dir::Dir::from_fd(fd.into()).map_err(|_| Reply::Failed)?;
     for entry in dir.iter() {
         let entry = entry.map_err(|_| Reply::Failed)?;
         let name = entry.file_name();
-        if matches!(name.to_bytes(), b"." | b"..") { continue; }
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
         *budget = budget.checked_sub(1).ok_or(Reply::Failed)?;
-        let child = File::from(openat2(parent, name, OpenHow::new()
-            .flags(OFlag::O_PATH | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW)
-            .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS | ResolveFlag::RESOLVE_NO_MAGICLINKS | ResolveFlag::RESOLVE_NO_XDEV))
-            .map_err(|_| Reply::Unauthorized)?);
+        let child = File::from(
+            openat2(
+                parent,
+                name,
+                OpenHow::new()
+                    .flags(OFlag::O_PATH | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW)
+                    .resolve(
+                        ResolveFlag::RESOLVE_BENEATH
+                            | ResolveFlag::RESOLVE_NO_SYMLINKS
+                            | ResolveFlag::RESOLVE_NO_MAGICLINKS
+                            | ResolveFlag::RESOLVE_NO_XDEV,
+                    ),
+            )
+            .map_err(|_| Reply::Unauthorized)?,
+        );
         let m = child.metadata().map_err(|_| Reply::Failed)?;
-        if mount_id(&child)? != expected { return Err(Reply::Unauthorized); }
+        if mount_id(&child)? != expected {
+            return Err(Reply::Unauthorized);
+        }
         if m.is_dir() {
             scan(&child, expected, depth + 1, budget)?;
         } else if !m.is_file() && !m.file_type().is_symlink() {

@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 terrarium-core.workspace = true
+terrarium-sys = { path = "../terrarium-sys" }
 terrarium-version.workspace = true
 clap.workspace = true
 anyhow.workspace = true

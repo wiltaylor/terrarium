@@ -1,9 +1,9 @@
 //! Fixed mount operations on pinned descriptors. No arbitrary flags or paths.
 //! These primitives are not reachable from any host verb or production caller.
 //! Callers must first persist the helper intent and quarantine every failure.
+use rustix::mount::{self, MountPropagationFlags, MoveMountFlags, OpenTreeFlags, UnmountFlags};
 use std::fs::File;
 use std::os::fd::AsRawFd;
-use rustix::mount::{self, MoveMountFlags, OpenTreeFlags, MountPropagationFlags, UnmountFlags};
 use terrarium_core::live_workspace::Reply;
 
 /// Only mount_setattr is missing a safe wrapper in the pinned dependencies.
@@ -16,26 +16,62 @@ pub trait Attributes {
     fn scaffold(&mut self, mount: &File) -> Result<(), Reply>;
 }
 
+pub struct LinuxAttributes;
+
+impl Attributes for LinuxAttributes {
+    fn workspace(&mut self, mount: &File) -> Result<(), Reply> {
+        use std::os::fd::AsFd;
+        use terrarium_sys::{MountAttributes as A, mount_setattr};
+        root()?;
+        mount_setattr(mount.as_fd(), A::NO_SUID | A::NO_DEV, A::READ_ONLY | A::NO_EXEC).map_err(|_| Reply::Failed)
+    }
+
+    fn scaffold(&mut self, mount: &File) -> Result<(), Reply> {
+        use std::os::fd::AsFd;
+        use terrarium_sys::{MountAttributes as A, mount_setattr};
+        root()?;
+        mount_setattr(mount.as_fd(), A::NO_SUID | A::NO_DEV, A::READ_ONLY).map_err(|_| Reply::Failed)
+    }
+}
+
 fn root() -> Result<(), Reply> {
-    if !nix::unistd::geteuid().is_root() { return Err(Reply::Unauthorized); }
+    if !nix::unistd::geteuid().is_root() {
+        return Err(Reply::Unauthorized);
+    }
     Ok(())
 }
 
-fn fd_path(fd: &File) -> String { format!("/proc/self/fd/{}", fd.as_raw_fd()) }
+fn fd_path(fd: &File) -> String {
+    format!("/proc/self/fd/{}", fd.as_raw_fd())
+}
 
 /// Clone only this opened directory, never its mounted descendants. The
 /// detached FD pins the source until staged/publication completes.
 pub fn clone_nonrecursive(source: &File) -> Result<File, Reply> {
     root()?;
-    mount::open_tree(source, "", OpenTreeFlags::OPEN_TREE_CLONE | OpenTreeFlags::OPEN_TREE_CLOEXEC | OpenTreeFlags::AT_EMPTY_PATH)
-        .map(File::from).map_err(|_| Reply::Failed)
+    mount::open_tree(
+        source,
+        "",
+        OpenTreeFlags::OPEN_TREE_CLONE
+            | OpenTreeFlags::OPEN_TREE_CLOEXEC
+            | OpenTreeFlags::AT_EMPTY_PATH,
+    )
+    .map(File::from)
+    .map_err(|_| Reply::Failed)
 }
 
 /// Both endpoints are directory FDs. Reopen the destination beneath its pinned
 /// protected parent after this call, then verify its new mount ID and identity.
 pub fn attach(tree: &File, destination: &File) -> Result<(), Reply> {
     root()?;
-    mount::move_mount(tree, "", destination, "", MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH | MoveMountFlags::MOVE_MOUNT_T_EMPTY_PATH).map_err(|_| Reply::Failed)
+    mount::move_mount(
+        tree,
+        "",
+        destination,
+        "",
+        MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH | MoveMountFlags::MOVE_MOUNT_T_EMPTY_PATH,
+    )
+    .map_err(|_| Reply::Failed)
 }
 
 /// Explicitly break inherited propagation BEFORE attribute changes or publish.
@@ -54,7 +90,10 @@ pub fn make_shared(mount: &File) -> Result<(), Reply> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Unmount { Removed, Busy }
+pub enum Unmount {
+    Removed,
+    Busy,
+}
 
 /// Ordinary unmount first. EBUSY is the only condition permitting a separately
 /// recorded lazy-detach step. Every other error leaves revoke pending.

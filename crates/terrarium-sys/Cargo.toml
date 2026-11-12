@@ -1,0 +1,16 @@
+[package]
+name = "terrarium-sys"
+description = "Audited safe Linux syscall wrappers missing from pinned dependencies"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = "0.2"
+bitflags = "2"
+
+# Operator exception, TER-925 / question 01M7734E782265CWHAE1JBA65E.
+# All other workspace crates inherit unsafe_code = forbid.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

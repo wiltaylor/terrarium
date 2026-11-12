@@ -5,9 +5,9 @@
 //! No kernel backend is selected by this module and hello never enables B4.
 
 pub mod mountinfo;
-pub mod runtime;
 pub mod mounts;
 mod paths;
+pub mod runtime;
 mod store;
 
 pub use paths::{Destination, ProtectedRoot, mount_id, scan_source};
@@ -192,3 +192,5 @@ pub async fn serve_connection<B: Backend>(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod disposable;

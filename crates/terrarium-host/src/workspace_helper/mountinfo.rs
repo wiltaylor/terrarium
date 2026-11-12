@@ -141,11 +141,15 @@ pub fn publisher(
     receiver: &MountEvidence,
     host_view: &[MountEvidence],
 ) -> Result<u64, Reply> {
+    publisher_at(host, receiver, host_view, "/work")
+}
+
+fn publisher_at(host: &MountEvidence, receiver: &MountEvidence, host_view: &[MountEvidence], receiver_path: &str) -> Result<u64, Reply> {
     let shared = group(host, "shared:").ok_or(Reply::Quarantined)?;
     if host.namespace == receiver.namespace
         || host.root != receiver.root
         || host.major_minor != receiver.major_minor
-        || receiver.mountpoint != "/work"
+        || receiver.mountpoint != receiver_path
         || host.optional_fields != vec![format!("shared:{shared}")]
         || receiver.optional_fields != vec![format!("master:{shared}")]
         || !has(&receiver.vfs_flags, "ro")
@@ -161,6 +165,11 @@ pub fn publisher(
         return Err(Reply::Quarantined);
     }
     Ok(shared)
+}
+
+#[cfg(test)]
+pub(super) fn publisher_fixture(host: &MountEvidence, receiver: &MountEvidence, host_view: &[MountEvidence], path: &str) -> Result<u64, Reply> {
+    publisher_at(host, receiver, host_view, path)
 }
 
 /// No extra child mounts or aliases within the protected publisher subtree.
@@ -201,20 +210,37 @@ pub fn workspace(
         || host.namespace == receiver.namespace
         || host.parent_id != host_publisher.mount_id
         || receiver.parent_id != receiver_publisher.mount_id
-        || host.mount_id == host.parent_id || receiver.mount_id == receiver.parent_id
+        || host.mount_id == host.parent_id
+        || receiver.mount_id == receiver.parent_id
         || host.optional_fields != vec![format!("shared:{shared}")]
         || receiver.optional_fields != vec![format!("master:{shared}")]
-    { return Err(Reply::Quarantined); }
+    {
+        return Err(Reply::Quarantined);
+    }
     for mount in [host, receiver] {
-        if mount.root != root || mount.major_minor != device
-            || !has(&mount.vfs_flags, "rw") || has(&mount.vfs_flags, "ro")
-            || !has(&mount.vfs_flags, "nosuid") || !has(&mount.vfs_flags, "nodev")
-            || has(&mount.vfs_flags, "noexec") || has(&mount.super_flags, "ro") {
+        if mount.root != root
+            || mount.major_minor != device
+            || !has(&mount.vfs_flags, "rw")
+            || has(&mount.vfs_flags, "ro")
+            || !has(&mount.vfs_flags, "nosuid")
+            || !has(&mount.vfs_flags, "nodev")
+            || has(&mount.vfs_flags, "noexec")
+            || has(&mount.super_flags, "ro")
+        {
             return Err(Reply::Quarantined);
         }
     }
-    let host_suffix = host.mountpoint.strip_prefix(&format!("{}/", host_publisher.mountpoint)).ok_or(Reply::Quarantined)?;
-    let receiver_suffix = receiver.mountpoint.strip_prefix("/work/").ok_or(Reply::Quarantined)?;
-    if host_suffix != receiver_suffix || host_suffix.split('/').count() != 2 { return Err(Reply::Quarantined); }
+    let host_suffix = host
+        .mountpoint
+        .strip_prefix(&format!("{}/", host_publisher.mountpoint))
+        .ok_or(Reply::Quarantined)?;
+    let receiver_prefix = format!("{}/", receiver_publisher.mountpoint);
+    let receiver_suffix = receiver
+        .mountpoint
+        .strip_prefix(&receiver_prefix)
+        .ok_or(Reply::Quarantined)?;
+    if host_suffix != receiver_suffix || host_suffix.split('/').count() != 2 {
+        return Err(Reply::Quarantined);
+    }
     Ok(())
 }
