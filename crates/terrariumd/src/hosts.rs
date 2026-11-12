@@ -77,7 +77,7 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 const ACK_EVERY: u64 = 256 * 1024;
 /// The largest WebSocket message the daemon accepts from a host.
 const MAX_MESSAGE: usize = 2 * 1024 * 1024;
-const JOURNAL_RETRY_DEADLINE: Duration = Duration::from_secs(30);
+const JOURNAL_RETRY_DEADLINE: Duration = Duration::from_secs(60);
 const JOURNAL_RETRY_EVENTS: usize = 64;
 const JOURNAL_RETRY_BYTES: usize = 4 * 1024 * 1024;
 // Drain retained chunks without inserting gaps larger than the exec
@@ -142,13 +142,8 @@ impl PendingJournal {
 
     fn push(&mut self, event: SessionEvent) -> bool {
         let bytes = serde_json::to_vec(&event).map_or(usize::MAX, |v| v.len());
-        if self.exhausted
-            || self.events.len() >= JOURNAL_RETRY_EVENTS
-            || bytes > JOURNAL_RETRY_BYTES.saturating_sub(self.bytes)
-        {
-            self.exhausted = true;
-            return false;
-        }
+        // The receive loop stops at the watermark. Retain the frame that
+        // crossed it too, rather than losing data or closing a healthy link.
         self.bytes += bytes;
         self.events.push_back(event);
         true
@@ -1372,11 +1367,7 @@ impl HostRegistry {
     /// Save before exposing output to a consumer that can acknowledge it.
     fn deliver(&self, host: &str, entry: &mut Entry, id: SessionId, event: SessionEvent) -> bool {
         if let Some(pending) = entry.pending_journal.get_mut(&id) {
-            if !pending.push(event)
-                && let Some(c) = &entry.conn
-            {
-                let _ = c.tx.send(Outgoing::Close(None));
-            }
+            pending.push(event);
             return false;
         }
         match self.try_deliver(host, entry, id, &event) {
@@ -1463,74 +1454,166 @@ impl HostRegistry {
         Ok(true)
     }
 
+    /// Called on a blocking task. Writer contention waits here, without a
+    /// registry guard, so heartbeat, ACK and other hosts keep running.
     fn retry_journal(&self, host: &str, conn_id: u64) {
-        let mut g = self.lock();
-        let Some(e) = g.get_mut(host) else { return };
-        if !e.conn.as_ref().is_some_and(|c| c.id == conn_id) {
-            return;
-        }
-        // Oldest retry first. At most one SQLite attempt per tick prevents
-        // many blocked sessions from monopolizing the link's heartbeat loop.
-        let mut ids: Vec<_> = e.pending_journal.keys().copied().collect();
-        ids.sort_by_key(|id| e.pending_journal[id].next);
-        for id in ids {
-            let Some(mut pending) = e.pending_journal.remove(&id) else {
-                continue;
-            };
-            let now = Instant::now();
-            let attempt = !pending.exhausted && now < pending.deadline && now >= pending.next;
-            if pending.exhausted || now >= pending.deadline {
-                pending.exhausted = true;
+        {
+            let mut g = self.lock();
+            let Some(e) = g.get_mut(host) else { return };
+            if !e.conn.as_ref().is_some_and(|c| c.id == conn_id) {
+                return;
+            }
+            if e.pending_journal.values().any(|p| !p.exhausted && Instant::now() >= p.deadline) {
+                for pending in e.pending_journal.values_mut() {
+                    pending.exhausted = true;
+                }
+                warn!(host, "host journal made no progress; closing without acknowledgement");
                 if let Some(c) = &e.conn {
                     let _ = c.tx.send(Outgoing::Close(None));
                 }
-            } else if now >= pending.next {
-                if let Some(event) = pending.events.front().cloned() {
-                    let terminal = event.is_terminal();
-                    let error = matches!(event, SessionEvent::Error { .. });
-                    let lost = matches!(event, SessionEvent::Lost { .. });
-                    match self.try_deliver(host, e, id, &event) {
-                        Ok(committed) => {
-                            pending.backoff = JOURNAL_RETRY_TICK;
-                            pending.events.pop_front();
-                            // Recalculate after removing an event, keeping the byte bound exact.
-                            pending.bytes = pending
-                                .events
-                                .iter()
-                                .map(|v| serde_json::to_vec(v).map_or(0, |v| v.len()))
-                                .sum();
-                            if committed && terminal {
-                                if lost {
-                                    if let Some(c) = &e.conn {
-                                        let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release {
-                                            session: id,
-                                        }));
-                                    }
-                                } else {
-                                    Self::ack_terminal(e, id, error);
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            if error.code != Code::ResourceBusy {
-                                pending.exhausted = true;
-                                if let Some(c) = &e.conn {
-                                    let _ = c.tx.send(Outgoing::Close(None));
-                                }
-                            }
-                            pending.backoff = (pending.backoff * 2).min(JOURNAL_RETRY_BACKOFF);
-                        }
-                    }
-                }
-                pending.next = Instant::now() + pending.backoff;
+                return;
             }
-            if !pending.events.is_empty() {
-                e.pending_journal.insert(id, pending);
-            }
-            if attempt {
-                break;
+            if e.pending_journal.is_empty() || e.pending_journal.values().all(|p| p.exhausted || Instant::now() < p.next) {
+                return;
             }
         }
+        let result = if let Some(journal) = self.journal.get() {
+            journal.with_writer(|conn| self.commit_pending(host, conn_id, Some(conn)))
+        } else {
+            self.commit_pending(host, conn_id, None)
+        };
+        if let Err(error) = &result
+            && error.code == Code::ResourceBusy
+        {
+            let mut g = self.lock();
+            if let Some(e) = g.get_mut(host)
+                && e.conn.as_ref().is_some_and(|c| c.id == conn_id)
+            {
+                for pending in e.pending_journal.values_mut() {
+                    pending.backoff = (pending.backoff * 2).min(JOURNAL_RETRY_BACKOFF);
+                    pending.next = Instant::now() + pending.backoff;
+                }
+            }
+        }
+        if let Err(error) = result
+            && error.code != Code::ResourceBusy
+        {
+            warn!(host, %error, "host journal commit failed; closing without acknowledgement");
+            let g = self.lock();
+            if let Some(e) = g.get(host)
+                && let Some(c) = &e.conn
+                && c.id == conn_id
+            {
+                let _ = c.tx.send(Outgoing::Close(None));
+            }
+        }
+    }
+
+    fn journal_backpressured(&self, host: &str) -> bool {
+        self.lock().get(host).is_some_and(|e| e.pending_journal.values().any(|p| {
+            p.events.len() >= JOURNAL_RETRY_EVENTS || p.bytes >= JOURNAL_RETRY_BYTES
+        }))
+    }
+
+    fn commit_pending(
+        &self,
+        host: &str,
+        conn_id: u64,
+        conn: Option<&mut rusqlite::Connection>,
+    ) -> crate::error::ApiResult<()> {
+        let mut g = self.lock();
+        let Some(e) = g.get_mut(host) else { return Ok(()) };
+        if !e.conn.as_ref().is_some_and(|c| c.id == conn_id)
+            || self.stopped.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        let mut saved = SavedHost {
+            token: e.resume_token.clone(),
+            next_id: e.next_id,
+            sessions: e.sessions.iter().map(|(&id, s)| (id, SavedSlot {
+                received: s.received, held: s.held, events: s.events,
+                terminal: s.terminal, ended_at: s.ended_at,
+            })).collect(),
+        };
+        let mut values = Vec::new();
+        let mut delivered = Vec::new();
+        for (&id, pending) in &e.pending_journal {
+            let Some(slot) = saved.sessions.get_mut(&id) else { continue };
+            for event in &pending.events {
+                if slot.terminal { break; }
+                slot.events += 1;
+                slot.terminal = event.is_terminal();
+                if slot.terminal {
+                    slot.ended_at = Some(chrono::Utc::now().timestamp());
+                }
+                if matches!(event, SessionEvent::Started { .. }) { slot.held = true; }
+                if let SessionEvent::Data { bytes, .. } = event {
+                    slot.received += bytes.len() as u64;
+                }
+                values.push((format!("event/{host}/{id}/{:020}", slot.events),
+                    serde_json::to_value(event).map_err(|_| ApiError::internal("cannot encode host session event"))?));
+                delivered.push((id, slot.events, event.clone()));
+            }
+        }
+        if values.is_empty() {
+            e.pending_journal.clear();
+            return Ok(());
+        }
+        values.push((format!("host/{host}"), serde_json::to_value(&saved)
+            .map_err(|_| ApiError::internal("cannot encode host resume state"))?));
+        let mut removed = Vec::new();
+        for (&id, s) in &e.sessions {
+            let mut output = s.output_events.clone();
+            for (event_id, seq, event) in &delivered {
+                if *event_id == id
+                    && let SessionEvent::Data { stream: StreamTag::Stdout | StreamTag::Stderr, bytes } = event
+                {
+                    output.push_back((*seq, bytes.len()));
+                }
+            }
+            let mut bytes: usize = output.iter().map(|(_, n)| n).sum();
+            while bytes > crate::executor::SESSION_BUFFER || output.len() > 4096 {
+                let Some((seq, len)) = output.pop_front() else { break };
+                bytes -= len;
+                removed.push(format!("event/{host}/{id}/{seq:020}"));
+            }
+        }
+        if let Some(journal) = self.journal.get()
+            && let Some(conn) = conn
+        {
+            journal.replace_on(conn, &values, &removed, &[])?;
+        }
+        // No live offset or consumer can observe the batch until commit.
+        for (id, slot) in saved.sessions {
+            if let Some(s) = e.sessions.get_mut(&id) {
+                s.received = slot.received;
+                s.events = slot.events;
+                s.terminal = slot.terminal;
+                s.ended_at = slot.ended_at;
+                s.held = slot.held;
+            }
+        }
+        e.pending_journal.clear();
+        for (id, seq, event) in delivered {
+            let Some(s) = e.sessions.get_mut(&id) else { continue };
+            if let SessionEvent::Data { stream: StreamTag::Stdout | StreamTag::Stderr, bytes } = &event {
+                s.output_events.push_back((seq, bytes.len()));
+            }
+            let prune = s.prune_count();
+            s.output_events.drain(..prune);
+            let _ = s.tx.send(event.clone());
+            if event.is_terminal() {
+                if matches!(event, SessionEvent::Lost { .. }) {
+                    if let Some(c) = &e.conn {
+                        let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release { session: id }));
+                    }
+                } else {
+                    Self::ack_terminal(e, id, matches!(event, SessionEvent::Error { .. }));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// A control frame about a session.
@@ -2339,11 +2422,18 @@ async fn serve_link(
     let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + hb, hb);
     let mut last_rx = Instant::now();
     let mut journal_retry = tokio::time::interval(JOURNAL_RETRY_TICK);
+    let mut journal_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut nonce = 0u64;
     let why = loop {
         tokio::select! {
-            _ = journal_retry.tick() => reg.retry_journal(&row.name, conn_id),
-            msg = stream.next() => {
+            _ = journal_retry.tick() => {
+                if journal_task.as_ref().is_none_or(|task| task.is_finished()) {
+                    let registry = reg.clone();
+                    let host = row.name.clone();
+                    journal_task = Some(tokio::task::spawn_blocking(move || registry.retry_journal(&host, conn_id)));
+                }
+            },
+            msg = stream.next(), if !reg.journal_backpressured(&row.name) => {
                 last_rx = Instant::now();
                 match msg {
                     Some(Ok(WsMessage::Text(t))) => match decode_control::<HostFrame>(t.as_str()) {
@@ -2395,6 +2485,9 @@ async fn serve_link(
                 }
             }
             _ = ticker.tick() => {
+                if reg.journal_backpressured(&row.name) {
+                    last_rx = Instant::now();
+                }
                 if last_rx.elapsed() > hb * MISSED_HEARTBEATS {
                     break "heartbeat timeout";
                 }
@@ -3007,7 +3100,7 @@ mod tests {
             Duration::from_millis(20)
         );
         conn.execute_batch("ROLLBACK").unwrap();
-        for _ in 0..3 {
+        for _ in 0..1 {
             reg.lock()
                 .get_mut("lab1")
                 .unwrap()
@@ -3047,8 +3140,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn journal_queue_exhaustion_closes_and_reconnect_replays() {
-        for deadline in [false, true] {
+    async fn journal_no_progress_closes_and_reconnect_replays() {
+        for deadline in [true] {
             let dir = tempfile::tempdir().unwrap();
             let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
             crate::secrets::ensure_key(&conn, dir.path()).unwrap();
@@ -3131,10 +3224,98 @@ mod tests {
             assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 8);
         }
         let mut pending = PendingJournal::new();
-        assert!(!pending.push(SessionEvent::Data {
+        assert!(pending.push(SessionEvent::Data {
             stream: StreamTag::Stdout,
             bytes: vec![0; JOURNAL_RETRY_BYTES]
         }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn journal_batch_six_streams_survive_writer_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore_with_db(dir.path(), db.clone()).unwrap();
+        let mut sessions: Vec<_> = (0..6).map(|_| reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap()).collect();
+        let (tx, mut outgoing) = mpsc::unbounded_channel();
+        reg.lock().get_mut("lab1").unwrap().conn = Some(Conn { id: 77, tx });
+        let writer_db = db.clone();
+        let (acquired, ready) = tokio::sync::oneshot::channel();
+        let writer = tokio::task::spawn_blocking(move || {
+            writer_db.read_now(|_| {
+                acquired.send(()).unwrap();
+                std::thread::sleep(Duration::from_secs(2));
+                Ok(())
+            }).unwrap();
+            for _ in 0..500 {
+                writer_db.read_now(|_| {
+                    std::thread::sleep(Duration::from_millis(1));
+                    Ok(())
+                }).unwrap();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        ready.await.unwrap();
+        let journal = resume::Journal::with_db(dir.path(), db.clone());
+        let mut sent = 0u32;
+        while sent < 2000 {
+            let count = (2000 - sent).min(64);
+            // Model the receive loop: it stops when any session reaches its
+            // watermark. All sessions share the same host connection.
+            for offset in sent..sent + count {
+                for session in &sessions {
+                    reg.on_data("lab1", DataFrame::new(session.id(), StreamTag::Stdout, offset.to_le_bytes().to_vec()));
+                }
+            }
+            if sent == 0 {
+                assert!(reg.journal_backpressured("lab1"));
+                assert!(outgoing.try_recv().is_err());
+                assert!(sessions.iter_mut().all(|s| s.rx.try_recv().is_err()));
+            }
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !reg.lock()["lab1"].pending_journal.is_empty() {
+                assert!(Instant::now() < deadline);
+                let registry = reg.clone();
+                tokio::task::spawn_blocking(move || registry.retry_journal("lab1", 77)).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                assert!(outgoing.try_recv().is_err(), "no close during contention");
+            }
+            let committed = journal.load::<SavedHost>("host/lab1").unwrap().unwrap();
+            for session in &mut sessions {
+                for offset in sent..sent + count {
+                    assert!(committed.sessions[&session.id()].received >= u64::from(offset + 1) * 4);
+                    assert_eq!(session.recv().await.unwrap(), SessionEvent::Data { stream: StreamTag::Stdout, bytes: offset.to_le_bytes().to_vec() });
+                }
+            }
+            sent += count;
+            assert_eq!(reg.lock()["lab1"].conn.as_ref().unwrap().id, 77);
+        }
+        writer.await.unwrap();
+        for session in &mut sessions {
+            reg.on_session_frame("lab1", HostFrame::Exit { session: session.id(), code: Some(0), signal: None, reason: ExitReason::Exited });
+            assert!(matches!(session.recv().await, Some(SessionEvent::Exit { .. })));
+            let events = journal.scan::<SessionEvent>(&format!("event/lab1/{}/", session.id())).unwrap();
+            assert_eq!(events.len(), 2001);
+            for (offset, (_, event)) in events.iter().take(2000).enumerate() {
+                assert_eq!(event, &SessionEvent::Data { stream: StreamTag::Stdout, bytes: (offset as u32).to_le_bytes().to_vec() });
+            }
+        }
+        let committed = journal.load::<SavedHost>("host/lab1").unwrap().unwrap();
+        let mut acks = 0;
+        while let Ok(out) = outgoing.try_recv() {
+            match out {
+                Outgoing::Frame(frame) => if let DaemonFrame::Ack { session, bytes } = *frame {
+                    assert_eq!(bytes, 8000);
+                    assert!(bytes <= committed.sessions[&session].received);
+                    acks += 1;
+                },
+                Outgoing::Close(_) => panic!("writer contention closed the connection"),
+                _ => {}
+            }
+        }
+        assert_eq!(acks, 6);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3186,15 +3367,9 @@ mod tests {
             );
             release.send(()).unwrap();
             writer.await.unwrap();
+            reg.lock().get_mut("lab1").unwrap().pending_journal.get_mut(&session.id()).unwrap().next = Instant::now();
+            reg.retry_journal("lab1", 1);
             for expected in [byte, byte + 16] {
-                reg.lock()
-                    .get_mut("lab1")
-                    .unwrap()
-                    .pending_journal
-                    .get_mut(&session.id())
-                    .unwrap()
-                    .next = Instant::now();
-                reg.retry_journal("lab1", 1);
                 assert_eq!(
                     session.rx.try_recv().unwrap(),
                     SessionEvent::Data {
