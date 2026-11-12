@@ -552,6 +552,7 @@ async fn retention_pass_forwards_previous_backup_to_the_private_worker() {
     assert_eq!(
         r.fake.calls(),
         vec![
+            "hot:preview-backups",
             "exec-create",
             "control-prepare",
             "exec-start",

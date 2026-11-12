@@ -554,6 +554,14 @@ impl Updater {
                 return Ok(serde_json::json!({"released": id, "removed": []}));
             }
             let cur = self.engine.target().await?;
+            // A read-only preview avoids generating permanent revocation
+            // tombstones every minute when there is nothing eligible to prune.
+            let arg = serde_json::to_string(&protected).map_err(|e| e.to_string())?;
+            let preview = self.exec_ok(&cur.id, hot_argv("preview-backups", &[&arg])).await?;
+            let preview: serde_json::Value = serde_json::from_str(&preview).map_err(|e| format!("bad retention preview: {e}"))?;
+            if preview["preview"].as_array().ok_or("retention preview omitted file list")?.is_empty() {
+                return Ok(serde_json::json!({"removed":[]}));
+            }
             self.retention_execute(&cur.id, protected).await
         }
         .await;
