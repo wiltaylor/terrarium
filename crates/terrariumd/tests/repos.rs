@@ -109,6 +109,36 @@ fn agent_git(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
 }
 
 #[tokio::test]
+async fn git_settings_scope_identity_and_off_hooks() {
+    let (td, _origin, _remotes) = daemon_with_repo().await;
+    td.patch("/api/projects/terra/git", json!({"name": "Project Author", "email": "project@example.test"})).await.ok();
+    td.patch("/api/repos/proj/git", json!({"provenance": false, "name": "Repo Author"})).await.ok();
+    let agent = td.agent("terra", "identity", json!({})).await;
+    let dest = PathBuf::from(agent["workspace"].as_str().unwrap()).join("proj");
+    let file = dest.join("live");
+    std::fs::write(&file, "Terrarium-Session: must-not-leak\n").unwrap();
+    let output = Command::new("git").current_dir(&dest)
+        .args(["commit", "-q", "--allow-empty", "-m", "test: private repo"])
+        .env_remove("GIT_AUTHOR_NAME").env_remove("GIT_AUTHOR_EMAIL")
+        .env_remove("GIT_COMMITTER_NAME").env_remove("GIT_COMMITTER_EMAIL")
+        .env("TERRARIUM_GIT_TRAILERS", "Terrarium-Agent: must-not-leak\n")
+        .env("TERRARIUM_GIT_TRAILERS_FILE", &file).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let output = Command::new("git").current_dir(&dest)
+        .args(["show", "-s", "--format=%an <%ae>%n%cn <%ce>%n%B"]).output().unwrap();
+    let message = String::from_utf8(output.stdout).unwrap();
+    assert!(message.starts_with("Repo Author <project@example.test>\nRepo Author <project@example.test>"), "{message}");
+    assert!(!message.contains("Terrarium-"), "{message}");
+    td.patch("/api/repos/proj/git", json!({"provenance": true})).await.ok();
+    td.post_as("terra/identity", "/api/repos/proj/checkout", json!({})).await.ok();
+    let state = &td.daemon.as_ref().unwrap().state;
+    let p = terrariumd::git_identity::provenance(state, agent["id"].as_str().unwrap()).await.unwrap();
+    assert!(!p.trailers.contains("Terrarium-Model:"), "{}", p.trailers);
+    let denied = td.patch_as("terra/identity", "/api/repos/proj/git", json!({"warn_only": true})).await;
+    assert!(!denied.status.is_success());
+}
+
+#[tokio::test]
 async fn agent_commits_have_bot_identity_and_current_terrarium_session() {
     let (td, _origin, _remotes) = daemon_with_repo().await;
     let a = td

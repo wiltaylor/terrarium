@@ -275,6 +275,63 @@ mod tests {
     use std::path::Path;
     use std::process::{Command, Stdio};
 
+    #[test]
+    fn provenance_off_push_hook_refuses_metadata_and_allows_warn_override() {
+        use std::io::Write as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = Provenance { repo: None, warn_only: false, identity: Identity { name: "User".into(), email: "user@example.test".into() }, trailers: String::new() };
+        git(tmp.path(), &["init", "-q"], &p);
+        git(tmp.path(), &["config", "terrarium.provenance", "false"], &p);
+        let hook = tmp.path().join("hook");
+        std::fs::write(&hook, crate::git::push_deny_hook(&[])).unwrap();
+        for message in ["clean commit", "commit\n\nTerrarium-Agent: private", "default identity"] {
+            if message == "default identity" { p.identity.name = "Terrarium".into(); }
+            git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", message], &p);
+            let oid = git(tmp.path(), &["rev-parse", "HEAD"], &p);
+            let input = format!("refs/heads/main {} refs/heads/main {}\n", oid.trim(), "0".repeat(40));
+            let run = || {
+                let mut child = Command::new("sh").current_dir(tmp.path())
+                    .arg(&hook).args(["origin", "unused"])
+                    .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+                child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+                child.wait_with_output().unwrap()
+            };
+            let out = run();
+            assert_eq!(out.status.success(), message == "clean commit", "{out:?}");
+            if message != "clean commit" {
+                assert!(String::from_utf8_lossy(&out.stderr).contains("provenance is off"));
+                git(tmp.path(), &["config", "terrarium.provenanceWarnOnly", "true"], &p);
+                assert!(run().status.success());
+                git(tmp.path(), &["config", "terrarium.provenanceWarnOnly", "false"], &p);
+            }
+        }
+    }
+
+    #[test]
+    fn push_markers_are_scoped_and_consumed_once() {
+        let refs = vec!["refs/heads/feature old new".into()];
+        mark_push("marker-test", "agent", "refs/heads/feature new refs/heads/feature old\n").unwrap();
+        assert!(!take_push_marker("marker-test", "other", refs.clone()));
+        assert!(take_push_marker("marker-test", "agent", refs.clone()));
+        assert!(!take_push_marker("marker-test", "agent", refs));
+    }
+
+    #[test]
+    fn fallback_config_allows_local_identity_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let identity = Identity { name: "Fallback \"Bot\"".into(), email: "fallback@example.test".into() };
+        write_fallback_config(tmp.path(), &identity).unwrap();
+        let p = Provenance { repo: None, warn_only: false, identity, trailers: String::new() };
+        git(tmp.path(), &["init", "-q"], &p);
+        git(tmp.path(), &["config", "user.name", "Local Author"], &p);
+        let out = Command::new("git").current_dir(tmp.path())
+            .args(["var", "GIT_AUTHOR_IDENT"])
+            .env_remove("GIT_AUTHOR_NAME").env_remove("GIT_AUTHOR_EMAIL")
+            .env("GIT_CONFIG_GLOBAL", tmp.path().join(CONFIG_FILE)).output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stdout).starts_with("Local Author <fallback@example.test>"));
+    }
+
     fn git(dir: &Path, args: &[&str], p: &Provenance) -> String {
         let mut env = BTreeMap::new();
         p.identity.env(&mut env);

@@ -1203,9 +1203,12 @@ async fn provenance_warning(state: &Shared, ctx: &Ctx, commands: &[pkt::Command]
         if let Some(card) = view.current_card {
             board::system_comment(t, &card, &body, None)?;
         } else {
+            let recipient = if mail::inbox_recipient(t, &project)?.is_some() {
+                mail::Address::Project(project)
+            } else { mail::Address::Operator };
             mail::send(t, mail::Outgoing {
                 from: &mail::Address::System,
-                to: &mail::Address::Project(project),
+                to: &recipient,
                 subject: "Git provenance warning",
                 body: &body,
                 thread: None,

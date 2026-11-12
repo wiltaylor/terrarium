@@ -749,6 +749,7 @@ pub fn config_allowed(key: &str, value: &str) -> bool {
             _ => false,
         },
         ("user" | "advice" | "color", _) => true,
+        ("terrarium", None) => matches!(var, "provenance" | "provenancewarnonly" | "repoid"),
         ("push", None) => matches!(var, "default" | "autosetupremote" | "followtags"),
         ("pull", None) => matches!(var, "rebase" | "ff"),
         ("init", None) => var == "defaultbranch",
