@@ -17,6 +17,7 @@
 //! kills the scopes that a run before it left ([`kill_leftovers`]).
 
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::path::Path;
 use std::time::Duration;
 

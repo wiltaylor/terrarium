@@ -121,3 +121,20 @@ fn job_limits_and_validation() {
         Limits { processes: Some(1), memory_bytes: Some(512 * 1024 * 1024), cpu_rate: Some(5000) });
     assert_ne!(wait(&child.process), 0);
 }
+
+#[test]
+fn nested_holder_budget_is_shared_and_session_kill_is_independent() {
+    let holder = terrarium_winapi::Job::new(Limits { processes: Some(2),
+        memory_bytes: Some(512 * 1024 * 1024), cpu_rate: Some(5000) }).unwrap();
+    let program = Path::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
+    let args = ["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), "Start-Sleep -Seconds 120".into()];
+    let run = || terrarium_winapi::spawn_in_holder(program, &args, None, &BTreeMap::new(), None, Limits::default(), Some(&holder));
+    let a = run().unwrap();
+    let b = run().unwrap();
+    assert!(run().is_err(), "third session exceeded shared process budget");
+    a.job.terminate().unwrap(); wait(&a.process);
+    assert!(b.process.try_wait().unwrap().is_none(), "sibling died on session kill");
+    holder.set_limits(Limits { processes: Some(2), memory_bytes: Some(512 * 1024 * 1024), cpu_rate: Some(2500) }).unwrap();
+    drop(holder);
+    wait(&b.process);
+}

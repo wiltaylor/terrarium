@@ -16,7 +16,7 @@ pub fn budget(limits: &crate::protocol::Limits) -> Result<Limits, String> {
     if limits.swap_bytes.is_some() || limits.io_weight.is_some() {
         return Err("Windows cannot enforce swap or IO weight".into());
     }
-    let cpu_rate = limits.cpu_millis.map(|millis| {
+    let cpu_rate = limits.cpu_millis.map(|millis| -> Result<u32, String> {
         let cpus = std::thread::available_parallelism().map_err(|e| e.to_string())?.get() as u64;
         let rate = (u64::from(millis) * 10 / cpus).min(10000);
         if rate == 0 { return Err("CPU limit is below Job Object precision".into()); }
