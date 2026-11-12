@@ -63,6 +63,7 @@ pub mod required_templates;
 pub mod research_helpers;
 pub mod reservations;
 pub mod reset;
+mod resource_lock;
 pub mod review_dispatcher;
 pub mod rule_script;
 pub mod rules_engine;

@@ -510,6 +510,41 @@ fn operator_mode_over_the_unix_socket() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn checkout_resource_busy_is_one_request_and_exit_one() {
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = requests.clone();
+    let message = "cannot check target python3 availability: host admission is busy; retry the command";
+    let app = axum::Router::new().route(
+        "/api/projects/terra/repos",
+        get(|| async { Json(json!([{"id": "repo", "name": "repo"}])) }),
+    ).fallback(move || {
+        let seen = seen.clone();
+        async move {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (
+                StatusCode::CONFLICT,
+                Json(json!({"error": {"code": "resource_busy", "message": message}})),
+            )
+        }
+    });
+    let dir = temp_dir("checkout-busy");
+    let socket = dir.join("api.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+            axum::serve(listener, app).await.unwrap();
+        });
+    });
+    let output = run(&socket, &["-p", "terra", "repo", "checkout", "repo", "--target", "box"]);
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    assert_eq!(text(&output.stderr), format!("terrarium: {message} [resource_busy]\n"));
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 /// Issue #13: `card edit --depends-on none` (and `--label none`) sends
 /// an empty list; `none` with other values is a usage error (exit 2) and
 /// sends nothing.
@@ -1336,6 +1371,36 @@ fn agent_mode_tunnels_every_call_over_the_runner_socket() {
     assert!(text(&o.stderr).contains("cannot connect to the runner"));
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn runner_checkout_preserves_busy_code_and_existing_details_envelope() {
+    let dir = temp_dir("runner-checkout-busy");
+    let (socket, seen) = fake_runner(&dir, |p| {
+        if p["method"] == "GET" && p["path"] == "/api/projects/terra/repos" {
+            return json!({"status": 200, "headers": {}, "body": [{"id": "repo", "name": "repo"}]});
+        }
+        json!({"status": 409, "headers": {}, "body": {"error": {
+            "code": "resource_busy",
+            "message": "cannot check target python3 availability: host admission is busy; retry the command",
+            "details": {"fixture": "existing-envelope"}
+        }}})
+    });
+    let output = bin()
+        .env("TERRARIUM_AGENT", "01AGENT")
+        .env("TERRARIUM_SOCKET", socket)
+        .args(["-p", "terra", "--json", "repo", "checkout", "repo", "--target", "box"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    let body: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(body["error"]["code"], "resource_busy");
+    assert_eq!(body["error"]["details"], json!({"fixture": "existing-envelope"}));
+    let seen = seen.lock().unwrap();
+    let checkouts: Vec<_> = seen.iter().filter(|r| {
+        r["params"]["method"] == "POST" && r["params"]["path"] == "/api/repos/repo/checkout"
+    }).collect();
+    assert_eq!(checkouts.len(), 1);
 }
 
 /// `card attach` and `card files get` over the runner tunnel (docs/api.md

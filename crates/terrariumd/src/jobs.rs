@@ -141,6 +141,7 @@
 //!   [`rerun_comment`], [`split_comment`], [`fail_comment`], and
 //!   [`fail_mail`].
 
+use crate::executor::ResourceOperation;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1750,7 +1751,10 @@ async fn step_redacted(
         return Err(ApiError::invalid("durable execution cannot take stdin"));
     }
     let pidfile = crate::run_kill::job_pidfile(job);
-    let admission = state.executor.target_admission(def).await?;
+    let admission = state
+        .executor
+        .target_admission(def, ResourceOperation::Job)
+        .await?;
     let (running, report) =
         crate::run_kill::start_named_locked(state, def, cmd, pidfile, &admission)?;
     let running = crate::executor::track_resource_run(state, def, cmd, running, report.clone())?;

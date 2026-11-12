@@ -8,6 +8,7 @@ use terrarium_core::{
     resources::HostCapacity,
 };
 use terrarium_host::{Client, ClientOptions};
+use terrariumd::executor::ResourceOperation;
 
 #[tokio::test]
 async fn old_reconciliation_cannot_open_a_new_connection_gate() {
@@ -944,7 +945,7 @@ async fn slow_docker_pull_does_not_hold_admission_or_block_another_host() {
     })
     .await
     .unwrap();
-    assert!(state.executor.resource_lock("h").try_lock_owned().is_ok());
+    assert!(state.executor.resource_lock("h").try_lock_owned(ResourceOperation::Reconcile).is_ok());
     // The pull cannot complete until we release its file gate below. Allow
     // shared CI scheduling delays without weakening the independence check.
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -1050,7 +1051,7 @@ async fn command_waits_briefly_for_admission_and_lock_keys_do_not_collide() {
         .await
         .unwrap();
     let lock = state.executor.resource_lock("h");
-    let guard = lock.lock_owned().await;
+    let guard = lock.lock_owned(ResourceOperation::Reconcile).await;
     let mut hostless = def.clone();
     hostless.host = None;
     hostless.name = "h".to_owned();
@@ -1058,7 +1059,7 @@ async fn command_waits_briefly_for_admission_and_lock_keys_do_not_collide() {
         state
             .executor
             .target_resource_lock(&hostless)
-            .try_lock_owned()
+            .try_lock_owned(ResourceOperation::Reconcile)
             .is_ok()
     );
     let cmd = RemoteCmd {
@@ -1069,11 +1070,60 @@ async fn command_waits_briefly_for_admission_and_lock_keys_do_not_collide() {
     tokio::time::sleep(Duration::from_millis(30)).await;
     drop(guard);
     assert!(run.collect(1024).await.end.unwrap().success());
-    let _guard = state.executor.resource_lock("h").lock_owned().await;
+    let _guard = state.executor.resource_lock("h").lock_owned(ResourceOperation::Reconcile).await;
     let run = start_cmd(&state, &def, &cmd).unwrap();
     assert!(
         matches!(run.collect(1024).await.end.unwrap(), terrariumd::executor::End::Error { code, .. } if code == "resource_busy")
     );
+    client.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn admission_deadline_and_closed_waiter_do_not_start_commands() {
+    use terrariumd::executor::{End, RemoteCmd, start_cmd};
+    let (td, server, client) = setup().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let mut def = state
+        .db
+        .read(|c| Ok(terrariumd::store::targets::get(c, "p-box")?.def))
+        .await
+        .unwrap();
+    def.kind = terrarium_core::config::TargetKind::Host;
+    let marker = td.dir.path().join("admission-opened");
+    let cmd = RemoteCmd {
+        argv: vec!["sh".into(), "-c".into(), "printf 'open\\n' >> \"$1\"".into(),
+            "sh".into(), marker.to_string_lossy().into_owned()],
+        ..Default::default()
+    };
+    let lock = state.executor.resource_lock("h");
+    let guard = lock.clone().lock_owned(ResourceOperation::Grant).await;
+    tokio::time::pause();
+    let mut run = start_cmd(&state, &def, &cmd).unwrap();
+    // Drive the spawned acquire before advancing the clock. Never assert
+    // scheduler ordering at the exact deadline.
+    tokio::task::yield_now().await;
+    assert!(run.events.try_recv().is_err());
+    tokio::time::advance(Duration::from_millis(499)).await;
+    assert!(run.events.try_recv().is_err());
+    assert!(!marker.exists());
+    assert!(state.executor.resource_sessions(std::slice::from_ref(&def.name), None).is_empty());
+    tokio::time::advance(Duration::from_millis(2)).await;
+    let event = run.events.recv().await.unwrap();
+    assert!(matches!(event, terrariumd::executor::Ev::End(End::Error { code, .. }) if code == "resource_busy"));
+    assert!(run.events.recv().await.is_none());
+    assert!(!marker.exists());
+    let closed = start_cmd(&state, &def, &cmd).unwrap();
+    tokio::task::yield_now().await;
+    drop(closed);
+    tokio::task::yield_now().await;
+    drop(guard);
+    tokio::time::resume();
+    // Fresh work after timeout must run once. A cancelled waiter must not
+    // run when the same mutex becomes available.
+    assert!(start_cmd(&state, &def, &cmd).unwrap().collect(4096).await.end.unwrap().success());
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "open\n");
+    assert!(lock.try_lock_owned(ResourceOperation::Exec).is_ok());
     client.abort();
     server.abort();
 }
@@ -1357,13 +1407,13 @@ async fn contended_command_errors_are_end_events_and_dropped_controls_kill() {
         .await
         .unwrap();
     def.kind = terrarium_core::config::TargetKind::Host;
-    let guard = state.executor.resource_lock("h").lock_owned().await;
+    let guard = state.executor.resource_lock("h").lock_owned(ResourceOperation::Reconcile).await;
     let mut bad = def.clone();
     bad.host = Some("missing-host".into());
     let other_guard = state
         .executor
         .resource_lock("missing-host")
-        .lock_owned()
+        .lock_owned(ResourceOperation::Reconcile)
         .await;
     let run = start_cmd(
         &state,
