@@ -320,6 +320,7 @@ impl Updater {
             ended_at: None,
         };
         *self.running() = Some(run.clone());
+        self.export_front(&run);
         Ok((run, guard))
     }
 
@@ -361,6 +362,7 @@ impl Updater {
             }
         }
         done.ended_at = Some(now());
+        self.export_front(&done);
         tracing::info!(run = %id, outcome = done.outcome.as_str(), error = ?done.error, "run ends");
         if let Err(e) = self.store.push(&done) {
             tracing::warn!("cannot write the history: {e}");
@@ -372,6 +374,13 @@ impl Updater {
     fn with_run(&self, f: impl FnOnce(&mut Run)) {
         if let Some(r) = self.running().as_mut() {
             f(r);
+            self.export_front(r);
+        }
+    }
+
+    fn export_front(&self, run: &Run) {
+        if let Err(error) = self.store.export_front(run) {
+            tracing::warn!(%error, "cannot export maintenance progress");
         }
     }
 

@@ -467,6 +467,35 @@ fn rig() -> Rig {
     rig_with("gh", true)
 }
 
+#[test]
+fn front_export_tracks_steps_and_survives_a_mid_step_stop() {
+    let r = rig();
+    let (_, guard) = r.updater.begin(RunKind::Update, "latest", "private-actor").unwrap();
+    let path = r.store.dir().join("front/current-run.json");
+    let read = || serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(read()["outcome"], "running");
+    let idx = r.updater.begin_step("snapshot-database");
+    assert_eq!(read()["steps"][idx]["state"], "running");
+    // A new reader after an updater crash sees a complete last transition.
+    let reopened = Store::new(r.store.dir(), 10);
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(reopened.dir().join("front/current-run.json")).unwrap()).unwrap();
+    assert_eq!(value["steps"][idx]["name"], "snapshot-database");
+    r.updater.end_step(idx, StepState::Failed, "private-command-output");
+    assert_eq!(read()["steps"][idx]["state"], "failed");
+    assert!(!read().to_string().contains("private-"));
+    drop(guard);
+}
+
+#[tokio::test]
+async fn front_export_retains_the_completed_run() {
+    let r = rig();
+    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(r.store.dir().join("front/current-run.json")).unwrap()).unwrap();
+    assert_eq!(value["outcome"], run.outcome.as_str());
+    assert_eq!(value["ended_at"], run.ended_at.unwrap());
+    assert_eq!(value["steps"].as_array().unwrap().len(), run.steps.len());
+}
+
 #[tokio::test]
 async fn missing_jobs_endpoint_warns_without_exposing_values_and_continues() {
     let r = rig();
