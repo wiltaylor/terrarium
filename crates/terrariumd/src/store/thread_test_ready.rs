@@ -15,7 +15,7 @@ pub fn readiness(
     let running = semver::Version::parse(running)
         .map_err(|_| ApiError::invalid("invalid running daemon version"))?;
     let mut st = conn.prepare(
-        "SELECT c.id, k.role, c.labels FROM thread_cards tc
+        "SELECT c.id, coalesce(k.role, k.name), c.labels FROM thread_cards tc
          JOIN cards c ON c.id = tc.card JOIN board_columns k ON k.id = c.column_id
          WHERE tc.thread = ?1 ORDER BY c.id",
     )?;
@@ -95,9 +95,9 @@ mod tests {
             "CREATE TABLE threads(id TEXT PRIMARY KEY, monitor TEXT);
              CREATE TABLE thread_cards(thread TEXT, card TEXT, PRIMARY KEY(thread, card));
              CREATE TABLE cards(id TEXT PRIMARY KEY, column_id TEXT, labels TEXT);
-             CREATE TABLE board_columns(id TEXT PRIMARY KEY, role TEXT);
+             CREATE TABLE board_columns(id TEXT PRIMARY KEY, role TEXT, name TEXT);
              INSERT INTO threads VALUES ('t', NULL);
-             INSERT INTO board_columns VALUES ('d', 'done'), ('r', 'review');
+             INSERT INTO board_columns VALUES ('d', NULL, 'done'), ('r', 'review', 'review');
              INSERT INTO cards VALUES ('A', 'd', '[\"version:1.2.3\"]'), ('B', 'r', '[]');
              INSERT INTO thread_cards VALUES ('t', 'A'), ('t', 'B');",
         )
