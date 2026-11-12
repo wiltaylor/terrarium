@@ -13,8 +13,7 @@ pub trait Backend {
     fn check_absent(&mut self, request: &Request) -> Result<(), Reply>;
     fn create_scaffold(&mut self, request: &Request) -> Result<Scaffold, Reply>;
     /// Create only, without starting. Return a verified full container ID.
-    fn create_receiver(&mut self, request: &Request, scaffold: &Scaffold)
-    -> Result<String, Reply>;
+    fn create_receiver(&mut self, request: &Request, scaffold: &Scaffold) -> Result<String, Reply>;
     /// Recheck scaffold identity, start the exact bound ID, and pin and verify
     /// the complete runtime configuration and mount namespace.
     fn start_and_verify(
@@ -43,31 +42,54 @@ mod tests {
     impl Fake {
         fn action(&mut self) -> Result<(), Reply> {
             self.calls += 1;
-            if self.calls == self.fail { Err(Reply::Failed) } else { Ok(()) }
+            if self.calls == self.fail {
+                Err(Reply::Failed)
+            } else {
+                Ok(())
+            }
         }
     }
 
     impl Backend for Fake {
-        fn check_absent(&mut self, _: &Request) -> Result<(), Reply> { Ok(()) }
+        fn check_absent(&mut self, _: &Request) -> Result<(), Reply> {
+            Ok(())
+        }
         fn create_scaffold(&mut self, _: &Request) -> Result<Scaffold, Reply> {
             self.action()?;
             Ok(Scaffold {
-                publisher: SourceIdentity { device: 1, inode: 1 },
-                staging: SourceIdentity { device: 1, inode: 2 },
-                state: SourceIdentity { device: 1, inode: 3 },
+                publisher: SourceIdentity {
+                    device: 1,
+                    inode: 1,
+                },
+                staging: SourceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+                state: SourceIdentity {
+                    device: 1,
+                    inode: 3,
+                },
             })
         }
         fn create_receiver(&mut self, _: &Request, _: &Scaffold) -> Result<String, Reply> {
             self.action()?;
             Ok("a".repeat(64))
         }
-        fn start_and_verify(&mut self, r: &Request, _: &Scaffold, id: &str) -> Result<RuntimeIdentity, Reply> {
+        fn start_and_verify(
+            &mut self,
+            r: &Request,
+            _: &Scaffold,
+            id: &str,
+        ) -> Result<RuntimeIdentity, Reply> {
             self.action()?;
             Ok(RuntimeIdentity {
                 registration: r.registration,
                 incarnation: r.incarnation,
                 container_id: id.into(),
-                namespace: NamespaceIdentity { device: 2, inode: 3 },
+                namespace: NamespaceIdentity {
+                    device: 2,
+                    inode: 3,
+                },
             })
         }
         fn commit_runtime(&mut self, _: &Request, _: &RuntimeIdentity) -> Result<(), Reply> {
@@ -113,7 +135,9 @@ mod tests {
             if complete {
                 b.create(r.clone()).unwrap();
             } else {
-                b.store.begin_bootstrap(&Journal::new(r.clone()).unwrap()).unwrap();
+                b.store
+                    .begin_bootstrap(&Journal::new(r.clone()).unwrap())
+                    .unwrap();
             }
             let calls = b.backend.calls;
             assert_eq!(b.retry(&r).is_ok(), complete);
@@ -133,7 +157,11 @@ pub struct Bootstrap<B> {
 
 impl<B: Backend> Bootstrap<B> {
     pub fn new(store: Store, backend: B) -> Self {
-        Self { store, backend, fenced: false }
+        Self {
+            store,
+            backend,
+            fenced: false,
+        }
     }
 
     /// No automatic recovery adoption is implemented. A committed duplicate
@@ -173,7 +201,9 @@ impl<B: Backend> Bootstrap<B> {
             self.advance(&mut journal, Step::CreatePending)?;
             let container = self.backend.create_receiver(&request, &scaffold)?;
             self.advance(&mut journal, Step::ContainerBound(container.clone()))?;
-            let runtime = self.backend.start_and_verify(&request, &scaffold, &container)?;
+            let runtime = self
+                .backend
+                .start_and_verify(&request, &scaffold, &container)?;
             self.advance(&mut journal, Step::ReceiverVerified(runtime.clone()))?;
             self.backend.commit_runtime(&request, &runtime)?;
             self.advance(&mut journal, Step::Committed)
