@@ -1054,7 +1054,9 @@ async fn release(
                     let previous = jobs::get(c, &id)?;
                     super::release_handoffs::authorize(&a, &previous)?;
                     if previous.project != card.project {
-                        return Err(ApiError::invalid("release phases must have the same project"));
+                        return Err(ApiError::invalid(
+                            "release phases must have the same project",
+                        ));
                     }
                     Some(previous.repo)
                 }
