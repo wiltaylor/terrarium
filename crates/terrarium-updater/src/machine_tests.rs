@@ -18,6 +18,8 @@ const BACKUP: &str = "/state/backups/terrarium-backup-1.zip";
 struct State {
     retention_running: bool,
     retention_protected: serde_json::Value,
+    resume_status: Option<String>,
+    resume_hang: bool,
     jobs_output: Option<String>,
     jobs_hang: bool,
     fail_once: HashSet<String>,
@@ -233,6 +235,9 @@ impl Engine for Fake {
                 });
             }
             let what = match (argv[0].as_str(), argv.get(3).map(String::as_str)) {
+                ("terrarium", Some("status")) if argv.get(2).is_some_and(|s| s == "update") => {
+                    "update-status".to_owned()
+                }
                 ("terrarium", Some("drain")) => "drain".to_owned(),
                 ("terrarium", Some("drain-jobs")) => "drain-jobs".to_owned(),
                 ("terrarium", Some("resume")) => "resume".to_owned(),
@@ -240,13 +245,23 @@ impl Engine for Fake {
                 _ => format!("status:{}", self.image_of(id).unwrap_or_default()),
             };
             let failed = self.call(format!("{what} {id}"));
+            if what == "resume" && self.0.lock().unwrap().resume_hang {
+                std::future::pending::<()>().await;
+            }
             if what == "drain-jobs" {
                 let hang = self.0.lock().unwrap().jobs_hang;
                 if hang {
                     std::future::pending::<()>().await;
                 }
             }
-            let stdout = if what == "backup" {
+            let stdout = if what == "update-status" {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .resume_status
+                    .clone()
+                    .unwrap_or_default()
+            } else if what == "backup" {
                 format!(r#"{{"name": "terrarium-backup-1.zip", "path": "{BACKUP}"}}"#)
             } else if what == "drain-jobs" {
                 self.0
@@ -456,7 +471,13 @@ impl Engine for Fake {
         since: &'a str,
     ) -> BoxFut<'a, Res<Option<String>>> {
         Box::pin(async move {
-            assert!(chrono::DateTime::parse_from_rfc3339(since).is_ok());
+            let (seconds, nanos) = since.split_once('.').unwrap();
+            assert!(seconds.parse::<i64>().is_ok());
+            assert_eq!(nanos.len(), 9);
+            assert!(nanos.parse::<u32>().unwrap() < 1_000_000_000);
+            if self.0.lock().unwrap().fail.contains("startup-log") {
+                return Err("transport error with private values".into());
+            }
             let crashes = self.0.lock().unwrap().startup_crash;
             if crashes && self.image_of(id).as_deref() == Some(new_ref().as_str()) {
                 self.call("daemon-exit-1".into());
@@ -548,6 +569,218 @@ fn rig_with(mode: &'static str, ok: bool) -> Rig {
 
 fn rig() -> Rig {
     rig_with("gh", true)
+}
+
+async fn wait_front(
+    store: &Store,
+    matches: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(bytes) = std::fs::read(store.dir().join("front/current-run.json"))
+                && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                && matches(&value)
+            {
+                return value;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn front_export_tracks_steps_and_survives_a_mid_step_stop() {
+    let r = rig();
+    let (_, guard) = r
+        .updater
+        .begin(RunKind::Update, "latest", "private-actor")
+        .unwrap();
+    let path = r.store.dir().join("front/current-run.json");
+    let read =
+        || serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap();
+    wait_front(&r.store, |v| v["outcome"] == "running").await;
+    let idx = r.updater.begin_step("snapshot-database");
+    wait_front(&r.store, |v| v["steps"][idx]["state"] == "running").await;
+    assert_eq!(read()["steps"][idx]["state"], "running");
+    // A new reader after an updater crash sees a complete last transition.
+    let reopened = Store::new(r.store.dir(), 10);
+    let value: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(reopened.dir().join("front/current-run.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["steps"][idx]["name"], "snapshot-database");
+    r.updater
+        .end_step(idx, StepState::Failed, "private-command-output");
+    wait_front(&r.store, |v| v["steps"][idx]["state"] == "failed").await;
+    assert_eq!(read()["steps"][idx]["state"], "failed");
+    assert!(!read().to_string().contains("private-"));
+    drop(guard);
+}
+
+#[tokio::test]
+async fn front_export_retains_the_completed_run() {
+    let r = rig();
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    wait_front(&r.store, |v| v["ended_at"].is_string()).await;
+    let value: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(r.store.dir().join("front/current-run.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["outcome"], run.outcome.as_str());
+    assert_eq!(value["ended_at"], run.ended_at.unwrap());
+    assert_eq!(value["steps"].as_array().unwrap().len(), run.steps.len());
+}
+
+#[tokio::test]
+async fn stalled_front_writer_cannot_delay_hold_deadline_recovery() {
+    struct Release(Arc<(Mutex<bool>, std::sync::Condvar)>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            *self.0.0.lock().unwrap() = true;
+            self.0.1.notify_all();
+        }
+    }
+    let mut r = rig();
+    let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let release = Release(gate.clone());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let signal = entered.clone();
+    let store = r.store.clone();
+    let updater = Arc::get_mut(&mut r.updater).unwrap();
+    updater.front = front_publisher(Arc::new(move |run| {
+        signal.notify_one();
+        let (lock, wake) = &*gate;
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = wake.wait(released).unwrap();
+        }
+        store.export_front(run)
+    }));
+    updater.hot_budget = (
+        Duration::from_secs(12),
+        Duration::from_secs(6),
+        Duration::from_secs(1),
+    );
+    updater.cfg.health_timeout = Duration::from_secs(240);
+    {
+        let mut state = r.fake.0.lock().unwrap();
+        state.hot = true;
+        state.startup_crash = true;
+        state.pending_once = Some("restore-database".into());
+    }
+    let started = tokio::time::Instant::now();
+    let updater = r.updater.clone();
+    let work =
+        tokio::spawn(async move { updater.run_now(RunKind::Update, "latest", "operator").await });
+    tokio::time::timeout(Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    let run = tokio::time::timeout(Duration::from_secs(13), work)
+        .await
+        .expect("stalled projection must not delay recovery")
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_millis(12500));
+    assert_eq!(run.outcome, Outcome::RecoveryFailed);
+    assert!(
+        r.fake
+            .calls()
+            .iter()
+            .any(|call| call == "stop-for-recovery c0")
+    );
+    // No timeout or automatic release exists in the writer. It stays blocked
+    // until after the safety-critical update/recovery has finished.
+    assert!(!*release.0.0.lock().unwrap());
+    drop(release);
+    let value = wait_front(&r.store, |v| v["ended_at"].is_string()).await;
+    assert_eq!(value["outcome"], "recovery_failed");
+    assert_eq!(value["steps"].as_array().unwrap().len(), run.steps.len());
+}
+
+#[cfg(feature = "bin")]
+#[tokio::test]
+#[ignore = "requires owned tiny containers on terrarium-docker-scratch"]
+async fn real_docker_startup_health() {
+    let healthy = std::env::var("TER984_HEALTHY_CONTAINER").unwrap();
+    let crashed = std::env::var("TER984_CRASHED_CONTAINER").unwrap();
+    assert!(healthy.starts_with("ter-984-"));
+    assert!(crashed.starts_with("ter-984-"));
+    let mut r = rig();
+    let updater = Arc::get_mut(&mut r.updater).unwrap();
+    updater.engine = Arc::new(crate::docker::Docker {
+        socket: "/var/run/docker.sock".into(),
+        target: None,
+    });
+    updater.cfg.health_timeout = Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    // The fixtures are started after the epoch. This exercises dockerd's
+    // fractional UNIX timestamp parser as well as the real health/exec path.
+    updater
+        .wait_hot_healthy_until(&healthy, deadline, Some("0.000000000"))
+        .await
+        .unwrap();
+    let reason = updater
+        .wait_hot_healthy_until(&crashed, deadline, Some("0.000000000"))
+        .await
+        .unwrap_err();
+    assert!(reason.contains("FOREIGN KEY constraint failed"), "{reason}");
+    assert!(!reason.contains("private-fixture-value"));
+}
+
+#[tokio::test]
+async fn resume_retries_an_old_daemon_that_is_not_ready() {
+    let r = rig();
+    r.fake.0.lock().unwrap().fail_once.insert("resume".into());
+    let (_run, _guard) = r.updater.begin(RunKind::Update, "test", "test").unwrap();
+    let cur = r.fake.target().await.unwrap();
+    r.updater.resume(&cur).await;
+    let calls = r.fake.calls();
+    assert_eq!(calls.iter().filter(|c| *c == "resume c0").count(), 2);
+    assert_eq!(
+        r.updater
+            .running()
+            .as_ref()
+            .unwrap()
+            .steps
+            .last()
+            .unwrap()
+            .state,
+        StepState::Ok
+    );
+}
+
+#[tokio::test]
+async fn resume_accepts_verified_open_drains_after_a_failed_or_slow_wake() {
+    for hang in [false, true] {
+        let r = rig();
+        let (_run, _guard) = r.updater.begin(RunKind::Update, "test", "test").unwrap();
+        r.fake.fail("resume");
+        {
+            let mut s = r.fake.0.lock().unwrap();
+            s.resume_hang = hang;
+            s.resume_status = Some(r#"{"drain":{"on":false,"jobs_drain":null}}"#.into());
+        }
+        let cur = r.fake.target().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), r.updater.resume(&cur))
+            .await
+            .unwrap();
+        assert!(r.fake.calls().iter().any(|c| c == "update-status c0"));
+        assert_eq!(
+            r.updater
+                .running()
+                .as_ref()
+                .unwrap()
+                .steps
+                .last()
+                .unwrap()
+                .state,
+            StepState::Ok
+        );
+    }
 }
 
 #[tokio::test]
@@ -1009,6 +1242,41 @@ async fn hot_swap_failed_health_restores_before_old_release_admission() {
             .unwrap()
             < calls.iter().position(|c| c == "hot:commit").unwrap()
     );
+}
+
+#[tokio::test]
+async fn unreadable_startup_log_does_not_replace_health_checks() {
+    for healthy in [true, false] {
+        let r = rig();
+        r.fake.0.lock().unwrap().hot = true;
+        r.fake.fail("startup-log");
+        if !healthy {
+            r.fake.fail(&format!("health:{}", new_ref()));
+        }
+        let run = r
+            .updater
+            .run_now(RunKind::Update, "latest", "operator")
+            .await;
+        assert_eq!(
+            run.outcome,
+            if healthy {
+                Outcome::Succeeded
+            } else {
+                Outcome::RolledBack
+            },
+            "{run:#?}"
+        );
+        let warnings: Vec<_> = run
+            .steps
+            .iter()
+            .filter(|s| s.name == "startup-log-warning")
+            .collect();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0].detail,
+            "cannot read daemon startup log (values hidden); continuing health checks"
+        );
+    }
 }
 
 #[tokio::test]

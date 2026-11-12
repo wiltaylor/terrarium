@@ -67,6 +67,29 @@ const icon = (r: HTMLElement) => r.querySelector<HTMLElement>("[data-testid=thre
 const status = (el: HTMLElement) => el.querySelector("[aria-label='Thread details'] [data-testid=thread-status]")?.textContent?.trim();
 
 describe("the Threads screen (TER-466)", () => {
+  it("links a live message author and its session, but not operator or removed authors", async () => {
+    const seeded = api.world.threads![0]!;
+    const agent = api.world.agents[0]!;
+    const id = "author-links-thread";
+    api.world.threads!.push({ ...seeded, id, messages: [
+      { id: "live", author: agent.id, author_name: agent.name, kind: "message", text: "Live", at: seeded.created_at, session_id: "known-session" },
+      { id: "op", author: "operator", author_name: "operator", kind: "message", text: "Operator", at: seeded.created_at },
+      { id: "gone", author: "removed-agent", author_name: "former worker", kind: "message", text: "Gone", at: seeded.created_at },
+    ] });
+    try {
+      const { el } = mount(`/threads/${id}`);
+      await waitFor(() => expect(el.querySelectorAll(".thread-post").length).toBeGreaterThanOrEqual(3));
+      const posts = el.querySelectorAll(".thread-post");
+      expect(posts[0]!.querySelector("strong a")?.getAttribute("href")).toBe(`/agents/${agent.id}`);
+      expect(posts[0]!.querySelector('a[href="/sessions/known-session"]')).not.toBeNull();
+      expect(posts[1]!.querySelector("strong")?.textContent).toBe("You");
+      expect(posts[1]!.querySelector("strong a")).toBeNull();
+      expect(posts[2]!.querySelector("strong")?.textContent).toBe("former worker");
+      expect(posts[2]!.querySelector("strong a")).toBeNull();
+    } finally {
+      api.world.threads = api.world.threads!.filter((t) => t.id !== id);
+    }
+  });
   it("shows a failed request's mail fallback and its reason in the handoff", async () => {
     const seeded = api.world.threads!.find((t) => t.status === "closed")!;
     const id = "01JBTHRDFALLBACK00000000001";

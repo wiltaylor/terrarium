@@ -196,6 +196,7 @@ pub struct Updater {
     registry: Arc<dyn Registry>,
     verifier: Arc<dyn Verifier>,
     store: Store,
+    front: tokio::sync::watch::Sender<Option<Run>>,
     cfg: Config,
     /// The run in progress, with its steps so far.
     running: Mutex<Option<Run>>,
@@ -209,6 +210,27 @@ fn now() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+type FrontWriter = Arc<dyn Fn(&Run) -> std::io::Result<()> + Send + Sync>;
+
+fn front_publisher(writer: FrontWriter) -> tokio::sync::watch::Sender<Option<Run>> {
+    let (sender, mut receiver) = tokio::sync::watch::channel::<Option<Run>>(None);
+    tokio::spawn(async move {
+        while receiver.changed().await.is_ok() {
+            let Some(run) = receiver.borrow_and_update().clone() else {
+                continue;
+            };
+            let writer = writer.clone();
+            // One writer at a time preserves order, even while newer snapshots
+            // replace the pending slot. A stalled write never blocks updates.
+            match tokio::task::spawn_blocking(move || writer(&run)).await {
+                Ok(Ok(())) => (),
+                result => tracing::warn!(?result, "cannot export maintenance progress"),
+            }
+        }
+    });
+    sender
+}
+
 /// A failure of a step: the name and the reason.
 struct Fail(String);
 
@@ -220,11 +242,14 @@ impl Updater {
         store: Store,
         cfg: Config,
     ) -> Self {
+        let export_store = store.clone();
+        let front = front_publisher(Arc::new(move |run| export_store.export_front(run)));
         Self {
             engine,
             registry,
             verifier,
             store,
+            front,
             cfg,
             #[cfg(test)]
             hot_budget: (
@@ -338,6 +363,7 @@ impl Updater {
             });
         }
         *self.running() = Some(run.clone());
+        self.export_front(&run);
         Ok((run, guard))
     }
 
@@ -379,6 +405,7 @@ impl Updater {
             }
         }
         done.ended_at = Some(now());
+        self.export_front(&done);
         tracing::info!(run = %id, outcome = done.outcome.as_str(), error = ?done.error, "run ends");
         if let Err(e) = self.store.push(&done) {
             tracing::warn!("cannot write the history: {e}");
@@ -697,7 +724,14 @@ impl Updater {
     fn with_run(&self, f: impl FnOnce(&mut Run)) {
         if let Some(r) = self.running().as_mut() {
             f(r);
+            self.export_front(r);
         }
+    }
+
+    fn export_front(&self, run: &Run) {
+        // Memory-only, latest-wins publication. No filesystem work or await
+        // on the updater's safety-critical path or under its running mutex.
+        self.front.send_replace(Some(run.clone()));
     }
 
     fn begin_step(&self, name: &str) -> usize {
@@ -766,13 +800,37 @@ impl Updater {
     /// End both drains after health or an early failure.
     async fn resume(&self, cur: &Container) {
         let idx = self.begin_step("resume");
-        match tokio::time::timeout(
-            Duration::from_secs(30),
-            self.exec_ok(&cur.id, resume_argv()),
-        )
+        match tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                // Old daemons support this same command. A rollback may
+                // expose the API before recovery has settled. Retry only
+                // this idempotent operation, within the existing reserve.
+                if matches!(
+                    tokio::time::timeout(
+                        Duration::from_secs(5),
+                        self.exec_ok(&cur.id, resume_argv())
+                    )
+                    .await,
+                    Ok(Ok(_))
+                ) {
+                    return;
+                }
+                let argv = ["terrarium", "admin", "update", "status", "--json"]
+                    .map(String::from)
+                    .to_vec();
+                if let Ok(out) = self.exec_ok(&cur.id, argv).await
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(&out)
+                    && v["drain"]["on"] == false
+                    && v["drain"].get("jobs_drain").is_some_and(|v| v.is_null())
+                {
+                    return;
+                }
+                tokio::time::sleep(self.cfg.health_poll).await;
+            }
+        })
         .await
         {
-            Ok(Ok(_)) => self.end_step(
+            Ok(()) => self.end_step(
                 idx,
                 StepState::Ok,
                 "the daemon takes new turns and jobs again",
@@ -1168,7 +1226,8 @@ impl Updater {
         let attempt = async {
             let left = budget_left(switch_deadline, Duration::ZERO).map_err(Fail)?;
             let control_timeout = left.as_secs_f64().to_string();
-            let startup_since = Utc::now().to_rfc3339();
+            let now = Utc::now();
+            let startup_since = format!("{}.{:09}", now.timestamp(), now.timestamp_subsec_nanos());
             self.step(
                 "start-daemon",
                 self.exec_ok(&cur.id, hot_argv("start", &[&release, &control_timeout])),
@@ -1328,11 +1387,20 @@ impl Updater {
         let deadline = (tokio::time::Instant::now() + self.cfg.health_timeout).min(hold_deadline);
         // Docker health can still describe the old daemon. Require a new live
         // status answer too, and allow the normal start-period failures.
+        let mut read_startup_log = startup_since;
         loop {
-            if let Some(since) = startup_since
-                && let Some(reason) = self.engine.daemon_failure_since(id, since).await?
-            {
-                return Err(reason);
+            if let Some(since) = read_startup_log {
+                match self.engine.daemon_failure_since(id, since).await {
+                    Ok(Some(reason)) => return Err(reason),
+                    Ok(None) => {}
+                    Err(_) => {
+                        let warning = "cannot read daemon startup log (values hidden); continuing health checks";
+                        tracing::warn!("{warning}");
+                        let idx = self.begin_step("startup-log-warning");
+                        self.end_step(idx, StepState::Failed, warning);
+                        read_startup_log = None;
+                    }
+                }
             }
             let health = self.engine.health(id).await?;
             if matches!(health, Health::Exited(_)) {

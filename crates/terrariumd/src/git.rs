@@ -210,7 +210,11 @@ const MAX_HOOKS: usize = 64;
 /// `terrarium_core::config::check_push_deny_glob`, so they are safe as
 /// shell `case` patterns.
 pub fn push_deny_hook(push_deny: &[String]) -> String {
-    let patterns = push_deny.join("|");
+    let patterns = if push_deny.is_empty() {
+        "terrarium-no-branch-matches".into()
+    } else {
+        push_deny.join("|")
+    };
     format!(
         r#"#!/bin/sh
 # Written by terrariumd from the repo's push_deny list. Each checkout by
@@ -233,10 +237,34 @@ done <<TERRARIUM_REFS
 $input
 TERRARIUM_REFS
 test -n "$refused" && exit 1
+if test "$(git config --get terrarium.provenance)" = false; then
+  while read -r local_ref local_oid remote_ref remote_oid; do
+    case "$local_oid" in *[!0]*) ;; *) continue;; esac
+    case "$remote_oid" in
+      *[!0]*) commits=$(git rev-list "$remote_oid..$local_oid") || exit 1;;
+      *)
+        commits=$(git rev-list "$local_oid" --not --remotes="$1") || exit 1;;
+    esac
+    for commit in $commits; do
+      metadata=$(git show -s --format='%B%n%an%n%ae%n%cn%n%ce' "$commit") || exit 1
+      if printf '%s\n' "$metadata" | grep -Eiq '^(Terrarium-[A-Za-z-]+:|Terrarium$|terrarium@localhost$)'; then
+        echo "Terrarium: provenance is off but outgoing commit $commit contains Terrarium trailers or the default identity; configure repo identity and remove metadata before pushing" >&2
+        test "$(git config --get terrarium.provenanceWarnOnly)" = true || exit 1
+      fi
+    done
+  done <<TERRARIUM_REFS
+$input
+TERRARIUM_REFS
+fi
 repo_hook="${{0%/*}}/{REPO_PRE_PUSH}"
 if test -x "$repo_hook"; then
   if test -n "$input"; then printf '%s\n' "$input"; fi | "$repo_hook" "$@"
-  exit $?
+  status=$?
+  test "$status" = 0 || exit "$status"
+fi
+repo_id=$(git config --get terrarium.repoId)
+if test -n "$repo_id"; then
+  printf '%s\n' "$input" | terrarium repo push-checked "$repo_id" >/dev/null || echo "Terrarium: could not record managed hook check; the proxy will warn" >&2
 fi
 exit 0
 "#
@@ -271,7 +299,7 @@ fn install_hooks(c: &Checkout, r: &Runner) -> Result<Vec<String>, GitError> {
         terrarium_core::config::check_hooks_dir(dir).map_err(GitError::Refused)?;
         files = hook_files(c, r, dir)?;
     }
-    if !c.hooks.push_deny.is_empty() {
+    if !c.hooks.push_deny.is_empty() || c.hooks.provenance.is_some() {
         terrarium_core::config::check_push_deny(&c.hooks.push_deny).map_err(GitError::Refused)?;
         if let Some(f) = files.iter_mut().find(|(n, _)| n == "pre-push") {
             REPO_PRE_PUSH.clone_into(&mut f.0);
@@ -288,6 +316,29 @@ fn install_hooks(c: &Checkout, r: &Runner) -> Result<Vec<String>, GitError> {
         files.push(("prepare-commit-msg".into(), p.hook().into_bytes()));
         r.quiet(&c.dest, &["config", "user.name", &p.identity.name])?;
         r.quiet(&c.dest, &["config", "user.email", &p.identity.email])?;
+        if let Some(repo) = &p.repo {
+            r.quiet(&c.dest, &["config", "terrarium.repoId", repo])?;
+        }
+        r.quiet(
+            &c.dest,
+            &[
+                "config",
+                "terrarium.provenance",
+                if p.trailers.is_empty() {
+                    "false"
+                } else {
+                    "true"
+                },
+            ],
+        )?;
+        r.quiet(
+            &c.dest,
+            &[
+                "config",
+                "terrarium.provenanceWarnOnly",
+                if p.warn_only { "true" } else { "false" },
+            ],
+        )?;
     }
     let git_dir = open_git_dir(&c.dest, false)?;
     let shown = Path::new(".git");
@@ -723,6 +774,7 @@ pub fn config_allowed(key: &str, value: &str) -> bool {
             _ => false,
         },
         ("user" | "advice" | "color", _) => true,
+        ("terrarium", None) => matches!(var, "provenance" | "provenancewarnonly" | "repoid"),
         ("push", None) => matches!(var, "default" | "autosetupremote" | "followtags"),
         ("pull", None) => matches!(var, "rebase" | "ff"),
         ("init", None) => var == "defaultbranch",
@@ -2656,7 +2708,13 @@ impl JobRepo {
     /// Merge `other` onto `head` with a merge commit (as `merge --no-ff`
     /// would) with `message`. No work tree: `git merge-tree --write-tree`
     /// makes the tree, `git commit-tree` the commit.
-    pub fn merge(&self, head: &str, other: &str, message: &str) -> Result<MergeStep, GitError> {
+    pub fn merge(
+        &self,
+        head: &str,
+        other: &str,
+        message: &str,
+        identity: &crate::git_identity::Identity,
+    ) -> Result<MergeStep, GitError> {
         if self.is_ancestor(other, head)? {
             return Ok(MergeStep::Merged(head.to_owned()));
         }
@@ -2696,7 +2754,6 @@ impl JobRepo {
                 return Ok(MergeStep::Failed(msg));
             }
         }
-        let identity = crate::git_identity::Identity::from_env();
         let mut runner = self.runner(false)?;
         let mut env = std::collections::BTreeMap::new();
         identity.env(&mut env);
@@ -3777,7 +3834,12 @@ mod tests {
         // A second job opens the same repo and fetches only new objects.
         // Its first job's refs and locally made objects must survive.
         let marker = r
-            .merge(&next, "refs/remotes/job/clean", "cached merge")
+            .merge(
+                &next,
+                "refs/remotes/job/clean",
+                "cached merge",
+                &crate::git_identity::Identity::from_env(),
+            )
             .unwrap();
         let MergeStep::Merged(marker) = marker else {
             panic!("clean merge failed")
@@ -3794,7 +3856,12 @@ mod tests {
         assert_eq!(r.commit_of("refs/remotes/job/nope").unwrap(), None);
 
         let MergeStep::Merged(m1) = r
-            .merge(&next, "refs/remotes/job/clean", "Merge clean onto next")
+            .merge(
+                &next,
+                "refs/remotes/job/clean",
+                "Merge clean onto next",
+                &crate::git_identity::Identity::from_env(),
+            )
             .unwrap()
         else {
             panic!("clean did not merge")
@@ -3814,23 +3881,47 @@ mod tests {
             "Terrarium <terrarium@localhost>\nTerrarium <terrarium@localhost>"
         );
         let MergeStep::Merged(m2) = r
-            .merge(&m1, "refs/remotes/job/c1", "Merge c1 onto next")
+            .merge(
+                &m1,
+                "refs/remotes/job/c1",
+                "Merge c1 onto next",
+                &crate::git_identity::Identity::from_env(),
+            )
             .unwrap()
         else {
             panic!("c1 did not merge")
         };
         // c2 changes the line that c1 changed.
         assert_eq!(
-            r.merge(&m2, "refs/remotes/job/c2", "Merge c2 onto next")
-                .unwrap(),
+            r.merge(
+                &m2,
+                "refs/remotes/job/c2",
+                "Merge c2 onto next",
+                &crate::git_identity::Identity::from_env()
+            )
+            .unwrap(),
             MergeStep::Conflict(vec!["a.txt".into()])
         );
         // A branch that is in the head already gives the head.
         assert_eq!(
-            r.merge(&m2, "refs/remotes/job/clean", "again").unwrap(),
+            r.merge(
+                &m2,
+                "refs/remotes/job/clean",
+                "again",
+                &crate::git_identity::Identity::from_env()
+            )
+            .unwrap(),
             MergeStep::Merged(m2.clone())
         );
-        match r.merge(&m2, "refs/remotes/job/lone", "lone").unwrap() {
+        match r
+            .merge(
+                &m2,
+                "refs/remotes/job/lone",
+                "lone",
+                &crate::git_identity::Identity::from_env(),
+            )
+            .unwrap()
+        {
             MergeStep::Failed(msg) => assert!(msg.contains("unrelated"), "{msg}"),
             other => panic!("unrelated histories merged: {other:?}"),
         }

@@ -26,6 +26,7 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -50,6 +51,9 @@ struct Fake {
     fail_new: bool,
     /// `rm` answers 500 and removes nothing.
     fail_rm: bool,
+    /// `ls` answers an error instead of a listing.
+    ls_status: Option<u16>,
+    malformed_ls: bool,
     /// `new` waits this long before it answers.
     new_delay_ms: u64,
     /// `ls` reports each VM this much older than it is.
@@ -131,6 +135,12 @@ async fn fake_api() -> (String, FakeRef) {
                         (StatusCode::OK, v.to_string())
                     }
                     Some("ls") => {
+                        if let Some(status) = g.ls_status {
+                            return (StatusCode::from_u16(status).unwrap(), "unavailable".into());
+                        }
+                        if g.malformed_ls {
+                            return (StatusCode::OK, "{}".into());
+                        }
                         let older = chrono::Duration::seconds(g.ls_older_secs);
                         let vms: Vec<Value> = g
                             .vms
@@ -172,7 +182,7 @@ async fn fake_api() -> (String, FakeRef) {
 
 /// A fake `ssh`: it logs the destination and runs the remote command here.
 /// While the file `ssh-slow` is in `dir`, it waits before it runs.
-fn fake_ssh(dir: &std::path::Path) -> (String, std::path::PathBuf) {
+pub(crate) fn fake_ssh(dir: &std::path::Path) -> (String, std::path::PathBuf) {
     let log = dir.join("ssh.log");
     let bin = dir.join("fake-ssh");
     std::fs::write(
@@ -206,7 +216,7 @@ async fn reboot(td: &mut TestDaemon, url: &str, ssh: &str) {
     .await;
 }
 
-async fn output(td: &TestDaemon, target: &str, sid: &str) -> (String, Value) {
+pub(crate) async fn output(td: &TestDaemon, target: &str, sid: &str) -> (String, Value) {
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut out = Vec::new();
     let mut since = 0u64;
@@ -255,8 +265,252 @@ fn target(name: &str, life: u64) -> Value {
            "exedev": {"max_life_secs": life}})
 }
 
+#[tokio::test]
+async fn durable_exedev_finishes_offline_once_with_real_exit() {
+    let (mut td, _fake, _, url, ssh) = daemon().await;
+    let root = td.dir.path().join("remote-spool");
+    let _cleanup = super::ssh_restart::RemoteCleanup(root.clone());
+    let mut def = target("restart-ex", 8 * 3600);
+    def["work_root"] = json!(root);
+    td.post("/api/targets", def).await.ok();
+    td.post_empty("/api/targets/restart-ex/up").await.ok();
+    let (aid, wid) = super::ssh_restart::start(&td, "restart-ex", root.to_str().unwrap()).await;
+    super::ssh_restart::started(&td, &wid, &root).await;
+    td.daemon.take().unwrap().shutdown_and_wait().await;
+    std::fs::write(root.join("go"), "go").unwrap();
+    let spool = std::fs::read_dir(root.join(".terrarium-runs"))
+        .unwrap()
+        .find(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
+        .unwrap()
+        .unwrap()
+        .path();
+    super::ssh_restart::wait_file(&spool.join("exit")).await;
+    assert_eq!(std::fs::read_to_string(spool.join("exit")).unwrap(), "23\n");
+    reboot(&mut td, &url, &ssh).await;
+    super::ssh_restart::completed(&td, &aid, &wid, &root).await;
+    reboot(&mut td, &url, &ssh).await;
+    super::ssh_restart::completed(&td, &aid, &wid, &root).await;
+}
+
+#[tokio::test]
+async fn durable_expired_checkpoint_does_not_relaunch_or_prevent_boot() {
+    let (mut td, _fake, _, url, ssh) = daemon().await;
+    let root = td.dir.path().join("expired-spool");
+    let _cleanup = super::ssh_restart::RemoteCleanup(root.clone());
+    let mut def = target("expired-ex", 8 * 3600);
+    def["work_root"] = json!(root);
+    td.post("/api/targets", def).await.ok();
+    td.post_empty("/api/targets/expired-ex/up").await.ok();
+    let command = format!(
+        "echo once >> '{}'; echo retained; exit 17",
+        root.join("launches").display()
+    );
+    let opened = td
+        .post(
+            "/api/targets/expired-ex/exec",
+            json!({"cmd":["sh","-c",command],"durable":true}),
+        )
+        .await;
+    let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
+    let (stdout, end) = output(&td, "expired-ex", &sid).await;
+    assert_eq!(stdout, "retained\n");
+    assert_eq!(end["code"], 17);
+    let spool = std::fs::read_dir(root.join(".terrarium-runs"))
+        .unwrap()
+        .find(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
+        .unwrap()
+        .unwrap()
+        .path();
+    // Simulate remote output GC while retaining its claim tombstone.
+    std::fs::write(spool.join("expired"), "").unwrap();
+    reboot(&mut td, &url, &ssh).await;
+    let (_, end) = output(&td, "expired-ex", &sid).await;
+    assert_eq!(end["code"], "durable_expired");
+    let journal = terrariumd::hosts::resume::Journal::new(&td.state);
+    let mut checkpoints = journal.scan::<Value>("ssh/").unwrap();
+    assert_eq!(checkpoints.len(), 1);
+    let (key, checkpoint) = checkpoints.first_mut().unwrap();
+    checkpoint["created"] = json!((chrono::Utc::now() - chrono::Duration::days(9)).timestamp());
+    journal.save(key, checkpoint).unwrap();
+    reboot(&mut td, &url, &ssh).await;
+    let (_, end) = output(&td, "expired-ex", &sid).await;
+    assert_eq!(end["type"], "error");
+    assert_eq!(end["code"], "interrupted");
+    assert_eq!(
+        std::fs::read_to_string(root.join("launches")).unwrap(),
+        "once\n"
+    );
+}
+
+#[tokio::test]
+async fn durable_exedev_recreated_vm_is_not_contacted() {
+    let (mut td, _fake, ssh_log, url, ssh) = daemon().await;
+    let root = td.dir.path().join("replacement-spool");
+    let _cleanup = super::ssh_restart::RemoteCleanup(root.clone());
+    let mut def = target("replacement-ex", 8 * 3600);
+    def["work_root"] = json!(root);
+    td.post("/api/targets", def).await.ok();
+    td.post_empty("/api/targets/replacement-ex/up").await.ok();
+    let opened = td
+        .post(
+            "/api/targets/replacement-ex/exec",
+            json!({"durable":true,"cmd":["sh","-c","echo retained; exit 19"]}),
+        )
+        .await;
+    let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
+    assert_eq!(output(&td, "replacement-ex", &sid).await.1["code"], 19);
+    td.daemon.take().unwrap().shutdown_and_wait().await;
+    let before = std::fs::read_to_string(&ssh_log).unwrap();
+    // Same target definition and SSH destination, but a different VM incarnation.
+    db(&td)
+        .execute(
+            "UPDATE exedev_vms SET name=name || '-replacement' WHERE target='replacement-ex'",
+            [],
+        )
+        .unwrap();
+    reboot(&mut td, &url, &ssh).await;
+    let (_, end) = output(&td, "replacement-ex", &sid).await;
+    assert_eq!(end["code"], "interrupted", "{end}");
+    assert!(
+        end["message"].as_str().unwrap().contains("target changed"),
+        "{end}"
+    );
+    assert_eq!(std::fs::read_to_string(&ssh_log).unwrap(), before);
+}
+
+#[tokio::test]
+async fn durable_startup_failures_end_promptly_with_reason() {
+    let (td, _fake, _, _, _) = daemon().await;
+    let tools = td.dir.path().join("limited-tools");
+    std::fs::create_dir(&tools).unwrap();
+    // Keep every prerequisite except mkfifo. No remote command may start.
+    for tool in [
+        "setsid", "nohup", "flock", "sh", "timeout", "date", "head", "tail", "base64", "tr", "wc",
+        "cat", "mkdir", "mv", "rm", "rmdir", "sleep",
+    ] {
+        std::os::unix::fs::symlink(format!("/usr/bin/{tool}"), tools.join(tool)).unwrap();
+    }
+    for (name, env, reason) in [
+        (
+            "missing-tool-ex",
+            json!({"PATH":tools}),
+            "unsupported: mkfifo missing",
+        ),
+        ("bad-spool-ex", json!({}), "spool error"),
+    ] {
+        let root = td.dir.path().join(name);
+        let mut def = target(name, 8 * 3600);
+        def["work_root"] = json!(root);
+        td.post("/api/targets", def).await.ok();
+        td.post_empty(&format!("/api/targets/{name}/up")).await.ok();
+        if name == "bad-spool-ex" {
+            std::fs::write(&root, "not a directory").unwrap();
+        }
+        let began = tokio::time::Instant::now();
+        let opened = td
+            .post(
+                &format!("/api/targets/{name}/exec"),
+                json!({"durable":true,"env":env,"cmd":["true"]}),
+            )
+            .await;
+        let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
+        let (_, end) = output(&td, name, &sid).await;
+        assert_eq!(end["code"], "unsupported", "{end}");
+        assert!(end["message"].as_str().unwrap().contains(reason), "{end}");
+        assert!(began.elapsed() < Duration::from_secs(5));
+    }
+    std::os::unix::fs::symlink("/usr/bin/mkfifo", tools.join("mkfifo")).unwrap();
+    let root = td.dir.path().join("missing-python");
+    let mut def = target("missing-python-ex", 8 * 3600);
+    def["work_root"] = json!(root);
+    td.post("/api/targets", def).await.ok();
+    td.post_empty("/api/targets/missing-python-ex/up")
+        .await
+        .ok();
+    let opened = td
+        .post(
+            "/api/targets/missing-python-ex/exec",
+            json!({"durable":true,"env":{"PATH":tools},"cmd":["true"]}),
+        )
+        .await;
+    let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
+    let (_, end) = output(&td, "missing-python-ex", &sid).await;
+    assert_eq!(end["code"], "unsupported", "{end}");
+    assert!(
+        end["message"].as_str().unwrap().contains("python3 missing"),
+        "{end}"
+    );
+}
+
 fn db(td: &TestDaemon) -> rusqlite::Connection {
     terrariumd::db::open(&td.state.join("terrarium.db")).unwrap()
+}
+
+#[tokio::test]
+async fn owned_root_cleanup_requires_proven_vm_absence() {
+    let (td, fake, _, _, _) = daemon().await;
+    let base = td.dir.path().join("remote-owned");
+    let owned = base.join("p/worker");
+    std::fs::create_dir_all(&owned).unwrap();
+    std::fs::write(owned.join(".terrarium-owner"), "another-agent").unwrap();
+    let mut definition = target("roots", 3600);
+    definition["work_root"] = json!(base);
+    td.post("/api/targets", definition).await.ok();
+    td.post_empty("/api/targets/roots/up").await.ok();
+    td.project("p").await;
+    let shared = state(&td);
+    let def = shared
+        .db
+        .read_now(|c| terrariumd::store::targets::get(c, "roots"))
+        .unwrap()
+        .def;
+    let resolved = terrariumd::exedev::exec_def(&shared, &def).unwrap();
+    let saved = serde_json::to_string(&resolved).unwrap();
+    db(&td).execute(
+        "INSERT INTO agent_target_roots (agent, project, name, target, definition) VALUES ('finished', 'p', 'worker', 'roots', ?1)",
+        [&saved],
+    ).unwrap();
+    let count = || {
+        db(&td)
+            .query_row(
+                "SELECT count(*) FROM agent_target_roots WHERE agent='finished'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    let audits = || {
+        db(&td).query_row("SELECT count(*) FROM audit WHERE action='target.root_dropped' AND json_extract(detail, '$.reason')='vm_absent'", [], |r| r.get::<_, i64>(0)).unwrap()
+    };
+    // Present VM: use the normal owner-marker check, which refuses this
+    // unowned path. An API miss must never bypass that check on a live VM.
+    terrariumd::target_roots::sweep(&shared).await.unwrap();
+    assert_eq!(count(), 1);
+    assert_eq!(audits(), 0);
+    fake.lock().unwrap().vms.clear();
+    for status in [401, 500, 504] {
+        fake.lock().unwrap().ls_status = Some(status);
+        terrariumd::target_roots::sweep(&shared).await.unwrap();
+        assert_eq!(count(), 1);
+        assert_eq!(audits(), 0);
+    }
+    {
+        let mut f = fake.lock().unwrap();
+        f.ls_status = None;
+        f.malformed_ls = true;
+    }
+    terrariumd::target_roots::sweep(&shared).await.unwrap();
+    assert_eq!(count(), 1);
+    fake.lock().unwrap().malformed_ls = false;
+    // The lease-end path has already forgotten the local VM record.
+    db(&td)
+        .execute("DELETE FROM exedev_vms WHERE target='roots'", [])
+        .unwrap();
+    terrariumd::target_roots::sweep(&shared).await.unwrap();
+    terrariumd::target_roots::sweep(&shared).await.unwrap();
+    assert_eq!(count(), 0);
+    assert_eq!(audits(), 1);
+    assert_eq!(fake.lock().unwrap().news(), 1);
 }
 
 /// The name prefix of the VMs of this daemon (TER-653).
@@ -433,6 +687,8 @@ async fn workspace_sync_roundtrip(work_root: bool) {
     let agent = td.agent("p", "worker", json!({})).await;
     let id = agent["id"].as_str().unwrap();
     let local = state(&td).work_dir.join("p/worker");
+    let alias = Path::new("/configured-sandbox-home/work");
+    td.sup.set_workspace_alias(alias.to_owned());
     std::fs::create_dir_all(local.join("repo")).unwrap();
     std::fs::write(local.join("repo/input"), "source").unwrap();
     let response = td
@@ -454,6 +710,28 @@ async fn workspace_sync_roundtrip(work_root: bool) {
     );
     assert_eq!(
         std::fs::read_to_string(local.join("repo/output")).unwrap(),
+        "source"
+    );
+    let response = td
+        .post(
+            "/api/targets/sync/exec",
+            json!({
+                "agent": id,
+                "cwd": alias.join("repo"),
+                "env": {"INPUT": alias.join("repo/input")},
+                "cmd": ["sh", "-c", "cat \"$INPUT\" > \"$1\"; pwd", "sh", alias.join("repo/alias-output")]
+            }),
+        )
+        .await;
+    let session = response.ok()["session_id"].as_str().unwrap();
+    let (stdout, end) = output(&td, "sync", session).await;
+    assert_eq!(end["code"], 0, "{end}");
+    assert_eq!(
+        stdout.trim(),
+        base.join("p/worker/workspace/repo").to_str().unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(local.join("repo/alias-output")).unwrap(),
         "source"
     );
     if work_root {

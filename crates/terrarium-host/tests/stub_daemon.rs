@@ -201,6 +201,7 @@ fn start_client(
 
 fn exec(session: SessionId, cmd: &str, args: &[&str], pty: Option<PtySize>) -> DaemonFrame {
     DaemonFrame::Exec(ExecRequest {
+        windows_run_as: None,
         session,
         cmd: cmd.into(),
         args: args.iter().map(|s| s.to_string()).collect(),
@@ -326,6 +327,7 @@ async fn cp_push_then_pull_round_trips_with_sha256() {
 
     // Push.
     conn.send(DaemonFrame::CpPush(CpPush {
+        windows_run_as: None,
         session: 10,
         path: path.clone(),
         mode: Some(0o640),
@@ -355,6 +357,7 @@ async fn cp_push_then_pull_round_trips_with_sha256() {
 
     // Pull.
     conn.send(DaemonFrame::CpPull(CpPull {
+        windows_run_as: None,
         session: 11,
         path: path.clone(),
     }))
@@ -370,6 +373,7 @@ async fn cp_push_then_pull_round_trips_with_sha256() {
 
     // A bad digest leaves the old file in place.
     conn.send(DaemonFrame::CpPush(CpPush {
+        windows_run_as: None,
         session: 12,
         path: path.clone(),
         mode: None,
@@ -395,6 +399,7 @@ async fn cp_push_then_pull_round_trips_with_sha256() {
 
     // A path outside allowed_cwd_roots is refused before anything runs.
     conn.send(DaemonFrame::CpPull(CpPull {
+        windows_run_as: None,
         session: 13,
         path: "/etc/hostname".into(),
     }))

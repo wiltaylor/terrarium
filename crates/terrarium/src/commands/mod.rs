@@ -16,6 +16,7 @@ pub mod jobs;
 pub mod knowledge;
 pub mod mail;
 pub mod monitors;
+pub mod pages;
 pub mod pipelines;
 pub mod projects;
 pub mod questions;
@@ -50,6 +51,28 @@ use crate::transport::encode;
 
 pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
     match cmd {
+        Command::Issue {
+            command:
+                crate::cli::IssueCmd::CloseDone {
+                    repo,
+                    dry_run,
+                    issue,
+                    version,
+                },
+        } => {
+            let project = ctx.project_or(None).await?;
+            let result = ctx
+                .api
+                .post(
+                    &format!(
+                        "/api/projects/{}/github-issues/close-done",
+                        encode(&project)
+                    ),
+                    Some(serde_json::json!({"repo":repo,"dry_run":dry_run,"issue":issue,"version":version})),
+                )
+                .await?;
+            ctx.emit(&result, |ctx, v| ctx.line(v.to_string()))
+        }
         Command::Issue {
             command: crate::cli::IssueCmd::Import { number, repo },
         } => {
@@ -92,6 +115,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Test { command } => test_runs::test(ctx, command).await,
         Command::Monitor { command } => monitors::monitor(ctx, command).await,
         Command::Dashboard { command } => monitors::dashboard(ctx, command).await,
+        Command::Page { command } => pages::run(ctx, command).await,
         Command::Pipeline { command } => pipelines::pipeline(ctx, command).await,
         Command::Calendar { command } => calendar::calendar(ctx, command).await,
         Command::Version => system::version(ctx).await,

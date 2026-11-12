@@ -1,5 +1,9 @@
 # The Terrarium container
 
+The separate [maintenance front](../docs/terrarium-front.md) owns web ports 8080
+and 8083. Its first installation requires a container swap with the updated
+Compose file. Update the front separately and rarely, not with daemon hot swaps.
+
 This directory holds the image (`Dockerfile`), the entrypoint
 (`entrypoint.sh`), the seccomp profile (`seccomp-bwrap.json`, see
 [seccomp-bwrap.README.md](seccomp-bwrap.README.md)), and the crash test

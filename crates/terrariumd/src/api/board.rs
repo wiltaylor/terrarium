@@ -21,6 +21,14 @@ use crate::store::board::{self, Board, Card, CardFilter, CardPatch, ColumnSpec, 
 pub fn routes() -> super::link_registry::RegisteredRouter {
     super::link_registry::RegisteredRouter::new()
         .route(
+            "/projects/{name}/github-issues/close-done",
+            post(close_done_issues),
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
+        )
+        .route(
             "/projects/{name}/board",
             get(show_board).patch(patch_board),
             &[
@@ -137,6 +145,43 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
 struct ImportIssue {
     repo: String,
     number: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloseDoneIssues {
+    repo: String,
+    issue: Option<u64>,
+    version: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+async fn close_done_issues(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiJson(body): ApiJson<CloseDoneIssues>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.issue.is_some() != body.version.is_some() {
+        return Err(crate::error::ApiError::invalid(
+            "issue and version must be supplied together",
+        ));
+    }
+    Ok(Json(
+        serde_json::to_value(
+            crate::github_issues::close_done(
+                &state,
+                actor,
+                name,
+                body.repo,
+                body.dry_run,
+                body.issue.zip(body.version),
+            )
+            .await?,
+        )
+        .map_err(|_| crate::error::ApiError::internal("cannot serialize issue closures"))?,
+    ))
 }
 
 async fn import_issue(

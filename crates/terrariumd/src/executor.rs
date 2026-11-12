@@ -55,6 +55,7 @@ use crate::secrets::{RunDirs, Secret};
 use crate::store::leases;
 use crate::store::targets::{self, TargetRow};
 
+pub(crate) mod durable;
 mod workspace_sync;
 
 /// Live exec sessions an agent may hold at once.
@@ -412,9 +413,13 @@ pub fn pump_process(
 
 /// A command for a target. `Debug` shows the env names, not the values
 /// (a value can be a secret, TER-142).
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteCmd {
+    /// Explicit opt-in: no stdin, PTY, or interactive shell.
+    #[serde(default)]
+    pub durable: bool,
     /// Only daemon-owned root scripts may request helper provisioning.
+    #[serde(default)]
     pub prepare_root: Option<terrarium_host::native::OwnedRoot>,
     /// Durable queue-step identity, bound atomically to a host session.
     pub resume_key: Option<String>,
@@ -551,8 +556,23 @@ fn valid_env_key(k: &str) -> bool {
         && c.all(|x| x.is_ascii_alphanumeric() || x == '_')
 }
 
+pub(crate) fn path_kind(state: &Shared, def: &TargetDef) -> terrarium_host::protocol::PathKind {
+    if def.kind == TargetKind::Host {
+        def.host
+            .as_deref()
+            .map(|h| state.executor.hosts.path_kind(h))
+            .unwrap_or_default()
+    } else {
+        terrarium_host::protocol::PathKind::Posix
+    }
+}
+
 impl RemoteCmd {
     fn check(&self) -> ApiResult<()> {
+        self.check_paths(terrarium_host::protocol::PathKind::Posix)
+    }
+
+    fn check_paths(&self, kind: terrarium_host::protocol::PathKind) -> ApiResult<()> {
         if self.argv.is_empty() && !self.shell {
             return Err(ApiError::invalid("`cmd` is empty; name a program"));
         }
@@ -560,7 +580,7 @@ impl RemoteCmd {
             return Err(ApiError::invalid(format!("bad env name `{k}`")));
         }
         if let Some(c) = &self.cwd
-            && !c.starts_with('/')
+            && kind.key(c).is_none()
         {
             return Err(ApiError::invalid(format!(
                 "`cwd` must be an absolute path, not `{c}`"
@@ -724,8 +744,24 @@ pub fn host_frame(
     cmd: &RemoteCmd,
     limits: Option<ExecLimits>,
 ) -> ApiResult<impl FnOnce(u32) -> DaemonFrame + use<>> {
+    host_frame_paths(
+        def,
+        shell,
+        cmd,
+        limits,
+        terrarium_host::protocol::PathKind::Posix,
+    )
+}
+
+fn host_frame_paths(
+    def: &TargetDef,
+    shell: Option<&str>,
+    cmd: &RemoteCmd,
+    limits: Option<ExecLimits>,
+    kind: terrarium_host::protocol::PathKind,
+) -> ApiResult<impl FnOnce(u32) -> DaemonFrame + use<>> {
     no_exec(def)?;
-    cmd.check()?;
+    cmd.check_paths(kind)?;
     let def = def.clone();
     let cmd = cmd.clone();
     let shell = shell.unwrap_or("/bin/sh").to_owned();
@@ -795,6 +831,7 @@ pub fn host_frame(
         | TargetKind::Vnc
         | TargetKind::Rdp
         | TargetKind::Desktop => DaemonFrame::Exec(ExecRequest {
+            windows_run_as: None,
             session,
             cmd: program,
             args,
@@ -844,6 +881,8 @@ pub struct ExecSession {
 
 #[derive(Serialize, Deserialize)]
 struct SavedExec {
+    #[serde(default)]
+    durable: bool,
     id: String,
     target: String,
     owner: Option<String>,
@@ -851,6 +890,8 @@ struct SavedExec {
     project: Option<String>,
     host_session: Option<(String, u32)>,
     secrets: Vec<(String, String)>,
+    #[serde(default)]
+    remote_key: Option<String>,
 }
 
 /// Rebuild output consumers before the wait engine reconciles process waits.
@@ -867,6 +908,7 @@ pub fn restore_sessions(state: &Shared) -> ApiResult<()> {
         Arc::get_mut(&mut session)
             .ok_or_else(|| ApiError::internal("restored session is unexpectedly shared"))?
             .id = saved.id;
+        session.takes_stdin.store(!saved.durable, Ordering::SeqCst);
         if let Some((host, id)) = saved.host_session {
             let hs = state
                 .executor
@@ -888,6 +930,26 @@ pub fn restore_sessions(state: &Shared) -> ApiResult<()> {
                 state.db.redactor().get(),
                 view,
             );
+            tokio::spawn(attach(run, session.clone(), ctl, false, false));
+        } else if let Some(key) = saved.remote_key {
+            let run = match durable::resume(state, &key) {
+                Ok(run) => run,
+                Err(error) => {
+                    session.finish(End::error("interrupted", error.message));
+                    state.executor.insert(session);
+                    continue;
+                }
+            };
+            let secrets: Vec<_> = saved
+                .secrets
+                .into_iter()
+                .map(|(name, value)| (name, zeroize::Zeroizing::new(value)))
+                .collect();
+            let view = saved.project.map_or(
+                terrarium_core::redact::View::All,
+                terrarium_core::redact::View::Scope,
+            );
+            let run = redact_run(run, own_redactor(&secrets), state.db.redactor().get(), view);
             tokio::spawn(attach(run, session.clone(), ctl, false, false));
         } else {
             session.finish(End::error("interrupted", "interrupted (ssh transport)"));
@@ -1451,6 +1513,36 @@ impl Executor {
         }
     }
 
+    /// Wait for reconnect enforcement without holding the lock it needs.
+    /// Return the admission guard so callers retain the existing atomic
+    /// budget check and session registration boundary.
+    pub(crate) async fn target_admission(
+        &self,
+        def: &TargetDef,
+    ) -> ApiResult<tokio::sync::OwnedMutexGuard<()>> {
+        let lock = self.target_resource_lock(def);
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let guard = lock.clone().lock_owned().await;
+                if !def
+                    .host
+                    .as_deref()
+                    .is_some_and(|h| self.resource_pending(h))
+                {
+                    return guard;
+                }
+                drop(guard);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            ApiError::conflict(
+                "host reservation reconciliation is pending; retry after enforcement is restored",
+            )
+        })
+    }
+
     pub fn resource_verb_idle(&self, host: &str) -> ApiResult<()> {
         if let Some(count) = self
             .resource_verbs
@@ -1887,6 +1979,14 @@ pub(crate) fn start_cmd_locked(
     def: &TargetDef,
     cmd: &RemoteCmd,
 ) -> ApiResult<Running> {
+    if cmd.durable && (cmd.pty.is_some() || cmd.shell) {
+        return Err(ApiError::invalid(
+            "durable execution cannot use a PTY or shell",
+        ));
+    }
+    if state.executor.hosts.is_stopped() {
+        return Err(ApiError::conflict("executor is stopping"));
+    }
     no_exec(def)?;
     // An exedev target runs its commands over ssh on its VM.
     if def.kind == TargetKind::Exedev {
@@ -1929,6 +2029,9 @@ pub(crate) fn start_cmd_locked(
                 &known_hosts(&state.state_dir)?,
                 cmd,
             )?;
+            if cmd.durable {
+                return durable::start(state, def, cmd, plan, guard);
+            }
             let mut c = tokio::process::Command::new(&plan.program);
             c.args(&plan.args);
             Ok(pump_process(
@@ -1941,6 +2044,7 @@ pub(crate) fn start_cmd_locked(
         _ => {
             let host = host_of(def)?;
             let caps = ex.hosts.capabilities(host);
+            let run_as = windows_run_as(state, def)?;
             if cmd.prepare_root.is_some()
                 && caps
                     .as_ref()
@@ -1969,13 +2073,48 @@ pub(crate) fn start_cmd_locked(
                 native.prepare_root = cmd.prepare_root.clone();
             }
             let shell = caps.and_then(|c| c.shell);
-            let make = host_frame(def, shell.as_deref(), cmd, limits)?;
+            let make = host_frame_paths(def, shell.as_deref(), cmd, limits, path_kind(state, def))?;
             Ok(pump_host(ex.hosts.open_bound(
                 host,
                 cmd.resume_key.as_deref(),
-                make,
+                move |id| {
+                    let mut frame = make(id);
+                    if let DaemonFrame::Exec(req) = &mut frame {
+                        req.windows_run_as = run_as;
+                    }
+                    frame
+                },
             )?))
         }
+    }
+}
+
+fn windows_run_as(
+    state: &Shared,
+    def: &TargetDef,
+) -> ApiResult<Option<terrarium_host::protocol::WindowsRunAs>> {
+    let Some(config) = &def.windows_run_as else {
+        return Ok(None);
+    };
+    crate::links::refuse_for_link("use a Windows run-as target")?;
+    crate::store::targets::validate(def)?;
+    if !state.executor.hosts.supports_windows_run_as(host_of(def)?) {
+        return Err(ApiError::invalid(
+            "windows_run_as requires a Windows host with the windows_run_as capability",
+        ));
+    }
+    match crate::secrets::load_now(
+        state,
+        crate::store::targets::owner(def),
+        &config.password_secret,
+    )? {
+        Secret::Login { password, .. } => Ok(Some(terrarium_host::protocol::WindowsRunAs {
+            account: config.account.clone(),
+            password: password.to_string(),
+        })),
+        _ => Err(ApiError::invalid(
+            "windows_run_as.password_secret must name a login secret",
+        )),
     }
 }
 
@@ -1997,7 +2136,7 @@ pub(crate) fn start_resource_cleanup(
         .hosts
         .capabilities(host)
         .and_then(|c| c.shell);
-    let make = host_frame(def, shell.as_deref(), cmd, None)?;
+    let make = host_frame_paths(def, shell.as_deref(), cmd, None, path_kind(state, def))?;
     Ok(pump_host(state.executor.hosts.open(host, make)?))
 }
 
@@ -2184,6 +2323,9 @@ async fn start_exec_secrets(
     check_cap(state, actor)?;
     let def = resolved_def(state, &row, Some(actor), cmd.agent.as_deref()).await?;
     let mut cmd = cmd;
+    if cmd.durable && cmd.resume_key.is_none() {
+        cmd.resume_key = Some(format!("remote/{}", ulid::Ulid::new()));
+    }
     cmd.holder = on.holder.clone().or_else(|| holder_of(actor));
     cmd.operator = actor.is_operator();
     crate::target_roots::prepare_exec(state, actor, &def, &mut cmd).await?;
@@ -2192,11 +2334,18 @@ async fn start_exec_secrets(
         && let Some(a) = actor.agent()
     {
         let p = crate::git_identity::provenance(state, &a.id).await?;
-        p.identity.env(&mut cmd.env);
+        for key in [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ] {
+            cmd.env.remove(key);
+        }
         cmd.env.insert("TERRARIUM_GIT_TRAILERS".into(), p.trailers);
         cmd.env.remove("TERRARIUM_GIT_TRAILERS_FILE");
     }
-    cmd.check()?;
+    cmd.check_paths(path_kind(state, &def))?;
     let sync = workspace_sync::prepare(
         state,
         actor,
@@ -2208,7 +2357,7 @@ async fn start_exec_secrets(
     if let Some(sync) = &sync {
         sync.translate_cmd(&mut cmd);
     }
-    let resources = state.executor.target_resource_lock(&def).lock_owned().await;
+    let resources = state.executor.target_admission(&def).await?;
     let (run, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     // The output is redacted for the caller (PLAN §16b.6, TER-33).
     let view = match actor {
@@ -2225,7 +2374,14 @@ async fn start_exec_secrets(
         state.executor.buffer_limit,
     );
     sess.set_kill_report(report);
+    sess.takes_stdin.store(!cmd.durable, Ordering::SeqCst);
     let saved = SavedExec {
+        durable: cmd.durable,
+        remote_key: if cmd.durable && matches!(def.kind, TargetKind::Ssh | TargetKind::Exedev) {
+            cmd.resume_key.clone()
+        } else {
+            None
+        },
         id: sess.id.clone(),
         target: sess.target.clone(),
         owner: sess.owner.clone(),
@@ -2319,7 +2475,7 @@ pub async fn start_tool_exec(
     cmd.pty = None;
     cmd.holder = holder_of(actor);
     cmd.operator = actor.is_operator();
-    let resources = state.executor.target_resource_lock(&def).lock_owned().await;
+    let resources = state.executor.target_admission(&def).await?;
     let (running, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     let (sess, ctl) = ExecSession::new(
         name,
@@ -2663,7 +2819,7 @@ pub async fn start_cp(
     mut body: CpBody,
 ) -> ApiResult<Arc<ExecSession>> {
     let row = usable(state, actor, name).await?;
-    if !body.path.starts_with('/') || body.path.split('/').any(|c| c == "..") {
+    if path_kind(state, &row.def).key(&body.path).is_none() {
         return Err(ApiError::invalid(format!(
             "`path` must be absolute and without `..`, not `{}`",
             body.path
@@ -2672,6 +2828,17 @@ pub async fn start_cp(
     check_cap(state, actor)?;
     no_exec(&row.def)?;
     let def = resolved_def(state, &row, Some(actor), body.agent.as_deref()).await?;
+    if path_kind(state, &def) == terrarium_host::protocol::PathKind::Windows
+        && let Some(a) = actor.agent()
+    {
+        let kind = path_kind(state, &def);
+        let root = kind
+            .workspace(&a.project, &a.name)
+            .ok_or_else(|| ApiError::invalid("invalid Windows workspace name"))?;
+        if !kind.inside(&root, &body.path, true) {
+            return Err(ApiError::invalid(format!("path must be inside {root}")));
+        }
+    }
     let sync = workspace_sync::prepare(
         state,
         actor,
@@ -2694,10 +2861,12 @@ pub async fn start_cp(
     match def.kind {
         TargetKind::Host => {
             let host = host_of(&def)?;
+            let run_as = windows_run_as(state, &def)?;
             let (path, mode) = (PathBuf::from(&body.path), body.mode);
             let hs = if push {
                 state.executor.hosts.open(host, move |session| {
                     DaemonFrame::CpPush(CpPush {
+                        windows_run_as: run_as,
                         session,
                         path,
                         mode,
@@ -2706,7 +2875,11 @@ pub async fn start_cp(
                 })?
             } else {
                 state.executor.hosts.open(host, move |session| {
-                    DaemonFrame::CpPull(CpPull { session, path })
+                    DaemonFrame::CpPull(CpPull {
+                        session,
+                        path,
+                        windows_run_as: run_as,
+                    })
                 })?
             };
             tokio::spawn(attach(pump_host(hs), sess.clone(), ctl, push, !push));
@@ -2802,6 +2975,7 @@ async fn vmlab_cp(
     };
     let cleanup = |state: Shared, host: String, stage: PathBuf| async move {
         let rm = ExecRequest {
+            windows_run_as: None,
             session: 0,
             cmd: "rm".into(),
             args: vec!["-f".into(), "--".into(), stage.display().to_string()],
@@ -2821,6 +2995,7 @@ async fn vmlab_cp(
         let stage2 = stage.clone();
         let hs = state.executor.hosts.open(&host, move |session| {
             DaemonFrame::CpPush(CpPush {
+                windows_run_as: None,
                 session,
                 path: stage2,
                 mode,
@@ -2869,6 +3044,7 @@ async fn vmlab_cp(
         let stage2 = stage.clone();
         match state.executor.hosts.open(&host, move |session| {
             DaemonFrame::CpPull(CpPull {
+                windows_run_as: None,
                 session,
                 path: stage2,
             })
@@ -3422,7 +3598,11 @@ pub async fn lifecycle(
     // changes refuse this host while a verb runs, without holding a mutex
     // across image pulls or blocking work on any other host.
     let _resource_verb = if def.kind == TargetKind::Docker {
-        let _admission = state.executor.target_resource_lock(def).lock_owned().await;
+        let _admission = if verb_kind == V::Up {
+            state.executor.target_admission(def).await?
+        } else {
+            state.executor.target_resource_lock(def).lock_owned().await
+        };
         if verb_kind == V::Up {
             crate::reservations::lifecycle_admission(state, def)?;
         }
@@ -3431,6 +3611,7 @@ pub async fn lifecycle(
         None
     };
     if verb_kind == V::Up && def.kind != TargetKind::Docker {
+        let _admission = state.executor.target_admission(def).await?;
         crate::reservations::lifecycle_admission(state, def)?;
     }
     let mut add_snapshot = None;
@@ -5356,6 +5537,20 @@ if [ -n "${TERRARIUM_COMMIT_HOOK:-}" ] && [ "$action" != not_updated ]; then
   mv -f "$hook_tmp" "$dest/.git/hooks/prepare-commit-msg"
   G -C "$dest" config user.name "$TERRARIUM_COMMIT_NAME"
   G -C "$dest" config user.email "$TERRARIUM_COMMIT_EMAIL"
+  if [ -n "${TERRARIUM_PUSH_HOOK:-}" ]; then
+    push_hook="$dest/.git/hooks/pre-push"
+    if [ -e "$push_hook" ] && ! grep -q '^# Written by terrariumd' "$push_hook"; then
+      [ ! -e "$push_hook.repo" ] && [ ! -L "$push_hook.repo" ] || exit 2
+      mv "$push_hook" "$push_hook.repo"
+    fi
+    push_tmp=$(mktemp "$dest/.git/hooks/.terrarium-push.XXXXXX")
+    printf '%s' "$TERRARIUM_PUSH_HOOK" > "$push_tmp"
+    chmod 755 "$push_tmp"
+    mv -f "$push_tmp" "$push_hook"
+    G -C "$dest" config terrarium.provenance "$TERRARIUM_PROVENANCE"
+    G -C "$dest" config terrarium.provenanceWarnOnly "$TERRARIUM_PROVENANCE_WARN_ONLY"
+    G -C "$dest" config terrarium.repoId "$TERRARIUM_REPO_ID"
+  fi
 fi
 head=$(G -C "$dest" rev-parse -q --verify HEAD || true)
 cur=$(G -C "$dest" symbolic-ref --short -q HEAD || true)
@@ -5466,6 +5661,7 @@ pub async fn checkout_on_target(
     state: &Shared,
     actor: &Actor,
     row: &TargetRow,
+    repo: &crate::store::repos::Repo,
     url: &str,
     dest: &str,
     branch: Option<&str>,
@@ -5482,7 +5678,20 @@ pub async fn checkout_on_target(
     let _root_guard = crate::target_roots::lock_card(state, actor, &row.def.name).await?;
     crate::target_roots::prepare(state, actor, &row.def, Some(dest)).await?;
     if let Some(a) = actor.agent() {
-        let p = crate::git_identity::provenance(state, &a.id).await?;
+        let p = crate::git_identity::for_repo(state, &a.id, repo).await?;
+        cmd.env.insert("TERRARIUM_REPO_ID".into(), repo.id.clone());
+        cmd.env.insert(
+            "TERRARIUM_PUSH_HOOK".into(),
+            crate::git::push_deny_hook(&repo.push_deny),
+        );
+        cmd.env.insert(
+            "TERRARIUM_PROVENANCE".into(),
+            (!p.trailers.is_empty()).to_string(),
+        );
+        cmd.env.insert(
+            "TERRARIUM_PROVENANCE_WARN_ONLY".into(),
+            p.warn_only.to_string(),
+        );
         cmd.env.insert("TERRARIUM_COMMIT_HOOK".into(), p.hook());
         cmd.env
             .insert("TERRARIUM_COMMIT_NAME".into(), p.identity.name);
@@ -5508,6 +5717,52 @@ pub async fn checkout_on_target(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn target_admission_waits_for_reconciliation_without_holding_its_lock() {
+        let executor = Arc::new(Executor::default());
+        let def: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
+        executor.set_resource_pending("h", true);
+        let waiting = {
+            let executor = executor.clone();
+            tokio::spawn(async move { executor.target_admission(&def).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        let reconcile = executor.resource_lock("h").try_lock_owned().unwrap();
+        let epoch = executor.resource_epoch("h");
+        assert!(executor.finish_resource_reconcile("h", epoch.as_deref()));
+        drop(reconcile);
+        tokio::time::advance(Duration::from_millis(50)).await;
+        let guard = waiting.await.unwrap().unwrap();
+        assert!(executor.resource_lock("h").try_lock_owned().is_err());
+        drop(guard);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn target_admission_refuses_when_reconciliation_deadline_passes() {
+        let executor = Executor::default();
+        let def: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
+        executor.set_resource_pending("h", true);
+        let started = tokio::time::Instant::now();
+        let error = executor.target_admission(&def).await.unwrap_err();
+        assert!(error.to_string().contains("reconciliation is pending"));
+        assert_eq!(started.elapsed(), Duration::from_secs(60));
+        assert!(executor.resource_pending("h"));
+        assert!(executor.resource_lock("h").try_lock_owned().is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn target_admission_deadline_includes_the_reconciliation_lock() {
+        let executor = Executor::default();
+        let def: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
+        executor.set_resource_pending("h", true);
+        let _reconcile = executor.resource_lock("h").lock_owned().await;
+        let started = tokio::time::Instant::now();
+        assert!(executor.target_admission(&def).await.is_err());
+        assert_eq!(started.elapsed(), Duration::from_secs(60));
+        assert!(executor.resource_pending("h"));
+    }
+
     #[test]
     fn own_key_redaction_covers_individual_pem_lines() {
         let body = "dummy-base64-private-key-line-for-redaction";
@@ -5840,6 +6095,8 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         let p = crate::git_identity::Provenance {
+            repo: None,
+            warn_only: false,
             identity: crate::git_identity::Identity::from_env(),
             trailers: "Terrarium-Agent: test/worker\n".into(),
         };

@@ -121,6 +121,8 @@ pub struct ThreadMessage {
     /// Markdown: untrusted data for every reader.
     pub text: String,
     pub at: String,
+    #[serde(flatten)]
+    pub session: crate::store::session_refs::SessionField,
 }
 
 /// A card that the thread tracks (TER-146, [`link_card`]). Only the IDs:
@@ -893,10 +895,29 @@ fn messages(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadMessage>> {
                 kind: r.get(2)?,
                 text: r.get(3)?,
                 at: r.get(4)?,
+                session: Default::default(),
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// Resolve message sessions only for the read API. Ordinary `get` calls,
+/// including those inside write transactions, do not need this lookup.
+pub fn message_sessions(conn: &Connection, messages: &mut [ThreadMessage]) -> ApiResult<()> {
+    let keys: Vec<_> = messages
+        .iter()
+        .map(|m| crate::store::session_refs::LinkKey {
+            session: None,
+            agent: crate::store::session_refs::agent_of(&m.author),
+            at: &m.at,
+        })
+        .collect();
+    let links = crate::store::session_refs::links(conn, &keys)?;
+    for (message, link) in messages.iter_mut().zip(links) {
+        message.session = crate::store::session_refs::SessionField::of(link);
+    }
+    Ok(())
 }
 
 fn questions_of(conn: &Connection, thread: &str) -> ApiResult<Vec<Question>> {

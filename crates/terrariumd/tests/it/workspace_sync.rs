@@ -28,16 +28,43 @@ fn copy_binary(jail: &Path, binary: &str) {
     }
 }
 
-struct Ssh {
+fn copy_python(jail: &Path) {
+    copy_binary(jail, "/usr/bin/python3");
+    // -S and the path helper use frozen os/stat/sys. Startup still needs the
+    // interpreter's encodings package. Copy only that package into the jail.
+    let encodings = std::process::Command::new("/usr/bin/python3")
+        .args(["-S", "-c", "import encodings; print(encodings.__path__[0])"])
+        .output()
+        .unwrap();
+    assert!(encodings.status.success());
+    let path = PathBuf::from(String::from_utf8(encodings.stdout).unwrap().trim());
+    let dest = jail.join(path.strip_prefix("/").unwrap());
+    std::fs::create_dir_all(&dest).unwrap();
+    // Python's bootstrap uses these landmarks to resolve its stdlib prefix.
+    let library = path.parent().unwrap();
+    std::fs::copy(library.join("os.py"), dest.parent().unwrap().join("os.py")).unwrap();
+    std::fs::create_dir(dest.parent().unwrap().join("lib-dynload")).unwrap();
+    for entry in std::fs::read_dir(path).unwrap().flatten() {
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "py")
+        {
+            std::fs::copy(entry.path(), dest.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
+pub(crate) struct Ssh {
     _dir: tempfile::TempDir,
-    jail: PathBuf,
-    key: PathBuf,
-    port: u16,
-    server: tokio::process::Child,
+    pub(crate) jail: PathBuf,
+    pub(crate) key: PathBuf,
+    pub(crate) port: u16,
+    pub(crate) server: tokio::process::Child,
 }
 
 impl Ssh {
-    async fn start(sshd: std::ffi::OsString) -> Self {
+    pub(crate) async fn start(sshd: std::ffi::OsString) -> Self {
         // sshd rejects a writable ancestor such as /tmp for ChrootDirectory.
         let dir = tempfile::tempdir_in("/run").unwrap();
         let jail = dir.path().join("jail");
@@ -58,9 +85,34 @@ impl Ssh {
             "/bin/sleep",
             "/usr/bin/base64",
             "/usr/bin/tr",
+            "/usr/bin/setsid",
+            "/usr/bin/flock",
+            "/usr/bin/nohup",
+            "/usr/bin/head",
+            "/usr/bin/tail",
+            "/usr/bin/mkfifo",
+            "/usr/bin/rmdir",
+            "/usr/bin/timeout",
+            "/usr/bin/date",
         ] {
             copy_binary(&jail, binary);
         }
+        copy_python(&jail);
+        let probe = std::process::Command::new("chroot")
+            .arg(&jail)
+            .args([
+                "/usr/bin/python3",
+                "-S",
+                "-c",
+                "import os, stat, sys; assert hasattr(os, 'O_NOFOLLOW')",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            probe.status.success(),
+            "fixture Python bootstrap: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
         std::fs::rename(jail.join("usr/bin/rsync"), jail.join("usr/bin/rsync-real")).unwrap();
         std::fs::write(
             jail.join("usr/bin/rsync"),

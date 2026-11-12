@@ -4933,6 +4933,48 @@ the GitHub label nor title cannot be recognized as GitHub work.
 A card that a schedule `card` action (§19) opens as the operator is not
 gated. The action never finds a held card: `close` does not move it and
 `open` does not comment on it, whatever its `trigger:<key>` label.
+**Close shipped issues** (TER-948): `POST /api/projects/{name}/github-issues/close-done`
+accepts `{ "repo": "terrarium", "dry_run": true }`. Only the operator or a
+`project_admin` of the named project can call it. Link keys are refused.
+`terrarium issue close-done --repo terrarium --dry-run` prints each eligible
+issue's cards and published versions without writing to GitHub. Omit
+`--dry-run` to post a closing comment and close each open issue. The hourly
+`github-issues` schedule can invoke this CLI after its import step.
+
+Closure is restricted to project `terrarium` and registered GitHub repository
+`wiltaylor/terrarium`. The daemon opens the `github-issues-token` secret at use
+time, with the repository's normal project secret/grant checks. A missing,
+unavailable, or non-token secret refuses the operation. No token goes to the
+caller. Requests go only to `api.github.com`, without redirects.
+
+Cards are matched by `GitHub #<number>:` titles (with no repository or the
+selected repository) or exact issue URL links. Every matched card, including
+archived cards, must be unheld, in the done role, and labelled with a version
+acknowledged by `group built` or published as a repository tag. Label
+`version:X.Y.Z` matches tag `vX.Y.Z` or `vX.Y.Z-alpha`, including hand cuts.
+Remote tags are read with daemon-owned `git ls-remote --tags` and the registered
+repo's normal credentials, never agent assertions. No match means no closure. The comment names
+every card and its published versions. A hidden comment marker lets a retry
+finish closing without posting again after a failed close. Concurrent callers
+are serialized. Successfully observed closures are cached and require no more
+GitHub issue calls. Reads use project/number keyset pages (200 cards, at most
+20,000 cards and issue identities), indexed URL link lookups (at most 100 per
+card), and at most 1000 comments per issue. Exceeding a bound refuses rather
+than guessing eligibility. Each run examines at most 20 eligible issues and
+makes at most 60 remote calls, including the tag lookup. It reserves 13 calls
+before starting each issue. A persisted cursor continues in issue-number order,
+wrapping at the end and skipping cached closed issues. Failed attempts advance
+the cursor too, so one problematic issue cannot starve the others. Dry runs
+change neither the cursor nor the closed cache. The command stops on the first
+API error without undoing earlier closures.
+
+For legacy issues without version labels, the operator alone can use
+`terrarium issue close-done --repo terrarium --issue 20 --version 0.1.0-alpha`
+(optionally `--dry-run`). API fields are `issue` and `version`, required
+together. This verifies the exact published tag `v0.1.0-alpha` and still
+requires every matched card to be done and unheld. It overrides only missing
+or different version labels, never unfinished work or a missing publication.
+
 **Import an issue** (TER-124): `POST /api/projects/{name}/github-issues/import`
 with `{"repo":"configured-repo-name","number":123}` returns `200` and the
 card. Requires project write access. The daemon fetches the issue from
@@ -6783,6 +6825,27 @@ Host metrics:
 
 ### 17.2 Targets
 
+A `host` target may name a Windows logon account and a daemon-side `login`
+secret (the secret's username is ignored):
+
+```toml
+[windows_run_as]
+account = 'DOMAIN\NAME' # or a local NAME
+password_secret = "windows-login"
+```
+
+Both fields are required together. Account names have 1 to 256 characters,
+no control characters, and either one nonempty name or two nonempty parts
+separated by a backslash. Other target kinds refuse this table. At each
+session start the connected host must report Windows and the
+`windows_run_as` capability. An absent capability fails closed, including
+on older hosts. Only then does the daemon open the secret, using the target's
+normal project/global secret grant rules. Missing, ungranted, or non-login
+secrets refuse the session. Neither API target responses nor audit records
+contain the password. The host receives it only in that session's `exec`
+frame (or `cp_push`/`cp_pull` for a transfer). This protocol support does not
+implement Windows logon itself.
+
 A target comes from `targets/<name>.toml` (`source: "file"`), from
 `POST /api/targets` (`source: "api"`), or from a fleet file
 (`source: "fleet:<name>"`, §18.1). Target names are one namespace for
@@ -7417,8 +7480,12 @@ owned root (including its ownership marker) before mirroring, and root cleanup
 also removes the mirror. Other agents use `<work_root>/<project>/<agent>/workspace`,
 or `<remote home>/<project>/<agent>/workspace` without `work_root`. Workspace
 paths in cwd, command arguments, environment values and copy paths are
-translated to that mirror for exec, run and checkout. Remote error text
-contains remote paths, which differ from the sandbox paths. On SSH targets
+translated to that mirror for exec, run and checkout.
+The sandbox workspace alias (`<configured sandbox home>/work`) is translated
+in the same fields, including copy paths. On SSH targets the alias maps to
+the canonical workspace path. Paths outside both roots and paths containing
+`..` components are left unchanged, not normalized into the workspace.
+Remote error text contains remote paths, which differ from the sandbox paths. On SSH targets
 the mirror remains at the same absolute path. An operator must select
 an agent. After a normally exited command (including nonzero exit) or a
 completed copy, it stages the remote tree locally and pulls changes and
@@ -7450,7 +7517,7 @@ plain requests only, so it works through the agent tunnel too
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `POST /api/targets/{name}/exec` | `{"cmd": [..], "cwd"?, "env"?, "pty"?, "shell"?, "timeout_secs"?, "agent"?}` | `201` `{"session_id", "target", "kind"}` |
+| `POST /api/targets/{name}/exec` | `{"cmd": [..], "cwd"?, "env"?, "pty"?, "shell"?, "timeout_secs"?, "agent"?, "durable"?}` | `201` `{"session_id", "target", "kind"}` |
 | `POST /api/targets/{name}/cp` | `{"direction": "push"\|"pull", "path", "mode"?, "agent"?}` | `201` `{"session_id", "target", "kind"}` |
 | `POST /api/targets/{name}/sessions/{id}/input` | `{"data"?, "resize"?, "signal"?, "eof"?, "finish"?}` | `200` `{"session_id", "accepted"}` |
 | `GET /api/targets/{name}/sessions/{id}/output` | `?since=<offset>&wait=<s>&max=<bytes>` | `200` output, below |
@@ -7473,6 +7540,35 @@ The exec body:
   the command. An agent caller uses its own; the operator must name one
   (`422 invalid` without it). A `lab_repo` or `lab_from_workspace` target
   with no instance on the host is `409 conflict`: bring it up first.
+
+On SSH and exe.dev, `durable: true` opts a noninteractive exec into restart
+survival. Agent `run` commands and queue recipes request this mode internally.
+The existing process wait or recipe continues with the original exit code
+and output even when the command finishes while the daemon is down. PTY and
+shell combinations are refused. Sending stdin `data` to a durable session
+is `422 invalid`. Input-fed queue setup and bundle transfer do not opt in.
+Ordinary execs, PTYs, and shells retain the previous interruption behavior.
+The private remote output spool is under the bound card agent's recorded
+owned root, or `<work_root>/.terrarium-runs` for other callers. The latter
+has a daemon-owned marker. No-follow directory-FD checks reject symlinks,
+foreign ownership and group/other writable components. Python 3 is required
+for these checks; missing tools are terminal errors, never installed. The spool
+retains the first 64 MiB per stream, and is removed after 24 hours of result
+retention (at most the command timeout plus 24 hours and two minutes).
+The remote lifetime is at most seven days, measured from the original
+checkpoint even if first launch is delayed. Recovery refuses a changed
+target incarnation, SSH host key or exe.dev VM ID with `interrupted (target
+changed)`, without connecting to the replacement. Startup probes report
+missing tools or spool errors, with a 30-second readiness deadline.
+See host-protocol.md, Reconnect.
+
+Durable SSH/exe.dev runs end when their foreground command exits or their
+absolute deadline passes, whichever comes first. The supervisor sends TERM
+to the command's process group, then KILL after five seconds. A descendant
+that calls `setsid` leaves that group and is not stopped by these signals.
+Bounded logger teardown cuts its inherited output streams, not the escaped
+process, so it cannot keep the run open indefinitely. A foreground exit
+preserves its exit code. A deadline ends with code 124.
 
 The input body: `data` is base64, at most 1 MiB of bytes (`413
 too_large` above). In a push, `data` is file bytes. `resize` is
@@ -11225,6 +11321,47 @@ blocks. With the triggers (§19.4), the results become alerts. The code is
 in `crates/terrariumd/src/monitors/` (the runs, the output parse, the
 layout) and `crates/terrariumd/src/store/monitors.rs` (the rows).
 
+### 30.0 Project pages
+
+Project pages use the rights in §30.1. `GET /api/projects/{name}/pages`
+returns `{"items": [page, ...]}` ordered by position, then slug (at most 10).
+`GET /api/projects/{name}/pages/{slug}` returns one page. `PUT` at that
+path creates or completely replaces it. `DELETE` removes it (204).
+Unknown projects or pages return 404. A PUT body is:
+
+```json
+{"title":"Overview","position":0,"widgets":[
+  {"id":"intro","kind":"markdown","x":0,"y":0,"w":12,"h":2,"text":"# Welcome"},
+  {"id":"guide","kind":"wiki","x":0,"y":2,"w":6,"h":4,"wiki":"guide"},
+  {"id":"load","kind":"stat","x":6,"y":2,"w":6,"h":4,"monitor":"MONITOR_ID","options":{"sparkline":true}}
+]}
+```
+
+A returned page adds `project`, `slug`, `updated_at`, and `updated_by`.
+Slugs are 1–64 lowercase ASCII letters, digits, hyphens or underscores,
+starting with a letter or digit. Titles are nonempty, at most 120 characters.
+Position is a nonnegative integer. Widgets (at most 100) have unique IDs
+(1–40 ASCII letters, digits, hyphens or underscores). Optional `title` is
+at most 120 characters. Grid coordinates are integers: x 0–11, y 0–9999,
+w 1–12 with x+w <= 12, h 1–10000 with y+h <= 10000. Rectangles cannot
+overlap. Optional `auto_height` (default true for markdown/wiki, false for
+monitors) lets markdown/wiki content
+grow beyond its minimum h. Otherwise h is the scrolling height limit.
+The daemon stores cells, not pixel heights.
+
+Kinds are `markdown`, `wiki`, `stat`, `status`, `chart`, `text`, `table`.
+Markdown requires `text` (at most 16384 UTF-8 bytes). Wiki requires `wiki`,
+a wiki path in this project (the wiki's path rules: up to 200 bytes,
+lowercase letters, digits, hyphens, underscores, dots and slashes, no empty,
+`.` or `..` segments). It is always resolved
+relative to this project, never another project. Missing wiki
+pages remain valid references so clients can show “page not found”. Monitor
+kinds require `monitor`, an existing monitor ID in this project compatible
+with the block kind, and accept dashboard `options` (§30.4). Other source
+fields are rejected. Unknown fields are rejected. Invalid input returns 422.
+Writes produce `page.set` or `page.remove` audit rows and a `page.updated`
+event with `{project, slug, deleted}`. Reading never drops stale references.
+
 ### 30.1 Rights
 
 | Action | Who |
@@ -13181,8 +13318,9 @@ cursor, so inaccessible quarantines cannot starve later rows.
 - After a daemon restart, host-agent jobs retain their running slot and
   resume their recorded phase. A live recipe is reattached, not killed or
   requeued, with its exit code and output replayed. The slot's result files
-  are not wiped. SSH and exe.dev runs remain interrupted and requeued as
-  before, with reason `interrupted (ssh transport)`.
+  are not wiped. SSH and exe.dev noninteractive runs and queue recipes
+  reattach to their detached spool. PTY/shell sessions and stdin-fed steps
+  remain interrupted, with reason `interrupted (ssh transport)`.
 - A host that cannot be reached is not a failure (TER-160). A job whose
   target's host agent is offline is not started and stays queued. A job
   whose target could not be reached before the recipe started (the host

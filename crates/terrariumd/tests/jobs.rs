@@ -2371,6 +2371,69 @@ async fn the_stats_give_the_first_attempt_pass_rate_and_the_failed_targets() {
 }
 
 both_flows!(a_merge_validates_and_pushes_next);
+#[tokio::test]
+async fn merge_identity_resolves_repo_project_and_instance_without_off_trailers() {
+    for scope in ["repo", "project", "instance"] {
+        let lab = lab(1).await;
+        lab.td
+            .patch("/api/projects/p/git", json!({"provenance": false}))
+            .await
+            .ok();
+        if scope != "instance" {
+            lab.td
+                .patch(
+                    "/api/projects/p/git",
+                    json!({"name": "Project Merge", "email": "project-merge@example.test"}),
+                )
+                .await
+                .ok();
+        }
+        if scope == "repo" {
+            let repos = lab.td.get("/api/projects/p/repos").await.ok().clone();
+            let id = repos.as_array().unwrap()[0]["id"].as_str().unwrap();
+            lab.td
+                .patch(
+                    &format!("/api/repos/{id}/git"),
+                    json!({"name": "Repo Merge", "email": "repo-merge@example.test"}),
+                )
+                .await
+                .ok();
+        }
+        lab.branch("identity-card", "next", &[("OK", "yes\n")]);
+        let card = lab.card("merge identity", "identity-card").await;
+        lab.td
+            .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+            .await
+            .ok();
+        lab.until_card(&card, "accepted", |c| c["column"] == "accepted")
+            .await;
+        lab.until_idle().await;
+        let identity = match scope {
+            "repo" => terrariumd::git_identity::Identity {
+                name: "Repo Merge".into(),
+                email: "repo-merge@example.test".into(),
+            },
+            "project" => terrariumd::git_identity::Identity {
+                name: "Project Merge".into(),
+                email: "project-merge@example.test".into(),
+            },
+            _ => terrariumd::git_identity::Identity::from_env(),
+        };
+        let actual = git(
+            &lab.origin,
+            &["show", "-s", "--format=%an <%ae>%n%cn <%ce>", "next"],
+        );
+        let expected = format!(
+            "{} <{}>\n{} <{}>",
+            identity.name, identity.email, identity.name, identity.email
+        );
+        assert_eq!(actual, expected, "{scope}");
+        let message = git(&lab.origin, &["show", "-s", "--format=%B", "next"]);
+        assert!(!message.contains("Terrarium-"), "{scope}: {message}");
+        lab.settle().await;
+    }
+}
+
 async fn a_merge_validates_and_pushes_next(flow: &'static str) {
     let lab = lab_flow(2, flow).await;
     let head = lab.branch("ter-c", "next", &[("OK", "yes\n")]);
@@ -2689,17 +2752,19 @@ async fn the_host_cap_holds_across_projects_in_order() {
         cards.push(id);
     }
 
-    // While they run, never more than one runs on lab1.
+    // Check the cap from one host snapshot. Separate project reads can
+    // observe consecutive jobs as running if one ends between the reads.
     let all = |v: &Value| v.as_i64().unwrap();
     let start = Instant::now();
     loop {
         let p = lab.td.get("/api/projects/p/jobs").await.ok().clone();
         let q = lab.td.get("/api/projects/q/jobs").await.ok().clone();
         let h = lab.td.get("/api/job-hosts").await.ok().clone();
-        let running = all(&p["running"]) + all(&q["running"]);
-        assert!(running <= 1, "p {p}\nq {q}");
         assert!(h["hosts"][0]["running"].as_i64().unwrap() <= 1, "{h}");
-        if running == 0 && all(&p["queued"]) + all(&q["queued"]) == 0 {
+        // No more jobs are submitted, so terminal project snapshots stay drained.
+        if all(&p["running"]) + all(&q["running"]) == 0
+            && all(&p["queued"]) + all(&q["queued"]) == 0
+        {
             break;
         }
         assert!(
@@ -3084,6 +3149,142 @@ pub(super) async fn native_merge_restart_keeps_recipe_exit_tail_and_junit(offlin
         )
         .await;
     assert_eq!(parsed.ok()["counts"]["passed"], 1);
+}
+
+#[tokio::test]
+async fn durable_ssh_queue_recipe_finishes_offline_once() {
+    let marks = tempfile::tempdir().unwrap();
+    let (ssh, _) = crate::exedev::fake_ssh(marks.path());
+    let mut lab = lab_impl_ssh(1, None, "code", Some(&ssh)).await;
+    // The fake SSH transport authenticates this fixture identity during its
+    // probe. Real SSH writes the same trust store after host authentication.
+    let host_key = marks.path().join("host-key");
+    assert!(
+        std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&host_key)
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::create_dir_all(lab.td.state.join("ssh")).unwrap();
+    std::fs::write(
+        lab.td.state.join("ssh/known_hosts"),
+        format!(
+            "127.0.0.1 {}",
+            std::fs::read_to_string(host_key.with_extension("pub")).unwrap()
+        ),
+    )
+    .unwrap();
+    let spool_root = marks.path().join("spool");
+    let _cleanup = crate::ssh_restart::RemoteCleanup(spool_root.clone());
+    lab.td.post("/api/targets", json!({"name":"p-queue-ssh","kind":"ssh","address":"ci@127.0.0.1","project":"p","work_root":spool_root})).await.ok();
+    let go = marks.path().join("go");
+    let started = marks.path().join("started");
+    let xml = marks.path().join("junit.xml");
+    let recipe = format!(
+        "echo \"$TERRARIUM_JOB_ID\" >> '{}'; printf '<testsuite tests=\"1\"><testcase name=\"kept\"/></testsuite>' > '{}'; while [ ! -e '{}' ]; do sleep 0.02; done; echo offline-queue-tail; exit 7",
+        started.display(),
+        xml.display(),
+        go.display()
+    );
+    lab.td.put("/api/projects/p/delivery", json!({"target":"p-queue-ssh","recipe":recipe,"slots":1,"next_repos":["app"],"work_dir":lab._dirs.path().join("jobs")})).await.ok();
+    lab.branch("ter-ssh-restart", "next", &[("OK", "yes\n")]);
+    let card = lab.card("ssh-restart", "ter-ssh-restart").await;
+    let queued = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    let jid = queued.ok()["job"]["id"].as_str().unwrap().to_owned();
+    crate::ssh_restart::wait_file(&xml).await;
+    let original = lab.td.get(&format!("/api/jobs/{jid}")).await.body;
+    assert_eq!(
+        std::fs::read_to_string(&started).unwrap(),
+        format!("{jid}\n"),
+        "initial launch"
+    );
+    let journal = terrariumd::hosts::resume::Journal::new(&lab.td.state);
+    let prefix = format!("ssh/recipe/{jid}/");
+    let bindings = journal.scan::<Value>(&prefix).unwrap();
+    assert_eq!(
+        bindings[0].0,
+        format!("{prefix}{}", original["attempt"]),
+        "checkpoint attempt"
+    );
+    assert_eq!(
+        journal.scan::<Value>(&prefix).unwrap().len(),
+        1,
+        "recipe binding before shutdown"
+    );
+    lab.td.daemon.take().unwrap().shutdown_and_wait().await;
+    assert_eq!(
+        journal.scan::<Value>(&prefix).unwrap().len(),
+        1,
+        "recipe binding after shutdown"
+    );
+    std::fs::write(&go, "go").unwrap();
+    let spool = std::fs::read_dir(spool_root.join(".terrarium-runs"))
+        .unwrap()
+        .find(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
+        .unwrap()
+        .unwrap()
+        .path();
+    crate::ssh_restart::wait_file(&spool.join("exit")).await;
+    assert_eq!(std::fs::read_to_string(spool.join("exit")).unwrap(), "7\n");
+    assert_eq!(
+        std::fs::read_to_string(&started).unwrap(),
+        format!("{jid}\n"),
+        "offline completion"
+    );
+    lab.td.boot_with_ssh(None, None, Some(&ssh)).await;
+    let spool_count = std::fs::read_dir(spool_root.join(".terrarium-runs"))
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
+        .count();
+    assert_eq!(spool_count, 1, "remote claim count after reboot");
+    // Job finalization publishes the terminal state before its after_end
+    // continuation queues the intentional retry. Do not confuse that brief
+    // idle interval with the retry having finished.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while lab.jobs().await.len() < 2 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let jobs = lab.until_idle().await;
+    let ended = jobs.iter().find(|j| j["id"] == jid).unwrap();
+    assert_eq!(ended["exit_code"], 7, "{ended}");
+    assert!(
+        ended["tail"]
+            .as_str()
+            .unwrap()
+            .contains("offline-queue-tail")
+    );
+    for field in ["attempt", "slot", "started_at"] {
+        assert_eq!(ended[field], original[field], "{field}");
+    }
+    // A failed merge intentionally queues a new job for attempt 2. That is
+    // not a restart of this job. Count launches by their durable job ID.
+    let launches = std::fs::read_to_string(started).unwrap();
+    assert_eq!(
+        launches.lines().filter(|line| *line == jid).count(),
+        1,
+        "{launches}"
+    );
+    assert_eq!(jobs.len(), 2, "the failed merge's intentional retry");
+    let card = lab.td.get(&format!("/api/cards/{card}")).await;
+    let notifications = card.ok()["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| {
+            let body = c["body"].as_str().unwrap_or("");
+            body.contains(&jid) && body.contains("attempt 1") && body.contains("failed")
+        })
+        .count();
+    assert_eq!(notifications, 1, "{}", card.body);
+    assert!(std::fs::read_to_string(xml).unwrap().contains("kept"));
 }
 
 async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {

@@ -498,14 +498,12 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
-        .init();
+    use tracing_subscriber::util::SubscriberInitExt;
+    terrarium_host::logging::subscriber(
+        std::io::stderr,
+        std::io::IsTerminal::is_terminal(&std::io::stderr()),
+    )
+    .init();
     match &args.command {
         Some(Cmd::TokenFile { path }) => return write_token_file(path),
         Some(Cmd::Cert { names, out, force }) => return write_cert(names, out, *force),

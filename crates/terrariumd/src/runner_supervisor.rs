@@ -524,6 +524,18 @@ struct LaunchedAccounts {
     bound: Vec<String>,
 }
 
+fn account_restart_needed(launched: Option<&str>, desired: Option<&str>) -> bool {
+    launched.is_some() && desired.is_some() && launched != desired
+}
+
+#[test]
+fn recovery_compares_the_effective_account_not_an_empty_subscription() {
+    assert!(!account_restart_needed(Some("default"), Some("default")));
+    assert!(!account_restart_needed(Some("default"), None));
+    assert!(account_restart_needed(Some("old"), Some("new")));
+    assert!(!account_restart_needed(None, Some("default")));
+}
+
 /// The `system` event of a resume that sends a changed prompt.
 const PROMPT_UPDATED: &str = "prompt updated on resume";
 
@@ -1301,6 +1313,7 @@ fn other(e: impl std::fmt::Display) -> SupervisorError {
 /// What the start needs from the store.
 #[derive(Default)]
 struct StoreView {
+    git_identity: Option<crate::git_identity::Identity>,
     peers: Vec<Peer>,
     queued: Vec<MailItem>,
     /// The agent's subscription row: `None` when the agent names none, or
@@ -1584,7 +1597,16 @@ impl RunnerSupervisor {
                     _ => None,
                 };
                 let ephemeral = crate::spawn::prompt_info(c, &id)?;
+                let git = crate::git_identity::settings(c, false, &project)?;
+                let mut git_identity = crate::git_identity::Identity::from_env();
+                if let Some(name) = git.name {
+                    git_identity.name = name;
+                }
+                if let Some(email) = git.email {
+                    git_identity.email = email;
+                }
                 Ok(StoreView {
+                    git_identity: Some(git_identity),
                     peers,
                     queued,
                     subscription,
@@ -2069,7 +2091,34 @@ impl RunnerSupervisor {
         // The instance bot identity deliberately overrides GIT_AUTHOR_* and
         // GIT_COMMITTER_* supplied by the harness or secret environment.
         spec.env.extend(litellm_env);
-        crate::git_identity::Identity::from_env().env(&mut spec.env);
+        crate::git_identity::write_fallback_config(
+            &layout.workspace,
+            &view
+                .git_identity
+                .clone()
+                .unwrap_or_else(crate::git_identity::Identity::from_env),
+        )
+        .map_err(|e| SupervisorError::NotReady(format!("cannot write git fallback config: {e}")))?;
+        spec.env.insert(
+            "GIT_CONFIG_GLOBAL".into(),
+            layout
+                .workspace_mount
+                .as_ref()
+                .unwrap_or(&layout.workspace)
+                .join(crate::git_identity::CONFIG_FILE)
+                .display()
+                .to_string(),
+        );
+        // Local checkout identity must win over the instance fallback.
+        // GIT_AUTHOR_* and GIT_COMMITTER_* would override repo config.
+        for key in [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ] {
+            spec.env.remove(key);
+        }
         spec.env.insert(
             "TERRARIUM_GIT_TRAILERS_FILE".into(),
             layout
@@ -4753,6 +4802,10 @@ impl RunnerSupervisor {
 }
 
 impl Supervisor for RunnerSupervisor {
+    fn workspace_alias(&self) -> Option<std::path::PathBuf> {
+        let sandbox = &self.inner.cfg.sandbox;
+        (sandbox.mode == SandboxMode::Bwrap).then(|| sandbox.home.join("work"))
+    }
     fn list_pending(
         &self,
         agent: AgentId,
@@ -5634,12 +5687,34 @@ impl Supervisor for RunnerSupervisor {
             self.adopt(id, epoch, remote, Some(events_since));
             let version = self.recorded_version(id, agent.harness);
             let launched = self.recorded_accounts(id);
+            // A missing explicit subscription means the harness default,
+            // not an empty account. Compare the account the next launch
+            // would actually select, rather than restarting every default
+            // account runner whenever the daemon recovers it.
+            let desired_account = match (&agent.subscription, self.state()) {
+                (Some(account), _) => Some(account.clone()),
+                (None, Some(state)) if agent.harness != HarnessId::Pi => {
+                    let harness = agent.harness;
+                    match state
+                        .db
+                        .read(move |c| crate::store::subscriptions::default_for(c, harness))
+                        .await
+                    {
+                        Ok(account) => account,
+                        Err(e) => {
+                            warn!(agent = %id, "cannot read the recovery account; keeping the running account: {e}");
+                            launched.account.clone()
+                        }
+                    }
+                }
+                _ => None,
+            };
             let settled = if let Some(slot) = lock(&self.inner.slots).get_mut(&id) {
                 slot.harness_version = version;
                 // A swap that the stored agent names and that the harness
                 // does not run yet: it applies when the turn ends.
                 slot.swap_pending =
-                    launched.account.is_some() && launched.account != agent.subscription;
+                    account_restart_needed(launched.account.as_deref(), desired_account.as_deref());
                 slot.account = launched.account;
                 slot.bound = launched.bound;
                 // A runner of another build (after a hot swap): it

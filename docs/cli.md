@@ -5,6 +5,16 @@
 that agents use is in [agent-rpc.md](agent-rpc.md). The design is in
 [PLAN.md](PLAN.md) §9, §10, and §12 to §17.
 
+## Project pages
+
+`terrarium -p <project> page ls` lists custom pages in tab order.
+`page show <slug>` prints the page JSON. `page set <slug> --from-file <file>`
+creates or replaces a page (`-` reads stdin). The file contains `title`,
+`position`, and `widgets`, as specified in [api.md §30.0](api.md#300-project-pages).
+`page rm <slug>` deletes it. Use `--json` for machine-readable results.
+Members and project agents read pages. Only the operator, sysadmins, and
+the project's project_admin write them. At most 10 pages per project.
+
 ## 1. Modes
 
 The CLI selects its mode from the environment.
@@ -150,6 +160,7 @@ terrarium project ls
 terrarium project show [name]                 the project, its agents, repos, targets, and target grants
 terrarium project new <name> [-d text] [--prefix TER]      sysadmin
 terrarium project set [name] [-d text] [--prefix P]        project_admin
+terrarium project set [name] [--provenance on|off] [--git-name NAME] [--git-email EMAIL]  operator/sysadmin
 terrarium project set [name] [--github-author login]... [--github-authors-clear]   operator only (the GitHub author gate)
 terrarium project rm <name> --confirm         sysadmin
 terrarium project repos [name]
@@ -159,6 +170,7 @@ terrarium project repo-add <url> [--name n] [--branch b] [--credential key] [--p
                           [--hooks-dir .githooks] [--push-deny 'op/*' ...]
                           [--push-via proxy|direct]
 terrarium repo ls
+terrarium repo set <repo> [--provenance on|off] [--git-name NAME] [--git-email EMAIL] [--warn-only true|false]  operator/sysadmin
 terrarium repo add <url> ...                  the same as project repo-add
 terrarium repo checkout <repo> [--target T] [--branch b] [--path p] [--depth n] [--agent a]
 terrarium repo rm <repo>                      project_admin; no confirm prompt

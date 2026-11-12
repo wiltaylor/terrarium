@@ -188,6 +188,11 @@ pub enum Command {
         #[command(subcommand)]
         command: DashboardCmd,
     },
+    /// Custom project pages and their widget layouts
+    Page {
+        #[command(subcommand)]
+        command: PageCmd,
+    },
     /// Pipelines: the CI/CD runs of the project (GitHub Actions, or a
     /// script for any other system), polled on a schedule
     #[command(visible_alias = "pipelines")]
@@ -384,6 +389,19 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum IssueCmd {
+    /// Close shipped issues in the approved repository (operator or project admin)
+    CloseDone {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        dry_run: bool,
+        /// Explicit legacy issue (operator only, requires --version)
+        #[arg(long, requires = "version")]
+        issue: Option<u64>,
+        /// Published tag version for an explicit issue (operator only)
+        #[arg(long, requires = "issue")]
+        version: Option<String>,
+    },
     /// Import an issue from a configured repository (idempotent)
     Import {
         number: u64,
@@ -455,6 +473,12 @@ pub enum ProjectCmd {
     },
     /// Change a project (project_admin)
     Set {
+        #[arg(long, value_parser = ["on", "off"])]
+        provenance: Option<String>,
+        #[arg(long)]
+        git_name: Option<String>,
+        #[arg(long)]
+        git_email: Option<String>,
         name: Option<String>,
         #[arg(long, short = 'd')]
         description: Option<String>,
@@ -732,6 +756,21 @@ pub struct RepoAddArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum RepoCmd {
+    #[command(hide = true)]
+    PushChecked { repo: String },
+    /// Change repo commit settings (operator/sysadmin). Refresh checkouts after changing them.
+    Set {
+        repo: String,
+        #[arg(long, value_parser = ["on", "off"])]
+        provenance: Option<String>,
+        #[arg(long)]
+        git_name: Option<String>,
+        #[arg(long)]
+        git_email: Option<String>,
+        /// Warn rather than refuse metadata-bearing pushes
+        #[arg(long)]
+        warn_only: Option<bool>,
+    },
     /// Repositories attached to the project
     Ls,
     /// Clone or update a repo in the workspace, or on a target
@@ -2595,6 +2634,22 @@ pub enum DashboardCmd {
         #[arg(long)]
         from_file: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PageCmd {
+    /// List the project pages in tab order
+    Ls,
+    /// Show a page and its widgets
+    Show { slug: String },
+    /// Create or replace a page from JSON (`-` reads stdin)
+    Set {
+        slug: String,
+        #[arg(long)]
+        from_file: String,
+    },
+    /// Delete a page
+    Rm { slug: String },
 }
 
 #[derive(Debug, Subcommand)]

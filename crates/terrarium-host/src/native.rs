@@ -1173,6 +1173,9 @@ pub fn plan_start(
     }
 
     let mut vars = req.env.clone();
+    // CUDA ordinals are not NVIDIA device minors. Select only the reserved
+    // UUIDs, in reservation order, even if the caller supplied another value.
+    vars.insert("CUDA_VISIBLE_DEVICES".into(), req.gpus.join(","));
     if let Some(w) = &own
         && *w != ctx.workspace_root
     {

@@ -41,6 +41,7 @@ pub mod display;
 pub mod docker;
 pub mod labcheck;
 pub mod limits;
+pub mod logging;
 pub mod metrics;
 pub mod native;
 pub mod outbox;

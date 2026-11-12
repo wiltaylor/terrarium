@@ -140,6 +140,8 @@ pub enum HostError {
     Busy(String, u32),
     #[error("cannot persist host session state")]
     Persistence,
+    #[error("Windows run-as requires a Windows host with the windows_run_as capability")]
+    WindowsRunAsUnsupported,
 }
 
 impl From<HostError> for ApiError {
@@ -148,6 +150,7 @@ impl From<HostError> for ApiError {
             HostError::Offline(_) => ApiError::conflict(e.to_string()),
             HostError::Busy(..) => ApiError::new(Code::RateLimited, e.to_string()),
             HostError::Persistence => ApiError::internal(e.to_string()),
+            HostError::WindowsRunAsUnsupported => ApiError::invalid(e.to_string()),
         }
     }
 }
@@ -223,6 +226,7 @@ struct SavedHost {
 /// The live state of a host, from its last `hello`.
 #[derive(Debug, Clone, Serialize)]
 pub struct LiveInfo {
+    pub path_kind: terrarium_host::protocol::PathKind,
     pub host_id: String,
     pub version: String,
     pub os: String,
@@ -472,6 +476,8 @@ impl HostRegistry {
         #[derive(Deserialize)]
         struct Binding {
             host_session: Option<(String, SessionId)>,
+            #[serde(default)]
+            remote_key: Option<String>,
         }
         let key = format!("exec/{id}");
         let mut entries = self.lock();
@@ -481,6 +487,10 @@ impl HostRegistry {
         let binding = journal.load::<Binding>(&key)?;
         let mut values = Vec::new();
         let mut prefixes = Vec::new();
+        let mut removed = vec![key.clone()];
+        if let Some(remote) = binding.as_ref().and_then(|b| b.remote_key.as_ref()) {
+            removed.push(format!("ssh/{remote}"));
+        }
         let session = binding.and_then(|b| b.host_session);
         if let Some((host, session)) = &session {
             let host_key = format!("host/{host}");
@@ -494,7 +504,7 @@ impl HostRegistry {
             }
             prefixes.push(format!("event/{host}/{session}/"));
         }
-        journal.replace(&values, &[key], &prefixes)?;
+        journal.replace(&values, &removed, &prefixes)?;
         if let Some((host, session)) = session
             && let Some(entry) = entries.get_mut(&host)
         {
@@ -513,7 +523,11 @@ impl HostRegistry {
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
-        let mut prefixes = vec![format!("prepare/{job}/"), format!("recipe/{job}/")];
+        let mut prefixes = vec![
+            format!("prepare/{job}/"),
+            format!("recipe/{job}/"),
+            format!("ssh/recipe/{job}/"),
+        ];
         let mut removed = Vec::new();
         for phase in ["recipe", "receive"] {
             let prefix = format!("bound/{phase}/{job}/");
@@ -566,6 +580,10 @@ impl HostRegistry {
                 let _ = conn.tx.send(Outgoing::Close(None));
             }
         }
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Claim the replay channel of a session from the previous daemon.
@@ -819,6 +837,23 @@ impl HostRegistry {
             .and_then(|e| e.info.as_ref().map(|i| i.capabilities.clone()))
     }
 
+    pub fn supports_windows_run_as(&self, host: &str) -> bool {
+        self.lock().get(host).is_some_and(|e| {
+            e.conn.is_some()
+                && e.info
+                    .as_ref()
+                    .is_some_and(|i| i.os == "windows" && i.capabilities.windows_run_as)
+        })
+    }
+
+    /// Native path syntax from the last hello. Container paths stay POSIX.
+    pub fn path_kind(&self, host: &str) -> terrarium_host::protocol::PathKind {
+        self.lock()
+            .get(host)
+            .and_then(|e| e.info.as_ref().map(|i| i.path_kind))
+            .unwrap_or_default()
+    }
+
     fn send(&self, host: &str, out: Outgoing) -> bool {
         match self.lock().get(host).and_then(|e| e.conn.clone()) {
             Some(c) => c.tx.send(out).is_ok(),
@@ -857,6 +892,21 @@ impl HostRegistry {
             }
         };
         let (tx, rx) = mpsc::unbounded_channel();
+        let frame = make(id);
+        let has_run_as = match &frame {
+            DaemonFrame::Exec(req) => req.windows_run_as.is_some(),
+            DaemonFrame::CpPush(req) => req.windows_run_as.is_some(),
+            DaemonFrame::CpPull(req) => req.windows_run_as.is_some(),
+            _ => false,
+        };
+        if has_run_as
+            && !e
+                .info
+                .as_ref()
+                .is_some_and(|i| i.os == "windows" && i.capabilities.windows_run_as)
+        {
+            return Err(HostError::WindowsRunAsUnsupported);
+        }
         e.sessions.insert(
             id,
             Slot {
@@ -879,7 +929,7 @@ impl HostRegistry {
             return Err(HostError::Persistence);
         }
         if let Some(c) = &e.conn {
-            let _ = c.tx.send(Outgoing::frame(make(id)));
+            let _ = c.tx.send(Outgoing::frame(frame));
         }
         Ok(HostSession {
             registry: self.clone(),
@@ -959,6 +1009,7 @@ impl HostRegistry {
             os: hello.os.clone(),
             arch: hello.arch.clone(),
             capabilities: hello.capabilities.clone(),
+            path_kind: hello.path_kind,
             max_sessions: hello.max_sessions,
             max_running_targets: hello.max_running_targets,
             connected_at: crate::db::now(),
@@ -1847,6 +1898,7 @@ async fn serve_link(
     welcome.update = offer;
     match encode_control(&DaemonFrame::Welcome(welcome.clone())) {
         Ok(t) => {
+            tracing::trace!("host transport frame send");
             if socket.send(WsMessage::Text(t.into())).await.is_err() {
                 reg.detach(&row.name, conn_id);
                 return;
@@ -1972,6 +2024,7 @@ async fn serve_link(
                     }
                     None => break "no sender",
                 };
+                tracing::trace!("host transport frame send");
                 if sink.send(msg).await.is_err() {
                     break "send failed";
                 }
@@ -2393,6 +2446,7 @@ mod tests {
             .unwrap();
         let id = session.id();
         let hello = Hello {
+            path_kind: terrarium_host::protocol::PathKind::Posix,
             protocol: 1,
             host: "lab1".into(),
             version: "test".into(),
