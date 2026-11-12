@@ -62,12 +62,22 @@ fn parse_config(bytes: &[u8]) -> Result<Config, Reply> {
     if config.host_agent_uid == 0
         || config.registrations.len() > 128
         || !config.work_root.is_absolute()
-        || ["/etc/terrarium-workspace-helper", "/run/terrarium-workspace-helper"].iter().any(|p| std::path::Path::new(p).starts_with(&config.work_root) || config.work_root.starts_with(p))
+        || [
+            "/etc/terrarium-workspace-helper",
+            "/run/terrarium-workspace-helper",
+        ]
+        .iter()
+        .any(|p| {
+            std::path::Path::new(p).starts_with(&config.work_root)
+                || config.work_root.starts_with(p)
+        })
         || config.registrations.iter().any(|r| {
             !r.publisher_root.is_absolute()
                 || !r.staging_root.is_absolute()
                 || !r.state_root.is_absolute()
-                || [&r.publisher_root, &r.staging_root, &r.state_root].iter().any(|p| p.starts_with(&config.work_root) || config.work_root.starts_with(p))
+                || [&r.publisher_root, &r.staging_root, &r.state_root]
+                    .iter()
+                    .any(|p| p.starts_with(&config.work_root) || config.work_root.starts_with(p))
         })
     {
         return Err(Reply::Unauthorized);

@@ -149,7 +149,9 @@ impl<I: Inspector, A: Attributes> Kernel<I, A> {
         let mut identities = std::collections::BTreeSet::new();
         for root in [&source, &publisher, &staging] {
             let metadata = root.fd.metadata().map_err(|_| Reply::Failed)?;
-            if !identities.insert((metadata.dev(), metadata.ino())) { return Err(Reply::Quarantined); }
+            if !identities.insert((metadata.dev(), metadata.ino())) {
+                return Err(Reply::Quarantined);
+            }
         }
         let roots = [path(&source.fd)?, path(&publisher.fd)?, path(&staging.fd)?];
         for (n, a) in roots.iter().enumerate() {
