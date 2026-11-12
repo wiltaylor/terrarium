@@ -523,6 +523,7 @@ impl Sync {
 }
 
 #[test]
+#[allow(clippy::unwrap_used)]
 fn workspace_alias_translation_is_strict() {
     let root = PathBuf::from("/work/project/agent");
     let mut sync = Sync {
