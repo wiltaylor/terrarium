@@ -93,7 +93,7 @@ pub fn current_token_snapshot() -> io::Result<TokenSnapshot> {
         user_sid,
         elevation_type: kind as u32,
         elevated,
-        administrators_enabled: attributes & SE_GROUP_ENABLED != 0,
-        administrators_deny_only: attributes & SE_GROUP_USE_FOR_DENY_ONLY != 0,
+        administrators_enabled: attributes & SE_GROUP_ENABLED as u32 != 0,
+        administrators_deny_only: attributes & SE_GROUP_USE_FOR_DENY_ONLY as u32 != 0,
     })
 }
