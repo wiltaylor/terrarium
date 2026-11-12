@@ -519,8 +519,7 @@ pub fn swap(bin: &Path, version: &str) -> Result<(), UpdateError> {
     Ok(())
 }
 
-/// A separate copy performs the replacement only after SCM reports the
-/// service stopped. Neither the service nor the updater overwrites itself.
+/// Retry replacement after image teardown without removing the destination.
 #[cfg(windows)]
 pub fn windows_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
     let until = std::time::Instant::now() + Duration::from_secs(15);
@@ -552,15 +551,34 @@ pub fn windows_prepare_replacement(bin: &Path, version: &str) -> std::io::Result
 
 #[cfg(windows)]
 pub fn swap(bin: &Path, version: &str) -> Result<(), UpdateError> {
-    let helper = sidecar(bin, "update-helper.exe");
-    std::fs::copy(sidecar(bin, NEW), &helper).map_err(io_err(&helper))?;
-    std::process::Command::new(&helper)
-        .arg("apply-service-update").arg(bin).arg(version)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn().map_err(io_err(&helper))?;
+    windows_prepare_replacement(bin, version).map_err(io_err(bin))?;
+    let old = sidecar(bin, "old");
+    if old.exists() { std::fs::remove_file(&old).map_err(io_err(&old))?; }
+    // Windows permits renaming the mapped image, but not replacing it.
+    std::fs::rename(bin, &old).map_err(io_err(bin))?;
+    if let Err(source) = std::fs::rename(sidecar(bin, NEW), bin) {
+        let _ = std::fs::rename(&old, bin);
+        let _ = std::fs::remove_file(sidecar(bin, PENDING));
+        return Err(io_err(bin)(source));
+    }
     Ok(())
+}
+
+/// Restore the saved image while the failed image is still mapped.
+#[cfg(windows)]
+pub fn windows_rollback(bin: &Path) -> std::io::Result<()> {
+    let pending = sidecar(bin, PENDING);
+    let version = std::fs::read(&pending)?;
+    let rejected = sidecar(bin, "rejected");
+    if rejected.exists() { std::fs::remove_file(&rejected)?; }
+    std::fs::rename(bin, &rejected)?;
+    let old = sidecar(bin, "old");
+    if let Err(error) = std::fs::rename(&old, bin) {
+        let _ = std::fs::rename(&rejected, bin);
+        return Err(error);
+    }
+    std::fs::write(sidecar(bin, FAILED), version)?;
+    std::fs::remove_file(pending)
 }
 
 #[cfg(test)]

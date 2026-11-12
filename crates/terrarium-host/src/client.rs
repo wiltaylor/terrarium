@@ -537,11 +537,7 @@ impl Client {
         tokio::spawn(async move {
             let version = offer.version.clone();
             match client.self_update(&su, &offer).await {
-                Ok(()) => {
-                    // SCM is stopped by the Windows helper, not by the dial-out loop.
-                    #[cfg(unix)]
-                    client.shared.restart.notify_one();
-                }
+                Ok(()) => client.shared.restart.notify_one(),
                 Err(e) => {
                     client
                         .shared

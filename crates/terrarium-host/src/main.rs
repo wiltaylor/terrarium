@@ -57,13 +57,6 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// Internal service-safe update worker, executed from a separate copy.
-    #[cfg(windows)]
-    #[command(hide = true)]
-    ApplyServiceUpdate { binary: PathBuf, version: String },
-    #[cfg(windows)]
-    #[command(hide = true)]
-    ResumeServiceUpdate { binary: PathBuf, version: String },
     /// Run under the Windows Service Control Manager as LocalSystem.
     #[cfg(windows)]
     Service,
@@ -415,6 +408,9 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         );
     }
     match &caps.limits {
+        Some(l) if l.job_objects => {
+            tracing::info!("resource limits: Windows Job Objects work");
+        }
         Some(l) if l.systemd => {
             tracing::info!(controllers = %l.controllers.join(" "), "resource limits: systemd-run --user works");
             terrarium_host::limits::kill_leftovers(&name).await;
@@ -521,14 +517,6 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    #[cfg(windows)]
-    if let Some(Cmd::ApplyServiceUpdate { binary, version }) = &args.command {
-        return windows_service_host::apply_update(binary, version, false);
-    }
-    #[cfg(windows)]
-    if let Some(Cmd::ResumeServiceUpdate { binary, version }) = &args.command {
-        return windows_service_host::apply_update(binary, version, true);
-    }
     let writer = tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stderr);
     #[cfg(windows)]
     let writer = if matches!(args.command, Some(Cmd::Service)) {
@@ -572,8 +560,6 @@ fn main() -> anyhow::Result<()> {
     }
     let rt = tokio::runtime::Runtime::new().context("start the runtime")?;
     match args.command {
-        #[cfg(windows)]
-        Some(Cmd::ApplyServiceUpdate { .. } | Cmd::ResumeServiceUpdate { .. }) => unreachable!("handled before the runtime"),
         #[cfg(windows)]
         Some(Cmd::Service) => unreachable!("handled by the service dispatcher"),
         Some(Cmd::Check { json, probe }) => rt.block_on(check(&cfg, json, probe)),

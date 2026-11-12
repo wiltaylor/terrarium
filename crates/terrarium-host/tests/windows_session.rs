@@ -88,6 +88,23 @@ fn service_update_replacement_never_removes_current_path() {
     assert_eq!(std::fs::read(&binary).unwrap(), b"old");
 }
 
+#[test]
+fn service_update_journal_and_rollback() {
+    use terrarium_host::selfupdate::{self, sidecar};
+    let root = tempfile::tempdir().unwrap();
+    let binary = root.path().join("host.exe");
+    std::fs::write(&binary, b"old").unwrap();
+    std::fs::write(sidecar(&binary, selfupdate::NEW), b"new").unwrap();
+    selfupdate::swap(&binary, "test-new").unwrap();
+    assert_eq!(std::fs::read(&binary).unwrap(), b"new");
+    assert_eq!(std::fs::read(sidecar(&binary, "old")).unwrap(), b"old");
+    assert_eq!(selfupdate::confirm(&binary), None);
+    selfupdate::windows_rollback(&binary).unwrap();
+    assert_eq!(std::fs::read(&binary).unwrap(), b"old");
+    assert_eq!(selfupdate::failed_version(&binary).as_deref(), Some("test-new"));
+    assert!(!sidecar(&binary, selfupdate::PENDING).exists());
+}
+
 #[tokio::test]
 async fn bare_program_resolves_from_request_path() {
     let mut plan = plan("[Console]::WriteLine('bare-program-ok')");
