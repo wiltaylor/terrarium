@@ -66,6 +66,10 @@ pub enum Health {
 
 /// The container engine.
 pub trait Engine: Send + Sync {
+    /// Whether the source supports the supervised offline snapshot protocol.
+    fn supervised_snapshot<'a>(&'a self, _cur: &'a Container) -> BoxFut<'a, Res<bool>> {
+        Box::pin(async { Ok(false) })
+    }
     /// Fail closed unless the runtime base and runner compatibility epoch match.
     fn can_hot_swap<'a>(&'a self, _cur: &'a Container, _to: &'a Image) -> BoxFut<'a, Res<bool>> {
         Box::pin(async { Ok(false) })
