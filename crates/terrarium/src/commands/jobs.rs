@@ -63,43 +63,97 @@ const JOB_COLS: &[(&str, &str)] = &[
 pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
     match cmd {
         JobCmd::Artifacts { id } => {
-            let value = ctx.api.get(&format!("/api/jobs/{}/artifacts", encode(id)), vec![]).await?;
+            let value = ctx
+                .api
+                .get(&format!("/api/jobs/{}/artifacts", encode(id)), vec![])
+                .await?;
             ctx.emit(&value, print_object)
         }
         JobCmd::Attach { id, file } => {
             use base64::Engine;
             use std::io::Read;
             let mut bytes = Vec::new();
-            std::fs::File::open(file)?.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
-            anyhow::ensure!(bytes.len() <= 1024 * 1024, "release attachment exceeds 1 MiB");
-            let value = ctx.api.post(&format!("/api/jobs/{}/attachment", encode(id)), Some(json!({"data":base64::engine::general_purpose::STANDARD.encode(bytes)}))).await?;
+            std::fs::File::open(file)?
+                .take(1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            anyhow::ensure!(
+                bytes.len() <= 1024 * 1024,
+                "release attachment exceeds 1 MiB"
+            );
+            let value = ctx
+                .api
+                .post(
+                    &format!("/api/jobs/{}/attachment", encode(id)),
+                    Some(json!({"data":base64::engine::general_purpose::STANDARD.encode(bytes)})),
+                )
+                .await?;
             ctx.emit(&value, print_object)
         }
-        JobCmd::ArtifactGet { id, name, destination } => {
+        JobCmd::ArtifactGet {
+            id,
+            name,
+            destination,
+        } => {
             use base64::Engine;
             use sha2::{Digest, Sha256};
             use std::io::Write;
-            let value = ctx.api.get(&format!("/api/jobs/{}/artifacts", encode(id)), vec![]).await?;
-            let artifacts = value["artifacts"].as_array().ok_or_else(|| anyhow::anyhow!("missing artifact list"))?;
-            let artifact = artifacts.iter().find(|a| a["name"].as_str() == Some(name)).ok_or_else(|| anyhow::anyhow!("no such release artifact"))?;
-            let size = artifact["size"].as_u64().ok_or_else(|| anyhow::anyhow!("missing artifact size"))?;
-            let hash = artifact["sha256"].as_str().ok_or_else(|| anyhow::anyhow!("missing artifact hash"))?;
-            let parent = destination.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+            let value = ctx
+                .api
+                .get(&format!("/api/jobs/{}/artifacts", encode(id)), vec![])
+                .await?;
+            let artifacts = value["artifacts"]
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("missing artifact list"))?;
+            let artifact = artifacts
+                .iter()
+                .find(|a| a["name"].as_str() == Some(name))
+                .ok_or_else(|| anyhow::anyhow!("no such release artifact"))?;
+            let size = artifact["size"]
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("missing artifact size"))?;
+            let hash = artifact["sha256"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing artifact hash"))?;
+            let parent = destination
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."));
             let mut file = tempfile::NamedTempFile::new_in(parent)?;
             let mut offset = 0;
             let mut digest = Sha256::new();
             while offset < size {
-                let chunk = ctx.api.get(&format!("/api/jobs/{}/artifacts/{}", encode(id), encode(name)), vec![("offset".into(), offset.to_string())]).await?;
-                let bytes = base64::engine::general_purpose::STANDARD.decode(chunk["data"].as_str().ok_or_else(|| anyhow::anyhow!("missing artifact bytes"))?)?;
-                anyhow::ensure!(!bytes.is_empty() && bytes.len() <= 1024 * 1024 && offset + bytes.len() as u64 <= size, "invalid artifact chunk");
+                let chunk = ctx
+                    .api
+                    .get(
+                        &format!("/api/jobs/{}/artifacts/{}", encode(id), encode(name)),
+                        vec![("offset".into(), offset.to_string())],
+                    )
+                    .await?;
+                let bytes = base64::engine::general_purpose::STANDARD.decode(
+                    chunk["data"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("missing artifact bytes"))?,
+                )?;
+                anyhow::ensure!(
+                    !bytes.is_empty()
+                        && bytes.len() <= 1024 * 1024
+                        && offset + bytes.len() as u64 <= size,
+                    "invalid artifact chunk"
+                );
                 file.write_all(&bytes)?;
                 digest.update(&bytes);
                 offset += bytes.len() as u64;
             }
-            anyhow::ensure!(format!("{:x}", digest.finalize()) == hash, "release artifact SHA-256 mismatch");
+            anyhow::ensure!(
+                format!("{:x}", digest.finalize()) == hash,
+                "release artifact SHA-256 mismatch"
+            );
             file.as_file().sync_all()?;
             file.persist_noclobber(destination)?;
-            ctx.emit(&json!({"path":destination,"size":size,"sha256":hash}), print_object)
+            ctx.emit(
+                &json!({"path":destination,"size":size,"sha256":hash}),
+                print_object,
+            )
         }
         JobCmd::Cleanup { after } => {
             let name = ctx.project_or(None).await?;
@@ -225,7 +279,12 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
         } => {
             let eta = planned(eta)?;
             let mut body = json!({});
-            for (k, v) in [("repo", repo), ("commit", commit), ("eta", &eta), ("after", after)] {
+            for (k, v) in [
+                ("repo", repo),
+                ("commit", commit),
+                ("eta", &eta),
+                ("after", after),
+            ] {
                 if let Some(v) = v {
                     body[k] = json!(v);
                 }
@@ -434,7 +493,10 @@ fn merged(cur: &Value, a: &DeliverySetArgs) -> anyhow::Result<Value> {
     put("timeout_secs", a.timeout.map(Value::from));
     put("release_target", a.release_target.clone().map(Value::from));
     put("release_recipe", a.release_recipe.clone().map(Value::from));
-    put("release_outputs", a.release_outputs.clone().map(Value::from));
+    put(
+        "release_outputs",
+        a.release_outputs.clone().map(Value::from),
+    );
     if !a.next_repos.is_empty() {
         d["next_repos"] = json!(a.next_repos);
     }

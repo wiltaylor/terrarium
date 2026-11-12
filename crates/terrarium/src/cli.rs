@@ -707,9 +707,16 @@ pub enum JobCmd {
     /// List private named outputs of a release job (project lead only)
     Artifacts { id: String },
     /// Download a private release output, verifying its SHA-256
-    ArtifactGet { id: String, name: String, destination: std::path::PathBuf },
+    ArtifactGet {
+        id: String,
+        name: String,
+        destination: std::path::PathBuf,
+    },
     /// Attach a smoke result (at most 1 MiB) to a passed phase-1 release
-    Attach { id: String, file: std::path::PathBuf },
+    Attach {
+        id: String,
+        file: std::path::PathBuf,
+    },
     /// Set the cap of a host, or take it away with `--clear`
     /// (sysadmin). The host is the target's host agent, else the host of
     /// its address, else the target name

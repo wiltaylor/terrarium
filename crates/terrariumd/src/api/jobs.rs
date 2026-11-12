@@ -1057,26 +1057,40 @@ async fn release(
         let a = actor.clone();
         let project = card.project.clone();
         let repo = repo.clone();
-        Some(state.db.read(move |c| {
-            let previous = jobs::get(c, &id)?;
-            super::release_handoffs::authorize(&a, &previous)?;
-            crate::release_handoff::check_predecessor(c, &previous)?;
-            if previous.project != project || previous.repo != repo {
-                return Err(ApiError::invalid("release phases must have the same project and repo"));
-            }
-            Ok(previous)
-        }).await?)
-    } else { None };
+        Some(
+            state
+                .db
+                .read(move |c| {
+                    let previous = jobs::get(c, &id)?;
+                    super::release_handoffs::authorize(&a, &previous)?;
+                    crate::release_handoff::check_predecessor(c, &previous)?;
+                    if previous.project != project || previous.repo != repo {
+                        return Err(ApiError::invalid(
+                            "release phases must have the same project and repo",
+                        ));
+                    }
+                    Ok(previous)
+                })
+                .await?,
+        )
+    } else {
+        None
+    };
     let head = if let Some(previous) = &previous {
-        previous.commit.clone().ok_or_else(|| ApiError::invalid("phase 1 has no release commit"))?
-    } else { rt::remote_head(&state, &card.project, &repo, jobs::RELEASE_BRANCH)
-        .await?
-        .ok_or_else(|| {
-            ApiError::conflict(format!(
-                "repo `{repo}` has no `{}` branch on its remote",
-                jobs::RELEASE_BRANCH
-            ))
-        })? };
+        previous
+            .commit
+            .clone()
+            .ok_or_else(|| ApiError::invalid("phase 1 has no release commit"))?
+    } else {
+        rt::remote_head(&state, &card.project, &repo, jobs::RELEASE_BRANCH)
+            .await?
+            .ok_or_else(|| {
+                ApiError::conflict(format!(
+                    "repo `{repo}` has no `{}` branch on its remote",
+                    jobs::RELEASE_BRANCH
+                ))
+            })?
+    };
     rt::check_commit(&head)?;
     if let Some(c) = &b.commit
         && !head.starts_with(&c.to_lowercase())

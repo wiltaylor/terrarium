@@ -3809,6 +3809,75 @@ async fn delivery_secret_config_refuses_plaintext_and_arbitrary_env_injection() 
     }
 }
 
+/// TER-1032: daemon-only artifacts and a pinned, linked second release.
+#[tokio::test]
+async fn release_handoff_publishes_and_delivers_linked_inputs() {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let lab = lab(1).await;
+    release_client(&lab, "rel-client").await;
+    let recipe = r#"set -eu
+mkdir -p handoff
+if [ "$TERRARIUM_RELEASE_PHASE" = 1 ]; then
+    printf signed-apk > handoff/signed.apk
+    printf fixtures > handoff/fixtures.zip
+else
+    test "$(cat "$TERRARIUM_RELEASE_ARTIFACTS/signed.apk")" = signed-apk
+    test "$(cat "$TERRARIUM_RELEASE_ARTIFACTS/fixtures.zip")" = fixtures
+    test "$(cat "$TERRARIUM_RELEASE_ATTACHMENT")" = smoke-ok
+    test "$(sha256sum "$TERRARIUM_RELEASE_ATTACHMENT" | cut -d' ' -f1)" = "$TERRARIUM_RELEASE_ATTACHMENT_SHA256"
+    test -n "$TERRARIUM_RELEASE_AFTER"
+    printf verified > handoff/result
+fi"#;
+    lab.td.put("/api/projects/p/delivery", json!({
+        "target":"p-box", "recipe":"true", "next_repos":["app"],
+        "work_dir":lab._dirs.path().join("jobs"),
+        "release_target":"rel-client", "release_recipe":recipe, "release_outputs":"handoff"
+    })).await.ok();
+    let card = lab.card("handoff", "main").await;
+    let endpoint = format!("/api/cards/{card}/release");
+    let queued = lab.td.post_as(&lab.lead, &endpoint, json!({})).await.ok().clone();
+    let first = queued["job"]["id"].as_str().unwrap();
+    let commit = queued["job"]["commit"].clone();
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.iter().find(|j| j["id"] == first).unwrap()["state"], "passed", "{jobs:?}");
+    let list = format!("/api/jobs/{first}/artifacts");
+    let attachment = format!("/api/jobs/{first}/attachment");
+    let outsider = lab.td.agent("q", "lead", json!({"roles":["project_admin"]})).await["id"].as_str().unwrap().to_owned();
+    for actor in [&lab.w1, &outsider] {
+        assert_eq!(lab.td.get_as(actor, &list).await.status, 403);
+        assert_eq!(lab.td.get_as(actor, &format!("{list}/signed.apk")).await.status, 403);
+        assert_eq!(lab.td.post_as(actor, &attachment, json!({"data":"eA=="})).await.status, 403);
+    }
+    let result = lab.td.get_as(&lab.lead, &list).await.ok().clone();
+    assert_eq!(result["artifacts"].as_array().unwrap().len(), 2);
+    for artifact in result["artifacts"].as_array().unwrap() {
+        let download = lab.td.get_as(&lab.lead, &format!("{list}/{}", artifact["name"].as_str().unwrap())).await.ok().clone();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(download["data"].as_str().unwrap()).unwrap();
+        assert_eq!(artifact["size"], bytes.len());
+        assert_eq!(artifact["sha256"], format!("{:x}", Sha256::digest(&bytes)));
+    }
+    // Missing attachment cannot queue a successor.
+    assert_eq!(lab.td.post_as(&lab.lead, &endpoint, json!({"after":first})).await.status, 409);
+    let huge = base64::engine::general_purpose::STANDARD.encode(vec![0; 1024 * 1024 + 1]);
+    assert_eq!(lab.td.post_as(&lab.lead, &attachment, json!({"data":huge})).await.status, 422);
+    let attached = lab.td.post_as(&lab.lead, &attachment, json!({"data":base64::engine::general_purpose::STANDARD.encode(b"smoke-ok")})).await.ok().clone();
+    assert_eq!(attached["attachment"]["sha256"], format!("{:x}", Sha256::digest(b"smoke-ok")));
+    // Advance main. Phase 2 must still take phase 1's exact commit.
+    std::fs::write(lab.work.join("new-main"), "later").unwrap();
+    git(&lab.work, &["add", "."]);
+    git(&lab.work, &["commit", "-qm", "later main"]);
+    git(&lab.work, &["push", "-q", "origin", "main"]);
+    let queued = lab.td.post_as(&lab.lead, &endpoint, json!({"after":first})).await.ok().clone();
+    assert_eq!(queued["job"]["commit"], commit);
+    let second = queued["job"]["id"].as_str().unwrap();
+    assert_eq!(lab.td.post_as(&lab.lead, &endpoint, json!({"after":first})).await.status, 409);
+    assert_eq!(lab.td.post_as(&lab.lead, &attachment, json!({"data":"eA=="})).await.status, 409);
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.iter().find(|j| j["id"] == second).unwrap()["state"], "passed", "{jobs:?}");
+    assert_eq!(lab.td.post_as(&lab.lead, &endpoint, json!({"after":first})).await.status, 409);
+}
+
 /// TER-623: a release job runs the release recipe on the release target,
 /// with the release secrets in its env and the release VM relay as
 /// TERRARIUM_DOCKER_HOST. The VM key never reaches the recipe, a merge job

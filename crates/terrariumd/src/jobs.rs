@@ -3392,13 +3392,27 @@ async fn steps(
     let mut env = recipe_env(job, x.dir, &head, base);
     if job.kind == JobKind::Release {
         let id = job.id.clone();
-        let link = x.state.db.read(move |c| crate::release_handoff::successor(c, &id)).await?;
-        env.insert("TERRARIUM_RELEASE_PHASE".into(), if link.is_some() { "2" } else { "1" }.into());
+        let link = x
+            .state
+            .db
+            .read(move |c| crate::release_handoff::successor(c, &id))
+            .await?;
+        env.insert(
+            "TERRARIUM_RELEASE_PHASE".into(),
+            if link.is_some() { "2" } else { "1" }.into(),
+        );
         if let Some(link) = link {
             let data = crate::release_handoff::inputs(&x.state.state_dir, &link)?;
             let input_dir = format!("{}/.terrarium/release-input", x.dir);
             let cmd = RemoteCmd {
-                argv: vec!["sh".into(), "-c".into(), format!("set -eu; test ! -e {0}; mkdir -p {0}/artifacts; tar -xf - -C {0}; chmod -R a-w {0}", crate::executor::sh_quote(&input_dir))],
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    format!(
+                        "set -eu; test ! -e {0}; mkdir -p {0}/artifacts; tar -xf - -C {0}; chmod -R a-w {0}",
+                        crate::executor::sh_quote(&input_dir)
+                    ),
+                ],
                 holder: x.holder.clone(),
                 timeout_secs: Some(120),
                 ..RemoteCmd::default()
@@ -3408,9 +3422,18 @@ async fn steps(
                 return Err(ApiError::conflict("cannot deliver release phase-2 inputs"));
             }
             env.insert("TERRARIUM_RELEASE_AFTER".into(), link.predecessor);
-            env.insert("TERRARIUM_RELEASE_ARTIFACTS".into(), format!("{input_dir}/artifacts"));
-            env.insert("TERRARIUM_RELEASE_ATTACHMENT".into(), format!("{input_dir}/attachment"));
-            env.insert("TERRARIUM_RELEASE_ATTACHMENT_SHA256".into(), link.attachment_sha256);
+            env.insert(
+                "TERRARIUM_RELEASE_ARTIFACTS".into(),
+                format!("{input_dir}/artifacts"),
+            );
+            env.insert(
+                "TERRARIUM_RELEASE_ATTACHMENT".into(),
+                format!("{input_dir}/attachment"),
+            );
+            env.insert(
+                "TERRARIUM_RELEASE_ATTACHMENT_SHA256".into(),
+                link.attachment_sha256,
+            );
         }
     }
     let tunnel = if let Some(key) = injected.iter().find(|i| i.env == "DOCKER_CI_KEY") {
@@ -3541,13 +3564,19 @@ async fn finish_recipe(
         .collect();
     x.recipe_started.store(true, Ordering::SeqCst);
     let ok = c.end.as_ref().is_some_and(End::success);
-    if ok && job.kind == JobKind::Release && let Some(directory) = &delivery.release_outputs {
+    if ok
+        && job.kind == JobKind::Release
+        && let Some(directory) = &delivery.release_outputs
+    {
         crate::release_handoff::relative_directory(directory)?;
         // Check every directory component. A recipe may not declare an output
         // directory through a symlink to another tree.
         let mut script = format!("set -eu; cd {}; p=.; ", crate::executor::sh_quote(x.dir));
         for component in directory.split('/') {
-            script.push_str(&format!("p=\"$p\"/{}; test ! -L \"$p\"; ", crate::executor::sh_quote(component)));
+            script.push_str(&format!(
+                "p=\"$p\"/{}; test ! -L \"$p\"; ",
+                crate::executor::sh_quote(component)
+            ));
         }
         script.push_str("cd \"$p\"; find . -mindepth 1 -maxdepth 1 -printf '%f\\0' | tar --null --no-recursion -T - -cf -");
         let limit = crate::release_handoff::output_limit()?;
@@ -3559,18 +3588,29 @@ async fn finish_recipe(
         };
         // File bytes must not pass through the textual log redactor. This is
         // daemon-only execution, not an agent exec session or a retained log.
-        if killed(&job.id) { return Err(ApiError::conflict("the job was cancelled")); }
-        let cmd = RemoteCmd { argv: low_priority(cmd.argv.clone(), x.ionice), ..cmd };
+        if killed(&job.id) {
+            return Err(ApiError::conflict("the job was cancelled"));
+        }
+        let cmd = RemoteCmd {
+            argv: low_priority(cmd.argv.clone(), x.ionice),
+            ..cmd
+        };
         let running = crate::executor::start_cmd(x.state, x.def, &cmd)?;
         set_control(&job.id, Some(running.ctl.clone()));
-        if killed(&job.id) { let _ = running.ctl.send(Control::Kill); }
+        if killed(&job.id) {
+            let _ = running.ctl.send(Control::Kill);
+        }
         let cap = limit as usize + 2 * 1024 * 1024;
         let output = running.collect(cap).await;
         if output.stdout.len() == cap {
-            return Err(ApiError::invalid(format!("release artifacts exceed the per-job limit of {limit} bytes")));
+            return Err(ApiError::invalid(format!(
+                "release artifacts exceed the per-job limit of {limit} bytes"
+            )));
         }
         if !output.end.as_ref().is_some_and(End::success) {
-            return Err(ApiError::conflict("cannot collect declared release outputs"));
+            return Err(ApiError::conflict(
+                "cannot collect declared release outputs",
+            ));
         }
         crate::release_handoff::publish(&x.state.state_dir, &job.id, &output.stdout[..], limit)?;
     }
@@ -3952,7 +3992,8 @@ async fn release_secrets(
 fn check_release_refs(delivery: &DeliveryDef) -> ApiResult<()> {
     let has_release = !delivery.release_secrets.is_empty()
         || delivery.docker_release.is_some()
-        || delivery.release_recipe.is_some();
+        || delivery.release_recipe.is_some()
+        || delivery.release_outputs.is_some();
     if has_release && delivery.release_target().is_none() {
         return Err(ApiError::invalid(
             "release_secrets, release_recipe and docker_release require release_target",
@@ -4011,6 +4052,7 @@ fn check_release_owner(
     let fields = [
         ("release_target", old.release_target != def.release_target),
         ("release_recipe", old.release_recipe != def.release_recipe),
+        ("release_outputs", old.release_outputs != def.release_outputs),
         (
             "release_secrets",
             old.release_secrets != def.release_secrets,
