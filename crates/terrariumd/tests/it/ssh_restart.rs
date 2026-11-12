@@ -218,12 +218,14 @@ async fn durable_ssh_redefined_target_or_host_identity_is_not_contacted() {
     // The private sshd fixture reuses its host key for client authentication.
     // Generate a separate replacement rather than copying that same key.
     let replacement = td.dir.path().join("replacement-host");
-    assert!(std::process::Command::new("ssh-keygen")
-        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
-        .arg(&replacement)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&replacement)
+            .status()
+            .unwrap()
+            .success()
+    );
     std::fs::write(
         td.state.join("ssh/known_hosts"),
         format!(
