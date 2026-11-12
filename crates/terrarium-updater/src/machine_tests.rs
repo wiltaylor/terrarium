@@ -677,8 +677,15 @@ async fn stalled_front_writer_cannot_delay_hold_deadline_recovery() {
     // rather than auto-advancing the budget while the thread is scheduled.
     tokio::time::resume();
     let updater = r.updater.clone();
-    let work =
-        tokio::spawn(async move { updater.run_now(RunKind::Update, "latest", "operator").await });
+    let writer_gate = release.0.clone();
+    let work = tokio::spawn(async move {
+        // Mutation: recovery completion incorrectly waits for front publication.
+        let run = updater.run_now(RunKind::Update, "latest", "operator").await;
+        while !*writer_gate.0.lock().unwrap() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        run
+    });
     tokio::time::timeout(Duration::from_secs(3), entered.notified())
         .await
         .unwrap();
