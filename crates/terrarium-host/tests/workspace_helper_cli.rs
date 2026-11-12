@@ -19,7 +19,7 @@ fn version_matches_release_binary_version_ref_convention() {
     let out = helper(&["--version"]);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(
-        String::from_utf8(out.stdout).unwrap(),
+        std::str::from_utf8(&out.stdout).unwrap(),
         format!("terrarium-workspace-helper {}\n", terrarium_version::FULL)
     );
     assert!(out.stderr.is_empty(), "{out:?}");
