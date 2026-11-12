@@ -24,7 +24,7 @@ pub struct Directories {
 impl Roots {
     /// Parents must already exist with protected ancestors. No repair, chmod,
     /// symlink following or operational journal import is attempted.
-    pub fn open() -> Result<Self, Reply> {
+    pub fn open(source: &ProtectedRoot, controls: &[&ProtectedRoot]) -> Result<Self, Reply> {
         let roots = Self {
             publisher: ProtectedRoot::open(Path::new(
                 "/var/lib/terrarium-workspace-helper/publishers",
@@ -39,6 +39,9 @@ impl Roots {
             owner: 0,
         };
         roots.distinct()?;
+        let mut protected = vec![&roots.registration, &roots.bootstrap];
+        protected.extend_from_slice(controls);
+        super::confinement::validate(&[source, &roots.publisher, &roots.staging], &protected)?;
         Ok(roots)
     }
 
@@ -56,6 +59,12 @@ impl Roots {
                 return Err(Reply::Unauthorized);
             }
             identities.push(identity);
+        }
+        // Inode inequality alone does not reject ancestry or bind aliases.
+        let roots = [&self.publisher, &self.staging, &self.registration, &self.bootstrap];
+        for (i, root) in roots.iter().enumerate() {
+            let others: Vec<_> = roots.iter().enumerate().filter_map(|(j, other)| (i != j).then_some(*other)).collect();
+            super::confinement::validate(&[*root], &others)?;
         }
         Ok(())
     }
@@ -103,6 +112,25 @@ impl Roots {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
+impl Roots {
+    pub(super) fn fixture(dir: &Path) -> Self {
+        let make = |name: &str| {
+            let path = dir.join(name);
+            std::fs::create_dir(&path).unwrap();
+            ProtectedRoot::fixture(&path)
+        };
+        Self {
+            publisher: make("publisher"),
+            staging: make("staging"),
+            registration: make("registration"),
+            bootstrap: make("bootstrap"),
+            owner: nix::unistd::geteuid().as_raw(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -122,18 +150,7 @@ mod tests {
 
     fn fixture() -> (tempfile::TempDir, Roots) {
         let dir = tempfile::tempdir().unwrap();
-        let make = |name: &str| {
-            let path = dir.path().join(name);
-            std::fs::create_dir(&path).unwrap();
-            ProtectedRoot::fixture(&path)
-        };
-        let roots = Roots {
-            publisher: make("publisher"),
-            staging: make("staging"),
-            registration: make("registration"),
-            bootstrap: make("bootstrap"),
-            owner: nix::unistd::geteuid().as_raw(),
-        };
+        let roots = Roots::fixture(dir.path());
         (dir, roots)
     }
 
@@ -193,5 +210,15 @@ mod tests {
         )
         .unwrap();
         assert!(roots.begin(request()).is_err());
+    }
+
+    #[test]
+    fn nested_parent_is_not_mistaken_for_distinct_protected_storage() {
+        let (dir, mut roots) = fixture();
+        let nested = dir.path().join("publisher/nested");
+        std::fs::create_dir(&nested).unwrap();
+        roots.staging = ProtectedRoot::fixture(&nested);
+        assert!(roots.begin(request()).is_err());
+        assert_eq!(std::fs::read_dir(dir.path().join("bootstrap")).unwrap().count(), 0);
     }
 }

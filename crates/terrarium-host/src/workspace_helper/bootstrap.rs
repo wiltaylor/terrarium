@@ -11,7 +11,7 @@ pub trait Backend {
     /// Refuse existing children and runtimes, including apparently empty ones.
     /// This check is not ownership proof and must precede the initial intent.
     fn check_absent(&mut self, request: &Request) -> Result<(), Reply>;
-    fn create_scaffold(&mut self, request: &Request) -> Result<Scaffold, Reply>;
+    fn create_scaffold(&mut self, request: &Request, store: &Store) -> Result<Scaffold, Reply>;
     /// Create only, without starting. Return a verified full container ID.
     fn create_receiver(&mut self, request: &Request, scaffold: &Scaffold) -> Result<String, Reply>;
     /// Recheck scaffold identity, start the exact bound ID, and pin and verify
@@ -54,7 +54,7 @@ mod tests {
         fn check_absent(&mut self, _: &Request) -> Result<(), Reply> {
             Ok(())
         }
-        fn create_scaffold(&mut self, _: &Request) -> Result<Scaffold, Reply> {
+        fn create_scaffold(&mut self, _: &Request, _: &Store) -> Result<Scaffold, Reply> {
             self.action()?;
             Ok(Scaffold {
                 publisher: SourceIdentity {
@@ -111,6 +111,35 @@ mod tests {
     }
 
     #[test]
+    fn fresh_metadata_mints_only_one_create_continuation() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = super::super::registration_roots::Roots::fixture(dir.path());
+        let r = request();
+        let mut b = Bootstrap::allocate(&roots, r.clone(), Fake { calls: 0, fail: 0 }).unwrap();
+        assert!(Bootstrap::allocate(&roots, r.clone(), Fake { calls: 0, fail: 0 }).is_err());
+        b.create_prepared().unwrap();
+        assert_eq!(b.backend.calls, 4);
+        assert_eq!(b.create_prepared(), Err(Reply::Conflict));
+        b.retry(&r).unwrap();
+        assert_eq!(b.backend.calls, 4);
+    }
+
+    #[test]
+    fn recovered_initial_metadata_cannot_mint_a_create_continuation() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = super::super::registration_roots::Roots::fixture(dir.path());
+        let r = request();
+        drop(Bootstrap::allocate(&roots, r.clone(), Fake { calls: 0, fail: 0 }).unwrap());
+        assert!(Bootstrap::allocate(&roots, r.clone(), Fake { calls: 0, fail: 0 }).is_err());
+        let store = Store::fixture(&dir.path().join("bootstrap").join(r.registration.0.to_string())).unwrap();
+        let mut recovered = Bootstrap::new(store, Fake { calls: 0, fail: 0 });
+        assert_eq!(recovered.create_prepared(), Err(Reply::Conflict));
+        assert_eq!(recovered.retry(&r), Err(Reply::Quarantined));
+        assert_eq!(recovered.backend.calls, 0);
+        assert!(recovered.store.load_bootstrap().unwrap().quarantined());
+    }
+
+    #[test]
     fn every_external_failure_fences_without_replaying() {
         for fail in 1..=4 {
             let dir = tempfile::tempdir().unwrap();
@@ -153,6 +182,7 @@ pub struct Bootstrap<B> {
     store: Store,
     backend: B,
     fenced: bool,
+    prepared: Option<Request>,
 }
 
 impl<B: Backend> Bootstrap<B> {
@@ -161,7 +191,34 @@ impl<B: Backend> Bootstrap<B> {
             store,
             backend,
             fenced: false,
+            prepared: None,
         }
+    }
+
+    /// Mint a one-use continuation only for freshly allocated metadata. An
+    /// existing journal directory can never mint this token after a crash.
+    pub fn allocate(
+        roots: &super::registration_roots::Roots,
+        request: Request,
+        mut backend: B,
+    ) -> Result<Self, Reply> {
+        Journal::new(request.clone())?;
+        backend.check_absent(&request)?;
+        let store = roots.begin(request.clone())?;
+        Ok(Self { store, backend, fenced: false, prepared: Some(request) })
+    }
+
+    pub fn create_prepared(&mut self) -> Result<(), Reply> {
+        if self.fenced {
+            return Err(Reply::Quarantined);
+        }
+        let request = self.prepared.take().ok_or(Reply::Conflict)?;
+        self.fenced = true;
+        let journal = self.store.load_bootstrap()?;
+        if !journal.initial() || journal.original() != &request {
+            return Err(Reply::Quarantined);
+        }
+        self.execute(request, journal)
     }
 
     /// No automatic recovery adoption is implemented. A committed duplicate
@@ -191,12 +248,19 @@ impl<B: Backend> Bootstrap<B> {
         if self.fenced {
             return Err(Reply::Quarantined);
         }
-        let mut journal = Journal::new(request.clone())?;
+        if self.prepared.is_some() {
+            return Err(Reply::Conflict);
+        }
+        let journal = Journal::new(request.clone())?;
         self.backend.check_absent(&request)?;
         self.fenced = true;
         self.store.begin_bootstrap(&journal)?;
+        self.execute(request, journal)
+    }
+
+    fn execute(&mut self, request: Request, mut journal: Journal) -> Result<(), Reply> {
         let result = (|| {
-            let scaffold = self.backend.create_scaffold(&request)?;
+            let scaffold = self.backend.create_scaffold(&request, &self.store)?;
             self.advance(&mut journal, Step::ScaffoldVerified(scaffold.clone()))?;
             self.advance(&mut journal, Step::CreatePending)?;
             let container = self.backend.create_receiver(&request, &scaffold)?;
