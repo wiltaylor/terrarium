@@ -15,10 +15,9 @@
 //! (default `backup-key`: its `passphrase` field, else `value`). With no
 //! key the run fails.
 //!
-//! Each run verifies the new backup (every file against the manifest). A
-//! full backup that verifies prunes the dir: it keeps the newest
-//! `TERRARIUM_BACKUP_KEEP` full backups (default `4`) and their diffs.
-//! Nothing is deleted before a newer full backup is verified. Each run
+//! Each run verifies the new backup (every file against the manifest).
+//! Retention is owned by the updater: newest five plus one per UTC day
+//! for fourteen days, with update and recovery references protected. Each run
 //! writes an audit row and a `backup` event. The first failure of a
 //! streak and a missed run mail the operator.
 //!
@@ -74,6 +73,7 @@ pub struct Config {
     /// `None`: off.
     pub interval: Option<Duration>,
     pub full_every: Duration,
+    /// Legacy configuration, accepted but no longer used for deletion.
     pub keep: usize,
     pub work: bool,
     pub passphrase_file: Option<PathBuf>,
@@ -86,7 +86,7 @@ impl Default for Config {
         Self {
             interval: None,
             full_every: Duration::from_secs(7 * 86_400),
-            keep: 4,
+            keep: 5,
             work: false,
             passphrase_file: None,
             key_secret: DEFAULT_KEY_SECRET.to_owned(),
@@ -154,6 +154,11 @@ impl Config {
     }
 
     pub fn from_env() -> Result<Self, String> {
+        if std::env::var_os(ENV_KEEP).is_some() {
+            tracing::warn!(
+                "{ENV_KEEP} is ignored for deletion: updater retention keeps five plus fourteen daily backups"
+            );
+        }
         Self::parse(|k| std::env::var(k).ok())
     }
 }
@@ -723,7 +728,7 @@ async fn run_once(
         None,
     )
     .await;
-    let mut report = Report {
+    let report = Report {
         kind,
         name: Some(created.name.clone()),
         verified: true,
@@ -731,30 +736,8 @@ async fn run_once(
         error: None,
         mailed: false,
     };
-    if kind != Kind::Full {
-        return Ok(report);
-    }
-    let (keep, id) = (cfg.keep, verified.id.clone());
-    let removed = tokio::task::spawn_blocking(move || super::prune(&dir, keep, &id))
-        .await
-        .map_err(|e| (kind, format!("the prune task failed: {e}")))?
-        .map_err(|e| (kind, format!("cannot delete the old backups: {e:#}")))?;
-    if !removed.is_empty() {
-        tracing::info!(removed = ?removed, "old backups deleted");
-        record(
-            state,
-            "backup.prune",
-            json!({"removed": removed, "verified": verified.id}),
-            EventDraft::new(
-                EVENT,
-                format!("{} old backups deleted", removed.len()),
-                json!({"change": "pruned", "removed": removed, "verified": verified.id}),
-            ),
-            None,
-        )
-        .await;
-    }
-    report.removed = removed;
+    // The updater is the only deletion owner. create_held already requested
+    // retention. No updater, busy updater, or uncertain recovery means keep all.
     drop(held);
     Ok(report)
 }

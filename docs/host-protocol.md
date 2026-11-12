@@ -1,5 +1,29 @@
 # The host agent protocol
 
+## Windows run-as credentials
+
+`hello.capabilities.windows_run_as` defaults to `false`. A host may report
+`true` only when it implements Windows session logon. The daemon requires both
+`hello.os = "windows"` and this capability before opening or sending a run-as
+password. It rechecks the connected host under the session admission lock.
+
+For a target with `[windows_run_as]`, each `exec`, `cp_push`, or `cp_pull` control frame carries
+`"windows_run_as": {"account": "DOMAIN\\\\NAME", "password": "..."}`.
+The field is omitted for ordinary exec sessions and for older peers. The
+daemon resolves the configured login secret at session start, not at target
+load. The password is session input only. It must never enter logs, errors,
+audit details, events, API responses, transcripts, replay journals, or host
+configuration. Debug formatting redacts it. A host must not retain the
+password after logon or echo it in an error. Windows logon implementation
+is separate from this protocol addition. Current hosts advertise `false`
+and refuse an unexpected run-as request rather than run under their own user.
+
+Both daemon and host production subscribers cap WebSocket/HTTP transport
+dependencies at INFO, including their log-to-tracing bridge. This cap is
+independent of the environment filter: even a more-specific `RUST_LOG=trace`
+directive cannot enable frame payload dumps, which can contain recoverable
+password bytes in hexadecimal. Link keys cannot use a Windows run-as target.
+
 This document is the wire contract between the daemon (`terrariumd`) and the
 host agent (`terrarium-host`). It closes [PLAN §22](PLAN.md#22-open-items)
 item 4 (framing, reconnection, and the output buffer). The design is in

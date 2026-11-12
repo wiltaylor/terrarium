@@ -29,6 +29,7 @@ pub async fn detect_with(
     let display = crate::display::detect(display, docker.present, vmlab.present);
     limits.docker = docker.present;
     HostCapabilities {
+        windows_run_as: false,
         gpus: crate::gpu::sample().await.unwrap_or_default(),
         gpu_reservations: true,
         capacity: detect_capacity(Path::new("/proc")),

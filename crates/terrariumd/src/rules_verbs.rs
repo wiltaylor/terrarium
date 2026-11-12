@@ -785,6 +785,7 @@ fn job_queue(
 #[derive(Debug, Clone, Default)]
 pub struct BatchPick {
     /// The cards that the batch takes: board order, at most the limit.
+    /// Routing fields only, not rendered card details (`board::selection_cards`).
     pub cards: Vec<Card>,
     /// The cards of the column that wait for a batch (not held, no open
     /// job), apart from the limit.
@@ -825,15 +826,11 @@ pub fn pick_batch(
     from: &str,
     limit: Option<usize>,
 ) -> ApiResult<BatchPick> {
-    let board = board::get_board(conn, project)?;
+    let cards = board::selection_cards(conn, project, from)?;
     let mut out = BatchPick::default();
     // The cards that could go, with their repo, in board order.
     let mut ready: Vec<(&Card, String)> = Vec::new();
-    for c in board
-        .cards
-        .iter()
-        .filter(|c| c.column == from && c.kind != "group")
-    {
+    for c in &cards {
         if api_jobs::not_held(c).is_err() {
             out.left_out.push(json!({"card": c.id, "reason": "held"}));
             continue;

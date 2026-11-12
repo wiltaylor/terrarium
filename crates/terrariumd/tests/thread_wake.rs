@@ -56,7 +56,71 @@ async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl Fn
 }
 
 const BLOCKED_TURN: &str = "A card that this thread tracks went to blocked.";
-const REVIEW_TURN: &str = "All cards that this thread tracks are in review or later.";
+const REVIEW_TURN: &str =
+    "Ready to test: all linked cards are done and installed on this instance.";
+
+#[tokio::test]
+async fn test_request_waits_for_every_card_and_installation() {
+    let lab = lab().await;
+    let (tid, eph) = lab.started("consult", "Installed work only").await;
+    let a = lab.card("p", "First").await;
+    let b = lab.card("p", "Second").await;
+    lab.link(&tid, &format!("p:{a}")).await;
+    lab.link(&tid, &format!("p:{b}")).await;
+    lab.track(&eph, &tid).await;
+    lab.parked(&eph).await;
+    lab.mv(&a, "done", None).await;
+    lab.mv(&b, "review", None).await;
+    assert!(lab.wakes(&tid).await.is_empty());
+    let path = format!("/api/agents/{eph}/questions");
+    let body = json!({"thread": tid, "text": "Does it work?", "test_request": true});
+    let r = lab.td.post_as(&eph, &path, body.clone()).await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(r.body.to_string().contains(&b));
+    let key = b.clone();
+    state(&lab.td)
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "UPDATE cards SET labels = '[\"version:999.0.0\"]' WHERE id = ?1",
+                [&key],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    lab.mv(&b, "done", None).await;
+    assert!(lab.wakes(&tid).await.is_empty());
+    let r = lab.td.post_as(&eph, &path, body.clone()).await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(r.body.to_string().contains("not installed"));
+    let key = b.clone();
+    state(&lab.td)
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "UPDATE cards SET labels = '[\"version:0.0.0\"]' WHERE id = ?1",
+                [&key],
+            )?;
+            terrariumd::store::threads::poll_test_ready(t, "")?;
+            terrariumd::store::threads::poll_test_ready(t, "")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(lab.wakes(&tid).await, ["review"]);
+    lab.td.wait_status(&eph, "idle").await;
+    lab.post_as(&eph, &tid, "Installed, ready to test.").await;
+    lab.parked(&eph).await;
+    let more = lab.card("p", "Added after readiness").await;
+    lab.link(&tid, &format!("p:{more}")).await;
+    lab.mv(&more, "review", None).await;
+    assert_eq!(lab.wakes(&tid).await, ["review"]);
+    lab.mv(&more, "done", None).await;
+    assert_eq!(lab.wakes(&tid).await, ["review", "review"]);
+    let r = lab.td.post_as(&eph, &path, body).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+}
 
 #[tokio::test]
 async fn ops_monitor_gates_ready_and_wakes_on_green_and_red() {
@@ -112,7 +176,7 @@ async fn ops_monitor_gates_ready_and_wakes_on_green_and_red() {
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.body["monitor"], "p:health");
     lab.parked(&eph).await;
-    lab.mv(&card, "review", None).await;
+    lab.mv(&card, "done", None).await;
     assert!(lab.wakes(&tid).await.is_empty());
     for (status, expected) in [
         (Status::Crit, vec![]),
@@ -301,8 +365,8 @@ async fn card_moved_back_after_done_must_reach_review_again() {
     lab.parked(&eph).await;
     lab.mv(&card, "in_progress", None).await;
     assert_eq!(lab.wakes(&tid).await, ["review"]);
-    lab.mv(&card, "review", None).await;
-    assert_eq!(lab.wakes(&tid).await, ["review", "review"]);
+    lab.mv(&card, "done", None).await;
+    assert_eq!(lab.wakes(&tid).await, ["review"]);
 }
 
 async fn monitor_sample(lab: &Lab, monitor: &str, status: terrariumd::monitors::parse::Status) {
@@ -489,7 +553,7 @@ impl Lab {
                 eph,
                 &format!("/api/agents/{eph}/questions"),
                 json!({"text": "Does it work?", "options": ["works", "found an issue"],
-                       "thread": tid}),
+                       "thread": tid, "test_request": true}),
             )
             .await;
         assert_eq!(r.status, 201, "{}", r.body);
@@ -585,20 +649,22 @@ async fn a_thread_with_cards_of_two_projects_wakes_and_closes_after_works() {
 
     // Out of blocked, and one card in review: not all cards are in review.
     lab.mv(&qc, "in_progress", None).await;
-    lab.mv(&pc, "review", None).await;
+    lab.mv(&pc, "done", None).await;
     assert_eq!(lab.thread(&tid).await["status"], "tracking");
     // The last card reaches review: all are in review or later.
-    lab.mv(&qc, "review", None).await;
+    lab.mv(&qc, "done", None).await;
     assert_eq!(lab.thread(&tid).await["status"], "waiting_agent");
     let turn = lab.nth_prompt(&eph, &review, 1).await;
-    assert!(turn.contains(&format!("- p:{pc} [review]")), "{turn}");
-    assert!(turn.contains(&format!("- q:{qc} [review]")), "{turn}");
+    assert!(turn.contains(&format!("- p:{pc} [done]")), "{turn}");
+    assert!(turn.contains(&format!("- q:{qc} [done]")), "{turn}");
     assert!(turn.contains("found an issue"), "{turn}");
     lab.td.wait_status(&eph, "idle").await;
     assert_eq!(lab.wakes(&tid).await, ["blocked", "review"]);
 
     // A move between two columns of review or later wakes nothing more.
-    lab.mv(&pc, "merge_queue", None).await;
+    lab.mv(&pc, "review", None).await;
+    assert_eq!(lab.wakes(&tid).await, ["blocked", "review"]);
+    lab.mv(&pc, "done", None).await;
     assert_eq!(lab.wakes(&tid).await, ["blocked", "review"]);
 
     // The test loop (D5): the agent posts the test steps and asks; the
@@ -627,14 +693,14 @@ async fn a_thread_with_cards_of_two_projects_wakes_and_closes_after_works() {
     assert_eq!(lab.thread(&tid).await["cards"].as_array().unwrap().len(), 3);
     lab.mv(&bug, "in_progress", None).await;
     assert_eq!(lab.thread(&tid).await["status"], "tracking");
-    lab.mv(&bug, "review", None).await;
+    lab.mv(&bug, "done", None).await;
     assert_eq!(lab.thread(&tid).await["status"], "waiting_agent");
     let turn = lab.nth_prompt(&eph, &review, 2).await;
     assert!(
-        turn.contains(&format!("- p:{bug} [review] Cache page is empty")),
+        turn.contains(&format!("- p:{bug} [done] Cache page is empty")),
         "{turn}"
     );
-    assert!(turn.contains(&format!("- p:{pc} [merge_queue]")), "{turn}");
+    assert!(turn.contains(&format!("- p:{pc} [done]")), "{turn}");
     lab.td.wait_status(&eph, "idle").await;
     assert_eq!(lab.wakes(&tid).await, ["blocked", "review", "review"]);
 
@@ -677,9 +743,10 @@ async fn tracking_ready_cards_and_archiving_unfinished_cards_wake_review() {
         let (tid, eph) = lab.started("consult", "Ready work").await;
         let ready = lab.card("p", "Ready").await;
         lab.link(&tid, &format!("p:{ready}")).await;
-        lab.mv(&ready, "review", None).await;
+        lab.mv(&ready, "done", None).await;
         let dropped = if archive {
             let card = lab.card("p", "Dropped").await;
+            lab.mv(&card, "done", None).await;
             lab.link(&tid, &format!("p:{card}")).await;
             Some(card)
         } else {
@@ -691,7 +758,6 @@ async fn tracking_ready_cards_and_archiving_unfinished_cards_wake_review() {
             .await;
         assert_eq!(r.status, 200, "{}", r.body);
         if let Some(card) = dropped {
-            lab.parked(&eph).await;
             let r = lab.td.delete(&format!("/api/cards/{card}")).await;
             assert!(r.status.is_success(), "{} {}", r.status, r.body);
         }
@@ -728,7 +794,7 @@ async fn card_events_and_agent_replies_preserve_open_question_waits() {
         .clone();
     lab.parked(&eph).await;
     lab.mv(&card, "blocked", Some("Need a decision.")).await;
-    lab.mv(&card, "review", None).await;
+    lab.mv(&card, "done", None).await;
     assert_eq!(lab.thread(&tid).await["status"], "waiting_operator");
     assert!(lab.wakes(&tid).await.is_empty());
     let th = lab
@@ -763,7 +829,7 @@ async fn only_a_thread_that_tracks_wakes_on_its_cards() {
     assert_eq!(th["status"], "waiting_operator");
     lab.parked(&eph).await;
     lab.mv(&pc, "blocked", Some("Stuck.")).await;
-    lab.mv(&pc, "review", None).await;
+    lab.mv(&pc, "done", None).await;
     assert!(lab.wakes(&tid).await.is_empty());
     assert_eq!(lab.thread(&tid).await["status"], "waiting_operator");
     assert!(
@@ -776,13 +842,14 @@ async fn only_a_thread_that_tracks_wakes_on_its_cards() {
     let (t2, e2) = lab.started("consult", "Archived").await;
     let a = lab.card("p", "Dropped").await;
     let b = lab.card("p", "Kept").await;
+    lab.mv(&a, "done", None).await;
     lab.link(&t2, &format!("p:{a}")).await;
     lab.link(&t2, &format!("p:{b}")).await;
     lab.track(&e2, &t2).await;
     lab.parked(&e2).await;
     let r = lab.td.delete(&format!("/api/cards/{a}")).await;
     assert!(r.status.is_success(), "{} {}", r.status, r.body);
-    lab.mv(&b, "review", None).await;
+    lab.mv(&b, "done", None).await;
     assert_eq!(lab.wakes(&t2).await, ["review"]);
     let turn = lab
         .nth_prompt(&e2, &format!("[Thread:{t2}] {REVIEW_TURN}"), 1)

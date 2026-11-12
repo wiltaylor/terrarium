@@ -41,6 +41,7 @@ pub mod display;
 pub mod docker;
 pub mod labcheck;
 pub mod limits;
+pub mod logging;
 pub mod metrics;
 pub mod native;
 pub mod outbox;
@@ -53,6 +54,8 @@ pub mod transfer;
 pub mod verb;
 pub mod vmlab;
 pub mod workspace;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub mod workspace_helper;
 
 pub use client::{Client, ClientOptions, SelfUpdateOptions};
 pub use config::{Config, HostPaths};
