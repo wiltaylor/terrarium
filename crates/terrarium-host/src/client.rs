@@ -647,6 +647,17 @@ impl Client {
         )
         .await
         .map_err(|_| ClientError::Timeout("connect"))??;
+        self.serve_connection(ws).await
+    }
+
+    async fn serve_connection<W>(&self, ws: W) -> Result<(), ClientError>
+    where
+        W: futures_util::Sink<Message, Error = tungstenite::Error>
+            + futures_util::Stream<Item = Result<Message, tungstenite::Error>>
+            + Unpin
+            + Send
+            + 'static,
+    {
         let (mut sink, mut stream) = ws.split();
 
         let hello = HostFrame::Hello(Box::new(self.hello().await));
@@ -724,6 +735,7 @@ impl Client {
         let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + hb, hb);
         let mut last_rx = Instant::now();
         let mut nonce = 0u64;
+        let mut writer_joined = false;
         let result = loop {
             tokio::select! {
                 msg = stream.next() => {
@@ -747,7 +759,10 @@ impl Client {
                     nonce += 1;
                     let _ = tx.send(Outgoing::Control(HostFrame::Ping { nonce }));
                 }
-                _ = &mut writer => break Ok(()),
+                _ = &mut writer => {
+                    writer_joined = true;
+                    break Ok(());
+                },
             }
         };
         if let Some(t) = sampler {
@@ -755,10 +770,12 @@ impl Client {
         }
         self.detach_all();
         drop(tx);
-        // Give the writer a moment to flush a close, then stop it.
-        if tokio::time::timeout(Duration::from_millis(200), &mut writer)
-            .await
-            .is_err()
+        // A JoinHandle consumed by select! must not be polled again.
+        // Otherwise give the writer a moment to flush a close, then stop it.
+        if !writer_joined
+            && tokio::time::timeout(Duration::from_millis(200), &mut writer)
+                .await
+                .is_err()
         {
             writer.abort();
         }
@@ -1720,6 +1737,91 @@ pub fn ensure_crypto_provider() {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    // Keep the read side open forever after Welcome while the first
+    // heartbeat write fails. A real socket close races the reader instead.
+    struct WriterFirstDaemon {
+        welcome: Option<Message>,
+        writes: usize,
+    }
+
+    impl futures_util::Stream for WriterFirstDaemon {
+        type Item = Result<Message, tungstenite::Error>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            match self.welcome.take() {
+                Some(welcome) => std::task::Poll::Ready(Some(Ok(welcome))),
+                None => std::task::Poll::Pending,
+            }
+        }
+    }
+
+    impl futures_util::Sink<Message> for WriterFirstDaemon {
+        type Error = tungstenite::Error;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn start_send(
+            mut self: std::pin::Pin<&mut Self>,
+            item: Message,
+        ) -> Result<(), Self::Error> {
+            self.writes += 1;
+            let Message::Text(text) = item else {
+                panic!("expected control frame");
+            };
+            match decode_control::<HostFrame>(&text).unwrap() {
+                HostFrame::Hello(_) if self.writes == 1 => Ok(()),
+                HostFrame::Ping { .. } => Err(tungstenite::Error::ConnectionClosed),
+                other => panic!("unexpected frame: {other:?}"),
+            }
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn writer_finishes_first_connection_returns_ok_and_can_reconnect() {
+        let client = Client::new(ClientOptions::new("ws://localhost", "test", "test"));
+        for _ in 0..2 {
+            let welcome = DaemonFrame::Welcome(Welcome {
+                host_id: "test".into(),
+                heartbeat_secs: 1,
+                resume_token: "resume".into(),
+                resume: vec![],
+                token: None,
+                metrics: false,
+                update: None,
+            });
+            let daemon = WriterFirstDaemon {
+                welcome: Some(Message::Text(encode_control(&welcome).unwrap().into())),
+                writes: 0,
+            };
+            tokio::time::timeout(Duration::from_secs(5), client.serve_connection(daemon))
+                .await
+                .expect("writer completion must end the connection")
+                .expect("writer-first disconnect is reconnectable");
+        }
+    }
 
     #[tokio::test]
     async fn staged_update_drain_expires_reopens_and_retries_without_discarding_stage() {

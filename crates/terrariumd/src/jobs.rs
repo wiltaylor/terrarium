@@ -3781,14 +3781,29 @@ pub(crate) async fn target_write_pause(name: &str) {
     }
 }
 
-/// The env names that `release_secrets` may set (TER-623): the secrets of
-/// `scripts/release.py`, and no other name.
-pub const RELEASE_SECRET_ENV: &[&str] = &[
-    "GHCR_TOKEN",
-    "GH_TOKEN",
-    "COSIGN_PRIVATE_KEY",
-    "COSIGN_PASSWORD",
-];
+/// Release secrets must not steer the executor or overwrite recipe metadata.
+fn check_release_env_name(name: &str) -> ApiResult<()> {
+    let mut bytes = name.bytes();
+    if name.len() > 64
+        || !bytes.next().is_some_and(|b| b.is_ascii_uppercase())
+        || !bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+    {
+        return Err(ApiError::invalid(
+            "release_secrets names must match ^[A-Z][A-Z0-9_]{0,63}$",
+        ));
+    }
+    if terrarium_core::env_deny::denied(name)
+        || ["DOCKER_RELEASE_KEY", "DOCKER_HOST", "DOCKER_CONFIG"].contains(&name)
+        || ["DYLD_", "DOCKER_CI_", "RUST", "JUST_"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+    {
+        return Err(ApiError::invalid(
+            "release_secrets names must not override job or tool environment variables",
+        ));
+    }
+    Ok(())
+}
 
 /// The env name under which the release VM key is resolved. The daemon
 /// uses it for the tunnel; it is never recipe env.
@@ -3885,13 +3900,7 @@ fn check_release_refs(delivery: &DeliveryDef) -> ApiResult<()> {
         ));
     }
     for (name, value) in &delivery.release_secrets {
-        secrets::grants::check_env_name(name)?;
-        if !RELEASE_SECRET_ENV.contains(&name.as_str()) {
-            return Err(ApiError::invalid(format!(
-                "release_secrets sets only {}, not `{name}`",
-                RELEASE_SECRET_ENV.join(", ")
-            )));
-        }
+        check_release_env_name(name)?;
         if !value.starts_with(secrets::run_env::REF_PREFIX) {
             return Err(ApiError::invalid(format!(
                 "release_secrets `{name}` must be an @secret reference"
