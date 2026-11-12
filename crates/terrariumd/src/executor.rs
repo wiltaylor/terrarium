@@ -551,8 +551,23 @@ fn valid_env_key(k: &str) -> bool {
         && c.all(|x| x.is_ascii_alphanumeric() || x == '_')
 }
 
+pub(crate) fn path_kind(state: &Shared, def: &TargetDef) -> terrarium_host::protocol::PathKind {
+    if def.kind == TargetKind::Host {
+        def.host
+            .as_deref()
+            .map(|h| state.executor.hosts.path_kind(h))
+            .unwrap_or_default()
+    } else {
+        terrarium_host::protocol::PathKind::Posix
+    }
+}
+
 impl RemoteCmd {
     fn check(&self) -> ApiResult<()> {
+        self.check_paths(terrarium_host::protocol::PathKind::Posix)
+    }
+
+    fn check_paths(&self, kind: terrarium_host::protocol::PathKind) -> ApiResult<()> {
         if self.argv.is_empty() && !self.shell {
             return Err(ApiError::invalid("`cmd` is empty; name a program"));
         }
@@ -560,7 +575,7 @@ impl RemoteCmd {
             return Err(ApiError::invalid(format!("bad env name `{k}`")));
         }
         if let Some(c) = &self.cwd
-            && !c.starts_with('/')
+            && kind.key(c).is_none()
         {
             return Err(ApiError::invalid(format!(
                 "`cwd` must be an absolute path, not `{c}`"
@@ -724,8 +739,24 @@ pub fn host_frame(
     cmd: &RemoteCmd,
     limits: Option<ExecLimits>,
 ) -> ApiResult<impl FnOnce(u32) -> DaemonFrame + use<>> {
+    host_frame_paths(
+        def,
+        shell,
+        cmd,
+        limits,
+        terrarium_host::protocol::PathKind::Posix,
+    )
+}
+
+fn host_frame_paths(
+    def: &TargetDef,
+    shell: Option<&str>,
+    cmd: &RemoteCmd,
+    limits: Option<ExecLimits>,
+    kind: terrarium_host::protocol::PathKind,
+) -> ApiResult<impl FnOnce(u32) -> DaemonFrame + use<>> {
     no_exec(def)?;
-    cmd.check()?;
+    cmd.check_paths(kind)?;
     let def = def.clone();
     let cmd = cmd.clone();
     let shell = shell.unwrap_or("/bin/sh").to_owned();
@@ -1971,7 +2002,7 @@ pub(crate) fn start_cmd_locked(
                 native.prepare_root = cmd.prepare_root.clone();
             }
             let shell = caps.and_then(|c| c.shell);
-            let make = host_frame(def, shell.as_deref(), cmd, limits)?;
+            let make = host_frame_paths(def, shell.as_deref(), cmd, limits, path_kind(state, def))?;
             Ok(pump_host(ex.hosts.open_bound(
                 host,
                 cmd.resume_key.as_deref(),
@@ -2033,7 +2064,7 @@ pub(crate) fn start_resource_cleanup(
         .hosts
         .capabilities(host)
         .and_then(|c| c.shell);
-    let make = host_frame(def, shell.as_deref(), cmd, None)?;
+    let make = host_frame_paths(def, shell.as_deref(), cmd, None, path_kind(state, def))?;
     Ok(pump_host(state.executor.hosts.open(host, make)?))
 }
 
@@ -2232,7 +2263,7 @@ async fn start_exec_secrets(
         cmd.env.insert("TERRARIUM_GIT_TRAILERS".into(), p.trailers);
         cmd.env.remove("TERRARIUM_GIT_TRAILERS_FILE");
     }
-    cmd.check()?;
+    cmd.check_paths(path_kind(state, &def))?;
     let sync = workspace_sync::prepare(
         state,
         actor,
@@ -2699,7 +2730,7 @@ pub async fn start_cp(
     mut body: CpBody,
 ) -> ApiResult<Arc<ExecSession>> {
     let row = usable(state, actor, name).await?;
-    if !body.path.starts_with('/') || body.path.split('/').any(|c| c == "..") {
+    if path_kind(state, &row.def).key(&body.path).is_none() {
         return Err(ApiError::invalid(format!(
             "`path` must be absolute and without `..`, not `{}`",
             body.path
@@ -2708,6 +2739,17 @@ pub async fn start_cp(
     check_cap(state, actor)?;
     no_exec(&row.def)?;
     let def = resolved_def(state, &row, Some(actor), body.agent.as_deref()).await?;
+    if path_kind(state, &def) == terrarium_host::protocol::PathKind::Windows
+        && let Some(a) = actor.agent()
+    {
+        let kind = path_kind(state, &def);
+        let root = kind
+            .workspace(&a.project, &a.name)
+            .ok_or_else(|| ApiError::invalid("invalid Windows workspace name"))?;
+        if !kind.inside(&root, &body.path, true) {
+            return Err(ApiError::invalid(format!("path must be inside {root}")));
+        }
+    }
     let sync = workspace_sync::prepare(
         state,
         actor,

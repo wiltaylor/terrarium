@@ -226,6 +226,7 @@ struct SavedHost {
 /// The live state of a host, from its last `hello`.
 #[derive(Debug, Clone, Serialize)]
 pub struct LiveInfo {
+    pub path_kind: terrarium_host::protocol::PathKind,
     pub host_id: String,
     pub version: String,
     pub os: String,
@@ -831,6 +832,14 @@ impl HostRegistry {
         })
     }
 
+    /// Native path syntax from the last hello. Container paths stay POSIX.
+    pub fn path_kind(&self, host: &str) -> terrarium_host::protocol::PathKind {
+        self.lock()
+            .get(host)
+            .and_then(|e| e.info.as_ref().map(|i| i.path_kind))
+            .unwrap_or_default()
+    }
+
     fn send(&self, host: &str, out: Outgoing) -> bool {
         match self.lock().get(host).and_then(|e| e.conn.clone()) {
             Some(c) => c.tx.send(out).is_ok(),
@@ -986,6 +995,7 @@ impl HostRegistry {
             os: hello.os.clone(),
             arch: hello.arch.clone(),
             capabilities: hello.capabilities.clone(),
+            path_kind: hello.path_kind,
             max_sessions: hello.max_sessions,
             max_running_targets: hello.max_running_targets,
             connected_at: crate::db::now(),
@@ -2420,6 +2430,7 @@ mod tests {
             .unwrap();
         let id = session.id();
         let hello = Hello {
+            path_kind: terrarium_host::protocol::PathKind::Posix,
             protocol: 1,
             host: "lab1".into(),
             version: "test".into(),

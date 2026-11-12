@@ -462,6 +462,11 @@ impl Client {
             Resume { token, sessions }
         });
         Hello {
+            path_kind: if cfg!(windows) {
+                crate::protocol::PathKind::Windows
+            } else {
+                crate::protocol::PathKind::Posix
+            },
             protocol: PROTOCOL_VERSION,
             host: self.opts.name.clone(),
             version: self.opts.version.clone(),

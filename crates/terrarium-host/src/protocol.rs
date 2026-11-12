@@ -14,6 +14,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+mod path;
+pub use path::PathKind;
+
 pub use terrarium_core::display::{DisplayOp, DisplayProtocol};
 pub use terrarium_core::limits::{Limits, LimitsCapability};
 pub use terrarium_core::protocol::{
@@ -163,6 +166,10 @@ impl Default for PtySize {
 /// The first frame on every connection, host to daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
+    /// Path syntax for native exec, copy and workspace paths. Container paths
+    /// remain POSIX. Older hosts default to POSIX.
+    #[serde(default)]
+    pub path_kind: PathKind,
     pub protocol: u32,
     /// The host agent's name, as targets refer to it.
     pub host: String,
@@ -1403,6 +1410,7 @@ mod tests {
     #[test]
     fn host_frames_round_trip() {
         let hello = HostFrame::Hello(Box::new(Hello {
+            path_kind: PathKind::Posix,
             protocol: PROTOCOL_VERSION,
             host: "lab1".into(),
             version: "0.1.0".into(),
