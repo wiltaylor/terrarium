@@ -188,6 +188,11 @@ pub enum Command {
         #[command(subcommand)]
         command: DashboardCmd,
     },
+    /// Custom project pages and their widget layouts
+    Page {
+        #[command(subcommand)]
+        command: PageCmd,
+    },
     /// Pipelines: the CI/CD runs of the project (GitHub Actions, or a
     /// script for any other system), polled on a schedule
     #[command(visible_alias = "pipelines")]
@@ -2606,6 +2611,22 @@ pub enum DashboardCmd {
         #[arg(long)]
         from_file: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PageCmd {
+    /// List the project pages in tab order
+    Ls,
+    /// Show a page and its widgets
+    Show { slug: String },
+    /// Create or replace a page from JSON (`-` reads stdin)
+    Set {
+        slug: String,
+        #[arg(long)]
+        from_file: String,
+    },
+    /// Delete a page
+    Rm { slug: String },
 }
 
 #[derive(Debug, Subcommand)]

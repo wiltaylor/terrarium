@@ -16,6 +16,7 @@ pub mod jobs;
 pub mod knowledge;
 pub mod mail;
 pub mod monitors;
+pub mod pages;
 pub mod pipelines;
 pub mod projects;
 pub mod questions;
@@ -114,6 +115,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Test { command } => test_runs::test(ctx, command).await,
         Command::Monitor { command } => monitors::monitor(ctx, command).await,
         Command::Dashboard { command } => monitors::dashboard(ctx, command).await,
+        Command::Page { command } => pages::run(ctx, command).await,
         Command::Pipeline { command } => pipelines::pipeline(ctx, command).await,
         Command::Calendar { command } => calendar::calendar(ctx, command).await,
         Command::Version => system::version(ctx).await,

@@ -11300,7 +11300,9 @@ The daemon stores cells, not pixel heights.
 
 Kinds are `markdown`, `wiki`, `stat`, `status`, `chart`, `text`, `table`.
 Markdown requires `text` (at most 16384 UTF-8 bytes). Wiki requires `wiki`,
-a wiki slug in this project, never a project-qualified path. Missing wiki
+a wiki path in this project (up to 256 bytes, slash-separated 1–64 character
+ASCII alphanumeric, hyphen or underscore segments). It is always resolved
+relative to this project, never another project. Missing wiki
 pages remain valid references so clients can show “page not found”. Monitor
 kinds require `monitor`, an existing monitor ID in this project compatible
 with the block kind, and accept dashboard `options` (§30.4). Other source

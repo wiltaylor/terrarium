@@ -24,6 +24,7 @@ mod longpoll;
 pub(crate) mod mail;
 mod memory;
 mod monitors;
+mod pages;
 mod pins;
 mod pipelines;
 mod preferences;
@@ -388,6 +389,7 @@ fn routes_with_registry(
         .merge(artifacts::routes())
         .merge(test_runs::routes())
         .merge(monitors::routes())
+        .merge(pages::routes())
         .merge(pipelines::routes())
         .merge(calendar::routes())
         .merge(pins::routes())

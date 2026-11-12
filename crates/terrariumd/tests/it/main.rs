@@ -3,6 +3,7 @@
 
 mod board_summary_growth;
 mod card_waits;
+mod pages;
 #[path = "../common/mod.rs"]
 mod common;
 mod exedev;
