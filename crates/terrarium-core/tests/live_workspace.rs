@@ -317,16 +317,31 @@ fn recovery_requires_exact_revoke_tombstone_history() {
     for mutation in 0..4 {
         let mut recovered: Journal = serde_json::from_slice(&encoded).unwrap();
         match mutation {
-            0 => { recovered.tombstones.remove(&attachment); }
-            1 => { recovered.tombstones.insert(attachment, 2); }
-            2 => { recovered.tombstones.insert(AttachmentId(Ulid::from(999)), 1); }
-            _ => { recovered.operations.clear(); recovered.last_contiguous_revision = 0; }
+            0 => {
+                recovered.tombstones.remove(&attachment);
+            }
+            1 => {
+                recovered.tombstones.insert(attachment, 2);
+            }
+            2 => {
+                recovered
+                    .tombstones
+                    .insert(AttachmentId(Ulid::from(999)), 1);
+            }
+            _ => {
+                recovered.operations.clear();
+                recovered.last_contiguous_revision = 0;
+            }
         }
         // Simulate loading the altered durable journal, not just live mutation.
-        let mut recovered: Journal = serde_json::from_slice(&serde_json::to_vec(&recovered).unwrap()).unwrap();
+        let mut recovered: Journal =
+            serde_json::from_slice(&serde_json::to_vec(&recovered).unwrap()).unwrap();
         recovered.recover_without_evidence();
         assert!(recovered.quarantined, "mutation {mutation}");
-        assert_eq!(recovered.prepare(envelope(2, Kind::Grant)), Err(Reply::Quarantined));
+        assert_eq!(
+            recovered.prepare(envelope(2, Kind::Grant)),
+            Err(Reply::Quarantined)
+        );
     }
     j.recover_without_evidence();
     assert!(!j.quarantined);
@@ -343,18 +358,38 @@ fn recovery_requires_exact_revoke_tombstone_history() {
 #[test]
 fn all_illegal_phase_pairs_reject_without_mutation() {
     use Phase::*;
-    let phases = [Prepared, Staged, StageVerified, Published,
-        OrdinaryUnmountObserved, LazyDetachObserved, PlaceholderRemoved, Verified, Committed];
-    let grant_edges = [(Prepared, Staged), (Staged, StageVerified),
-        (StageVerified, Published), (Published, Verified)];
-    let revoke_edges = [(Prepared, OrdinaryUnmountObserved),
+    let phases = [
+        Prepared,
+        Staged,
+        StageVerified,
+        Published,
+        OrdinaryUnmountObserved,
+        LazyDetachObserved,
+        PlaceholderRemoved,
+        Verified,
+        Committed,
+    ];
+    let grant_edges = [
+        (Prepared, Staged),
+        (Staged, StageVerified),
+        (StageVerified, Published),
+        (Published, Verified),
+    ];
+    let revoke_edges = [
+        (Prepared, OrdinaryUnmountObserved),
         (OrdinaryUnmountObserved, LazyDetachObserved),
         (OrdinaryUnmountObserved, PlaceholderRemoved),
-        (LazyDetachObserved, PlaceholderRemoved), (PlaceholderRemoved, Verified)];
+        (LazyDetachObserved, PlaceholderRemoved),
+        (PlaceholderRemoved, Verified),
+    ];
     for (kind, delivery, legal) in [
         (Kind::Grant, Delivery::Apply, grant_edges.as_slice()),
         (Kind::Revoke, Delivery::Apply, revoke_edges.as_slice()),
-        (Kind::Grant, Delivery::Superseded, &[(Prepared, Verified)][..]),
+        (
+            Kind::Grant,
+            Delivery::Superseded,
+            &[(Prepared, Verified)][..],
+        ),
     ] {
         for &from in &phases {
             for &to in &phases {
@@ -369,7 +404,11 @@ fn all_illegal_phase_pairs_reject_without_mutation() {
                     assert_eq!(result, Ok(()), "{kind:?}/{delivery:?}: {from:?} -> {to:?}");
                     assert_eq!(j.operations[&e.original.operation].phase, to);
                 } else {
-                    assert_eq!(result, Err(Reply::Failed), "{kind:?}/{delivery:?}: {from:?} -> {to:?}");
+                    assert_eq!(
+                        result,
+                        Err(Reply::Failed),
+                        "{kind:?}/{delivery:?}: {from:?} -> {to:?}"
+                    );
                     assert_eq!(j, before, "refused transition mutated journal");
                 }
             }

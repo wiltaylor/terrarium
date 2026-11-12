@@ -8,17 +8,34 @@ const SCHEMA: &str = include_str!("../../migrations/ter-924-live-workspace.sql")
 fn daemon_connections_enable_recursive_triggers() {
     let dir = tempfile::tempdir().unwrap();
     let c = terrariumd::db::open(&dir.path().join("daemon.sqlite")).unwrap();
-    assert_eq!(c.pragma_query_value(None, "recursive_triggers", |r| r.get::<_, u32>(0)).unwrap(), 1);
+    assert_eq!(
+        c.pragma_query_value(None, "recursive_triggers", |r| r.get::<_, u32>(0))
+            .unwrap(),
+        1
+    );
 }
 
 fn snapshot(c: &Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
-    ["live_workspaces", "workspace_reservations", "live_workspace_targets",
-        "live_workspace_attachments", "live_workspace_operations"].iter().map(|table| {
-        let mut statement = c.prepare(&format!("SELECT * FROM {table} ORDER BY 1")).unwrap();
+    [
+        "live_workspaces",
+        "workspace_reservations",
+        "live_workspace_targets",
+        "live_workspace_attachments",
+        "live_workspace_operations",
+    ]
+    .iter()
+    .map(|table| {
+        let mut statement = c
+            .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
+            .unwrap();
         let columns = statement.column_count();
-        statement.query_map([], |row| (0..columns).map(|n| row.get(n)).collect())
-            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
-    }).collect()
+        statement
+            .query_map([], |row| (0..columns).map(|n| row.get(n)).collect())
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    })
+    .collect()
 }
 
 #[test]
@@ -26,7 +43,8 @@ fn replace_and_upsert_cannot_erase_seals_or_history() {
     for recursive in [false, true] {
         let c = Connection::open_in_memory().unwrap();
         c.pragma_update(None, "foreign_keys", true).unwrap();
-        c.pragma_update(None, "recursive_triggers", recursive).unwrap();
+        c.pragma_update(None, "recursive_triggers", recursive)
+            .unwrap();
         seed(&c);
         c.execute_batch("INSERT INTO workspace_reservations VALUES ('w', 'domain', 'r1', 'sandbox');
             INSERT INTO live_workspace_attachments VALUES ('attachment', 'w', 'r1', 'agent-ulid', 'attached_verified', NULL);
@@ -57,7 +75,10 @@ fn replace_and_upsert_cannot_erase_seals_or_history() {
                 "INSERT OR REPLACE INTO live_workspace_targets SELECT registration_id, host_id, target_id, 'foreign', runtime_id, container_id, namespace_dev, namespace_ino, activation, state, last_contiguous_revision, allocated_revision FROM live_workspace_targets WHERE registration_id = 'r1'",
                 "INSERT INTO live_workspace_targets SELECT * FROM live_workspace_targets WHERE registration_id = 'r1' ON CONFLICT(registration_id) DO UPDATE SET trust_domain_id = 'foreign'",
             ] {
-                assert!(c.execute_batch(sql).is_err(), "recursive={recursive}, revoked={revoked}: {sql}");
+                assert!(
+                    c.execute_batch(sql).is_err(),
+                    "recursive={recursive}, revoked={revoked}: {sql}"
+                );
                 assert_eq!(snapshot(&c), before, "failed insert changed history: {sql}");
             }
         }
