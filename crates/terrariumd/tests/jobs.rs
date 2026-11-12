@@ -2652,15 +2652,15 @@ async fn the_host_cap_holds_across_projects_in_order() {
         .err(422, "invalid");
     let r = lab
         .td
-        .put("/api/job-hosts/lab1", json!({"heavy_jobs": 1}))
+        .put("/api/job-hosts/lab1", json!({"heavy_jobs": 2}))
         .await;
     assert_eq!(r.ok()["hosts"][0]["host"], host_id, "{}", r.body);
-    assert_eq!(r.ok()["hosts"][0]["heavy_jobs"], 1, "{}", r.body);
+    assert_eq!(r.ok()["hosts"][0]["heavy_jobs"], 2, "{}", r.body);
     let audit = lab
         .td
         .get("/api/audit?action=job.host_cap&order=desc")
         .await;
-    assert_eq!(audit.ok()[0]["detail"]["new"], 1, "{}", audit.body);
+    assert_eq!(audit.ok()[0]["detail"]["new"], 2, "{}", audit.body);
 
     // Queue p, q, p, q: the operator queues (a project admin of both).
     let mut cards = Vec::new();
@@ -2685,7 +2685,7 @@ async fn the_host_cap_holds_across_projects_in_order() {
             .await;
         assert_eq!(r.status, 201, "{}", r.body);
         assert_eq!(r.body["queue"]["host"]["host"], host_id, "{}", r.body);
-        assert_eq!(r.body["queue"]["host"]["heavy_jobs"], 1, "{}", r.body);
+        assert_eq!(r.body["queue"]["host"]["heavy_jobs"], 2, "{}", r.body);
         cards.push(id);
     }
 
