@@ -3137,8 +3137,8 @@ mod tests {
             // With only one queued row, SQLite may prefer the other
             // state-leading index and sort that one row. Both bound the
             // read to this state instead of scanning completed history.
-            let state_index = plan.contains(index)
-                || (state == "queued" && plan.contains("jobs_state_started"));
+            let state_index =
+                plan.contains(index) || (state == "queued" && plan.contains("jobs_state_started"));
             assert!(state_index && plan.contains("state=?"), "{plan}");
             assert!(!plan.contains("SCAN jobs"), "{plan}");
         }
