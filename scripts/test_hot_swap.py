@@ -136,6 +136,36 @@ class HotSwapTests(unittest.TestCase):
         self.assertFalse(probation.exists())
         self.assertFalse(Path(backup + ".hot-swap.sqlite").exists())
 
+    def test_recreate_transaction_restores_post_zip_write_and_releases_snapshot(self):
+        HOT.main(["init"])
+        root = self.state / "releases"
+        # A completed previous hot swap must not poison the new transaction.
+        HOT.record(root, phase="committed", admission_attempted=True)
+        db = self.state / "terrarium.db"
+        with sqlite3.connect(db) as conn:
+            conn.execute("CREATE TABLE journal(value TEXT)")
+            conn.execute("INSERT INTO journal VALUES ('before-zip')")
+        zip_db = self.state / "online-copy.sqlite"
+        with sqlite3.connect(db) as src, sqlite3.connect(zip_db) as dst:
+            src.backup(dst)
+        with sqlite3.connect(db) as conn:
+            conn.execute("INSERT INTO journal VALUES ('after-zip-before-drain')")
+        HOT.main(["begin", "a" * 64])
+        backup = str(self.state / "pre-recreate.zip")
+        started = time.monotonic()
+        HOT.main(["snapshot", backup])
+        with sqlite3.connect(db) as conn:
+            conn.execute("DELETE FROM journal")
+        HOT.main(["restore-database", backup])
+        with sqlite3.connect(db) as conn:
+            self.assertEqual(conn.execute("SELECT value FROM journal ORDER BY value").fetchall(),
+                             [("after-zip-before-drain",), ("before-zip",)])
+        self.assertLess(time.monotonic() - started, 5)
+        HOT.main(["commit", backup])
+        self.assertFalse(Path(backup + ".hot-swap.sqlite").exists())
+        self.assertEqual(HOT.transaction(root)["phase"], "rolled_back")
+        self.assertTrue(HOT.transaction(root)["admission_attempted"])
+
     def test_release_path_cannot_escape_volume(self):
         with self.assertRaises(ValueError):
             HOT.select(self.state, self.path)

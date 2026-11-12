@@ -10,10 +10,12 @@
 //!    `off` skips it, and the step says so.
 //! 4. `pull`: the image by digest. Before the drain, so that a slow or
 //!    failed pull does not stop work.
-//! 5. `drain`: `terrarium admin update drain` in the container: no new
+//! 5. Supervised recreate: online `backup` before either drain. Legacy
+//!    sources retain the full backup after drain (recorded in history).
+//! 6. `drain`: `terrarium admin update drain` in the container: no new
 //!    turns; the running turns get [`Config::drain_wait`] to end.
-//! 6. `backup`: `terrariumd backup create` in the container (a full
-//!    backup). Migrations only go forward, so the way back needs it.
+//!    Supervised sources then pause and take an exact SQLite snapshot for
+//!    automatic rollback. The ZIP is the manual restore point.
 //! 7. `stop`, then `remove`, then `start`: a new container with the same
 //!    settings and the new image.
 //! 8. `health`: the health check passes and `terrarium daemon status`
@@ -60,6 +62,8 @@ pub const DEFAULT_REPOSITORY: &str = "ghcr.io/wiltaylor/terrarium";
 const HOT_SWAP_HOLD_LIMIT: Duration = Duration::from_secs(900);
 const HOT_SWAP_RECOVERY_RESERVE: Duration = Duration::from_secs(60);
 const HOT_SWAP_STOP_RESERVE: Duration = Duration::from_secs(5);
+// Helper termination belongs to recovery, never to the final daemon stop.
+const HELPER_TERMINATION_RESERVE: Duration = Duration::from_secs(5);
 
 async fn recovery_before_deadline<T>(
     deadline: tokio::time::Instant,
@@ -196,6 +200,7 @@ pub struct Updater {
     registry: Arc<dyn Registry>,
     verifier: Arc<dyn Verifier>,
     store: Store,
+    front: tokio::sync::watch::Sender<Option<Run>>,
     cfg: Config,
     /// The run in progress, with its steps so far.
     running: Mutex<Option<Run>>,
@@ -205,8 +210,36 @@ pub struct Updater {
     hot_budget: (Duration, Duration, Duration),
 }
 
+#[derive(Default)]
+struct Replacement {
+    deadline: Option<tokio::time::Instant>,
+    admission_attempted: bool,
+    helper: Option<String>,
+}
+
 fn now() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+type FrontWriter = Arc<dyn Fn(&Run) -> std::io::Result<()> + Send + Sync>;
+
+fn front_publisher(writer: FrontWriter) -> tokio::sync::watch::Sender<Option<Run>> {
+    let (sender, mut receiver) = tokio::sync::watch::channel::<Option<Run>>(None);
+    tokio::spawn(async move {
+        while receiver.changed().await.is_ok() {
+            let Some(run) = receiver.borrow_and_update().clone() else {
+                continue;
+            };
+            let writer = writer.clone();
+            // One writer at a time preserves order, even while newer snapshots
+            // replace the pending slot. A stalled write never blocks updates.
+            match tokio::task::spawn_blocking(move || writer(&run)).await {
+                Ok(Ok(())) => (),
+                result => tracing::warn!(?result, "cannot export maintenance progress"),
+            }
+        }
+    });
+    sender
 }
 
 /// A failure of a step: the name and the reason.
@@ -220,11 +253,14 @@ impl Updater {
         store: Store,
         cfg: Config,
     ) -> Self {
+        let export_store = store.clone();
+        let front = front_publisher(Arc::new(move |run| export_store.export_front(run)));
         Self {
             engine,
             registry,
             verifier,
             store,
+            front,
             cfg,
             #[cfg(test)]
             hot_budget: (
@@ -264,10 +300,22 @@ impl Updater {
     /// Answer one request. An update or a rollback runs in the background.
     pub async fn handle(self: &Arc<Self>, req: Request) -> Response {
         let (kind, target, actor) = match req {
+            Request::RetentionRepair { confirm } => return self.retention_repair(confirm).await,
+            Request::RetentionInit {
+                confirm,
+                no_rollback_reference,
+            } => return self.retention_init(confirm, no_rollback_reference).await,
+            Request::Retention { release } => return self.retention(release.as_deref()).await,
             Request::Status => return Response::Status(Box::new(self.status().await)),
             Request::Update { target, actor } => (RunKind::Update, target, actor),
             Request::Rollback { actor } => (RunKind::Rollback, "previous".to_owned(), actor),
         };
+        if let Err(message) = self.reconcile_retention().await {
+            return Response::Error {
+                message,
+                busy: true,
+            };
+        }
         match self.begin(kind, &target, &actor) {
             Ok((run, guard)) => {
                 let me = self.clone();
@@ -319,7 +367,14 @@ impl Updater {
             started_at: now(),
             ended_at: None,
         };
+        if let Err(e) = self.store.retention_begin(&run) {
+            return Err(Response::Error {
+                message: format!("cannot protect update backups: {e}"),
+                busy: false,
+            });
+        }
         *self.running() = Some(run.clone());
+        self.export_front(&run);
         Ok((run, guard))
     }
 
@@ -361,18 +416,333 @@ impl Updater {
             }
         }
         done.ended_at = Some(now());
+        self.export_front(&done);
         tracing::info!(run = %id, outcome = done.outcome.as_str(), error = ?done.error, "run ends");
         if let Err(e) = self.store.push(&done) {
             tracing::warn!("cannot write the history: {e}");
+        } else if let Err(e) = self.store.retention_finish(&done) {
+            tracing::warn!("cannot release update retention hold: {e}");
         }
         done
+    }
+
+    async fn retention_repair(&self, confirm: bool) -> Response {
+        let Ok(_guard) = self.busy.clone().try_lock_owned() else {
+            return Response::Error {
+                message: "update or rollback in progress".into(),
+                busy: true,
+            };
+        };
+        let result = async {
+            let cur = self.engine.target().await?;
+            let helpers = self.engine.running_retention_helpers(&cur.id).await?;
+            if !helpers.is_empty() {
+                return Err(format!(
+                    "retention helper still running: {}",
+                    helpers.join(", ")
+                ));
+            }
+            let out = self
+                .exec_ok(&cur.id, hot_argv("retention-inventory", &[]))
+                .await?;
+            let inventory: std::collections::BTreeMap<String, String> =
+                serde_json::from_str(&out).map_err(|e| format!("bad retention inventory: {e}"))?;
+            let protected = self
+                .store
+                .retention_repair(false, &inventory, Vec::new())
+                .map_err(|e| e.to_string())?;
+            let arg = serde_json::to_string(&protected).map_err(|e| e.to_string())?;
+            let out = self
+                .exec_ok(&cur.id, hot_argv("preview-backups", &[&arg]))
+                .await?;
+            let mut detail: serde_json::Value =
+                serde_json::from_str(&out).map_err(|e| format!("bad retention preview: {e}"))?;
+            let names = detail["preview"]
+                .as_array()
+                .ok_or("retention preview omitted file list")?
+                .iter()
+                .map(|entry| {
+                    entry["name"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or("retention preview omitted name")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if confirm {
+                // Reinspect after the preview, before replacing lost identities.
+                if !self
+                    .engine
+                    .running_retention_helpers(&cur.id)
+                    .await?
+                    .is_empty()
+                {
+                    return Err("retention helper still running".into());
+                }
+                // Revoke a created-but-not-started helper too. A delayed start
+                // must not race repaired update admission.
+                self.exec_ok(&cur.id, hot_argv("retention-repair-revoke", &[]))
+                    .await?;
+                self.store
+                    .retention_repair(true, &inventory, names)
+                    .map_err(|e| e.to_string())?;
+            }
+            detail["holds"] = serde_json::to_value(inventory).map_err(|e| e.to_string())?;
+            detail["initialized"] = confirm.into();
+            Ok(detail)
+        }
+        .await;
+        match result {
+            Ok(detail) => Response::Retained { detail },
+            Err(message) => Response::Error {
+                message,
+                busy: false,
+            },
+        }
+    }
+
+    async fn retention_init(&self, confirm: bool, no_rollback: bool) -> Response {
+        let Ok(_guard) = self.busy.clone().try_lock_owned() else {
+            return Response::Error {
+                message: "update or rollback in progress".into(),
+                busy: true,
+            };
+        };
+        let result = async {
+            let protected = self
+                .store
+                .retention_init(false, no_rollback)
+                .map_err(|e| e.to_string())?;
+            let cur = self.engine.target().await?;
+            let protected = serde_json::to_string(&protected).map_err(|e| e.to_string())?;
+            let out = self
+                .exec_ok(&cur.id, hot_argv("preview-backups", &[&protected]))
+                .await?;
+            let mut detail: serde_json::Value =
+                serde_json::from_str(&out).map_err(|e| format!("bad retention preview: {e}"))?;
+            if confirm {
+                let names = detail["preview"]
+                    .as_array()
+                    .ok_or("retention preview omitted file list")?
+                    .iter()
+                    .map(|entry| {
+                        entry["name"]
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or("retention preview omitted name")
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.store
+                    .retention_confirm(no_rollback, names)
+                    .map_err(|e| e.to_string())?;
+            }
+            detail["initialized"] = confirm.into();
+            detail["confirmation"] =
+                "Run with --confirm to initialize retention and enable bounded deletion passes"
+                    .into();
+            Ok(detail)
+        }
+        .await;
+        match result {
+            Ok(detail) => Response::Retained { detail },
+            Err(message) => Response::Error {
+                message,
+                busy: false,
+            },
+        }
+    }
+
+    async fn retention_control(
+        &self,
+        container: &str,
+        action: &str,
+        value: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let arg = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+        let out = self
+            .exec_ok(container, hot_argv("retention-control", &[action, &arg]))
+            .await?;
+        serde_json::from_str(&out).map_err(|e| format!("bad retention control response: {e}"))
+    }
+
+    /// Startup and update admission use the same durable reconciliation path.
+    pub async fn reconcile_retention(&self) -> Result<(), String> {
+        let _guard = self
+            .busy
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| "update or retention in progress".to_owned())?;
+        self.reconcile_retention_locked().await
+    }
+
+    async fn reconcile_retention_locked(&self) -> Result<(), String> {
+        let Some(running) = self.store.retention_running().map_err(|e| e.to_string())? else {
+            return Ok(());
+        };
+        // First revoke the token durably. A delayed exec start or prepare can
+        // never restore it. The control command kills only its exact pidfd.
+        self.retention_control(
+            &running.container,
+            "cancel",
+            serde_json::json!({"token":running.token}),
+        )
+        .await?;
+        for _ in 0..20 {
+            let info = self.engine.exec_inspect(&running.exec_id).await?;
+            if !info.running {
+                return self
+                    .store
+                    .set_retention_running(None)
+                    .map_err(|e| e.to_string());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Err("retention helper still running: update admission remains blocked".into())
+    }
+
+    async fn retention_execute(
+        &self,
+        container: &str,
+        _protected: Vec<String>,
+    ) -> Result<serde_json::Value, String> {
+        let token = ulid::Ulid::new().to_string();
+        let exec_id = self
+            .engine
+            .exec_create(container, hot_argv("retain-backups", &[&token]))
+            .await?;
+        let mut running = crate::store::RetentionRunning {
+            container: container.into(),
+            exec_id,
+            token: token.clone(),
+            pid: None,
+            worker_pid: None,
+            worker_start: None,
+        };
+        self.store
+            .set_retention_running(Some(running.clone()))
+            .map_err(|e| e.to_string())?;
+        let execution = async {
+            self.retention_control(
+                container,
+                "prepare",
+                self.store
+                    .retention_authorization(&running)
+                    .map_err(|e| e.to_string())?,
+            )
+            .await?;
+            self.engine.exec_start(&running.exec_id).await?;
+            let mut renewed = tokio::time::Instant::now();
+            loop {
+                if renewed.elapsed() >= Duration::from_secs(2) {
+                    let authorization = self
+                        .store
+                        .retention_authorization(&running)
+                        .map_err(|e| e.to_string())?;
+                    self.retention_control(container, "renew", authorization)
+                        .await?;
+                    renewed = tokio::time::Instant::now();
+                }
+                let info = self.engine.exec_inspect(&running.exec_id).await?;
+                if info.pid != 0 {
+                    running.pid = Some(info.pid);
+                }
+                let identity = self
+                    .retention_control(container, "status", serde_json::json!({"token":token}))
+                    .await?;
+                running.worker_pid = identity["pid"].as_u64();
+                running.worker_start = identity["start"].as_str().map(str::to_owned);
+                self.store
+                    .set_retention_running(Some(running.clone()))
+                    .map_err(|e| e.to_string())?;
+                if !info.running {
+                    if info.code != 0 {
+                        return Err(format!("retention helper exit {}", info.code));
+                    }
+                    return self
+                        .retention_control(container, "receipt", serde_json::json!({"token":token}))
+                        .await;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        let result = tokio::time::timeout(Duration::from_secs(900), execution)
+            .await
+            .unwrap_or_else(|_| Err("retention helper timed out".into()));
+        if result.is_err() && self.store.retention_running().is_err() {
+            // Safety state itself may have disappeared. Revoke using the exact
+            // identity already held in memory, even if rereading it now fails.
+            self.retention_control(container, "cancel", serde_json::json!({"token":token}))
+                .await?;
+        }
+        // Even success revokes the token before clearing the durable hold.
+        // On any failure to revoke/inspect/stop, the interlock stays on disk.
+        self.reconcile_retention_locked().await?;
+        if result
+            .as_ref()
+            .is_ok_and(|detail| detail["stopped"] != true)
+        {
+            self.store
+                .retention_pass_finished()
+                .map_err(|e| e.to_string())?;
+        }
+        result
+    }
+
+    async fn retention(&self, release: Option<&str>) -> Response {
+        let Ok(_guard) = self.busy.clone().try_lock_owned() else {
+            return Response::Error {
+                message: "update or rollback in progress: retention deferred".into(),
+                busy: true,
+            };
+        };
+        let result = async {
+            self.reconcile_retention_locked().await?;
+            let protected = self
+                .store
+                .retention_protected(release)
+                .map_err(|e| e.to_string())?;
+            if let Some(id) = release {
+                return Ok(serde_json::json!({"released": id, "removed": []}));
+            }
+            let cur = self.engine.target().await?;
+            // A read-only preview avoids generating permanent revocation
+            // tombstones every minute when there is nothing eligible to prune.
+            let arg = serde_json::to_string(&protected).map_err(|e| e.to_string())?;
+            let preview = self
+                .exec_ok(&cur.id, hot_argv("preview-backups", &[&arg]))
+                .await?;
+            let preview: serde_json::Value = serde_json::from_str(&preview)
+                .map_err(|e| format!("bad retention preview: {e}"))?;
+            if preview["preview"]
+                .as_array()
+                .ok_or("retention preview omitted file list")?
+                .is_empty()
+            {
+                return Ok(serde_json::json!({"removed":[]}));
+            }
+            self.retention_execute(&cur.id, protected).await
+        }
+        .await;
+        match result {
+            Ok(detail) => Response::Retained { detail },
+            Err(message) => Response::Error {
+                message,
+                busy: false,
+            },
+        }
     }
 
     /// Change the record of the run in progress.
     fn with_run(&self, f: impl FnOnce(&mut Run)) {
         if let Some(r) = self.running().as_mut() {
             f(r);
+            self.export_front(r);
         }
+    }
+
+    fn export_front(&self, run: &Run) {
+        // Memory-only, latest-wins publication. No filesystem work or await
+        // on the updater's safety-critical path or under its running mutex.
+        self.front.send_replace(Some(run.clone()));
     }
 
     fn begin_step(&self, name: &str) -> usize {
@@ -440,22 +810,60 @@ impl Updater {
 
     /// End both drains after health or an early failure.
     async fn resume(&self, cur: &Container) {
+        let _ = self.resume_checked(cur, false).await;
+    }
+
+    async fn resume_checked(
+        &self,
+        cur: &Container,
+        require_confirmation: bool,
+    ) -> Result<(), Fail> {
         let idx = self.begin_step("resume");
-        match tokio::time::timeout(
-            Duration::from_secs(30),
-            self.exec_ok(&cur.id, resume_argv()),
-        )
+        match tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                // Old daemons support this same command. A rollback may
+                // expose the API before recovery has settled. Retry only
+                // this idempotent operation, within the existing reserve.
+                let resumed = matches!(
+                    tokio::time::timeout(
+                        Duration::from_secs(5),
+                        self.exec_ok(&cur.id, resume_argv())
+                    )
+                    .await,
+                    Ok(Ok(_))
+                );
+                if resumed && !require_confirmation {
+                    return;
+                }
+                let argv = ["terrarium", "admin", "update", "status", "--json"]
+                    .map(String::from)
+                    .to_vec();
+                if let Ok(out) = self.exec_ok(&cur.id, argv).await
+                    && (resumed || !require_confirmation)
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(&out)
+                    && v["drain"]["on"] == false
+                    && v["drain"].get("jobs_drain").is_some_and(|v| v.is_null())
+                {
+                    return;
+                }
+                tokio::time::sleep(self.cfg.health_poll).await;
+            }
+        })
         .await
         {
-            Ok(Ok(_)) => self.end_step(
-                idx,
-                StepState::Ok,
-                "the daemon takes new turns and jobs again",
-            ),
+            Ok(()) => {
+                self.end_step(
+                    idx,
+                    StepState::Ok,
+                    "the daemon takes new turns and jobs again",
+                );
+                Ok(())
+            }
             _ => {
                 let warning = "cannot resume turns and jobs (values hidden)";
                 tracing::warn!("{warning}");
                 self.end_step(idx, StepState::Failed, warning);
+                Err(Fail(warning.into()))
             }
         }
     }
@@ -590,15 +998,49 @@ impl Updater {
                 .await
                 .map_err(failed)?;
 
+        let supervised = !hot
+            && self
+                .engine
+                .supervised_snapshot(&cur)
+                .await
+                .map_err(|e| failed(Fail(e)))?;
+        let online_backup = if supervised {
+            let backup = self.online_backup(&cur).await.map_err(failed)?;
+            self.with_run(|r| r.backup = Some(backup.clone()));
+            Some(backup)
+        } else {
+            None
+        };
+
+        #[cfg(not(test))]
+        let (hold, reserve, stop) = (
+            HOT_SWAP_HOLD_LIMIT,
+            HOT_SWAP_RECOVERY_RESERVE,
+            HOT_SWAP_STOP_RESERVE,
+        );
+        #[cfg(test)]
+        let (hold, reserve, stop) = self.hot_budget;
+        // One clock starts with admission drain, not after the snapshot.
+        let deadlines = supervised.then(|| {
+            let end = tokio::time::Instant::now() + hold;
+            (end, end - reserve, end - stop)
+        });
+
         // Older daemons may not support jobs-only drain. Never prevent an
         // update for that reason, and never record their error values.
         let idx = self.begin_step("drain-jobs");
-        match tokio::time::timeout(
+        let jobs = tokio::time::timeout(
             self.cfg.drain_wait + Duration::from_secs(5),
             self.exec_ok(&cur.id, drain_jobs_argv(self.cfg.drain_wait)),
-        )
-        .await
-        {
+        );
+        let jobs = if let Some((_, switch, _)) = deadlines {
+            tokio::time::timeout_at(switch, jobs)
+                .await
+                .unwrap_or_else(Err)
+        } else {
+            jobs.await
+        };
+        match jobs {
             Ok(Ok(out)) => {
                 let detail = serde_json::from_str::<serde_json::Value>(&out)
                     .ok()
@@ -630,39 +1072,93 @@ impl Updater {
         }
 
         // Drain and back up. A failure here changes nothing.
-        if let Err(f) = self
-            .step(
-                "drain",
-                self.exec_ok(&cur.id, drain_argv(self.cfg.drain_wait)),
-                |out| last_line(out, "no new turns; the running turns ended or waited"),
-            )
-            .await
-        {
+        let drain = self.step(
+            "drain",
+            self.exec_ok(&cur.id, drain_argv(self.cfg.drain_wait)),
+            |out| last_line(out, "no new turns; the running turns ended or waited"),
+        );
+        let drained = if let Some((_, switch, _)) = deadlines {
+            tokio::time::timeout_at(switch, drain)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(Fail(
+                        "recreate drain exceeded the hold safety deadline".into(),
+                    ))
+                })
+        } else {
+            drain.await
+        };
+        if let Err(f) = drained {
+            if let Some((end, _, recovery)) = deadlines {
+                return Err(self
+                    .recreate_early_failure(
+                        &cur,
+                        online_backup.as_deref().unwrap_or_default(),
+                        end,
+                        recovery,
+                        false,
+                        f,
+                    )
+                    .await);
+            }
             self.resume(&cur).await;
             return Err(failed(f));
         }
-        let backup = match self
-            .step(
-                "backup",
-                async {
-                    let out = self.exec_ok(&cur.id, backup_argv()).await?;
-                    backup_path(&out)
-                },
-                |p| format!("full backup {p}"),
-            )
-            .await
-        {
-            Ok(p) => p,
-            Err(f) => {
-                self.resume(&cur).await;
-                return Err(failed(f));
+        let backup = if let Some(backup) = online_backup {
+            backup
+        } else {
+            match self
+                .step(
+                    "backup",
+                    async {
+                        let out = self.exec_ok(&cur.id, backup_argv()).await?;
+                        backup_path(&out)
+                    },
+                    |p| format!("full backup {p}; legacy recreate: backup after drain"),
+                )
+                .await
+            {
+                Ok(p) => p,
+                Err(f) => {
+                    self.resume(&cur).await;
+                    return Err(failed(f));
+                }
             }
         };
         self.with_run(|r| r.backup = Some(backup.clone()));
 
+        if let Some((end, switch, recovery)) = deadlines {
+            self.recreate_snapshot(&cur, &backup, end, switch, recovery)
+                .await?;
+        }
+
         // From here the container changes: a failure goes back.
-        match self.replace(&prepared, &to, restore.as_deref()).await {
+        let mut replacement = Replacement {
+            deadline: deadlines.map(|(_, switch, _)| switch),
+            ..Default::default()
+        };
+        let replace = self.replace(&prepared, &to, restore.as_deref(), &mut replacement);
+        let replaced = if let Some((_, switch, _)) = deadlines {
+            tokio::time::timeout_at(switch, replace)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(Fail(
+                        "recreate replacement exceeded the hold safety deadline".into(),
+                    ))
+                })
+        } else {
+            replace.await
+        };
+        if let Some((end, _, recovery)) = deadlines
+            && let Err(e) = self.end_helper(&mut replacement.helper, recovery).await
+        {
+            return Err(self.stop_recreate(&cur, &backup, end, e).await);
+        }
+        match replaced {
             Ok(()) => {
+                if let Some((_, switch, _)) = deadlines {
+                    self.finish_recreate(&cur, &backup, switch).await;
+                }
                 let prev = Previous {
                     image: cur.image.clone(),
                     spec: Some(cur.spec.clone()),
@@ -676,13 +1172,212 @@ impl Updater {
                 }
                 Ok(Outcome::Succeeded)
             }
-            Err(f) => match self.recover(&cur, &backup).await {
-                Ok(()) => Err((Outcome::RolledBack, f)),
-                Err(Fail(e)) => Err((
-                    Outcome::RollbackFailed,
-                    Fail(format!("{}; the way back failed too: {e}", f.0)),
-                )),
+            Err(f) => {
+                if replacement.admission_attempted
+                    && let Some((end, _, _)) = deadlines
+                {
+                    // Resume may have admitted writes. Never rewind that journal.
+                    return Err(self.stop_recreate(&cur, &backup, end, f.0).await);
+                }
+                match self
+                    .recover(
+                        &cur,
+                        &backup,
+                        deadlines.map(|(end, _, recovery)| (end, recovery)),
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        if let Some((_, _, recovery)) = deadlines {
+                            self.finish_recreate(&cur, &backup, recovery).await;
+                        }
+                        Err((Outcome::RolledBack, f))
+                    }
+                    Err(Fail(e)) => Err((
+                        if supervised {
+                            Outcome::RecoveryFailed
+                        } else {
+                            Outcome::RollbackFailed
+                        },
+                        Fail(format!("{}; the way back failed too: {e}", f.0)),
+                    )),
+                }
+            }
+        }
+    }
+
+    async fn online_backup(&self, cur: &Container) -> Result<String, Fail> {
+        let backup_started = Utc::now();
+        self.step(
+            "backup",
+            async {
+                let out = self.exec_ok(&cur.id, backup_argv()).await?;
+                backup_path(&out)
             },
+            |p| format!("full backup {p}; began at {backup_started}; writes after that time may not be included; manual pre-update restore point"),
+        ).await
+    }
+
+    async fn tracked_once(
+        &self,
+        cur: &Container,
+        image: &Image,
+        argv: Vec<String>,
+        deadline: tokio::time::Instant,
+        helper: &mut Option<String>,
+    ) -> Res<crate::engine::ExecOut> {
+        budget_left(deadline, Duration::ZERO)?;
+        let id = self
+            .engine
+            .prepare_once(cur, image, bounded_command(argv, deadline)?)
+            .await?;
+        // This assignment precedes start. Cancellation cannot lose a running
+        // helper's ID, and callers must verify its termination before restart.
+        *helper = Some(id.clone());
+        let idx = self.begin_step("offline-helper");
+        self.end_step(
+            idx,
+            StepState::Ok,
+            format!("recorded helper {id} before start; termination must be verified"),
+        );
+        self.engine.run_prepared_once(&id).await
+    }
+
+    async fn end_helper(
+        &self,
+        helper: &mut Option<String>,
+        deadline: tokio::time::Instant,
+    ) -> Res<()> {
+        if let Some(id) = helper.as_deref() {
+            tokio::time::timeout_at(deadline, self.engine.remove_once(id))
+                .await
+                .map_err(|_| "restore helper termination deadline elapsed".to_owned())??;
+            *helper = None;
+        }
+        Ok(())
+    }
+
+    async fn finish_recreate(&self, cur: &Container, backup: &str, deadline: tokio::time::Instant) {
+        // Use the source helper even when the destination is a legacy image.
+        if let Err(e) = self
+            .step(
+                "snapshot-cleanup",
+                async {
+                    let out = tokio::time::timeout_at(
+                        deadline,
+                        self.engine.run_once(
+                            cur,
+                            &cur.image,
+                            bounded_command(hot_argv("commit", &[backup]), deadline)?,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| "snapshot cleanup deadline elapsed".to_owned())??;
+                    if out.code != 0 {
+                        return Err(out.reason());
+                    }
+                    Ok(())
+                },
+                |()| "recreate transaction committed; snapshot released".into(),
+            )
+            .await
+        {
+            tracing::warn!("snapshot cleanup failed, retained for recovery: {}", e.0);
+        }
+    }
+
+    async fn recreate_snapshot(
+        &self,
+        cur: &Container,
+        backup: &str,
+        deadline: tokio::time::Instant,
+        switch_deadline: tokio::time::Instant,
+        recovery_deadline: tokio::time::Instant,
+    ) -> Result<(), (Outcome, Fail)> {
+        let mut helper = None;
+        let work = self
+            .step(
+                "snapshot-database",
+                async {
+                    tokio::time::timeout_at(switch_deadline, async {
+                        let old = self.exec_ok(&cur.id, hot_argv("probe", &[])).await?;
+                        // begin clears a prior completed transaction's admission flag.
+                        self.exec_ok(&cur.id, hot_argv("begin", &[old.trim()]))
+                            .await?;
+                        self.exec_ok(&cur.id, hot_argv("pause", &["960"])).await?;
+                        let out = self
+                            .tracked_once(
+                                cur,
+                                &cur.image,
+                                hot_argv("snapshot", &[backup]),
+                                switch_deadline,
+                                &mut helper,
+                            )
+                            .await?;
+                        self.end_helper(&mut helper, switch_deadline).await?;
+                        if out.code != 0 {
+                            return Err(out.reason());
+                        }
+                        // End the supervisor hold before container replacement. Once
+                        // stopped there are no retained runners or automatic restart.
+                        self.step("stop", self.engine.stop(&cur.id), |()| {
+                            "stopped the paused source container".into()
+                        })
+                        .await
+                        .map_err(|f| f.0)?;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(|_| "recreate snapshot exceeded the hold safety deadline".to_owned())?
+                },
+                |()| "exact paused database snapshot for automatic recreate rollback".into(),
+            )
+            .await;
+        if let Err(e) = self.end_helper(&mut helper, recovery_deadline).await {
+            return Err(self.failed_hot_recovery(cur, backup, deadline, e).await);
+        }
+        if let Err(f) = work {
+            return Err(self
+                .recreate_early_failure(cur, backup, deadline, recovery_deadline, true, f)
+                .await);
+        }
+        Ok(())
+    }
+
+    async fn recreate_early_failure(
+        &self,
+        cur: &Container,
+        backup: &str,
+        deadline: tokio::time::Instant,
+        recovery_deadline: tokio::time::Instant,
+        paused: bool,
+        f: Fail,
+    ) -> (Outcome, Fail) {
+        let recovery = recovery_before_deadline(recovery_deadline, async {
+            if paused {
+                let left = budget_left(recovery_deadline, Duration::ZERO)?
+                    .as_secs_f64()
+                    .to_string();
+                self.exec_ok(&cur.id, hot_argv("cancel-pause", &[&left]))
+                    .await?;
+            }
+            self.wait_hot_healthy_until(&cur.id, recovery_deadline, None)
+                .await?;
+            self.resume_checked(cur, true).await.map_err(|f| f.0)?;
+            Ok(())
+        })
+        .await;
+        match recovery {
+            Ok(_) => (Outcome::Failed, f),
+            Err(e) => {
+                self.failed_hot_recovery(
+                    cur,
+                    backup,
+                    deadline,
+                    format!("{}; recreate snapshot recovery: {e}", f.0),
+                )
+                .await
+            }
         }
     }
 
@@ -713,18 +1408,7 @@ impl Updater {
         // VACUUM INTO in the daemon's backup CLI is safe while it is live.
         // The ZIP is the manual pre-update restore point, not the exact
         // automatic rollback point (the paused database snapshot below).
-        let backup_started = Utc::now();
-        let backup = self
-            .step(
-                "backup",
-                async {
-                    let out = self.exec_ok(&cur.id, backup_argv()).await?;
-                    backup_path(&out)
-                },
-                |p| format!("full backup {p}; began at {backup_started}; writes after that time may not be included; manual pre-update restore point"),
-            )
-            .await
-            .map_err(failed)?;
+        let backup = self.online_backup(cur).await.map_err(failed)?;
         self.with_run(|r| r.backup = Some(backup.clone()));
         self.exec_ok(&cur.id, hot_argv("begin", &[&release]))
             .await
@@ -785,16 +1469,19 @@ impl Updater {
 
         // No daemon is running here. Hold/replay runners keep their processes,
         // while the snapshot includes every completed pre-upgrade write.
+        let mut helper = None;
         let snapshot = self
             .step(
                 "snapshot-database",
                 async {
                     let snapshot = tokio::time::timeout_at(
                         switch_deadline,
-                        self.engine.run_once(
+                        self.tracked_once(
                             cur,
                             &cur.image,
-                            bounded_command(hot_argv("snapshot", &[&backup]), switch_deadline)?,
+                            hot_argv("snapshot", &[&backup]),
+                            switch_deadline,
+                            &mut helper,
                         ),
                     )
                     .await
@@ -811,6 +1498,11 @@ impl Updater {
                 Clone::clone,
             )
             .await;
+        if let Err(e) = self.end_helper(&mut helper, recovery_deadline).await {
+            return Err(self
+                .failed_hot_recovery(cur, &backup, hold_deadline, e)
+                .await);
+        }
         match snapshot {
             Ok(_) => (),
             Err(f) => {
@@ -922,32 +1614,32 @@ impl Updater {
                         }
                     }
                 });
-                let recovery = recovery_before_deadline(recovery_deadline, async {
-                    let left = budget_left(recovery_deadline, Duration::ZERO)?
+                let work_deadline = recovery_deadline - HELPER_TERMINATION_RESERVE;
+                let recovery = recovery_before_deadline(work_deadline, async {
+                    let left = budget_left(work_deadline, Duration::ZERO)?
                         .as_secs_f64()
                         .to_string();
                     self.exec_ok(&cur.id, hot_argv("pause", &[&left])).await?;
                     // Keep the live runners' open files and logs intact.
                     let out = self
-                        .engine
-                        .run_once(
+                        .tracked_once(
                             cur,
                             &cur.image,
-                            bounded_command(
-                                hot_argv("restore-database", &[&backup]),
-                                recovery_deadline,
-                            )?,
+                            hot_argv("restore-database", &[&backup]),
+                            work_deadline,
+                            &mut helper,
                         )
                         .await?;
+                    self.end_helper(&mut helper, work_deadline).await?;
                     if out.code != 0 {
                         return Err(out.reason());
                     }
-                    let left = budget_left(recovery_deadline, Duration::ZERO)?
+                    let left = budget_left(work_deadline, Duration::ZERO)?
                         .as_secs_f64()
                         .to_string();
                     self.exec_ok(&cur.id, hot_argv("start", &[old.trim(), &left]))
                         .await?;
-                    self.wait_hot_healthy_until(&cur.id, recovery_deadline, None)
+                    self.wait_hot_healthy_until(&cur.id, work_deadline, None)
                         .await?;
                     self.store
                         .set_image(&cur.image.reference)
@@ -956,6 +1648,11 @@ impl Updater {
                     Ok::<_, String>(())
                 })
                 .await;
+                if let Err(e) = self.end_helper(&mut helper, recovery_deadline).await {
+                    return Err(self
+                        .failed_hot_recovery(cur, &backup, hold_deadline, e)
+                        .await);
+                }
                 match recovery {
                     Ok(()) => Err((Outcome::RolledBack, f)),
                     Err(e) => Err(self
@@ -1098,16 +1795,33 @@ impl Updater {
         cur: &Container,
         to: &Image,
         restore: Option<&str>,
+        replacement: &mut Replacement,
     ) -> Result<(), Fail> {
-        self.step("stop", self.engine.stop(&cur.id), |()| {
-            format!("stopped {}", cur.name)
-        })
-        .await?;
+        if replacement.deadline.is_none() {
+            self.step("stop", self.engine.stop(&cur.id), |()| {
+                format!("stopped {}", cur.name)
+            })
+            .await?;
+        }
         if let Some(path) = restore {
             self.step(
                 "restore",
                 async {
-                    let out = self.engine.run_once(cur, to, restore_argv(path)).await?;
+                    let out = if let Some(deadline) = replacement.deadline {
+                        self.tracked_once(
+                            cur,
+                            to,
+                            restore_argv(path),
+                            deadline,
+                            &mut replacement.helper,
+                        )
+                        .await?
+                    } else {
+                        self.engine.run_once(cur, to, restore_argv(path)).await?
+                    };
+                    if let Some(deadline) = replacement.deadline {
+                        self.end_helper(&mut replacement.helper, deadline).await?;
+                    }
                     if out.code == 0 {
                         Ok(())
                     } else {
@@ -1129,7 +1843,12 @@ impl Updater {
             .await?;
         self.step("health", self.wait_healthy(&new.id), Clone::clone)
             .await?;
-        self.resume(&new).await;
+        replacement.admission_attempted = true;
+        if replacement.deadline.is_some() {
+            self.resume_checked(&new, true).await?;
+        } else {
+            self.resume(&new).await;
+        }
         Ok(())
     }
 
@@ -1176,7 +1895,68 @@ impl Updater {
 
     /// Go back to `cur`: remove what runs under its name, restore
     /// `backup` with the old image, and start the old image.
-    async fn recover(&self, cur: &Container, backup: &str) -> Result<(), Fail> {
+    async fn recover(
+        &self,
+        cur: &Container,
+        backup: &str,
+        deadlines: Option<(tokio::time::Instant, tokio::time::Instant)>,
+    ) -> Result<(), Fail> {
+        let Some((deadline, recovery_deadline)) = deadlines else {
+            return self.recover_inner(cur, backup, None, &mut None).await;
+        };
+        let mut helper = None;
+        let work_deadline = recovery_deadline - HELPER_TERMINATION_RESERVE;
+        let recovered = tokio::time::timeout_at(
+            work_deadline,
+            self.recover_inner(cur, backup, Some(work_deadline), &mut helper),
+        )
+        .await;
+        if let Err(e) = self.end_helper(&mut helper, recovery_deadline).await {
+            return Err(self.stop_recreate(cur, backup, deadline, e).await.1);
+        }
+        match recovered {
+            Ok(Ok(())) => Ok(()),
+            failure => {
+                let reason = match failure {
+                    Ok(Err(Fail(e))) => e,
+                    _ => "recreate recovery deadline elapsed".into(),
+                };
+                Err(self.stop_recreate(cur, backup, deadline, reason).await.1)
+            }
+        }
+    }
+
+    async fn stop_recreate(
+        &self,
+        cur: &Container,
+        backup: &str,
+        deadline: tokio::time::Instant,
+        reason: String,
+    ) -> (Outcome, Fail) {
+        // The source may have been removed. Resolve the current target so an
+        // uncertain destination or recovered daemon is stopped, not just c0.
+        let stop = tokio::time::timeout_at(deadline, async {
+            let now = self.engine.target().await;
+            let id = now.as_ref().map_or(cur.id.as_str(), |c| c.id.as_str());
+            self.engine.stop_for_recovery(id).await
+        })
+        .await;
+        (
+            Outcome::RecoveryFailed,
+            Fail(format!(
+                "{reason}; recreate recovery failed; stop confirmed: {}; manual restore required: {backup}.hot-swap.sqlite; verify any outstanding helper has stopped",
+                matches!(stop, Ok(Ok(())))
+            )),
+        )
+    }
+
+    async fn recover_inner(
+        &self,
+        cur: &Container,
+        backup: &str,
+        snapshot_deadline: Option<tokio::time::Instant>,
+        helper: &mut Option<String>,
+    ) -> Result<(), Fail> {
         let idx = self.begin_step("rollback");
         self.end_step(
             idx,
@@ -1194,10 +1974,23 @@ impl Updater {
         self.step(
             "restore",
             async {
-                let out = self
-                    .engine
-                    .run_once(cur, &cur.image, restore_argv(backup))
-                    .await?;
+                let out = if let Some(deadline) = snapshot_deadline {
+                    let out = self
+                        .tracked_once(
+                            cur,
+                            &cur.image,
+                            hot_argv("restore-database", &[backup]),
+                            deadline,
+                            helper,
+                        )
+                        .await?;
+                    self.end_helper(helper, deadline).await?;
+                    out
+                } else {
+                    self.engine
+                        .run_once(cur, &cur.image, restore_argv(backup))
+                        .await?
+                };
                 if out.code == 0 {
                     Ok(())
                 } else {
@@ -1214,7 +2007,11 @@ impl Updater {
             .await?;
         self.step("health", self.wait_healthy(&old.id), Clone::clone)
             .await?;
-        self.resume(&old).await;
+        if snapshot_deadline.is_some() {
+            self.resume_checked(&old, true).await?;
+        } else {
+            self.resume(&old).await;
+        }
         Ok(())
     }
 }

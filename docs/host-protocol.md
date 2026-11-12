@@ -1,5 +1,29 @@
 # The host agent protocol
 
+## Windows run-as credentials
+
+`hello.capabilities.windows_run_as` defaults to `false`. A host may report
+`true` only when it implements Windows session logon. The daemon requires both
+`hello.os = "windows"` and this capability before opening or sending a run-as
+password. It rechecks the connected host under the session admission lock.
+
+For a target with `[windows_run_as]`, each `exec`, `cp_push`, or `cp_pull` control frame carries
+`"windows_run_as": {"account": "DOMAIN\\\\NAME", "password": "..."}`.
+The field is omitted for ordinary exec sessions and for older peers. The
+daemon resolves the configured login secret at session start, not at target
+load. The password is session input only. It must never enter logs, errors,
+audit details, events, API responses, transcripts, replay journals, or host
+configuration. Debug formatting redacts it. A host must not retain the
+password after logon or echo it in an error. Windows logon implementation
+is separate from this protocol addition. Current hosts advertise `false`
+and refuse an unexpected run-as request rather than run under their own user.
+
+Both daemon and host production subscribers cap WebSocket/HTTP transport
+dependencies at INFO, including their log-to-tracing bridge. This cap is
+independent of the environment filter: even a more-specific `RUST_LOG=trace`
+directive cannot enable frame payload dumps, which can contain recoverable
+password bytes in hexadecimal. Link keys cannot use a Windows run-as target.
+
 This document is the wire contract between the daemon (`terrariumd`) and the
 host agent (`terrarium-host`). It closes [PLAN §22](PLAN.md#22-open-items)
 item 4 (framing, reconnection, and the output buffer). The design is in
@@ -37,6 +61,18 @@ one second before cancellation falls back to killing the local client.
   have.
 
 ## Connection
+
+`hello.path_kind` selects native host path syntax: `posix` (also the default
+when absent) or `windows`. Exec cwd and copy paths are opaque wire strings,
+not paths interpreted with the daemon's OS. Docker paths remain POSIX even
+on a Windows host. Windows paths accept absolute drive and UNC forms with
+either separator. Comparisons are ASCII case-insensitive and component-boundary
+checked. Parent/dot/empty components, device namespaces, reserved DOS names,
+alternate streams, trailing dots/spaces, controls and non-ASCII paths are
+refused. Restricting to ASCII avoids ambiguous filesystem case folding.
+An agent's Windows workspace is `C:\Terrarium\work\<project>\<agent>`.
+The daemon checks lexical scope only. Host-side ACLs, creation and real
+Windows execution/copy require the Windows host implementation.
 
 | Item | Value |
 |---|---|
@@ -1178,10 +1214,57 @@ output offsets and terminal events before acknowledging them. It keeps up
 to 8 MiB and 4096 stdout/stderr events per session for replay, without
 changing the absolute resume offset. Copy file data is not tail-truncated.
 Closed execs and completed jobs remove their checkpoints. Finished helper
-sessions without a durable owner expire after five minutes. SSH and exe.dev
-run interruptions are reported as `interrupted (ssh transport)` and queue
-jobs on those transports are killed and requeued. Native jobs from an older
-daemon without continuation checkpoints also use kill/requeue.
+sessions without a durable owner expire after five minutes.
+
+SSH and exe.dev noninteractive `run` commands and queue recipes opt into a
+detached supervisor. They retain their real exit code and stdout/stderr if
+the command finishes while the daemon is down. The encrypted journal binds
+the run to a random remote claim directory before launch. Reattachment
+replays that directory, never launches a second command under the same
+identity, and resumes the existing process wait or queue phase.
+
+The remote side needs the usual POSIX shell and coreutils, including
+`setsid`, `nohup`, `flock`, `timeout`, `mkfifo`, `head`, `tail`, `base64`, and
+Python 3. No host
+installation is performed. Bound card agents use their recorded owned root
+and owner marker. Other callers use `<work_root>/.terrarium-runs` with a
+daemon-owned marker (the normal default root is `/src/terrarium`). All root,
+parent and claim opens use no-follow directory FDs. From the owned root
+down, directories must belong to the remote UID without group/other write.
+New directories are created individually mode 0700. Recovery refuses changed
+markers, symlinks, foreign owners and writable directories. Commands, readers,
+cancellation and cleanup remain relative to the pinned directory identities.
+As with owned-root cleanup, a trusted same-UID rename is outside this boundary.
+Each stdout/stderr spool retains the first 64 MiB and drains further output.
+Commands have a maximum seven-day lifetime, with a 24-hour default when no
+timeout is supplied. The deadline is absolute from the original checkpoint:
+a delayed first launch gets only the remaining time, not a new timeout.
+An independent janitor removes the files 24 hours after completion, only
+after acquiring the supervisor's lifetime lock. The empty claim and expiry marker remain
+until the checkpoint's eight-day absolute deadline, then are removed too.
+An expired checkpoint is never relaunched.
+
+Recovery compares the target's definition, creation and lifecycle stamps.
+SSH also records the authenticated host key fingerprints and pins a private
+trust file. exe.dev records the VM ID, not just its SSH address. A changed
+incarnation ends as `interrupted (target changed)` without connecting.
+Remote tool and spool probes precede detachment. Missing tools and spool
+errors are terminal `unsupported` errors. The supervisor must acknowledge
+readiness within 30 seconds or the reader ends with a startup error.
+
+The command has a dedicated process group. Foreground exit or the absolute
+deadline selects its result, then TERM and five seconds later KILL stop the
+group and close background children that remain in it. A descendant that
+calls `setsid` leaves the run's process group and is not stopped by these
+signals. Bounded logger teardown cuts its inherited output streams, not the
+escaped process, so it cannot keep the wait or queue slot open.
+
+PTY and shell sessions, ordinary SSH execs without `durable: true`, and
+stdin-fed queue setup/bundle transfers stay on the existing transport. They
+end as `interrupted (ssh transport)` at a restart. Jobs interrupted before
+their durable recipe starts use kill/requeue. A durable execution rejects
+PTY/shell and stdin input. Native jobs from an older daemon without
+continuation checkpoints also use kill/requeue.
 
 ## Self-update
 

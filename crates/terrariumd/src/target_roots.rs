@@ -681,6 +681,34 @@ pub async fn prepare_exec(
     let Some(a) = actor.agent() else {
         return Ok(());
     };
+    let kind = crate::executor::path_kind(state, def);
+    if kind == terrarium_host::protocol::PathKind::Windows {
+        // Windows creation and ACL enforcement belong to the host. Do not
+        // send the Linux prepare script to it. Still enforce lexical scope.
+        let root = kind
+            .workspace(&a.project, &a.name)
+            .ok_or_else(|| ApiError::invalid("invalid Windows workspace name"))?;
+        if cmd
+            .cwd
+            .as_deref()
+            .is_some_and(|p| !kind.inside(&root, p, true))
+        {
+            return Err(ApiError::invalid(format!("cwd must be inside {root}")));
+        }
+        cmd.cwd.get_or_insert(root.clone());
+        for (key, suffix) in [("CARGO_TARGET_DIR", "target"), ("RESULTS_DIR", "results")] {
+            let value = cmd
+                .env
+                .entry(key.into())
+                .or_insert(format!(r"{root}\{suffix}"));
+            if !kind.inside(&root, value, false) {
+                return Err(ApiError::invalid(format!(
+                    "{key} must be strictly under {root}"
+                )));
+            }
+        }
+        return Ok(());
+    }
     let stored = stored_base(state, &a.id, &def.name).await?;
     let r = root(stored.as_deref().unwrap_or(base(def)), &a.project, &a.name)?;
     let paths = [

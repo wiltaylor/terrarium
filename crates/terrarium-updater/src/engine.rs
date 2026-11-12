@@ -36,6 +36,13 @@ pub struct ExecOut {
     pub stderr: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecState {
+    pub running: bool,
+    pub pid: u64,
+    pub code: i64,
+}
+
 impl ExecOut {
     /// The last line of stderr, else of stdout: the reason of a failure.
     pub fn reason(&self) -> String {
@@ -66,6 +73,10 @@ pub enum Health {
 
 /// The container engine.
 pub trait Engine: Send + Sync {
+    /// Whether the source supports the supervised offline snapshot protocol.
+    fn supervised_snapshot<'a>(&'a self, _cur: &'a Container) -> BoxFut<'a, Res<bool>> {
+        Box::pin(async { Ok(false) })
+    }
     /// Fail closed unless the runtime base and runner compatibility epoch match.
     fn can_hot_swap<'a>(&'a self, _cur: &'a Container, _to: &'a Image) -> BoxFut<'a, Res<bool>> {
         Box::pin(async { Ok(false) })
@@ -85,6 +96,19 @@ pub trait Engine: Send + Sync {
     fn pull<'a>(&'a self, reference: &'a str) -> BoxFut<'a, Res<Image>>;
     /// Run `argv` in the running container `id`.
     fn exec<'a>(&'a self, id: &'a str, argv: Vec<String>) -> BoxFut<'a, Res<ExecOut>>;
+    /// Two-phase exec for deletion: caller durably records identity before start.
+    fn exec_create<'a>(&'a self, _id: &'a str, _argv: Vec<String>) -> BoxFut<'a, Res<String>> {
+        Box::pin(async { Err("durable exec unsupported".into()) })
+    }
+    fn exec_start<'a>(&'a self, _id: &'a str) -> BoxFut<'a, Res<()>> {
+        Box::pin(async { Err("durable exec unsupported".into()) })
+    }
+    fn exec_inspect<'a>(&'a self, _id: &'a str) -> BoxFut<'a, Res<ExecState>> {
+        Box::pin(async { Err("durable exec inspection unsupported".into()) })
+    }
+    fn running_retention_helpers<'a>(&'a self, _id: &'a str) -> BoxFut<'a, Res<Vec<String>>> {
+        Box::pin(async { Err("retention helper inventory unsupported".into()) })
+    }
     /// Stop the container gracefully (its stop timeout).
     fn stop<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>>;
     /// Stop without allowing a daemon to restart on an unverified database.
@@ -105,6 +129,23 @@ pub trait Engine: Send + Sync {
         image: &'a Image,
         argv: Vec<String>,
     ) -> BoxFut<'a, Res<ExecOut>>;
+    /// Create an offline helper without starting it. Its ID must be retained
+    /// by the caller before start, including across a cancelled wait.
+    fn prepare_once<'a>(
+        &'a self,
+        _spec: &'a Container,
+        _image: &'a Image,
+        _argv: Vec<String>,
+    ) -> BoxFut<'a, Res<String>> {
+        Box::pin(async { Err("tracked helpers unsupported".into()) })
+    }
+    fn run_prepared_once<'a>(&'a self, _id: &'a str) -> BoxFut<'a, Res<ExecOut>> {
+        Box::pin(async { Err("tracked helpers unsupported".into()) })
+    }
+    /// Kill/remove this exact helper and verify with inspect that it is gone.
+    fn remove_once<'a>(&'a self, _id: &'a str) -> BoxFut<'a, Res<()>> {
+        Box::pin(async { Err("tracked helper termination unsupported".into()) })
+    }
     /// The health of the container `id`.
     fn health<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<Health>>;
     /// A daemon exit after this startup attempt, even when its supervisor

@@ -13,10 +13,12 @@ const state = vi.hoisted(() => ({
   counts: { blocked_cards: 0, questions: { open: 0, urgent: 0, critical: 0 } } as ProjectCounts,
   listeners: [] as ((e: AgentEvent) => void)[],
   reads: [] as string[],
+  dashboard: false,
 }));
 vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   agents: { inProject: (p: string) => state.agents.filter((a) => a.project === p) },
   api: {
+    pages: { list: async () => ({ items: state.dashboard ? [{ slug: "dashboard", title: "Dashboard", position: 0, widgets: [] }] : [], can_edit: false, dashboard_slug: "dashboard" }) },
     projects: {
       counts: async (p: string) => {
         state.reads.push(p);
@@ -36,6 +38,7 @@ const { default: ProjectScreen } = await import("./ProjectScreen");
 
 let dispose: (() => void) | undefined;
 afterEach(() => {
+  state.dashboard = false;
   state.agents = [];
   state.counts = { blocked_cards: 0, questions: { open: 0, urgent: 0, critical: 0 } };
   state.reads = [];
@@ -97,7 +100,9 @@ describe("ProjectScreen", () => {
   });
 
   it("moves between tabs with browser back and forward", async () => {
+    state.dashboard = true;
     const { root, history } = mount("/p/demo/tests/1");
+    await waitFor(() => expect(links(root).some(a => a.textContent === "Dashboard")).toBe(true));
     links(root).find((a) => a.textContent === "Dashboard")!.click();
     await waitFor(() => expect(active(root).map((a) => a.textContent)).toEqual(["Dashboard"]));
     links(root).find((a) => a.textContent === "Knowledge")!.click();
@@ -108,20 +113,22 @@ describe("ProjectScreen", () => {
     await waitFor(() => expect(active(root).map((a) => a.textContent)).toEqual(["Knowledge"]));
   });
 
-  it("scrolls the active tab into view on a phone, including after navigation", async () => {
-    const scrolled: Element[] = [];
-    const scrollIntoView = vi.fn(function (this: Element) {
-      scrolled.push(this);
+  it("reveals the active tab horizontally, including after navigation, without scrolling the document", async () => {
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+      if (this.tagName === "NAV") return { left: 0, right: 300 } as DOMRect;
+      const scroll = this.closest("nav")?.scrollLeft ?? 0;
+      const left = (this.textContent === "Settings" ? 400 : 0) - scroll;
+      return { left, right: left + 100 } as DOMRect;
     });
-    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
-    Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
     const { root } = mount("/p/demo/settings/secrets");
-    expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
-    expect(scrolled.at(-1)?.textContent).toBe("Settings");
+    const nav = root.querySelector("nav")!;
+    expect(nav.scrollLeft).toBe(200);
     links(root).find((a) => a.textContent === "Board")!.click();
-    await waitFor(() => expect(scrolled.at(-1)?.textContent).toBe("Board"));
+    await waitFor(() => expect(nav.scrollLeft).toBe(0));
+    vi.restoreAllMocks();
   });
   it("shows the blocked agents, blocked cards, and open questions on their tabs, in the accessible name", async () => {
+    state.dashboard = true;
     state.agents = [
       { project: "demo", status: "blocked" },
       { project: "demo", status: "error" },
@@ -144,6 +151,7 @@ describe("ProjectScreen", () => {
   });
 
   it("reads the counts again after a card event of the project, and not for another project", async () => {
+    state.dashboard = true;
     vi.useFakeTimers();
     try {
       const { root } = mount("/p/demo/board");

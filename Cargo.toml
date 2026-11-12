@@ -1,10 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/terrarium-front",
     "crates/terrarium-core",
     "crates/terrariumd",
     "crates/terrarium",
     "crates/terrarium-host",
+    "crates/terrarium-sys",
     "crates/terrarium-runner",
     "crates/terrarium-compat",
     "crates/terrarium-version",

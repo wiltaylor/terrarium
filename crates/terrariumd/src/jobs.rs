@@ -464,6 +464,16 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
     // old kill/requeue path for them instead of replaying prepare beneath
     // an untracked recipe. Read outside the shared DB writer transaction.
     let journal = crate::hosts::resume::Journal::with_db(&state.state_dir, state.db.clone());
+    let remote_checkpoints: HashSet<String> = journal
+        .scan::<serde_json::Value>("ssh/recipe/")
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(key, _)| {
+            key.strip_prefix("ssh/recipe/")
+                .and_then(|rest| rest.split('/').next())
+                .map(str::to_owned)
+        })
+        .collect();
     let checkpoints: HashSet<String> = match journal.scan::<serde_json::Value>("prepare/") {
         Ok(rows) => rows
             .into_iter()
@@ -551,9 +561,10 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                 // a running one that gets a cancel meanwhile keeps its
                 // slot as a draining job (TER-123 review 2, major 1).
                 let live = LiveRun::new(&job.id);
-                if running && !other_host && checkpoints.contains(&job.id)
+                if running && !other_host
                     && def.as_ref().is_some_and(|d|
-                        matches!(d.kind, TargetKind::Host | TargetKind::Docker | TargetKind::Vmlab))
+                        (matches!(d.kind, TargetKind::Host | TargetKind::Docker | TargetKind::Vmlab) && checkpoints.contains(&job.id))
+                        || (matches!(d.kind, TargetKind::Ssh | TargetKind::Exedev) && remote_checkpoints.contains(&job.id)))
                 {
                     resumed.push((job, delivery, live));
                     continue;
@@ -1735,8 +1746,11 @@ async fn step_redacted(
     input: Option<Vec<u8>>,
     own: &[(String, zeroize::Zeroizing<String>)],
 ) -> ApiResult<Collected> {
+    if cmd.durable && input.is_some() {
+        return Err(ApiError::invalid("durable execution cannot take stdin"));
+    }
     let pidfile = crate::run_kill::job_pidfile(job);
-    let admission = state.executor.target_resource_lock(def).lock_owned().await;
+    let admission = state.executor.target_admission(def).await?;
     let (running, report) =
         crate::run_kill::start_named_locked(state, def, cmd, pidfile, &admission)?;
     let running = crate::executor::track_resource_run(state, def, cmd, running, report.clone())?;
@@ -2077,6 +2091,7 @@ pub fn set_lost_runs(job: &str, n: u32) {
 /// broke. A cancelled job is never lost: the caller checks [`killed`].
 fn lost_run(end: Option<&End>, stderr: &[u8], ssh_host: Option<&str>) -> Option<String> {
     match end {
+        Some(End::Error { code, .. }) if code == "durable_expired" => None,
         None => Some("the run ended without an end".into()),
         Some(End::Error { code, .. }) if FIXED_ERRORS.contains(&code.as_str()) => None,
         Some(End::Error { code, message }) => Some(format!("error {code}: {message}")),
@@ -2891,7 +2906,12 @@ fn brought_from_next(
 /// Step 1, in the daemon, with the repo credential (TER-103): fetch, check
 /// out or merge, record the commit as [`job_ref`], and write the bundle.
 /// Blocking.
-fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared {
+fn prepare(
+    repo: &git::JobRepo,
+    job: &Job,
+    bundle: &std::path::Path,
+    identity: &crate::git_identity::Identity,
+) -> Prepared {
     let failed = |what: String| {
         Prepared::End(JobEnd {
             passed: false,
@@ -3000,7 +3020,7 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
                 }
             }
             // The commit, not the ref: the merge takes what was checked.
-            match repo.merge(&cur, &tip, &format!("Merge {b} onto {onto}")) {
+            match repo.merge(&cur, &tip, &format!("Merge {b} onto {onto}"), identity) {
                 Ok(git::MergeStep::Merged(c)) => {
                     cur = c;
                     merged += 1;
@@ -3119,25 +3139,31 @@ async fn steps(
     let job = x.job;
     let journal = crate::hosts::resume::Journal::with_db(&x.state.state_dir, x.state.db.clone());
     let resume_key = recipe_resume_key(job);
+    let host_bound = journal.load::<(String, u32)>(&format!("bound/{resume_key}"))?;
+    let remote_bound = crate::executor::durable::exists(x.state, &resume_key)?;
     if let Some(saved) = journal.load::<RecipeResume>(&resume_key)?
-        && let Some((host, id)) = journal.load::<(String, u32)>(&format!("bound/{resume_key}"))?
+        && (host_bound.is_some() || remote_bound)
     {
         drop(guard);
         x.at(STEP_RECIPE);
         x.recipe_started.store(true, Ordering::SeqCst);
-        let session = x
-            .state
-            .executor
-            .hosts
-            .reattach(&host, id)
-            .ok_or_else(|| ApiError::internal("the saved recipe has no replay channel"))?;
+        let running =
+            if let Some((host, id)) = host_bound {
+                let session =
+                    x.state.executor.hosts.reattach(&host, id).ok_or_else(|| {
+                        ApiError::internal("the saved recipe has no replay channel")
+                    })?;
+                crate::executor::pump_host(session)
+            } else {
+                crate::executor::durable::resume(x.state, &resume_key)?
+            };
         let own: Vec<_> = saved
             .own
             .iter()
             .map(|(label, value)| (label.clone(), zeroize::Zeroizing::new(value.clone())))
             .collect();
         let run = crate::executor::redact_run(
-            crate::executor::pump_host(session),
+            running,
             crate::executor::own_redactor(&own),
             x.state.db.redactor().get(),
             terrarium_core::redact::View::All,
@@ -3166,6 +3192,20 @@ async fn steps(
         }
     }
     x.at(STEP_PREPARE);
+    let project = job.project.clone();
+    let repo_name = job.repo.clone();
+    let merge_identity = if job.kind == JobKind::Merge {
+        x.state
+            .db
+            .read(move |c| {
+                let repo = repos::resolve(c, &repo_name, Some(&project))?;
+                Ok(crate::git_identity::effective(c, &repo)?.1)
+            })
+            .await?
+    } else {
+        // Validate jobs do not create commits during preparation.
+        crate::git_identity::Identity::from_env()
+    };
     let guard = Arc::new(guard);
     let prepare_key = format!("prepare/{}/{}", job.id, job.attempt);
     let cached = journal.load::<Prepared>(&prepare_key)?;
@@ -3184,12 +3224,13 @@ async fn steps(
             break;
         }
         let (j, bundle, prepare_guard) = (job.clone(), x.bundle.clone(), guard.clone());
+        let identity = merge_identity.clone();
         let (result, damaged) = x
             .daemon(move |r| {
                 let _guard = prepare_guard;
                 #[cfg(test)]
                 tests::prepare_fault(r);
-                let result = prepare(r, &j, &bundle);
+                let result = prepare(r, &j, &bundle, &identity);
                 let damaged = matches!(result, Prepared::End(_)) && r.needs_rebuild();
                 (result, damaged)
             })
@@ -3424,6 +3465,7 @@ async fn steps(
         return Err(ApiError::conflict("the job was cancelled"));
     }
     let recipe_cmd = RemoteCmd {
+        durable: matches!(x.def.kind, TargetKind::Ssh | TargetKind::Exedev),
         argv: low_priority(recipe_cmd.argv.clone(), x.ionice),
         resume_key: Some(resume_key.clone()),
         ..recipe_cmd
@@ -3439,9 +3481,7 @@ async fn steps(
             .map(|(label, value)| (label.clone(), value.to_string()))
             .collect(),
     };
-    if !matches!(x.def.kind, TargetKind::Ssh | TargetKind::Exedev) {
-        journal.save(&resume_key, &saved)?;
-    }
+    journal.save(&resume_key, &saved)?;
     let c = step_redacted(x.state, &job.id, x.def, &recipe_cmd, RECIPE_MAX, None, &own).await?;
     if let Some(identity) = log_target {
         crate::job_logs::record_output(x.state, job, delivery, &saved.log, &identity, &c.stdout)

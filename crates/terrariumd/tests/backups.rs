@@ -21,10 +21,32 @@ async fn the_api_makes_lists_and_serves_backups_for_the_operator_only() {
         .to_owned();
 
     // An agent, also a sysadmin, gets nothing.
+    td.post_as(
+        &sys,
+        "/api/backups/retention/repair",
+        json!({"confirm":true}),
+    )
+    .await
+    .err(403, "forbidden");
     td.post_as(&sys, "/api/backups", json!({}))
         .await
         .err(403, "forbidden");
     td.get_as(&sys, "/api/backups").await.err(403, "forbidden");
+    td.post_as(
+        &sys,
+        "/api/backups/recovery-release",
+        json!({"run":"failed"}),
+    )
+    .await
+    .err(403, "forbidden");
+
+    td.post_as(
+        &sys,
+        "/api/backups/retention/init",
+        json!({"confirm":true,"no_rollback_reference":true}),
+    )
+    .await
+    .err(403, "forbidden");
 
     // A diff with no full backup is invalid.
     td.post("/api/backups", json!({"kind": "diff"}))
@@ -276,21 +298,17 @@ async fn scheduled_runs_seal_verify_rotate_prune_and_alert() {
     backup::verify(&d1_path, None, Some(KEY1)).unwrap();
     assert!(backup::verify(&d1_path, None, Some(KEY2)).is_err());
 
-    // A third full backup verifies: the oldest full and its diff go.
+    // No updater is reachable in this fixture: verification never deletes.
     runner.cfg.full_every = Duration::ZERO;
     let f3 = runner.run(&state).await;
     assert_eq!(f3.kind, Kind::Full, "{f3:?}");
-    let mut removed = f3.removed.clone();
-    removed.sort();
-    let mut want = vec![f1.name.clone().unwrap(), d1.name.clone().unwrap()];
-    want.sort();
-    assert_eq!(removed, want);
+    assert!(f3.removed.is_empty());
     let names: Vec<String> = backup::list(&dir)
         .unwrap()
         .into_iter()
         .map(|l| l.name)
         .collect();
-    assert_eq!(names.len(), 3, "{names:?}");
+    assert_eq!(names.len(), 5, "{names:?}");
 
     // A missed run mails once per due time.
     let later = chrono::Utc::now() + chrono::Duration::days(3);
@@ -341,7 +359,7 @@ async fn scheduled_runs_seal_verify_rotate_prune_and_alert() {
     assert_eq!(count("backup.failed "), 2, "{actions:?}");
     assert_eq!(count("backup.recovered "), 1, "{actions:?}");
     assert_eq!(count("backup.verify "), 5, "{actions:?}");
-    assert_eq!(count("backup.prune "), 1, "{actions:?}");
+    assert_eq!(count("backup.prune "), 0, "{actions:?}");
     assert_eq!(count("backup.missed "), 1, "{actions:?}");
     assert!(
         events.iter().any(|e| e.contains("\"change\":\"verified\"")),
@@ -409,7 +427,7 @@ async fn a_scheduled_backup_that_does_not_verify_is_set_aside_and_missed_mails_o
 
     let f1 = runner.run(&state).await;
     assert!(f1.error.is_none() && f1.kind == Kind::Full, "{f1:?}");
-    assert_eq!(f1.removed, vec![manual]);
+    assert!(f1.removed.is_empty());
     let f1 = f1.name.unwrap();
 
     // The verify fails: the file goes aside, f1 stays, and one mail.
@@ -425,7 +443,8 @@ async fn a_scheduled_backup_that_does_not_verify_is_set_aside_and_missed_mails_o
             .into_iter()
             .map(|l| l.name)
             .collect();
-        assert_eq!(names, vec![f1.clone()]);
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&f1) && names.contains(&manual));
     }
     let aside = std::fs::read_dir(&dir)
         .unwrap()
@@ -443,7 +462,7 @@ async fn a_scheduled_backup_that_does_not_verify_is_set_aside_and_missed_mails_o
     runner.verify = backup::verify;
     let f2 = runner.run(&state).await;
     assert!(f2.error.is_none(), "{f2:?}");
-    assert_eq!(f2.removed, vec![f1]);
+    assert!(f2.removed.is_empty());
 
     let mails = state
         .db

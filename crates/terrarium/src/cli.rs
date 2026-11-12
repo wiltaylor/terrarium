@@ -188,6 +188,11 @@ pub enum Command {
         #[command(subcommand)]
         command: DashboardCmd,
     },
+    /// Custom project pages and their widget layouts
+    Page {
+        #[command(subcommand)]
+        command: PageCmd,
+    },
     /// Pipelines: the CI/CD runs of the project (GitHub Actions, or a
     /// script for any other system), polled on a schedule
     #[command(visible_alias = "pipelines")]
@@ -422,6 +427,8 @@ pub enum DaemonCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum BackupCmd {
+    /// Release a failed update's recovery backup from retention protection (operator)
+    ReleaseRecovery { run: String },
     /// Make a backup in the daemon's backup dir now
     Create {
         /// `full`, or `diff` (the files that changed since the newest full backup)
@@ -466,6 +473,12 @@ pub enum ProjectCmd {
     },
     /// Change a project (project_admin)
     Set {
+        #[arg(long, value_parser = ["on", "off"])]
+        provenance: Option<String>,
+        #[arg(long)]
+        git_name: Option<String>,
+        #[arg(long)]
+        git_email: Option<String>,
         name: Option<String>,
         #[arg(long, short = 'd')]
         description: Option<String>,
@@ -744,6 +757,21 @@ pub struct RepoAddArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum RepoCmd {
+    #[command(hide = true)]
+    PushChecked { repo: String },
+    /// Change repo commit settings (operator/sysadmin). Refresh checkouts after changing them.
+    Set {
+        repo: String,
+        #[arg(long, value_parser = ["on", "off"])]
+        provenance: Option<String>,
+        #[arg(long)]
+        git_name: Option<String>,
+        #[arg(long)]
+        git_email: Option<String>,
+        /// Warn rather than refuse metadata-bearing pushes
+        #[arg(long)]
+        warn_only: Option<bool>,
+    },
     /// Repositories attached to the project
     Ls,
     /// Clone or update a repo in the workspace, or on a target
@@ -2610,6 +2638,22 @@ pub enum DashboardCmd {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum PageCmd {
+    /// List the project pages in tab order
+    Ls,
+    /// Show a page and its widgets
+    Show { slug: String },
+    /// Create or replace a page from JSON (`-` reads stdin)
+    Set {
+        slug: String,
+        #[arg(long)]
+        from_file: String,
+    },
+    /// Delete a page
+    Rm { slug: String },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum UsageCmd {
     /// Per-agent breakdown for the project
     Project,
@@ -2861,6 +2905,9 @@ pub enum ThreadCmd {
         id: String,
         /// The question, or the summary of a bundle (`-` reads stdin)
         text: String,
+        /// Ask whether linked work works, only once it is done and installed
+        #[arg(long)]
+        test_request: bool,
         /// A choice for the operator; repeat for more (at most 10)
         #[arg(long = "option", short = 'o', conflicts_with = "bundle")]
         options: Vec<String>,
@@ -2973,6 +3020,12 @@ pub enum QuestionCmd {
     Ask {
         /// The question, short and clear
         text: String,
+        /// Ask whether linked work works, only once it is done and installed
+        #[arg(long)]
+        test_request: bool,
+        /// Inbox thread of the attached thread agent
+        #[arg(long)]
+        thread: Option<String>,
         /// A choice for the operator; repeat for more (at most 10)
         #[arg(long = "option", short = 'o')]
         options: Vec<String>,
@@ -2982,7 +3035,7 @@ pub enum QuestionCmd {
         #[command(flatten)]
         context: QuestionContext,
         /// The card that the question is about
-        #[arg(long, required = true)]
+        #[arg(long, required_unless_present = "thread")]
         card: Option<String>,
         /// Mark the question urgent
         #[arg(long, conflicts_with = "critical")]
@@ -3386,6 +3439,11 @@ pub struct SnapshotOn {
 
 #[derive(Debug, Subcommand)]
 pub enum AdminCmd {
+    /// Operator-only backup retention initialization
+    Backup {
+        #[command(subcommand)]
+        command: AdminBackupCmd,
+    },
     /// Operator-only job maintenance
     Job {
         #[command(subcommand)]
@@ -3477,6 +3535,31 @@ pub enum AdminCmd {
     Password {
         #[command(subcommand)]
         command: PasswordCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AdminBackupCmd {
+    Retention {
+        #[command(subcommand)]
+        command: RetentionCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RetentionCmd {
+    /// Rebuild lost safety state conservatively. Requires --confirm.
+    Repair {
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Preview the first deletion pass. Requires --confirm to enable retention.
+    Init {
+        #[arg(long)]
+        confirm: bool,
+        /// Explicitly establish an empty rollback baseline on a never-updated installation
+        #[arg(long)]
+        no_rollback_reference: bool,
     },
 }
 

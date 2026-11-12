@@ -214,6 +214,8 @@ pub enum HostError {
     Persistence,
     #[error("host journal writer is busy")]
     JournalBusy,
+    #[error("Windows run-as requires a Windows host with the windows_run_as capability")]
+    WindowsRunAsUnsupported,
 }
 
 impl From<HostError> for ApiError {
@@ -223,6 +225,7 @@ impl From<HostError> for ApiError {
             HostError::Busy(..) => ApiError::new(Code::RateLimited, e.to_string()),
             HostError::Persistence => ApiError::internal(e.to_string()),
             HostError::JournalBusy => ApiError::new(Code::ResourceBusy, e.to_string()),
+            HostError::WindowsRunAsUnsupported => ApiError::invalid(e.to_string()),
         }
     }
 }
@@ -298,6 +301,7 @@ struct SavedHost {
 /// The live state of a host, from its last `hello`.
 #[derive(Debug, Clone, Serialize)]
 pub struct LiveInfo {
+    pub path_kind: terrarium_host::protocol::PathKind,
     pub host_id: String,
     pub version: String,
     pub os: String,
@@ -641,6 +645,8 @@ impl HostRegistry {
         #[derive(Deserialize)]
         struct Binding {
             host_session: Option<(String, SessionId)>,
+            #[serde(default)]
+            remote_key: Option<String>,
         }
         let key = format!("exec/{id}");
         let mut entries = self.lock();
@@ -650,6 +656,10 @@ impl HostRegistry {
         let binding = journal.load::<Binding>(&key)?;
         let mut values = Vec::new();
         let mut prefixes = Vec::new();
+        let mut removed = vec![key.clone()];
+        if let Some(remote) = binding.as_ref().and_then(|b| b.remote_key.as_ref()) {
+            removed.push(format!("ssh/{remote}"));
+        }
         let session = binding.and_then(|b| b.host_session);
         if let Some((host, session)) = &session {
             let host_key = format!("host/{host}");
@@ -663,7 +673,7 @@ impl HostRegistry {
             }
             prefixes.push(format!("event/{host}/{session}/"));
         }
-        journal.replace(&values, &[key], &prefixes)?;
+        journal.replace(&values, &removed, &prefixes)?;
         if let Some((host, session)) = session
             && let Some(entry) = entries.get_mut(&host)
         {
@@ -690,7 +700,11 @@ impl HostRegistry {
             return Ok(());
         };
         let mut entries = self.lock();
-        let mut prefixes = vec![format!("prepare/{job}/"), format!("recipe/{job}/")];
+        let mut prefixes = vec![
+            format!("prepare/{job}/"),
+            format!("recipe/{job}/"),
+            format!("ssh/recipe/{job}/"),
+        ];
         let mut removed = Vec::new();
         for phase in ["recipe", "receive"] {
             let prefix = format!("bound/{phase}/{job}/");
@@ -744,6 +758,10 @@ impl HostRegistry {
                 let _ = conn.tx.send(Outgoing::Close(None));
             }
         }
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Claim the replay channel of a session from the previous daemon.
@@ -1018,6 +1036,23 @@ impl HostRegistry {
             .and_then(|e| e.info.as_ref().map(|i| i.capabilities.clone()))
     }
 
+    pub fn supports_windows_run_as(&self, host: &str) -> bool {
+        self.lock().get(host).is_some_and(|e| {
+            e.conn.is_some()
+                && e.info
+                    .as_ref()
+                    .is_some_and(|i| i.os == "windows" && i.capabilities.windows_run_as)
+        })
+    }
+
+    /// Native path syntax from the last hello. Container paths stay POSIX.
+    pub fn path_kind(&self, host: &str) -> terrarium_host::protocol::PathKind {
+        self.lock()
+            .get(host)
+            .and_then(|e| e.info.as_ref().map(|i| i.path_kind))
+            .unwrap_or_default()
+    }
+
     fn send(&self, host: &str, out: Outgoing) -> bool {
         match self.lock().get(host).and_then(|e| e.conn.clone()) {
             Some(c) => c.tx.send(out).is_ok(),
@@ -1042,8 +1077,9 @@ impl HostRegistry {
     ) -> Result<HostSession, HostError> {
         let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
         let mut make = Some(make);
+        let mut prepared = None;
         retry_metadata(
-            || self.try_open_bound(host, binding, &mut make),
+            || self.try_open_bound(host, binding, &mut make, &mut prepared),
             |error| matches!(error, HostError::JournalBusy),
         )
     }
@@ -1053,6 +1089,7 @@ impl HostRegistry {
         host: &str,
         binding: Option<&str>,
         make: &mut Option<impl FnOnce(SessionId) -> DaemonFrame>,
+        prepared: &mut Option<(SessionId, DaemonFrame)>,
     ) -> Result<HostSession, HostError> {
         let mut g = self.lock();
         let e = g
@@ -1071,6 +1108,38 @@ impl HostRegistry {
             }
         };
         let (tx, rx) = mpsc::unbounded_channel();
+        // Windows capability checks need the frame before persistence.
+        // Keep the FnOnce result across retries rather than consuming it again.
+        if prepared.is_none() {
+            let Some(make) = make.take() else {
+                e.next_id = previous_next;
+                return Err(HostError::Persistence);
+            };
+            *prepared = Some((id, make(id)));
+        }
+        let Some((prepared_id, frame)) = prepared.as_ref() else {
+            e.next_id = previous_next;
+            return Err(HostError::Persistence);
+        };
+        if *prepared_id != id {
+            e.next_id = previous_next;
+            return Err(HostError::Persistence);
+        }
+        let has_run_as = match frame {
+            DaemonFrame::Exec(req) => req.windows_run_as.is_some(),
+            DaemonFrame::CpPush(req) => req.windows_run_as.is_some(),
+            DaemonFrame::CpPull(req) => req.windows_run_as.is_some(),
+            _ => false,
+        };
+        if has_run_as
+            && !e
+                .info
+                .as_ref()
+                .is_some_and(|i| i.os == "windows" && i.capabilities.windows_run_as)
+        {
+            e.next_id = previous_next;
+            return Err(HostError::WindowsRunAsUnsupported);
+        }
         e.sessions.insert(
             id,
             Slot {
@@ -1094,11 +1163,11 @@ impl HostRegistry {
                 HostError::Persistence
             });
         }
-        let Some(make) = make.take() else {
+        let Some((_, frame)) = prepared.take() else {
             return Err(HostError::Persistence);
         };
         if let Some(c) = &e.conn {
-            let _ = c.tx.send(Outgoing::frame(make(id)));
+            let _ = c.tx.send(Outgoing::frame(frame));
         }
         Ok(HostSession {
             registry: self.clone(),
@@ -1179,6 +1248,7 @@ impl HostRegistry {
             os: hello.os.clone(),
             arch: hello.arch.clone(),
             capabilities: hello.capabilities.clone(),
+            path_kind: hello.path_kind,
             max_sessions: hello.max_sessions,
             max_running_targets: hello.max_running_targets,
             connected_at: crate::db::now(),
@@ -2492,6 +2562,7 @@ async fn serve_link(
     welcome.update = offer;
     match encode_control(&DaemonFrame::Welcome(welcome.clone())) {
         Ok(t) => {
+            tracing::trace!("host transport frame send");
             if socket.send(WsMessage::Text(t.into())).await.is_err() {
                 reg.detach(&row.name, conn_id);
                 return;
@@ -2967,6 +3038,7 @@ mod tests {
             .unwrap();
         let id = session.id();
         let hello = Hello {
+            path_kind: terrarium_host::protocol::PathKind::Posix,
             protocol: 1,
             host: "lab1".into(),
             version: "test".into(),
@@ -3233,6 +3305,7 @@ mod tests {
         assert!(reg.detach("lab1", 1).is_some());
         assert!(reg.lock()["lab1"].pending_journal.is_empty());
         let hello = Hello {
+            path_kind: terrarium_host::protocol::PathKind::Posix,
             protocol: PROTOCOL_VERSION,
             host: "lab1".into(),
             version: "test".into(),
@@ -3938,9 +4011,12 @@ mod tests {
         let journal = resume::Journal::with_db(dir.path(), db.clone());
         let (release, writer) = hold_writer(db.clone());
         let r = reg.clone();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frame_calls = calls.clone();
         let opening = std::thread::spawn(move || {
-            r.open_bound("lab1", Some("test/open"), |_| DaemonFrame::Ping {
-                nonce: 42,
+            r.open_bound("lab1", Some("test/open"), |_| {
+                frame_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                DaemonFrame::Ping { nonce: 42 }
             })
         });
         metadata_retry_started(&reg);
@@ -3950,6 +4026,7 @@ mod tests {
         release.send(()).unwrap();
         writer.join().unwrap();
         let session = opening.join().unwrap().unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(matches!(outgoing.try_recv().unwrap(), Outgoing::Frame(_)));
         assert_eq!(
             journal.load::<(String, u32)>("bound/test/open").unwrap(),
@@ -4077,6 +4154,7 @@ mod tests {
             .unwrap();
         reg.detach("lab1", 1).unwrap();
         let hello = Hello {
+            path_kind: terrarium_host::protocol::PathKind::Posix,
             protocol: PROTOCOL_VERSION,
             host: "lab1".into(),
             version: "test".into(),
@@ -4119,6 +4197,7 @@ mod tests {
 
     fn lost_test_hello(token: &str, ids: &[SessionId]) -> Hello {
         Hello {
+            path_kind: terrarium_host::protocol::PathKind::Posix,
             protocol: PROTOCOL_VERSION,
             host: "lab1".into(),
             version: "test".into(),

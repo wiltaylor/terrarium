@@ -16,7 +16,7 @@ use terrariumd::settings::{
 use terrariumd::usage_collector::UsageConfig;
 use terrariumd::{DaemonConfig, start_with_usage};
 use tracing::{error, info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::util::SubscriberInitExt;
 
 fn main() -> anyhow::Result<()> {
     // A script child of the board rules (TER-173): no runtime, no logs,
@@ -31,12 +31,11 @@ fn main() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn daemon_main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
-        .init();
+    terrarium_host::logging::subscriber(
+        std::io::stdout,
+        std::io::IsTerminal::is_terminal(&std::io::stdout()),
+    )
+    .init();
 
     let settings = Settings::parse();
     if matches!(settings.command, Some(Command::RequiredTemplatesCheck)) {
@@ -67,7 +66,18 @@ async fn daemon_main() -> anyhow::Result<()> {
         return config_command(command);
     }
     if let Some(Command::Backup { command }) = &settings.command {
-        return backup_command(&settings, command);
+        backup_command(&settings, command)?;
+        if matches!(command, BackupCommand::Create { .. })
+            && let Err(e) = terrariumd::backup::retention::request(None).await
+        {
+            // Keep --json stdout machine-readable, including when the
+            // optional updater is absent or busy with this very update.
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("backup retention deferred: {e}");
+            }
+        }
+        return Ok(());
     }
     // TERRARIUM_PASSWORD(_FILE): set the first password now, then start
     // again without the two variables, so no child process (a harness, git,
@@ -284,6 +294,7 @@ async fn daemon_main() -> anyhow::Result<()> {
     let backup_cfg =
         terrariumd::backup::schedule::Config::from_env().map_err(anyhow::Error::msg)?;
     let backup_task = terrariumd::backup::schedule::spawn(daemon.state.clone(), backup_cfg);
+    let _retention_task = terrariumd::backup::retention::spawn();
     let hints_state = std::sync::Arc::downgrade(&daemon.state);
     tokio::spawn(async move {
         loop {

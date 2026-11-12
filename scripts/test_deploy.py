@@ -799,6 +799,24 @@ class Scripts(unittest.TestCase):
 class Layout(unittest.TestCase):
     """compose.yaml, `docker::volumes-init`, and DATA_DIRS name the same dirs."""
 
+    def test_front_owns_web_ports_without_daemon_or_updater_secrets(self):
+        text = (dp.REPO / "compose.yaml").read_text()
+        front = text.split("\n  terrarium-front:", 1)[1].split("\n  terrarium:", 1)[0]
+        daemon = text.split("\n  terrarium:", 1)[1].split("\n  terrarium-updater:", 1)[0]
+        for port in ("TERRARIUM_PORT:-8080", "TERRARIUM_INGEST_PORT:-8083"):
+            self.assertIn(port, front)
+            self.assertNotIn(port, daemon)
+        for port in ("TERRARIUM_ARTIFACT_PORT:-8081", "TERRARIUM_HOST_PORT:-8082"):
+            self.assertIn(port, daemon)
+            self.assertNotIn(port, front)
+        self.assertIn("/state/front:/front:ro", front)
+        self.assertIn("/updater/state/front:/progress:ro", front)
+        self.assertIn("read_only: true", front)
+        self.assertIn("restart: unless-stopped", front)
+        self.assertIn("/opt/terrarium/bundled/bin/terrarium-front", front)
+        for forbidden in ("TERRARIUM_TOKEN", "TERRARIUM_PASSWORD", "docker.sock", "updater.sock", "/state:/state", "/updater/state:/"):
+            self.assertNotIn(forbidden, front)
+
     def test_compose_binds_only_data_dirs(self):
         text = (dp.REPO / "compose.yaml").read_text()
         binds = re.findall(r"^\s*- (\S+?):/", text, re.MULTILINE)

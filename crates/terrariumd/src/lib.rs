@@ -498,6 +498,7 @@ async fn activate(
     let mut owned = ActivationTasks(Vec::new());
     let tasks = &mut owned.0;
     tasks.push(state.executor.hosts.spawn_resume_grace());
+    tasks.push(executor::durable::spawn_cleanup(&state));
     tasks.push(spawn_pump(state.clone()));
     tasks.push(git_identity::spawn_refresh(state.clone()));
     tasks.push(usage_collector::spawn(state.clone()));

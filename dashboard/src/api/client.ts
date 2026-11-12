@@ -223,6 +223,12 @@ import type {
 } from "./types";
 
 export interface Api {
+  pages: {
+    list(project: string): Promise<{ items: import("./types").ProjectPage[]; can_edit: boolean; dashboard_slug?: string }>;
+    get(project: string, slug: string): Promise<import("./types").ProjectPage>;
+    save(project: string, slug: string, body: import("./types").ProjectPageInput): Promise<import("./types").ProjectPage>;
+    remove(project: string, slug: string): Promise<void>;
+  };
   home: import("./home").HomeApi;
   health(): Promise<Health>;
   /** `GET /api/system/version`: the daemon's build (version, git ref, build time). */
@@ -1101,6 +1107,12 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
   const secretPath = (scope: string, name: string) => `/api/secrets/${seg(scope)}/${seg(name)}`;
 
   return {
+    pages: {
+      list: (project) => get(`${p(project)}/pages`),
+      get: (project, slug) => get(`${p(project)}/pages/${seg(slug)}`),
+      save: (project, slug, body) => put(`${p(project)}/pages/${seg(slug)}`, body),
+      remove: (project, slug) => del(`${p(project)}/pages/${seg(slug)}`),
+    },
     health: () => get("/api/health"),
     systemVersion: () => get("/api/system/version"),
     selfUpdate: {

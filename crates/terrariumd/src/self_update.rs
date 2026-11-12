@@ -734,13 +734,20 @@ pub async fn request(state: &Shared, req: Request, actor: &str) -> ApiResult<Str
     let (action, target) = match &req {
         Request::Update { target, .. } => ("system.update", target.clone()),
         Request::Rollback { .. } => ("system.rollback", "previous".to_owned()),
-        Request::Status => return Err(ApiError::bad_request("not an action")),
+        Request::Status
+        | Request::Retention { .. }
+        | Request::RetentionInit { .. }
+        | Request::RetentionRepair { .. } => {
+            return Err(ApiError::bad_request("not an update action"));
+        }
     };
     let answer = ask(state, &req).await.map_err(updater_error)?;
     let (run, ok, error) = match answer {
         Response::Accepted { run } => (Some(run), true, None),
         Response::Error { message, .. } => (None, false, Some(message)),
-        Response::Status(_) => (None, false, Some("unexpected answer".to_owned())),
+        Response::Status(_) | Response::Retained { .. } => {
+            (None, false, Some("unexpected answer".to_owned()))
+        }
     };
     let detail = json!({"target": target, "run": run, "ok": ok, "error": error,
                         "from": terrarium_version::FULL});
@@ -788,7 +795,7 @@ pub fn start_jobs_drain(state: &Shared, by: &str) {
 
 /// End the drain, and the drain of the job slots: the work that waited
 /// goes out.
-pub async fn end_drain(state: &Shared) {
+pub async fn end_drain(state: &Shared) -> ResumeInfo {
     lock(&state.self_update.jobs_drain).take();
     let was = lock(&state.self_update.drain).take();
     let parked = state.usage.streams.set_closed(false);
@@ -798,9 +805,42 @@ pub async fn end_drain(state: &Shared) {
     for id in parked {
         state.supervisor.stream_granted(id);
     }
-    crate::lifecycle::wake_with_work(state, None, "drain_end").await;
     // The jobs that waited in the queue start (TER-123).
     crate::jobs::kick(state);
+    let state = state.clone();
+    resume_answer(async move {
+        crate::lifecycle::wake_with_work_report(&state, None, "drain_end").await
+    })
+    .await
+}
+
+/// Admission has already reopened. Wake failures are warnings, not a failed resume.
+#[derive(Debug, Serialize)]
+pub struct ResumeInfo {
+    pub on: bool,
+    pub jobs_drain: Option<Drain>,
+    pub wake_errors: usize,
+    pub wake_pending: bool,
+}
+
+async fn resume_answer(
+    wake: impl std::future::Future<Output = usize> + Send + 'static,
+) -> ResumeInfo {
+    // Keep a slow wake alive after the response. Do not wait on busy-agent
+    // status or queued work to acknowledge the admission state change.
+    let mut task = tokio::spawn(wake);
+    let (wake_errors, wake_pending) =
+        match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+            Ok(Ok(errors)) => (errors, false),
+            Ok(Err(_)) => (1, false),
+            Err(_) => (0, true),
+        };
+    ResumeInfo {
+        on: false,
+        jobs_drain: None,
+        wake_errors,
+        wake_pending,
+    }
 }
 
 // ------------------------------------------------------------ the task

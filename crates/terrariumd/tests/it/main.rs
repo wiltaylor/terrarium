@@ -8,11 +8,14 @@ mod common;
 mod exedev;
 mod host_restart;
 mod live_workspace;
+mod pages;
 mod read_positions;
 mod remotes;
+mod ssh_restart;
 mod ter221_latency;
 #[path = "../trouble.rs"]
 mod trouble;
+mod windows_paths;
 mod workspace_sync;
 
 mod reservations;
@@ -207,3 +210,4 @@ mod waits;
 mod webhooks;
 #[path = "../wiki.rs"]
 mod wiki;
+mod windows_run_as;
