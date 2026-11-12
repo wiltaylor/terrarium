@@ -75,7 +75,7 @@ def main():
         cancel = os.open('cancel', os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=claim)
         os.close(cancel)
     else:
-        os.execvp('sh', ['sh', '-c', script])
+        os.execv('/bin/sh', ['sh', '-c', script])
 
 
 try:

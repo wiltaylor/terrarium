@@ -3184,7 +3184,9 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
         while lab.jobs().await.len() < 2 {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let jobs = lab.until_idle().await;
     let ended = jobs.iter().find(|j| j["id"] == jid).unwrap();
     assert_eq!(ended["exit_code"], 7, "{ended}");

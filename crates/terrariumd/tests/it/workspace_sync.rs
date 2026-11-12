@@ -40,6 +40,10 @@ fn copy_python(jail: &Path) {
     let path = PathBuf::from(String::from_utf8(encodings.stdout).unwrap().trim());
     let dest = jail.join(path.strip_prefix("/").unwrap());
     std::fs::create_dir_all(&dest).unwrap();
+    // Python's bootstrap uses these landmarks to resolve its stdlib prefix.
+    let library = path.parent().unwrap();
+    std::fs::copy(library.join("os.py"), dest.parent().unwrap().join("os.py")).unwrap();
+    std::fs::create_dir(dest.parent().unwrap().join("lib-dynload")).unwrap();
     for entry in std::fs::read_dir(path).unwrap().flatten() {
         if entry
             .path()
@@ -94,10 +98,21 @@ impl Ssh {
             copy_binary(&jail, binary);
         }
         copy_python(&jail);
-        let probe = std::process::Command::new("chroot").arg(&jail)
-            .args(["/usr/bin/python3", "-S", "-c", "import os, stat, sys; assert hasattr(os, 'O_NOFOLLOW')"])
-            .output().unwrap();
-        assert!(probe.status.success(), "fixture Python bootstrap: {}", String::from_utf8_lossy(&probe.stderr));
+        let probe = std::process::Command::new("chroot")
+            .arg(&jail)
+            .args([
+                "/usr/bin/python3",
+                "-S",
+                "-c",
+                "import os, stat, sys; assert hasattr(os, 'O_NOFOLLOW')",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            probe.status.success(),
+            "fixture Python bootstrap: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
         std::fs::rename(jail.join("usr/bin/rsync"), jail.join("usr/bin/rsync-real")).unwrap();
         std::fs::write(
             jail.join("usr/bin/rsync"),
