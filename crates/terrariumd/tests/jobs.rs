@@ -4104,7 +4104,7 @@ async fn the_release_config_refuses_a_shared_target_and_plain_values() {
     let base = json!({"target": "p-box", "recipe": "true", "release_target": "rel-client"});
     let r = lab.td.put("/api/projects/p/delivery", base.clone()).await;
     assert_eq!(r.status, 200, "{}", r.body);
-    let before = lab.td.get("/api/projects/p/delivery").await.ok();
+    let before = lab.td.get("/api/projects/p/delivery").await.ok().clone();
     for name in [
         "PATH",
         "HOME",
