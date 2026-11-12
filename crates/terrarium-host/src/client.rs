@@ -567,7 +567,9 @@ impl Client {
     ) -> Result<(), crate::selfupdate::UpdateError> {
         use crate::selfupdate as u;
         let key = crate::update_signature::RELEASE_KEY.ok_or_else(|| {
-            u::UpdateError::Offer("this dev build has no release verification key; install manually".into())
+            u::UpdateError::Offer(
+                "this dev build has no release verification key; install manually".into(),
+            )
         })?;
         u::check_writable(&su.binary)?;
         let url = u::http_url(&self.opts.url, &offer.path)?;
@@ -585,14 +587,7 @@ impl Client {
         let (path, query) = offer.path.split_once('?').unwrap_or((&offer.path, ""));
         let bundle_path = format!("{path}.sigstore.json?{query}");
         let bundle_url = u::http_url(&self.opts.url, &bundle_path)?;
-        let bundle = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            u::download(&bundle_url, self.opts.tls.clone(), crate::update_signature::MAX_BUNDLE_BYTES),
-        ).await.map_err(|_| u::UpdateError::Download {
-            url: bundle_url,
-            message: "release signature download timed out".into(),
-        })??;
-        crate::update_signature::verify(&data, &bundle, Some(key)).map_err(u::UpdateError::Offer)?;
+        crate::update_signature::download_and_verify(&data, &bundle_url, self.opts.tls.clone(), Some(key)).await?;
         u::stage(&su.binary, &data, &offer.version).await?;
         tracing::info!(sha256 = %sha, bytes = data.len(), "self-update: the new binary checks out");
         self.drain_for_update(su).await;

@@ -62,7 +62,11 @@ pub(super) fn registered_routes() -> super::link_registry::RegisteredRouter {
             get(checksum),
             &[(Method::GET, Access::PublicDenied)],
         )
-        .route(BUNDLE_PATH, get(signature_bundle), &[(Method::GET, Access::PublicDenied)])
+        .route(
+            BUNDLE_PATH,
+            get(signature_bundle),
+            &[(Method::GET, Access::PublicDenied)],
+        )
 }
 
 /// The binary and its SHA-256 only. The host listener serves these too:
@@ -84,11 +88,15 @@ fn bundle_cache_path(binary: &Path, hash: &str) -> PathBuf {
 async fn read_bundle(path: &Path) -> anyhow::Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
     let mut data = Vec::new();
-    tokio::fs::File::open(path).await?
+    tokio::fs::File::open(path)
+        .await?
         .take(terrarium_host::update_signature::MAX_BUNDLE_BYTES as u64 + 1)
-        .read_to_end(&mut data).await?;
-    anyhow::ensure!(!data.is_empty() && data.len() <= terrarium_host::update_signature::MAX_BUNDLE_BYTES,
-        "missing or oversized release signature bundle");
+        .read_to_end(&mut data)
+        .await?;
+    anyhow::ensure!(
+        !data.is_empty() && data.len() <= terrarium_host::update_signature::MAX_BUNDLE_BYTES,
+        "missing or oversized release signature bundle"
+    );
     Ok(data)
 }
 
@@ -98,27 +106,40 @@ async fn ensure_bundle(binary: &Path, hash: &str, arch: &str) -> anyhow::Result<
     if read_bundle(&path).await.is_ok() {
         return Ok(());
     }
-    anyhow::ensure!(terrarium_host::update_signature::RELEASE_KEY.is_some(),
-        "dev daemon has no release key; no release bundle available");
+    anyhow::ensure!(
+        terrarium_host::update_signature::RELEASE_KEY.is_some(),
+        "dev daemon has no release key; no release bundle available"
+    );
     let version = terrarium_version::VERSION;
-    let url = format!("https://github.com/wiltaylor/terrarium/releases/download/v{version}/terrarium-host-{version}-linux-{arch}.sigstore.json");
+    let url = format!(
+        "https://github.com/wiltaylor/terrarium/releases/download/v{version}/terrarium-host-{version}-linux-{arch}.sigstore.json"
+    );
     let tls = terrarium_host::tls::transport(&url, &terrarium_host::tls::TlsSettings::default())?
-        .tls.ok_or_else(|| anyhow::anyhow!("missing HTTPS configuration"))?;
-    let client = reqwest::Client::builder().https_only(true)
+        .tls
+        .ok_or_else(|| anyhow::anyhow!("missing HTTPS configuration"))?;
+    let client = reqwest::Client::builder()
+        .https_only(true)
         .use_preconfigured_tls((*tls).clone())
-        .timeout(std::time::Duration::from_secs(30)).build()?;
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    fetch_bundle(&client, &url, &path).await
+}
+
+async fn fetch_bundle(client: &reqwest::Client, url: &str, path: &Path) -> anyhow::Result<()> {
     let mut response = client.get(url).send().await?.error_for_status()?;
     let mut data = Vec::new();
     while let Some(chunk) = response.chunk().await? {
-        anyhow::ensure!(data.len() + chunk.len() <= terrarium_host::update_signature::MAX_BUNDLE_BYTES,
-            "release signature bundle is too large");
+        anyhow::ensure!(
+            data.len() + chunk.len() <= terrarium_host::update_signature::MAX_BUNDLE_BYTES,
+            "release signature bundle is too large"
+        );
         data.extend_from_slice(&chunk);
     }
     anyhow::ensure!(!data.is_empty(), "release signature bundle is empty");
     // Do not persist truncated downloads. Each request has its own temporary file.
-    let temp = tempfile::NamedTempFile::new_in(binary.parent().unwrap_or(Path::new(".")))?;
+    let temp = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))?;
     tokio::fs::write(temp.path(), &data).await?;
-    temp.persist(&path)?;
+    temp.persist(path)?;
     Ok(())
 }
 
@@ -132,9 +153,18 @@ async fn signature_bundle(State(state): State<Shared>, Query(q): Query<ArchQuery
         Err(_) => None,
     };
     match data {
-        Some(data) => ([(header::CONTENT_TYPE, "application/json"),
-            (header::CACHE_CONTROL, "no-store")], data).into_response(),
-        None => text(StatusCode::NOT_FOUND, "no release signature bundle\n".into()),
+        Some(data) => (
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            data,
+        )
+            .into_response(),
+        None => text(
+            StatusCode::NOT_FOUND,
+            "no release signature bundle\n".into(),
+        ),
     }
 }
 
@@ -686,6 +716,44 @@ mod tests {
         )
         .unwrap();
         assert!(update_offer(dist.path(), "x86_64").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn bundle_cache_is_bounded_and_never_persists_missing_or_partial_downloads() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for _ in 0..4 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let n = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..n]);
+                let response = if request.contains("/missing ") {
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
+                } else if request.contains("/partial ") {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort".to_vec()
+                } else if request.contains("/large ") {
+                    let body = vec![b'x'; terrarium_host::update_signature::MAX_BUNDLE_BYTES + 1];
+                    let mut response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+                    response.extend(body);
+                    response
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nbundle".to_vec()
+                };
+                let _ = socket.write_all(&response).await;
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cached");
+        let client = reqwest::Client::new();
+        for route in ["missing", "partial", "large"] {
+            assert!(fetch_bundle(&client, &format!("{base}/{route}"), &path).await.is_err());
+            assert!(!path.exists());
+        }
+        fetch_bundle(&client, &format!("{base}/valid"), &path).await.unwrap();
+        assert_eq!(read_bundle(&path).await.unwrap(), b"bundle");
+        server.await.unwrap();
     }
 
     #[test]
