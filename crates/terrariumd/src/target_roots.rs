@@ -505,7 +505,7 @@ pub async fn prepare(
         return Ok(None);
     }
     if !probe.end().success() {
-        return Err(ApiError::invalid(probe_failure(&probe)));
+        return Err(python_probe_error(&probe));
     }
     let mut path = root(&current, &a.project, &a.name)?;
     if dest.is_some_and(|d| !inside(&path, d)) {
@@ -611,6 +611,16 @@ pub async fn prepare(
         ));
     }
     Ok(Some(path))
+}
+
+/// Preserve the admission type before considering untrusted probe output.
+fn python_probe_error(probe: &crate::executor::Collected) -> ApiError {
+    if matches!(probe.end(), crate::executor::End::Error { code, .. } if code == "resource_busy") {
+        return ApiError::resource_busy(
+            "cannot check target python3 availability: host admission is busy; retry the command",
+        );
+    }
+    ApiError::invalid(probe_failure(probe))
 }
 
 /// The error of a failed python3 probe, with what the target said: its
@@ -973,6 +983,45 @@ pub fn spawn(state: Shared) -> tokio::task::JoinHandle<()> {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn python_probe_preserves_only_exact_typed_resource_busy() {
+        use crate::error::Code;
+        use crate::executor::{Collected, End};
+        let busy = Collected {
+            stderr: b"hostile stderr credential-canary".to_vec(),
+            end: Some(End::error("resource_busy", "hostile message payload-canary")),
+            ..Default::default()
+        };
+        let error = python_probe_error(&busy);
+        assert!(matches!(error.code, Code::ResourceBusy));
+        assert_eq!(error.code.status().as_u16(), 409);
+        assert_eq!(
+            error.message,
+            "cannot check target python3 availability: host admission is busy; retry the command"
+        );
+        for code in ["invalid", "ResourceBusy", "resource_busy "] {
+            let other = Collected {
+                end: Some(End::error(code, "resource_busy")),
+                ..Default::default()
+            };
+            assert!(matches!(python_probe_error(&other).code, Code::Invalid));
+        }
+        let failed_exit = Collected {
+            stderr: b"resource_busy".to_vec(),
+            end: Some(End::Exit {
+                code: Some(1),
+                signal: None,
+                reason: "resource_busy".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(python_probe_error(&failed_exit).code, Code::Invalid));
+        assert_eq!(
+            python_probe_error(&failed_exit).message,
+            "cannot check target python3 availability: resource_busy"
+        );
+    }
 
     /// TER-566: the error of a failed python3 probe says why.
     #[test]
