@@ -896,7 +896,7 @@ async fn hot_swap_daemon_exit_rolls_back_without_waiting_for_health_timeout() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn every_pending_hot_recovery_stage_ends_inside_the_original_hold_budget() {
     let mut cases = tokio::task::JoinSet::new();
     for case in [
@@ -915,8 +915,9 @@ async fn every_pending_hot_recovery_stage_ends_inside_the_original_hold_budget()
         cases.spawn(async move {
             let mut r = rig();
             let updater = Arc::get_mut(&mut r.updater).unwrap();
-            // Keep >5 s for the real helper kill grace, but make all cases
-            // concurrent and short. Production uses 900/60/5 seconds.
+            // Exercise the budget in virtual time, independent of host load.
+            // Keep >5 s for the helper kill grace encoded in commands.
+            // Production uses 900/60/5 seconds.
             updater.hot_budget = (
                 Duration::from_secs(12),
                 Duration::from_secs(6),
