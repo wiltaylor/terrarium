@@ -1750,7 +1750,7 @@ async fn step_redacted(
         return Err(ApiError::invalid("durable execution cannot take stdin"));
     }
     let pidfile = crate::run_kill::job_pidfile(job);
-    let admission = state.executor.target_resource_lock(def).lock_owned().await;
+    let admission = state.executor.target_admission(def).await?;
     let (running, report) =
         crate::run_kill::start_named_locked(state, def, cmd, pidfile, &admission)?;
     let running = crate::executor::track_resource_run(state, def, cmd, running, report.clone())?;
