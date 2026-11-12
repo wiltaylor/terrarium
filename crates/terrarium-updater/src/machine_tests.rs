@@ -1351,7 +1351,6 @@ async fn supervised_recreate_pending_replacement_stages_share_the_drain_deadline
                 s.pending_engine = if stage == "resume" { None } else { Some(stage) };
                 s.resume_hang = stage == "resume";
             }
-            let started = tokio::time::Instant::now();
             let run = tokio::time::timeout(
                 Duration::from_secs(21),
                 r.updater.run_now(RunKind::Update, "latest", "operator"),
@@ -1359,7 +1358,6 @@ async fn supervised_recreate_pending_replacement_stages_share_the_drain_deadline
             .await
             .expect("replacement and recovery must share the original drain deadline");
             assert_eq!(run.outcome, Outcome::RecoveryFailed, "{stage}: {run:#?}");
-            assert!(started.elapsed() < Duration::from_secs(21), "{stage}");
             let calls = r.fake.calls();
             assert!(
                 calls.iter().any(|c| c.starts_with("stop-for-recovery ")),
