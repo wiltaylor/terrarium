@@ -109,6 +109,18 @@ pub trait Engine: Send + Sync {
         image: &'a Image,
         argv: Vec<String>,
     ) -> BoxFut<'a, Res<ExecOut>>;
+    /// Create an offline helper without starting it. Its ID must be retained
+    /// by the caller before start, including across a cancelled wait.
+    fn prepare_once<'a>(&'a self, _spec: &'a Container, _image: &'a Image, _argv: Vec<String>) -> BoxFut<'a, Res<String>> {
+        Box::pin(async { Err("tracked helpers unsupported".into()) })
+    }
+    fn run_prepared_once<'a>(&'a self, _id: &'a str) -> BoxFut<'a, Res<ExecOut>> {
+        Box::pin(async { Err("tracked helpers unsupported".into()) })
+    }
+    /// Kill/remove this exact helper and verify with inspect that it is gone.
+    fn remove_once<'a>(&'a self, _id: &'a str) -> BoxFut<'a, Res<()>> {
+        Box::pin(async { Err("tracked helper termination unsupported".into()) })
+    }
     /// The health of the container `id`.
     fn health<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<Health>>;
     /// A daemon exit after this startup attempt, even when its supervisor

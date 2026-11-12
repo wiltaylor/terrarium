@@ -32,6 +32,8 @@ struct State {
     pending_stop: bool,
     pending_engine: Option<&'static str>,
     jobs_delay: Duration,
+    helpers: HashMap<String, (Container, Image, Vec<String>)>,
+    helper_next: u32,
     staged: Option<Image>,
     /// The containers by name.
     containers: HashMap<String, Container>,
@@ -234,12 +236,10 @@ impl Engine for Fake {
                 }
             }
             let stdout = if what == "update-status" {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .resume_status
-                    .clone()
-                    .unwrap_or_default()
+                let s = self.0.lock().unwrap();
+                s.resume_status.clone().unwrap_or_else(|| if s.supervised {
+                    r#"{"drain":{"on":false,"jobs_drain":null}}"#.into()
+                } else { String::new() })
             } else if what == "backup" {
                 format!(r#"{{"name": "terrarium-backup-1.zip", "path": "{BACKUP}"}}"#)
             } else if what == "drain-jobs" {
@@ -397,6 +397,36 @@ impl Engine for Fake {
                     String::new()
                 },
             })
+        })
+    }
+
+    fn prepare_once<'a>(&'a self, spec: &'a Container, image: &'a Image, argv: Vec<String>) -> BoxFut<'a, Res<String>> {
+        Box::pin(async move {
+            let mut s = self.0.lock().unwrap();
+            s.helper_next += 1;
+            let id = format!("helper{}", s.helper_next);
+            s.calls.push(format!("helper-created {id}"));
+            s.helpers.insert(id.clone(), (spec.clone(), image.clone(), argv));
+            Ok(id)
+        })
+    }
+
+    fn run_prepared_once<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<ExecOut>> {
+        Box::pin(async move {
+            self.call(format!("helper-start {id}"));
+            let (spec, image, argv) = self.0.lock().unwrap().helpers.get(id).unwrap().clone();
+            self.run_once(&spec, &image, argv).await
+        })
+    }
+
+    fn remove_once<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
+        Box::pin(async move {
+            if self.call(format!("helper-remove {id}")) {
+                return Err("helper termination unverified".into());
+            }
+            self.0.lock().unwrap().helpers.remove(id);
+            self.call(format!("helper-gone {id}"));
+            Ok(())
         })
     }
 

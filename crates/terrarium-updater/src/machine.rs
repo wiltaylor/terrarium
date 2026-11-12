@@ -208,6 +208,13 @@ pub struct Updater {
     hot_budget: (Duration, Duration, Duration),
 }
 
+#[derive(Default)]
+struct Replacement {
+    deadline: Option<tokio::time::Instant>,
+    admission_attempted: bool,
+    helper: Option<String>,
+}
+
 fn now() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -476,26 +483,32 @@ impl Updater {
 
     /// End both drains after health or an early failure.
     async fn resume(&self, cur: &Container) {
+        let _ = self.resume_checked(cur, false).await;
+    }
+
+    async fn resume_checked(&self, cur: &Container, require_confirmation: bool) -> Result<(), Fail> {
         let idx = self.begin_step("resume");
         match tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 // Old daemons support this same command. A rollback may
                 // expose the API before recovery has settled. Retry only
                 // this idempotent operation, within the existing reserve.
-                if matches!(
+                let resumed = matches!(
                     tokio::time::timeout(
                         Duration::from_secs(5),
                         self.exec_ok(&cur.id, resume_argv())
                     )
                     .await,
                     Ok(Ok(_))
-                ) {
+                );
+                if resumed && !require_confirmation {
                     return;
                 }
                 let argv = ["terrarium", "admin", "update", "status", "--json"]
                     .map(String::from)
                     .to_vec();
                 if let Ok(out) = self.exec_ok(&cur.id, argv).await
+                    && (resumed || !require_confirmation)
                     && let Ok(v) = serde_json::from_str::<serde_json::Value>(&out)
                     && v["drain"]["on"] == false
                     && v["drain"].get("jobs_drain").is_some_and(|v| v.is_null())
@@ -507,15 +520,16 @@ impl Updater {
         })
         .await
         {
-            Ok(()) => self.end_step(
+            Ok(()) => { self.end_step(
                 idx,
                 StepState::Ok,
                 "the daemon takes new turns and jobs again",
-            ),
+            ); Ok(()) },
             _ => {
                 let warning = "cannot resume turns and jobs (values hidden)";
                 tracing::warn!("{warning}");
                 self.end_step(idx, StepState::Failed, warning);
+                Err(Fail(warning.into()))
             }
         }
     }
@@ -785,13 +799,15 @@ impl Updater {
         }
 
         // From here the container changes: a failure goes back.
-        let mut admission_attempted = false;
+        let mut replacement = Replacement {
+            deadline: deadlines.map(|(_, switch, _)| switch),
+            ..Default::default()
+        };
         let replace = self.replace(
             &prepared,
             &to,
             restore.as_deref(),
-            supervised,
-            &mut admission_attempted,
+            &mut replacement,
         );
         let replaced = if let Some((_, switch, _)) = deadlines {
             tokio::time::timeout_at(switch, replace)
@@ -804,6 +820,11 @@ impl Updater {
         } else {
             replace.await
         };
+        if let Some((end, _, recovery)) = deadlines {
+            if let Err(e) = self.end_helper(&mut replacement.helper, recovery).await {
+                return Err(self.stop_recreate(&cur, &backup, end, e).await);
+            }
+        }
         match replaced {
             Ok(()) => {
                 if let Some((_, switch, _)) = deadlines {
@@ -823,7 +844,7 @@ impl Updater {
                 Ok(Outcome::Succeeded)
             }
             Err(f) => {
-                if admission_attempted && let Some((end, _, _)) = deadlines {
+                if replacement.admission_attempted && let Some((end, _, _)) = deadlines {
                     // Resume may have admitted writes. Never rewind that journal.
                     return Err(self.stop_recreate(&cur, &backup, end, f.0).await);
                 }
@@ -866,6 +887,24 @@ impl Updater {
         ).await
     }
 
+    async fn tracked_once(&self, cur: &Container, image: &Image, argv: Vec<String>, deadline: tokio::time::Instant, helper: &mut Option<String>) -> Res<crate::engine::ExecOut> {
+        budget_left(deadline, Duration::ZERO)?;
+        let id = self.engine.prepare_once(cur, image, bounded_command(argv, deadline)?).await?;
+        // This assignment precedes start. Cancellation cannot lose a running
+        // helper's ID, and callers must verify its termination before restart.
+        *helper = Some(id.clone());
+        self.engine.run_prepared_once(&id).await
+    }
+
+    async fn end_helper(&self, helper: &mut Option<String>, deadline: tokio::time::Instant) -> Res<()> {
+        if let Some(id) = helper.as_deref() {
+            tokio::time::timeout_at(deadline, self.engine.remove_once(id)).await
+                .map_err(|_| "restore helper termination deadline elapsed".to_owned())??;
+            *helper = None;
+        }
+        Ok(())
+    }
+
     async fn finish_recreate(&self, cur: &Container, backup: &str, deadline: tokio::time::Instant) {
         // Use the source helper even when the destination is a legacy image.
         if let Err(e) = self
@@ -903,6 +942,7 @@ impl Updater {
         switch_deadline: tokio::time::Instant,
         recovery_deadline: tokio::time::Instant,
     ) -> Result<(), (Outcome, Fail)> {
+        let mut helper = None;
         let work = self
             .step(
                 "snapshot-database",
@@ -914,13 +954,13 @@ impl Updater {
                             .await?;
                         self.exec_ok(&cur.id, hot_argv("pause", &["960"])).await?;
                         let out = self
-                            .engine
-                            .run_once(
+                            .tracked_once(
                                 cur,
                                 &cur.image,
-                                bounded_command(hot_argv("snapshot", &[backup]), switch_deadline)?,
+                                hot_argv("snapshot", &[backup]), switch_deadline, &mut helper,
                             )
                             .await?;
+                        self.end_helper(&mut helper, switch_deadline).await?;
                         if out.code != 0 {
                             return Err(out.reason());
                         }
@@ -939,6 +979,9 @@ impl Updater {
                 |()| "exact paused database snapshot for automatic recreate rollback".into(),
             )
             .await;
+        if let Err(e) = self.end_helper(&mut helper, recovery_deadline).await {
+            return Err(self.failed_hot_recovery(cur, backup, deadline, e).await);
+        }
         if let Err(f) = work {
             return Err(self
                 .recreate_early_failure(cur, backup, deadline, recovery_deadline, true, f)
@@ -966,7 +1009,7 @@ impl Updater {
             }
             self.wait_hot_healthy_until(&cur.id, recovery_deadline, None)
                 .await?;
-            self.resume(cur).await;
+                self.resume_checked(cur, true).await.map_err(|f| f.0)?;
             Ok(())
         })
         .await;
@@ -1072,16 +1115,17 @@ impl Updater {
 
         // No daemon is running here. Hold/replay runners keep their processes,
         // while the snapshot includes every completed pre-upgrade write.
+        let mut helper = None;
         let snapshot = self
             .step(
                 "snapshot-database",
                 async {
                     let snapshot = tokio::time::timeout_at(
                         switch_deadline,
-                        self.engine.run_once(
+                        self.tracked_once(
                             cur,
                             &cur.image,
-                            bounded_command(hot_argv("snapshot", &[&backup]), switch_deadline)?,
+                            hot_argv("snapshot", &[&backup]), switch_deadline, &mut helper,
                         ),
                     )
                     .await
@@ -1098,6 +1142,9 @@ impl Updater {
                 Clone::clone,
             )
             .await;
+        if let Err(e) = self.end_helper(&mut helper, recovery_deadline).await {
+            return Err(self.failed_hot_recovery(cur, &backup, hold_deadline, e).await);
+        }
         match snapshot {
             Ok(_) => (),
             Err(f) => {
@@ -1216,16 +1263,13 @@ impl Updater {
                     self.exec_ok(&cur.id, hot_argv("pause", &[&left])).await?;
                     // Keep the live runners' open files and logs intact.
                     let out = self
-                        .engine
-                        .run_once(
+                        .tracked_once(
                             cur,
                             &cur.image,
-                            bounded_command(
-                                hot_argv("restore-database", &[&backup]),
-                                recovery_deadline,
-                            )?,
+                            hot_argv("restore-database", &[&backup]), recovery_deadline, &mut helper,
                         )
                         .await?;
+                    self.end_helper(&mut helper, recovery_deadline).await?;
                     if out.code != 0 {
                         return Err(out.reason());
                     }
@@ -1243,6 +1287,9 @@ impl Updater {
                     Ok::<_, String>(())
                 })
                 .await;
+                if let Err(e) = self.end_helper(&mut helper, hold_deadline).await {
+                    return Err(self.failed_hot_recovery(cur, &backup, hold_deadline, e).await);
+                }
                 match recovery {
                     Ok(()) => Err((Outcome::RolledBack, f)),
                     Err(e) => Err(self
@@ -1385,10 +1432,9 @@ impl Updater {
         cur: &Container,
         to: &Image,
         restore: Option<&str>,
-        already_stopped: bool,
-        admission_attempted: &mut bool,
+        replacement: &mut Replacement,
     ) -> Result<(), Fail> {
-        if !already_stopped {
+        if replacement.deadline.is_none() {
             self.step("stop", self.engine.stop(&cur.id), |()| {
                 format!("stopped {}", cur.name)
             })
@@ -1398,7 +1444,12 @@ impl Updater {
             self.step(
                 "restore",
                 async {
-                    let out = self.engine.run_once(cur, to, restore_argv(path)).await?;
+                    let out = if let Some(deadline) = replacement.deadline {
+                        self.tracked_once(cur, to, restore_argv(path), deadline, &mut replacement.helper).await?
+                    } else { self.engine.run_once(cur, to, restore_argv(path)).await? };
+                    if let Some(deadline) = replacement.deadline {
+                        self.end_helper(&mut replacement.helper, deadline).await?;
+                    }
                     if out.code == 0 {
                         Ok(())
                     } else {
@@ -1420,8 +1471,10 @@ impl Updater {
             .await?;
         self.step("health", self.wait_healthy(&new.id), Clone::clone)
             .await?;
-        *admission_attempted = true;
-        self.resume(&new).await;
+        replacement.admission_attempted = true;
+        if replacement.deadline.is_some() {
+            self.resume_checked(&new, true).await?;
+        } else { self.resume(&new).await; }
         Ok(())
     }
 
@@ -1475,13 +1528,17 @@ impl Updater {
         deadlines: Option<(tokio::time::Instant, tokio::time::Instant)>,
     ) -> Result<(), Fail> {
         let Some((deadline, recovery_deadline)) = deadlines else {
-            return self.recover_inner(cur, backup, None).await;
+            return self.recover_inner(cur, backup, None, &mut None).await;
         };
+        let mut helper = None;
         let recovered = tokio::time::timeout_at(
             recovery_deadline,
-            self.recover_inner(cur, backup, Some(recovery_deadline)),
+            self.recover_inner(cur, backup, Some(recovery_deadline), &mut helper),
         )
         .await;
+        if let Err(e) = self.end_helper(&mut helper, deadline).await {
+            return Err(self.stop_recreate(cur, backup, deadline, e).await.1);
+        }
         match recovered {
             Ok(Ok(())) => Ok(()),
             failure => {
@@ -1523,6 +1580,7 @@ impl Updater {
         cur: &Container,
         backup: &str,
         snapshot_deadline: Option<tokio::time::Instant>,
+        helper: &mut Option<String>,
     ) -> Result<(), Fail> {
         let idx = self.begin_step("rollback");
         self.end_step(
@@ -1541,18 +1599,11 @@ impl Updater {
         self.step(
             "restore",
             async {
-                let out = self
-                    .engine
-                    .run_once(
-                        cur,
-                        &cur.image,
-                        if let Some(deadline) = snapshot_deadline {
-                            bounded_command(hot_argv("restore-database", &[backup]), deadline)?
-                        } else {
-                            restore_argv(backup)
-                        },
-                    )
-                    .await?;
+                let out = if let Some(deadline) = snapshot_deadline {
+                    let out = self.tracked_once(cur, &cur.image, hot_argv("restore-database", &[backup]), deadline, helper).await?;
+                    self.end_helper(helper, deadline).await?;
+                    out
+                } else { self.engine.run_once(cur, &cur.image, restore_argv(backup)).await? };
                 if out.code == 0 {
                     Ok(())
                 } else {
@@ -1569,7 +1620,9 @@ impl Updater {
             .await?;
         self.step("health", self.wait_healthy(&old.id), Clone::clone)
             .await?;
-        self.resume(&old).await;
+        if snapshot_deadline.is_some() {
+            self.resume_checked(&old, true).await?;
+        } else { self.resume(&old).await; }
         Ok(())
     }
 }

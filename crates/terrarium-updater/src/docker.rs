@@ -342,7 +342,14 @@ impl Docker {
             .ok(Method::POST, "/containers/create", Some(body))
             .await?;
         let id = made["Id"].as_str().unwrap_or_default().to_owned();
-        let r = async {
+        let r = self.run_created(&id).await;
+        let _ = self
+            .call(Method::DELETE, &format!("/containers/{id}?force=1"), None)
+            .await;
+        r
+    }
+
+    async fn run_created(&self, id: &str) -> Res<ExecOut> {
             self.ok(Method::POST, &format!("/containers/{id}/start"), None)
                 .await?;
             let w = self
@@ -361,12 +368,6 @@ impl Docker {
                 stdout,
                 stderr,
             })
-        }
-        .await;
-        let _ = self
-            .call(Method::DELETE, &format!("/containers/{id}?force=1"), None)
-            .await;
-        r
     }
 }
 
@@ -988,6 +989,36 @@ impl Engine for Docker {
             }
             self.run_body(once_body(&spec.spec, &image.reference, &argv))
                 .await
+        })
+    }
+
+    fn prepare_once<'a>(&'a self, spec: &'a Container, image: &'a Image, mut argv: Vec<String>) -> BoxFut<'a, Res<String>> {
+        Box::pin(async move {
+            let executable = if argv.first().is_some_and(|s| s == "timeout") { 3 } else { 0 };
+            if argv.get(executable).is_some_and(|s| s == "terrariumd")
+                && let Some(img) = self.inspect_image(&image.id).await?
+                && img["Config"]["Labels"]["io.terrarium.hot-swap-layout"] == "1" {
+                argv[executable] = "/opt/terrarium/bundled/bin/terrariumd".into();
+            }
+            let made = self.ok(Method::POST, "/containers/create", Some(once_body(&spec.spec, &image.reference, &argv))).await?;
+            made["Id"].as_str().filter(|s| !s.is_empty()).map(str::to_owned)
+                .ok_or_else(|| "Docker helper create returned no ID".into())
+        })
+    }
+
+    fn run_prepared_once<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<ExecOut>> {
+        Box::pin(async move { self.run_created(&enc(id)).await })
+    }
+
+    fn remove_once<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
+        Box::pin(async move {
+            let id = enc(id);
+            // Inspect even if delete's answer was lost. Only absence proves
+            // this helper cannot still be writing the database.
+            let _ = self.call(Method::DELETE, &format!("/containers/{id}?force=1"), None).await;
+            let (status, _) = self.call(Method::GET, &format!("/containers/{id}/json"), None).await?;
+            if status == StatusCode::NOT_FOUND { Ok(()) }
+            else { Err("restore helper termination unverified".into()) }
         })
     }
 
