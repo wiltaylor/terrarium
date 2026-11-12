@@ -2594,7 +2594,8 @@ impl Db {
     }
 
     /// Run a read on the blocking pool.
-    pub async fn read<T, F>(&self, f: F) -> ApiResult<T>
+    #[track_caller]
+    pub fn read<T, F>(&self, f: F) -> impl std::future::Future<Output = ApiResult<T>> + '_
     where
         T: Send + 'static,
         F: FnOnce(&Connection) -> ApiResult<T> + Send + 'static,
@@ -2602,6 +2603,8 @@ impl Db {
         let conn = self.conn.clone();
         let queued = tracing::enabled!(target: "terrariumd::db_timing", tracing::Level::DEBUG)
             .then(std::time::Instant::now);
+        let caller = std::panic::Location::caller();
+        async move {
         crate::links::spawn_blocking(move || {
             let started = queued.map(|_| std::time::Instant::now());
             let guard = match conn.lock() {
@@ -2616,6 +2619,8 @@ impl Db {
                 (queued, started, acquired, finished)
             {
                 tracing::debug!(target: "terrariumd::db_timing", operation = "read",
+                    caller_file = caller.file(),
+                    caller_line = caller.line(),
                     scheduling_us = started.duration_since(queued).as_micros() as u64,
                     mutex_wait_us = acquired.duration_since(started).as_micros() as u64,
                     sql_us = finished.duration_since(acquired).as_micros() as u64,
@@ -2625,6 +2630,7 @@ impl Db {
         })
         .await
         .map_err(|e| ApiError::internal(format!("database task failed: {e}")))?
+        }
     }
 
     /// Run a read on the calling thread. Only for a short read at the
@@ -3367,6 +3373,46 @@ mod tests {
 
     fn migration_count() -> usize {
         MIGRATIONS.len() + NAMED_MIGRATIONS.len()
+    }
+
+    #[test]
+    fn rule_selection_is_column_indexed_and_does_not_render_board_history() {
+        use crate::store::board::{SELECTION_SQL, get_board, selection_cards};
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO projects(name,created_at,updated_at) VALUES ('p','t','t');
+             INSERT INTO boards(project,created_at) VALUES ('p','t');
+             INSERT INTO board_columns(id,project,name,position) VALUES
+               (1,'p','accepted',0),(2,'p','done',1);
+             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000)
+             INSERT INTO cards(id,project,number,column_id,position,title,labels,created_by,created_at,updated_at)
+               SELECT 'P-'||x,'p',x,CASE WHEN x<=3 THEN 1 ELSE 2 END,x,'fixture',
+                 '[\"version:vnext\"]','operator','2026-11-12T00:00:00Z','t' FROM n;
+             INSERT INTO card_comments(id,card,author,body,created_at)
+               SELECT 'comment-'||id,id,'operator',hex(zeroblob(1000)),'t' FROM cards;
+             UPDATE cards SET archived=1 WHERE id='P-2';
+             UPDATE cards SET kind='group' WHERE id='P-3';",
+        ).unwrap();
+        let start = std::time::Instant::now();
+        let old = get_board(&conn, "p").unwrap();
+        let before = start.elapsed();
+        let start = std::time::Instant::now();
+        let selected = selection_cards(&conn, "p", "accepted").unwrap();
+        let after = start.elapsed();
+        eprintln!("2000 cards, 2000 2KB comments: full board {before:?}, rule selection {after:?}");
+        let expected: Vec<_> = old.cards.iter().filter(|c| c.column == "accepted" && c.kind != "group")
+            .map(|c| (&c.id, &c.labels, &c.created_at)).collect();
+        let actual: Vec<_> = selected.iter().map(|c| (&c.id, &c.labels, &c.created_at)).collect();
+        assert_eq!(actual, expected);
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].comments.is_empty());
+        assert!(selection_cards(&conn, "p", "missing").unwrap().is_empty());
+        let plan: Vec<String> = conn.prepare(&format!("EXPLAIN QUERY PLAN {SELECTION_SQL}"))
+            .unwrap().query_map(["p", "accepted"], |r| r.get(3)).unwrap()
+            .collect::<Result<_, _>>().unwrap();
+        assert!(plan.iter().any(|p| p.contains("SEARCH c USING INDEX cards_column")), "{plan:?}");
+        assert!(!plan.iter().any(|p| p.contains("SCAN c") || p.contains("TEMP B-TREE")), "{plan:?}");
     }
 
     #[tokio::test]

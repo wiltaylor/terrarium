@@ -825,15 +825,11 @@ pub fn pick_batch(
     from: &str,
     limit: Option<usize>,
 ) -> ApiResult<BatchPick> {
-    let board = board::get_board(conn, project)?;
+    let cards = board::selection_cards(conn, project, from)?;
     let mut out = BatchPick::default();
     // The cards that could go, with their repo, in board order.
     let mut ready: Vec<(&Card, String)> = Vec::new();
-    for c in board
-        .cards
-        .iter()
-        .filter(|c| c.column == from && c.kind != "group")
-    {
+    for c in &cards {
         if api_jobs::not_held(c).is_err() {
             out.left_out.push(json!({"card": c.id, "reason": "held"}));
             continue;
