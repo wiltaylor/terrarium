@@ -145,6 +145,11 @@ impl Lab {
     }
 
     async fn secret(&mut self, value: &str) {
+        let mut body = json!({"kind": "login",
+            "fields": {"username": "ignored", "password": value}});
+        if value != ROTATED {
+            body["name"] = json!("win-login");
+        }
         let r = self
             .td
             .req(
@@ -158,8 +163,7 @@ impl Lab {
                 } else {
                     "/api/secrets"
                 },
-                Some(json!({"name": "win-login", "kind": "login",
-            "fields": {"username": "ignored", "password": value}})),
+                Some(body),
                 None,
             )
             .await;
