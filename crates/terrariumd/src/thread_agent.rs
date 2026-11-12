@@ -27,9 +27,9 @@
 //!   thread back into tracking and parks it again.
 //! - **Wake rules** (TER-148, TER-144 D4, D5): in a thread that tracks, a
 //!   linked card that goes to blocked, or a move that leaves all linked
-//!   cards in review or later, wakes the agent with a `[Thread:<id>]` turn
+//!   cards done and installed, wakes the agent with a `[Thread:<id>]` turn
 //!   ([`cards_turn`]) that lists the linked cards it may read and says what
-//!   to do: on blocked, tell the operator; on all in review, post what
+//!   to do: on blocked, tell the operator; on ready to test, post what
 //!   changed, the pre-release and the test steps, and ask "works / found an
 //!   issue". On "found an issue" it asks the lead for a bug card linked to
 //!   the same thread, and tracks again.

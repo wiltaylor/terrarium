@@ -646,6 +646,18 @@ pub fn linked_states(conn: &Connection, thread: &str) -> ApiResult<Vec<LinkedSta
 /// is green. Requires a live card or a monitor, so monitor-only ops work too.
 fn all_review_or_later(conn: &Connection, thread: &str) -> ApiResult<bool> {
     let monitor = get_bare(conn, thread)?.monitor;
+    if !monitor_ready(conn, thread)? {
+        return Ok(false);
+    }
+    let live: Vec<LinkedState> = linked_states(conn, thread)?
+        .into_iter()
+        .filter(|s| !s.archived)
+        .collect();
+    Ok((monitor.is_some() || !live.is_empty()) && live.iter().all(|s| s.review_or_later))
+}
+
+fn monitor_ready(conn: &Connection, thread: &str) -> ApiResult<bool> {
+    let monitor = get_bare(conn, thread)?.monitor;
     if let Some(key) = &monitor {
         let (project, name) = key.split_once(':').unwrap_or(("", ""));
         let green: bool = conn.query_row(
@@ -659,11 +671,7 @@ fn all_review_or_later(conn: &Connection, thread: &str) -> ApiResult<bool> {
             return Ok(false);
         }
     }
-    let live: Vec<LinkedState> = linked_states(conn, thread)?
-        .into_iter()
-        .filter(|s| !s.archived)
-        .collect();
-    Ok((monitor.is_some() || !live.is_empty()) && live.iter().all(|s| s.review_or_later))
+    Ok(true)
 }
 
 /// Check at most 64 tracked threads, using an indexed keyset cursor.
@@ -674,7 +682,7 @@ pub fn poll_test_ready(t: &mut Tx<'_>, after: &str) -> ApiResult<String> {
             .collect::<Result<_, _>>()?
     };
     for id in &ids {
-        if all_review_or_later(t, id)? {
+        if monitor_ready(t, id)? {
             let (cards, reasons) =
                 super::thread_test_ready::readiness(t, id, terrarium_version::VERSION)?;
             let previous: Option<String> = t.query_row(

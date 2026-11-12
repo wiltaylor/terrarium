@@ -109,6 +109,15 @@ async fn test_request_waits_for_every_card_and_installation() {
         .await
         .unwrap();
     assert_eq!(lab.wakes(&tid).await, ["review"]);
+    lab.td.wait_status(&eph, "idle").await;
+    lab.post_as(&eph, &tid, "Installed, ready to test.").await;
+    lab.parked(&eph).await;
+    let more = lab.card("p", "Added after readiness").await;
+    lab.link(&tid, &format!("p:{more}")).await;
+    lab.mv(&more, "review", None).await;
+    assert_eq!(lab.wakes(&tid).await, ["review"]);
+    lab.mv(&more, "done", None).await;
+    assert_eq!(lab.wakes(&tid).await, ["review", "review"]);
     let r = lab.td.post_as(&eph, &path, body).await;
     assert_eq!(r.status, 201, "{}", r.body);
 }
