@@ -275,20 +275,31 @@ pub fn provision_root(workspace: &Path, root: &OwnedRoot) -> Result<(), Refusal>
     use std::fs::File;
     use std::io::{Read, Write};
 
-    let invalid = |e| Refusal::invalid(format!("cannot provision owned root under {}/{}: {e}; inspect the paths and set the base and project parent to root:workspace-group mode 0755 before retrying", workspace.display(), root.project));
+    let invalid = |e| {
+        Refusal::invalid(format!(
+            "cannot provision owned root under {}/{}: {e}; inspect the paths and set the base and project parent to root:workspace-group mode 0755 before retrying",
+            workspace.display(),
+            root.project
+        ))
+    };
     for name in [&root.project, &root.name, &root.agent] {
         if name.is_empty()
             || name.len() > 128
-            || !name.bytes().all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+            || !name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
         {
             return Err(invalid("invalid project, agent name or agent ID".into()));
         }
     }
     if Path::new(&root.base) != workspace {
-        return Err(invalid("work_root must equal the helper workspace_root".into()));
+        return Err(invalid(
+            "work_root must equal the helper workspace_root".into(),
+        ));
     }
     let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
-    let base = File::from(open(workspace, flags, Mode::empty()).map_err(|e| invalid(e.to_string()))?);
+    let base =
+        File::from(open(workspace, flags, Mode::empty()).map_err(|e| invalid(e.to_string()))?);
     let safe_parent = |file: &File| -> Result<(), Refusal> {
         let meta = file.metadata().map_err(|e| invalid(e.to_string()))?;
         if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
@@ -297,47 +308,90 @@ pub fn provision_root(workspace: &Path, root: &OwnedRoot) -> Result<(), Refusal>
         Ok(())
     };
     safe_parent(&base)?;
-    let project_created = match mkdirat(&base, root.project.as_str(), Mode::from_bits_truncate(0o755)) {
+    let project_created = match mkdirat(
+        &base,
+        root.project.as_str(),
+        Mode::from_bits_truncate(0o755),
+    ) {
         Ok(()) => true,
         Err(nix::errno::Errno::EEXIST) => false,
         Err(e) => return Err(invalid(e.to_string())),
     };
-    let project = File::from(openat(&base, root.project.as_str(), flags, Mode::empty())
-        .map_err(|e| invalid(e.to_string()))?);
+    let project = File::from(
+        openat(&base, root.project.as_str(), flags, Mode::empty())
+            .map_err(|e| invalid(e.to_string()))?,
+    );
     safe_parent(&project)?;
     if project_created {
-        project.set_permissions(std::fs::Permissions::from_mode(0o755)).map_err(|e| invalid(e.to_string()))?;
+        project
+            .set_permissions(std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| invalid(e.to_string()))?;
     }
     let gid = base.metadata().map_err(|e| invalid(e.to_string()))?.gid();
-    let created = match mkdirat(&project, root.name.as_str(), Mode::from_bits_truncate(0o700)) {
+    let created = match mkdirat(
+        &project,
+        root.name.as_str(),
+        Mode::from_bits_truncate(0o700),
+    ) {
         Ok(()) => true,
         Err(nix::errno::Errno::EEXIST) => false,
         Err(e) => return Err(invalid(e.to_string())),
     };
-    let owned = File::from(openat(&project, root.name.as_str(), flags, Mode::empty())
-        .map_err(|e| invalid(e.to_string()))?);
+    let owned = File::from(
+        openat(&project, root.name.as_str(), flags, Mode::empty())
+            .map_err(|e| invalid(e.to_string()))?,
+    );
     if created {
         fchown(&owned, None, Some(Gid::from_raw(gid))).map_err(|e| invalid(e.to_string()))?;
-        let mut marker = File::from(openat(&owned, ".terrarium-owner",
-            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-            Mode::from_bits_truncate(0o640)).map_err(|e| invalid(e.to_string()))?);
+        let mut marker = File::from(
+            openat(
+                &owned,
+                ".terrarium-owner",
+                OFlag::O_WRONLY
+                    | OFlag::O_CREAT
+                    | OFlag::O_EXCL
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_CLOEXEC,
+                Mode::from_bits_truncate(0o640),
+            )
+            .map_err(|e| invalid(e.to_string()))?,
+        );
         fchown(&marker, None, Some(Gid::from_raw(gid))).map_err(|e| invalid(e.to_string()))?;
-        marker.set_permissions(std::fs::Permissions::from_mode(0o640)).map_err(|e| invalid(e.to_string()))?;
-        marker.write_all(root.agent.as_bytes()).map_err(|e| invalid(e.to_string()))?;
-        owned.set_permissions(std::fs::Permissions::from_mode(0o2770)).map_err(|e| invalid(e.to_string()))?;
+        marker
+            .set_permissions(std::fs::Permissions::from_mode(0o640))
+            .map_err(|e| invalid(e.to_string()))?;
+        marker
+            .write_all(root.agent.as_bytes())
+            .map_err(|e| invalid(e.to_string()))?;
+        owned
+            .set_permissions(std::fs::Permissions::from_mode(0o2770))
+            .map_err(|e| invalid(e.to_string()))?;
     } else {
         let meta = owned.metadata().map_err(|e| invalid(e.to_string()))?;
         if meta.uid() != 0 || meta.gid() != gid || meta.mode() & 0o7777 != 0o2770 {
             return Err(invalid("existing agent root must be root-owned, workspace-group owned and mode 2770; administrator migration required".into()));
         }
-        let mut marker = File::from(openat(&owned, ".terrarium-owner",
-            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
-            Mode::empty()).map_err(|e| invalid(e.to_string()))?);
-        if !marker.metadata().map_err(|e| invalid(e.to_string()))?.is_file() {
+        let mut marker = File::from(
+            openat(
+                &owned,
+                ".terrarium-owner",
+                OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| invalid(e.to_string()))?,
+        );
+        if !marker
+            .metadata()
+            .map_err(|e| invalid(e.to_string()))?
+            .is_file()
+        {
             return Err(invalid("owner marker must be a regular file".into()));
         }
         let mut agent = String::new();
-        Read::by_ref(&mut marker).take(129).read_to_string(&mut agent).map_err(|e| invalid(e.to_string()))?;
+        Read::by_ref(&mut marker)
+            .take(129)
+            .read_to_string(&mut agent)
+            .map_err(|e| invalid(e.to_string()))?;
         if agent != root.agent {
             return Err(invalid("root belongs to another agent".into()));
         }
@@ -359,20 +413,28 @@ pub fn remove_empty_root(workspace: &Path, root: &OwnedRoot) -> Result<(), Refus
     let invalid = |e| Refusal::invalid(format!("cannot remove empty owned root: {e}"));
     let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
     let base = open(workspace, flags, Mode::empty()).map_err(|e| invalid(e.to_string()))?;
-    let project = openat(&base, root.project.as_str(), flags, Mode::empty()).map_err(|e| invalid(e.to_string()))?;
-    let owned = openat(&project, root.name.as_str(), flags, Mode::empty()).map_err(|e| invalid(e.to_string()))?;
-    for entry in std::fs::read_dir(format!("/proc/self/fd/{}", owned.as_raw_fd())).map_err(|e| invalid(e.to_string()))? {
+    let project = openat(&base, root.project.as_str(), flags, Mode::empty())
+        .map_err(|e| invalid(e.to_string()))?;
+    let owned = openat(&project, root.name.as_str(), flags, Mode::empty())
+        .map_err(|e| invalid(e.to_string()))?;
+    for entry in std::fs::read_dir(format!("/proc/self/fd/{}", owned.as_raw_fd()))
+        .map_err(|e| invalid(e.to_string()))?
+    {
         if entry.map_err(|e| invalid(e.to_string()))?.file_name() != ".terrarium-owner" {
             return Err(invalid("root still contains data".into()));
         }
     }
-    unlinkat(&owned, ".terrarium-owner", UnlinkatFlags::NoRemoveDir).map_err(|e| invalid(e.to_string()))?;
+    unlinkat(&owned, ".terrarium-owner", UnlinkatFlags::NoRemoveDir)
+        .map_err(|e| invalid(e.to_string()))?;
     if let Err(e) = unlinkat(&project, root.name.as_str(), UnlinkatFlags::RemoveDir) {
         // Keep a refused cleanup retryable, without following or replacing
         // anything a still-running holder might have created.
-        if let Ok(fd) = openat(&owned, ".terrarium-owner",
+        if let Ok(fd) = openat(
+            &owned,
+            ".terrarium-owner",
             OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-            Mode::from_bits_truncate(0o640)) {
+            Mode::from_bits_truncate(0o640),
+        ) {
             let mut marker = File::from(fd);
             let _ = marker.write_all(root.agent.as_bytes());
         }
@@ -1877,7 +1939,9 @@ impl Helper {
                 .map_err(|e| Refusal::new(ErrorKind::Unsupported, e))?;
             if let Some(root) = &req.prepare_root {
                 if req.holder != "operator" {
-                    return Err(Refusal::invalid("owned root provisioning requires operator scope"));
+                    return Err(Refusal::invalid(
+                        "owned root provisioning requires operator scope",
+                    ));
                 }
                 provision_root(&self.ctx.workspace_root, root)?;
             }

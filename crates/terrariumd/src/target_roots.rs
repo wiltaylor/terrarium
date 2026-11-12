@@ -402,9 +402,19 @@ fn command(
     root(base, project, name)?;
     let mut cmd = root_script(
         [
-            "python3", "-c", SCRIPT,
-            if mode == "delete" && cwd.is_some() { "clear" } else { mode },
-            base, project, name, agent, dest,
+            "python3",
+            "-c",
+            SCRIPT,
+            if mode == "delete" && cwd.is_some() {
+                "clear"
+            } else {
+                mode
+            },
+            base,
+            project,
+            name,
+            agent,
+            dest,
         ]
         .into_iter()
         .map(str::to_owned)

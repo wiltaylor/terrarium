@@ -25,7 +25,9 @@ fn workspace() -> tempfile::TempDir {
 
 fn pool_session(base: &Path, name: &str, uid: u32) {
     let out = Command::new("python3")
-        .args(["-c", r#"
+        .args([
+            "-c",
+            r#"
 import os, sys
 base, name, sibling = sys.argv[1:]
 os.chdir(base + '/project/' + name)
@@ -37,7 +39,8 @@ for op in [lambda: os.chmod(base + '/project', 0o777),
     except PermissionError: pass
     else: raise AssertionError('pool user modified protected parent')
 assert os.path.isfile(base + '/project/' + sibling + '/.terrarium-owner')
-"#])
+"#,
+        ])
         .arg(base)
         .arg(name)
         .arg(if name == "a" { "b" } else { "a" })
@@ -45,7 +48,11 @@ assert os.path.isfile(base + '/project/' + sibling + '/.terrarium-owner')
         .gid(23000)
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -71,7 +78,9 @@ fn two_pool_users_cannot_change_project_or_rename_sibling_roots() {
 
 #[test]
 fn unsafe_existing_parents_are_refused_without_repair() {
-    if !nix::unistd::geteuid().is_root() { return; }
+    if !nix::unistd::geteuid().is_root() {
+        return;
+    }
     let tmp = workspace();
     let project = tmp.path().join("project");
     std::fs::create_dir(&project).unwrap();
@@ -84,7 +93,10 @@ fn unsafe_existing_parents_are_refused_without_repair() {
         std::os::unix::fs::chown(path, Some(uid), None).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
         let err = provision_root(tmp.path(), &request(tmp.path(), "a")).unwrap_err();
-        assert!(err.message.contains("administrator migration required"), "{err:?}");
+        assert!(
+            err.message.contains("administrator migration required"),
+            "{err:?}"
+        );
         assert_eq!(path.metadata().unwrap().uid(), uid);
         assert_eq!(path.metadata().unwrap().mode() & 0o777, mode);
         assert!(!project.join("a").exists());
@@ -95,7 +107,9 @@ fn unsafe_existing_parents_are_refused_without_repair() {
 
 #[test]
 fn cleanup_removes_only_empty_matching_root_and_preserves_sibling() {
-    if !nix::unistd::geteuid().is_root() { return; }
+    if !nix::unistd::geteuid().is_root() {
+        return;
+    }
     let tmp = workspace();
     let a = request(tmp.path(), "a");
     let b = request(tmp.path(), "b");
@@ -115,7 +129,9 @@ fn cleanup_removes_only_empty_matching_root_and_preserves_sibling() {
 
 #[test]
 fn symlinks_and_unmarked_existing_roots_are_refused() {
-    if !nix::unistd::geteuid().is_root() { return; }
+    if !nix::unistd::geteuid().is_root() {
+        return;
+    }
     let tmp = workspace();
     let other = workspace();
     std::os::unix::fs::symlink(other.path(), tmp.path().join("project")).unwrap();
