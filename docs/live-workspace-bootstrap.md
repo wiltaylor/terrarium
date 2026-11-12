@@ -14,6 +14,13 @@ administrative children from registration IDs beneath configured protected
 parents. Peer authentication is necessary but does not replace daemon authority.
 Link provenance is rejected without operator-route exceptions.
 
+The request also binds the canonical digest of the helper-selected receiver
+specification (pinned image digest, fixed command and runtime profile). The
+helper must match that digest against its protected configuration before any
+intent or side effect. A caller supplies no image, command or profile override.
+Changing the helper specification requires a new operation, never replay under
+the old identity. A configured profile alone is not B5 approval or activation.
+
 The daemon first commits a FULL-synchronous immediate transaction recording its
 intent and reservation. The helper then syncs its immutable bootstrap intent
 and containing directory before creating anything. Every externally observed

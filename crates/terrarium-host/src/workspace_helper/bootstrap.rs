@@ -8,7 +8,8 @@ use terrarium_core::live_workspace::{Reply, RuntimeIdentity};
 /// Implementations must retain pinned scaffold/runtime FDs for the entire
 /// operation. Paths and Docker options are helper-selected, never request data.
 pub trait Backend {
-    /// Refuse existing children and runtimes, including apparently empty ones.
+    /// Match the protected specification digest and measured runtime profile,
+    /// then refuse existing children/runtimes, including apparently empty ones.
     /// This check is not ownership proof and must precede the initial intent.
     fn check_absent(&mut self, request: &Request) -> Result<(), Reply>;
     fn create_scaffold(&mut self, request: &Request, store: &Store) -> Result<Scaffold, Reply>;
@@ -100,6 +101,7 @@ mod tests {
     fn request() -> Request {
         serde_json::from_value(serde_json::json!({
             "version": 1,
+            "configuration": vec![1; 32],
             "operation": "00000000000000000000000001",
             "provenance": {"daemon_instance": "00000000000000000000000002", "caller": "local_operator"},
             "host": "00000000000000000000000003",

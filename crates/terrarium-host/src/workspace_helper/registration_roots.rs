@@ -147,6 +147,7 @@ mod tests {
     fn request() -> Request {
         serde_json::from_value(serde_json::json!({
             "version": 1,
+            "configuration": vec![1; 32],
             "operation": "00000000000000000000000001",
             "provenance": {"daemon_instance": "00000000000000000000000002", "caller": "local_operator"},
             "host": "00000000000000000000000003",

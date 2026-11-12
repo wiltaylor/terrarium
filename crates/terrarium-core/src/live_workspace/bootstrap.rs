@@ -22,6 +22,9 @@ pub struct Request {
     pub registration: RegistrationId,
     pub incarnation: RuntimeId,
     pub domain: TrustDomainId,
+    /// Digest of the protected helper-selected image/command/runtime profile.
+    /// The helper independently computes and matches it before admission.
+    pub configuration: [u8; 32],
 }
 
 impl Request {
@@ -29,6 +32,7 @@ impl Request {
         self.version == PROTOCOL_VERSION
             && segment(&self.target)
             && !matches!(self.provenance.caller, Caller::Link(_))
+            && self.configuration != [0; 32]
     }
 
     pub fn hash(&self) -> Result<[u8; 32], serde_json::Error> {

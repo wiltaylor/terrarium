@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 #[cfg(test)]
 use terrarium_core::live_workspace::MountEvidence;
-use terrarium_core::live_workspace::{Activation, Reply, RuntimeIdentity};
+use terrarium_core::live_workspace::{Activation, OperationId, RegistrationId, Reply, RuntimeId, RuntimeIdentity};
 
 /// Exact versions and topology must be measured again by B5 on any change.
 /// There is deliberately no production profile or default approved version.
@@ -25,7 +25,7 @@ pub struct Profile {
 }
 
 impl Profile {
-    fn check(&self, pinned: &Self) -> Result<(), Reply> {
+    pub(crate) fn check(&self, pinned: &Self) -> Result<(), Reply> {
         if self != pinned
             || !self.rootful
             || !self.same_mount_namespace
@@ -71,14 +71,25 @@ fn create_flags(
     registration: &Registration,
     pinned: &Profile,
 ) -> Result<Vec<String>, Reply> {
-    registration.profile.check(pinned)?;
+    fixed_create_flags(req, &registration.publisher, registration.runtime.registration,
+        registration.runtime.incarnation, &registration.profile, pinned)
+}
+
+fn fixed_create_flags(
+    req: &Create,
+    publisher: &str,
+    registration: RegistrationId,
+    incarnation: RuntimeId,
+    profile: &Profile,
+    pinned: &Profile,
+) -> Result<Vec<String>, Reply> {
+    profile.check(pinned)?;
     if req.name.is_empty()
         || req.name.starts_with('-')
         || req.image.is_empty()
         || req.image.starts_with('-')
-        || !safe_publisher(&registration.publisher)
-        || registration.publisher.rsplit('/').next()
-            != Some(registration.runtime.registration.0.to_string().as_str())
+        || !safe_publisher(publisher)
+        || publisher.rsplit('/').next() != Some(registration.0.to_string().as_str())
     {
         return Err(Reply::Unauthorized);
     }
@@ -87,6 +98,7 @@ fn create_flags(
         "--name",
         &req.name,
         "--restart=no",
+        "--pull=never",
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges:true",
         "--network=none",
@@ -101,25 +113,42 @@ fn create_flags(
     // profile must deny namespace creation. No caller security opts are allowed.
     args.push(format!(
         "type=bind,src={},dst=/work,readonly,bind-propagation=rslave",
-        registration.publisher
+        publisher
     ));
     args.extend([
         "--label".into(),
         format!(
             "terrarium.workspace.registration={}",
-            registration.runtime.registration.0
+            registration.0
         ),
     ]);
     args.extend([
         "--label".into(),
         format!(
             "terrarium.workspace.runtime={}",
-            registration.runtime.incarnation.0
+            incarnation.0
         ),
     ]);
     args.push(req.image.clone());
     args.extend(req.command.clone());
     Ok(args)
+}
+
+/// Helper-only bootstrap planning before a full container ID exists. No
+/// invented runtime identity and no caller-selected administrative path.
+pub(crate) fn bootstrap_create_flags(
+    req: &Create,
+    publisher: &str,
+    registration: RegistrationId,
+    incarnation: RuntimeId,
+    operation: OperationId,
+    profile: &Profile,
+    pinned: &Profile,
+) -> Result<Vec<String>, Reply> {
+    let mut flags = fixed_create_flags(req, publisher, registration, incarnation, profile, pinned)?;
+    let before_image = flags.len() - req.command.len() - 1;
+    flags.splice(before_image..before_image, ["--label".into(), format!("terrarium.workspace.bootstrap={}", operation.0)]);
+    Ok(flags)
 }
 
 fn safe_publisher(path: &str) -> bool {

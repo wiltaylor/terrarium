@@ -164,6 +164,7 @@ mod tests {
         let roots = super::super::registration_roots::Roots::fixture(dir.path());
         let request = serde_json::from_value(serde_json::json!({
             "version": 1,
+            "configuration": vec![1; 32],
             "operation": "00000000000000000000000001",
             "provenance": {"daemon_instance": "00000000000000000000000002", "caller": "local_operator"},
             "host": "00000000000000000000000003",

@@ -47,6 +47,7 @@ mod bootstrap_tests {
             registration: id(n + 3),
             incarnation: id(n + 4),
             domain: id(n + 5),
+            configuration: [1; 32],
         })
         .unwrap()
     }

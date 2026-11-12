@@ -11,6 +11,7 @@ pub mod mountinfo;
 pub mod mounts;
 mod paths;
 pub mod registration_roots;
+pub mod receiver;
 pub mod runtime;
 pub mod scaffold;
 pub mod service;

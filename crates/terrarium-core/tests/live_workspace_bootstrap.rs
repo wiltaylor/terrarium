@@ -19,6 +19,7 @@ fn request() -> Request {
         registration: RegistrationId(Ulid::new()),
         incarnation: RuntimeId(Ulid::new()),
         domain: TrustDomainId(Ulid::new()),
+        configuration: [1; 32],
     }
 }
 
@@ -115,7 +116,7 @@ fn immutable_request_and_bound_runtime_cannot_be_substituted() {
     j.advance(all[4].clone()).unwrap();
     j.advance(Step::Committed).unwrap();
     assert!(j.retry(&r).is_ok());
-    for field in 0..7 {
+    for field in 0..8 {
         let mut changed = r.clone();
         match field {
             0 => changed.operation = OperationId(Ulid::new()),
@@ -124,7 +125,8 @@ fn immutable_request_and_bound_runtime_cannot_be_substituted() {
             3 => changed.registration = RegistrationId(Ulid::new()),
             4 => changed.incarnation = RuntimeId(Ulid::new()),
             5 => changed.domain = TrustDomainId(Ulid::new()),
-            _ => changed.provenance.caller = Caller::Link(Ulid::new()),
+            6 => changed.provenance.caller = Caller::Link(Ulid::new()),
+            _ => changed.configuration = [2; 32],
         }
         assert!(j.retry(&changed).is_err());
     }
