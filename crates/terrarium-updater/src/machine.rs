@@ -827,7 +827,7 @@ impl Updater {
                 })
                 .await;
                 return Err(match recovery {
-                    Ok(()) => (Outcome::Failed, f),
+                    Ok(_) => (Outcome::Failed, f),
                     Err(e) => {
                         self.failed_hot_recovery(
                             cur,
