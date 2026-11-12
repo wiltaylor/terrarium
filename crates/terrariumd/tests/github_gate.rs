@@ -38,7 +38,8 @@ async fn issue_closure_requires_own_project_admin_and_fixed_repo_secret() {
     )
     .await
     .ok();
-    for who in ["terrarium/lead"] {
+    {
+        let who = "terrarium/lead";
         let result = td.post_as(who, route, body.clone()).await;
         assert!(
             result.body.to_string().contains("github-issues-token"),
