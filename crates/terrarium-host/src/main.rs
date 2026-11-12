@@ -483,6 +483,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     opts.display = cfg.display.clone();
     match std::env::current_exe() {
         Ok(binary) => {
+            #[cfg(unix)]
             let supervised = std::env::var_os("INVOCATION_ID").is_some();
             #[cfg(windows)]
             let supervised = matches!(Args::parse().command, Some(Cmd::Service));

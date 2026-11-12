@@ -64,6 +64,7 @@ pub struct PushFile {
     file: tokio::fs::File,
     hasher: Sha256,
     bytes: u64,
+    #[cfg(unix)]
     mode: Option<u32>,
 }
 
@@ -74,6 +75,10 @@ impl PushFile {
         mkdirs: bool,
         session: SessionId,
     ) -> Result<Self, TransferError> {
+        // POSIX modes have no Windows meaning. The destination inherits its
+        // directory ACL, under the service account's filesystem authority.
+        #[cfg(windows)]
+        let _ = mode;
         let parent = path.parent().ok_or_else(|| TransferError::NotAFile {
             path: path.to_owned(),
         })?;
@@ -98,6 +103,7 @@ impl PushFile {
             file,
             hasher: Sha256::new(),
             bytes: 0,
+            #[cfg(unix)]
             mode,
         })
     }
