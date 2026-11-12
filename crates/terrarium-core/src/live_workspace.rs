@@ -501,14 +501,14 @@ impl Journal {
                 || i.result != Some(expected_result)
                 || (i.envelope.delivery == Delivery::Superseded && r.kind != Kind::Grant);
             revisions.push(r.revision);
-            if r.kind == Kind::Revoke {
-                if let Some(holder) = &r.holder {
-                    // prepare records the latest revoke intent for an attachment.
-                    // Pending intents still quarantine below, but must not erase
-                    // their write-ahead tombstone during recovery.
-                    let revision = expected_tombstones.entry(holder.attachment).or_insert(0);
-                    *revision = (*revision).max(r.revision);
-                }
+            if r.kind == Kind::Revoke
+                && let Some(holder) = &r.holder
+            {
+                // prepare records the latest revoke intent for an attachment.
+                // Pending intents still quarantine below, but must not erase
+                // their write-ahead tombstone during recovery.
+                let revision = expected_tombstones.entry(holder.attachment).or_insert(0);
+                *revision = (*revision).max(r.revision);
             }
         }
         divergent |= self.tombstones != expected_tombstones;
