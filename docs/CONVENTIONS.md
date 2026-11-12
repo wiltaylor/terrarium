@@ -284,13 +284,17 @@ for other remotes. `project set --provenance on|off` sets a project default,
 and `repo set --provenance on|off` overrides it. Off suppresses live and
 snapshot trailers. Commit identity resolves each name/email independently:
 repo setting, project setting, then `TERRARIUM_GIT_NAME`/`TERRARIUM_GIT_EMAIL`.
+Only the operator and sysadmins may change identity, provenance, or warn-only
+settings. Members and project admins may read them. Each change records old
+and new settings in the audit log. Managed merge jobs resolve the same repo,
+project, then instance identity and do not add trailers when provenance is off.
 Sandbox identity is a global Git fallback, not author/committer environment
 variables that would override local repo configuration. Refresh managed
 checkouts after changing settings and restart sessions for a new project
 fallback identity. Existing commits are never rewritten.
 
 With provenance off, the managed pre-push hook refuses outgoing commits with
-`Terrarium-` metadata or the default identity. Only the operator may set
+`Terrarium-` metadata or the default identity. The operator or a sysadmin may set
 `repo set --warn-only true` to warn instead. New branches are checked against
 local remote-tracking refs. Missing remote base objects fail the check closed.
 The hook records a short-lived, one-use marker for the authenticated agent,

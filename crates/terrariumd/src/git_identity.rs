@@ -117,6 +117,7 @@ pub fn save_settings(
         }
     }
     let mut value = settings(t, repo, id)?;
+    let before = value.clone();
     if patch.provenance.is_some() {
         value.provenance = patch.provenance;
     }
@@ -135,6 +136,12 @@ pub fn save_settings(
         "INSERT INTO project_git_settings(project,settings) VALUES(?1,?2) ON CONFLICT(project) DO UPDATE SET settings=excluded.settings"
     };
     t.execute(sql, rusqlite::params![id, serde_json::to_string(&value)?])?;
+    let project = if repo {
+        crate::store::repos::resolve(t, id, None)?.project
+    } else { id.to_owned() };
+    t.audit("git.settings_update", id, Some(&project), serde_json::json!({
+        "scope": if repo { "repo" } else { "project" }, "old": before, "new": value
+    }))?;
     Ok(value)
 }
 

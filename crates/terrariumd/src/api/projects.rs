@@ -119,10 +119,7 @@ async fn set_git_settings(
     Path(name): Path<String>,
     ApiJson(patch): ApiJson<crate::git_identity::Settings>,
 ) -> ApiResult<Json<crate::git_identity::Settings>> {
-    policy::admin_project(&actor, &name, "changing project git settings")?;
-    if patch.warn_only.is_some() {
-        policy::operator_only(&actor, "changing the provenance push override")?;
-    }
+    policy::sysadmin(&actor, "changing project git settings")?;
     state
         .db
         .write(actor.label(), move |t| {

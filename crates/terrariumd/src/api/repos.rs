@@ -123,10 +123,7 @@ async fn set_git_settings(
         .db
         .write(label, move |t| {
             let repo = repos::resolve(t, &id, context.as_deref())?;
-            policy::admin_project(&actor, &repo.project, "changing repo git settings")?;
-            if patch.warn_only.is_some() {
-                policy::operator_only(&actor, "changing the provenance push override")?;
-            }
+            policy::sysadmin(&actor, "changing repo git settings")?;
             Ok(Json(crate::git_identity::save_settings(
                 t, true, &repo.id, patch,
             )?))

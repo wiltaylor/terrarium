@@ -2708,7 +2708,7 @@ impl JobRepo {
     /// Merge `other` onto `head` with a merge commit (as `merge --no-ff`
     /// would) with `message`. No work tree: `git merge-tree --write-tree`
     /// makes the tree, `git commit-tree` the commit.
-    pub fn merge(&self, head: &str, other: &str, message: &str) -> Result<MergeStep, GitError> {
+    pub fn merge(&self, head: &str, other: &str, message: &str, identity: &crate::git_identity::Identity) -> Result<MergeStep, GitError> {
         if self.is_ancestor(other, head)? {
             return Ok(MergeStep::Merged(head.to_owned()));
         }
@@ -2748,7 +2748,6 @@ impl JobRepo {
                 return Ok(MergeStep::Failed(msg));
             }
         }
-        let identity = crate::git_identity::Identity::from_env();
         let mut runner = self.runner(false)?;
         let mut env = std::collections::BTreeMap::new();
         identity.env(&mut env);
@@ -3829,7 +3828,7 @@ mod tests {
         // A second job opens the same repo and fetches only new objects.
         // Its first job's refs and locally made objects must survive.
         let marker = r
-            .merge(&next, "refs/remotes/job/clean", "cached merge")
+            .merge(&next, "refs/remotes/job/clean", "cached merge", &crate::git_identity::Identity::from_env())
             .unwrap();
         let MergeStep::Merged(marker) = marker else {
             panic!("clean merge failed")
@@ -3846,7 +3845,7 @@ mod tests {
         assert_eq!(r.commit_of("refs/remotes/job/nope").unwrap(), None);
 
         let MergeStep::Merged(m1) = r
-            .merge(&next, "refs/remotes/job/clean", "Merge clean onto next")
+            .merge(&next, "refs/remotes/job/clean", "Merge clean onto next", &crate::git_identity::Identity::from_env())
             .unwrap()
         else {
             panic!("clean did not merge")
@@ -3866,23 +3865,23 @@ mod tests {
             "Terrarium <terrarium@localhost>\nTerrarium <terrarium@localhost>"
         );
         let MergeStep::Merged(m2) = r
-            .merge(&m1, "refs/remotes/job/c1", "Merge c1 onto next")
+            .merge(&m1, "refs/remotes/job/c1", "Merge c1 onto next", &crate::git_identity::Identity::from_env())
             .unwrap()
         else {
             panic!("c1 did not merge")
         };
         // c2 changes the line that c1 changed.
         assert_eq!(
-            r.merge(&m2, "refs/remotes/job/c2", "Merge c2 onto next")
+            r.merge(&m2, "refs/remotes/job/c2", "Merge c2 onto next", &crate::git_identity::Identity::from_env())
                 .unwrap(),
             MergeStep::Conflict(vec!["a.txt".into()])
         );
         // A branch that is in the head already gives the head.
         assert_eq!(
-            r.merge(&m2, "refs/remotes/job/clean", "again").unwrap(),
+            r.merge(&m2, "refs/remotes/job/clean", "again", &crate::git_identity::Identity::from_env()).unwrap(),
             MergeStep::Merged(m2.clone())
         );
-        match r.merge(&m2, "refs/remotes/job/lone", "lone").unwrap() {
+        match r.merge(&m2, "refs/remotes/job/lone", "lone", &crate::git_identity::Identity::from_env()).unwrap() {
             MergeStep::Failed(msg) => assert!(msg.contains("unrelated"), "{msg}"),
             other => panic!("unrelated histories merged: {other:?}"),
         }

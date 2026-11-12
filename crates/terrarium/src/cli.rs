@@ -738,7 +738,7 @@ pub struct RepoAddArgs {
 pub enum RepoCmd {
     #[command(hide = true)]
     PushChecked { repo: String },
-    /// Change repo commit settings. Refresh checkouts after changing them.
+    /// Change repo commit settings (operator/sysadmin). Refresh checkouts after changing them.
     Set {
         repo: String,
         #[arg(long, value_parser = ["on", "off"])]
@@ -747,7 +747,7 @@ pub enum RepoCmd {
         git_name: Option<String>,
         #[arg(long)]
         git_email: Option<String>,
-        /// Operator only: warn rather than refuse metadata-bearing pushes
+        /// Warn rather than refuse metadata-bearing pushes
         #[arg(long)]
         warn_only: Option<bool>,
     },

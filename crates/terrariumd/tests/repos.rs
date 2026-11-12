@@ -111,6 +111,43 @@ fn agent_git(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
 }
 
 #[tokio::test]
+async fn git_settings_require_operator_or_sysadmin_and_audit_changes() {
+    let td = TestDaemon::start().await;
+    td.project("gitsettings").await;
+    let repo = td.post("/api/projects/gitsettings/repos", json!({"name": "app", "url": "https://github.com/customer/app.git"})).await.ok().clone();
+    let path = format!("/api/repos/{}/git", repo["id"].as_str().unwrap());
+    for (name, roles) in [("member", json!([])), ("admin", json!(["project_admin"])), ("lead", json!(["project_admin"]))] {
+        td.agent("gitsettings", name, json!({"roles": roles})).await;
+        let actor = format!("gitsettings/{name}");
+        for route in [path.as_str(), "/api/projects/gitsettings/git"] {
+            td.get_as(&actor, route).await.ok();
+            for patch in [json!({"name": "Denied", "email": "denied@example.test"}), json!({"provenance": true}), json!({"warn_only": true})] {
+                td.patch_as(&actor, route, patch).await.err(403, "forbidden");
+            }
+        }
+    }
+    td.agent("gitsettings", "system", json!({"roles": ["sysadmin"]})).await;
+    for route in [path.as_str(), "/api/projects/gitsettings/git"] {
+        for patch in [json!({"name": "Operator", "email": "operator@example.test"}), json!({"provenance": false}), json!({"warn_only": false})] {
+            td.patch(route, patch).await.ok();
+        }
+        for patch in [json!({"name": "Sysadmin", "email": "sysadmin@example.test"}), json!({"provenance": true}), json!({"warn_only": true})] {
+            td.patch_as("gitsettings/system", route, patch).await.ok();
+        }
+    }
+    td.daemon.as_ref().unwrap().state.db.read(|c| {
+        let mut stmt = c.prepare("SELECT detail FROM audit WHERE action='git.settings_update'")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(rows.len(), 12);
+        for row in rows {
+            let value: serde_json::Value = serde_json::from_str(&row)?;
+            assert!(value["old"].is_object() && value["new"].is_object());
+        }
+        Ok(())
+    }).await.unwrap();
+}
+
+#[tokio::test]
 async fn git_settings_scope_identity_and_off_hooks() {
     let (td, _origin, _remotes) = daemon_with_repo().await;
     let repos = td.get("/api/projects/terra/repos").await.ok().clone();
