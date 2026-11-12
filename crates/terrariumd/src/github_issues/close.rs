@@ -76,12 +76,17 @@ pub async fn close_done(
     // Fresh daemon-owned mirror tags also cover manually cut releases.
     let view = crate::api::repo_trees::ensure_mirror(state, &repo, true).await?;
     if view.error.is_some() {
-        return Err(ApiError::new(Code::Unavailable, "cannot refresh published repository tags"));
+        return Err(ApiError::new(
+            Code::Unavailable,
+            "cannot refresh published repository tags",
+        ));
     }
     let published = mirror_tags(crate::api::repo_trees::mirror_dir(state, &repo)).await?;
     if let Some((number, version)) = &explicit {
         if *number == 0 || !published.contains(&format!("v{version}")) {
-            return Err(ApiError::invalid("explicit issue version must name an existing published tag vV"));
+            return Err(ApiError::invalid(
+                "explicit issue version must name an existing published tag vV",
+            ));
         }
     }
     let (p, name, override_version) = (project.clone(), repo.name.clone(), explicit.clone());
@@ -111,7 +116,9 @@ pub async fn close_done(
     for (number, comment) in selected {
         // Each issue needs at most 13 requests (state, ten comment pages,
         // comment, close). Never start one that could exceed the run budget.
-        if budget.remaining < 13 { break; }
+        if budget.remaining < 13 {
+            break;
+        }
         let outcome = close_one(
             &client,
             "https://api.github.com/repos/wiltaylor/terrarium",
@@ -122,7 +129,7 @@ pub async fn close_done(
         )
         .await;
         if !dry_run && explicit.is_none() {
-            let (p,n) = (project.clone(),repo.name.clone());
+            let (p, n) = (project.clone(), repo.name.clone());
             let completed = outcome.is_ok();
             state.db.write(actor.label(), move |t| {
                 t.execute("INSERT INTO github_closure_cursor(project,repo,after_issue) VALUES (?1,?2,?3) ON CONFLICT(project,repo) DO UPDATE SET after_issue=excluded.after_issue",params![p,n,number])?;
@@ -142,26 +149,63 @@ pub async fn close_done(
 }
 
 async fn mirror_tags(path: std::path::PathBuf) -> ApiResult<BTreeSet<String>> {
-    let out = tokio::time::timeout(std::time::Duration::from_secs(20), tokio::process::Command::new("git")
-        .arg("--git-dir").arg(path).args(["for-each-ref", "--count=10001", "--format=%(refname:strip=2)", "refs/tags/"])
-        .kill_on_drop(true).output()).await
-        .map_err(|_| ApiError::new(Code::Unavailable,"published tag read timed out"))?
-        .map_err(|_| ApiError::new(Code::Unavailable,"cannot read published tags"))?;
-    if !out.status.success() { return Err(ApiError::new(Code::Unavailable,"cannot read published tags")); }
-    let tags: BTreeSet<_> = String::from_utf8(out.stdout).map_err(|_| ApiError::invalid("invalid published tags"))?.lines().map(str::to_owned).collect();
-    if tags.len() > 10000 { return Err(ApiError::invalid("too many published tags")); }
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        tokio::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(path)
+            .args([
+                "for-each-ref",
+                "--count=10001",
+                "--format=%(refname:strip=2)",
+                "refs/tags/",
+            ])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| ApiError::new(Code::Unavailable, "published tag read timed out"))?
+    .map_err(|_| ApiError::new(Code::Unavailable, "cannot read published tags"))?;
+    if !out.status.success() {
+        return Err(ApiError::new(
+            Code::Unavailable,
+            "cannot read published tags",
+        ));
+    }
+    let tags: BTreeSet<_> = String::from_utf8(out.stdout)
+        .map_err(|_| ApiError::invalid("invalid published tags"))?
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    if tags.len() > 10000 {
+        return Err(ApiError::invalid("too many published tags"));
+    }
     Ok(tags)
 }
 
-fn select_batch(candidates: BTreeMap<u64,String>, after: u64, closed: &BTreeSet<u64>, explicit: bool) -> Vec<(u64,String)> {
-    let mut rows: Vec<_> = candidates.into_iter().filter(|(n,_)| explicit || !closed.contains(n)).collect();
-    rows.sort_by_key(|(n,_)| (*n <= after, *n));
+fn select_batch(
+    candidates: BTreeMap<u64, String>,
+    after: u64,
+    closed: &BTreeSet<u64>,
+    explicit: bool,
+) -> Vec<(u64, String)> {
+    let mut rows: Vec<_> = candidates
+        .into_iter()
+        .filter(|(n, _)| explicit || !closed.contains(n))
+        .collect();
+    rows.sort_by_key(|(n, _)| (*n <= after, *n));
     rows.truncate(20);
     rows
 }
 
-struct Budget { remaining: usize }
-impl Default for Budget { fn default() -> Self { Self { remaining: 60 } } }
+struct Budget {
+    remaining: usize,
+}
+impl Default for Budget {
+    fn default() -> Self {
+        Self { remaining: 60 }
+    }
+}
 
 fn issue_number(title: &str) -> Option<u64> {
     title
@@ -180,8 +224,18 @@ fn candidates(c: &Connection, project: &str, repo: &str) -> ApiResult<BTreeMap<u
     candidates_with(c, project, repo, BTreeSet::new(), None)
 }
 
-fn candidates_with(c: &Connection, project: &str, repo: &str, mut published: BTreeSet<String>, explicit: Option<(u64,String)>) -> ApiResult<BTreeMap<u64, String>> {
-    published.extend(version_groups::built_versions(c, project)?.into_iter().map(|v| format!("v{v}")));
+fn candidates_with(
+    c: &Connection,
+    project: &str,
+    repo: &str,
+    mut published: BTreeSet<String>,
+    explicit: Option<(u64, String)>,
+) -> ApiResult<BTreeMap<u64, String>> {
+    published.extend(
+        version_groups::built_versions(c, project)?
+            .into_iter()
+            .map(|v| format!("v{v}")),
+    );
     let done = board::role_name(c, project, "done", "done")?;
     let mut issues: BTreeMap<u64, Vec<(String, Option<String>)>> = BTreeMap::new();
     let mut after = 0i64;
@@ -208,11 +262,17 @@ fn candidates_with(c: &Connection, project: &str, repo: &str, mut published: BTr
             if card_repo.as_deref().is_none_or(|r| r == repo) {
                 numbers.extend(issue_number(&title));
             }
-            let mut links = c.prepare("SELECT ref FROM card_links WHERE card=?1 AND kind='url' ORDER BY ref LIMIT 101")?;
+            let mut links = c.prepare(
+                "SELECT ref FROM card_links WHERE card=?1 AND kind='url' ORDER BY ref LIMIT 101",
+            )?;
             let mut link_count = 0;
             for link in links.query_map([&id], |r| r.get::<_, String>(0))? {
                 link_count += 1;
-                if link_count > 100 { return Err(ApiError::invalid("issue closure exceeds 100 URL links per card")); }
+                if link_count > 100 {
+                    return Err(ApiError::invalid(
+                        "issue closure exceeds 100 URL links per card",
+                    ));
+                }
                 if let Some(n) = link?
                     .strip_prefix("https://github.com/wiltaylor/terrarium/issues/")
                     .and_then(|s| s.parse::<u64>().ok())
@@ -232,10 +292,17 @@ fn candidates_with(c: &Connection, project: &str, repo: &str, mut published: BTr
                 None
             };
             for n in numbers {
-                if explicit.as_ref().is_some_and(|(only,_)| *only != n) { continue; }
+                if explicit.as_ref().is_some_and(|(only, _)| *only != n) {
+                    continue;
+                }
                 let version = if column == done && !labels.iter().any(|l| l == "hold") {
-                    explicit.as_ref().map(|(_,v)| format!("v{v}")).or_else(|| version.clone())
-                } else { None };
+                    explicit
+                        .as_ref()
+                        .map(|(_, v)| format!("v{v}"))
+                        .or_else(|| version.clone())
+                } else {
+                    None
+                };
                 issues
                     .entry(n)
                     .or_default()
@@ -250,7 +317,9 @@ fn candidates_with(c: &Connection, project: &str, repo: &str, mut published: BTr
 
 fn published_tag(label: &str, published: &BTreeSet<String>) -> Option<String> {
     let version = label.strip_prefix('v').unwrap_or(label);
-    [format!("v{version}"), format!("v{version}-alpha")].into_iter().find(|v| published.contains(v))
+    [format!("v{version}"), format!("v{version}-alpha")]
+        .into_iter()
+        .find(|v| published.contains(v))
 }
 
 fn comments(issues: BTreeMap<u64, Vec<(String, Option<String>)>>) -> BTreeMap<u64, String> {
@@ -276,7 +345,12 @@ fn comments(issues: BTreeMap<u64, Vec<(String, Option<String>)>>) -> BTreeMap<u6
 }
 
 async fn response(request: reqwest::RequestBuilder, budget: &mut Budget) -> ApiResult<Value> {
-    if budget.remaining == 0 { return Err(ApiError::new(Code::Unavailable, "GitHub request budget exhausted")); }
+    if budget.remaining == 0 {
+        return Err(ApiError::new(
+            Code::Unavailable,
+            "GitHub request budget exhausted",
+        ));
+    }
     budget.remaining -= 1;
     let mut r = request
         .send()
@@ -333,7 +407,11 @@ async fn close_one(
     // Recover after a successful comment but a failed close (including restart).
     let mut found = false;
     for page in 1..=10 {
-        let rows = response(client.get(format!("{url}/comments?per_page=100&page={page}")), budget).await?;
+        let rows = response(
+            client.get(format!("{url}/comments?per_page=100&page={page}")),
+            budget,
+        )
+        .await?;
         let rows = rows
             .as_array()
             .ok_or_else(|| ApiError::invalid("invalid GitHub comments"))?;
@@ -415,13 +493,35 @@ mod tests {
         let client = reqwest::Client::new();
         let comment = format!("Done in Terrarium 1.0.0-alpha (cards TER-1). Closing.\n\n{MARKER}");
         let mut budget = Budget::default();
-        assert!(close_one(&client, &base, 7, &comment, true, &mut budget).await.unwrap());
+        assert!(
+            close_one(&client, &base, 7, &comment, true, &mut budget)
+                .await
+                .unwrap()
+        );
         assert_eq!(posted.load(Ordering::SeqCst), 0);
-        assert!(close_one(&client, &base, 7, &comment, false, &mut budget).await.is_err());
-        assert!(close_one(&client, &base, 7, &comment, false, &mut budget).await.unwrap());
-        assert!(!close_one(&client, &base, 7, &comment, false, &mut budget).await.unwrap());
+        assert!(
+            close_one(&client, &base, 7, &comment, false, &mut budget)
+                .await
+                .is_err()
+        );
+        assert!(
+            close_one(&client, &base, 7, &comment, false, &mut budget)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !close_one(&client, &base, 7, &comment, false, &mut budget)
+                .await
+                .unwrap()
+        );
         let mut exhausted = Budget { remaining: 0 };
-        assert!(close_one(&client, &base, 7, &comment, false, &mut exhausted).await.unwrap_err().message.contains("budget"));
+        assert!(
+            close_one(&client, &base, 7, &comment, false, &mut exhausted)
+                .await
+                .unwrap_err()
+                .message
+                .contains("budget")
+        );
         assert_eq!(budget.remaining, 51);
         assert_eq!(posted.load(Ordering::SeqCst), 1);
         server.abort();
@@ -465,12 +565,37 @@ mod tests {
         assert!(candidates(&t, "p", "repo").unwrap().is_empty());
         // Hand cuts have a repository tag but no group acknowledgement.
         let published = BTreeSet::from(["v1.0.0-alpha".into()]);
-        assert!(candidates_with(&t,"p","repo",published.clone(),None).unwrap()[&7].contains("v1.0.0-alpha"));
-        let legacy = make(&mut t,"GitHub #20: legacy", "done",vec![]);
-        assert!(!candidates_with(&t,"p","repo",published.clone(),None).unwrap().contains_key(&20));
-        assert!(candidates_with(&t,"p","repo",published.clone(),Some((20,"1.0.0-alpha".into()))).unwrap()[&20].contains(&legacy.id));
-        t.execute("UPDATE cards SET labels='[\"hold\"]' WHERE id=?1",[&legacy.id]).unwrap();
-        assert!(candidates_with(&t,"p","repo",published,Some((20,"1.0.0-alpha".into()))).unwrap().is_empty());
+        assert!(
+            candidates_with(&t, "p", "repo", published.clone(), None).unwrap()[&7]
+                .contains("v1.0.0-alpha")
+        );
+        let legacy = make(&mut t, "GitHub #20: legacy", "done", vec![]);
+        assert!(
+            !candidates_with(&t, "p", "repo", published.clone(), None)
+                .unwrap()
+                .contains_key(&20)
+        );
+        assert!(
+            candidates_with(
+                &t,
+                "p",
+                "repo",
+                published.clone(),
+                Some((20, "1.0.0-alpha".into()))
+            )
+            .unwrap()[&20]
+                .contains(&legacy.id)
+        );
+        t.execute(
+            "UPDATE cards SET labels='[\"hold\"]' WHERE id=?1",
+            [&legacy.id],
+        )
+        .unwrap();
+        assert!(
+            candidates_with(&t, "p", "repo", published, Some((20, "1.0.0-alpha".into())))
+                .unwrap()
+                .is_empty()
+        );
         // This is the same publication acknowledgement used by group built.
         t.execute("INSERT INTO card_groups (project,key,card,status,rule,done_when,closed_at) VALUES ('p','version:test',?1,'Built 1.0.0-alpha','test','done','now')", [&a.id]).unwrap();
         let eligible = candidates(&t, "p", "repo").unwrap();
@@ -502,15 +627,15 @@ mod tests {
 
     #[test]
     fn issue_budget_continues_after_cursor_and_skips_cached_closures() {
-        let candidates: BTreeMap<_,_> = (1..=50).map(|n|(n,n.to_string())).collect();
-        let first = select_batch(candidates.clone(),0,&BTreeSet::new(),false);
-        assert_eq!(first.len(),20);
-        assert_eq!(first.last().unwrap().0,20);
-        let next = select_batch(candidates.clone(),20,&BTreeSet::from([21,22]),false);
-        assert_eq!(next.first().unwrap().0,23);
-        assert_eq!(next.len(),20);
-        let wrap = select_batch(candidates,49,&BTreeSet::from([1,2]),false);
-        assert_eq!(wrap[0].0,50);
-        assert_eq!(wrap[1].0,3);
+        let candidates: BTreeMap<_, _> = (1..=50).map(|n| (n, n.to_string())).collect();
+        let first = select_batch(candidates.clone(), 0, &BTreeSet::new(), false);
+        assert_eq!(first.len(), 20);
+        assert_eq!(first.last().unwrap().0, 20);
+        let next = select_batch(candidates.clone(), 20, &BTreeSet::from([21, 22]), false);
+        assert_eq!(next.first().unwrap().0, 23);
+        assert_eq!(next.len(), 20);
+        let wrap = select_batch(candidates, 49, &BTreeSet::from([1, 2]), false);
+        assert_eq!(wrap[0].0, 50);
+        assert_eq!(wrap[1].0, 3);
     }
 }

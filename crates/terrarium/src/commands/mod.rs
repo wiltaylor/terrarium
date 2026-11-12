@@ -51,7 +51,13 @@ use crate::transport::encode;
 pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
     match cmd {
         Command::Issue {
-            command: crate::cli::IssueCmd::CloseDone { repo, dry_run, issue, version },
+            command:
+                crate::cli::IssueCmd::CloseDone {
+                    repo,
+                    dry_run,
+                    issue,
+                    version,
+                },
         } => {
             let project = ctx.project_or(None).await?;
             let result = ctx
