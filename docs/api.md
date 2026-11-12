@@ -11294,14 +11294,16 @@ Position is a nonnegative integer. Widgets (at most 100) have unique IDs
 (1–40 ASCII letters, digits, hyphens or underscores). Optional `title` is
 at most 120 characters. Grid coordinates are integers: x 0–11, y 0–9999,
 w 1–12 with x+w <= 12, h 1–10000 with y+h <= 10000. Rectangles cannot
-overlap. Optional `auto_height` (default false) lets markdown/wiki content
+overlap. Optional `auto_height` (default true for markdown/wiki, false for
+monitors) lets markdown/wiki content
 grow beyond its minimum h. Otherwise h is the scrolling height limit.
 The daemon stores cells, not pixel heights.
 
 Kinds are `markdown`, `wiki`, `stat`, `status`, `chart`, `text`, `table`.
 Markdown requires `text` (at most 16384 UTF-8 bytes). Wiki requires `wiki`,
-a wiki path in this project (up to 256 bytes, slash-separated 1–64 character
-ASCII alphanumeric, hyphen or underscore segments). It is always resolved
+a wiki path in this project (the wiki's path rules: up to 200 bytes,
+lowercase letters, digits, hyphens, underscores, dots and slashes, no empty,
+`.` or `..` segments). It is always resolved
 relative to this project, never another project. Missing wiki
 pages remain valid references so clients can show “page not found”. Monitor
 kinds require `monitor`, an existing monitor ID in this project compatible
