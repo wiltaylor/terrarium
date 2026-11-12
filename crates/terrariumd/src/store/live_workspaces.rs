@@ -7,6 +7,8 @@ use serde_json::json;
 use terrarium_core::live_workspace::Enrollment;
 use ulid::Ulid;
 
+pub mod operations;
+
 /// Authority is selected by daemon code, never deserialized from a request.
 #[derive(Clone, Copy)]
 pub enum WorkspaceUse<'a> {
