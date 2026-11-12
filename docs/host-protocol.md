@@ -1294,6 +1294,37 @@ another host. A TLS proxy in front of the host listener must pass
 
 **The steps of the host agent.**
 
+Self-updates require a cosign sign-blob signature verified offline against the
+release ECDSA P-256 public key built into the host. A daemon hash is not an
+authentication mechanism. Before making an offer, the daemon downloads the
+release's `<asset>.sigstore.json` from GitHub over HTTPS with system roots
+(30 seconds, at most 1 MiB). It caches the bundle beside the dist binary, keyed
+by the binary hash, and serves it on
+`/install/terrarium-host.sigstore.json?arch=<arch>` on the pinned host listener.
+No available bundle means no offer, with the reason logged. Hosts never need
+GitHub access. Proxies must pass this route too.
+
+The host downloads the bundle from that same listener (30 seconds, 1 MiB) and
+verifies its signature over the downloaded binary before writing or executing
+`.new`. Missing, malformed, or invalid signatures refuse the update. This is
+release-key authentication only, not transparency-log verification or rollback
+protection. Dev builds without `TERRARIUM_RELEASE_PUBKEY` at compile time have
+no key and refuse self-update with an instruction to install manually.
+
+The positive integration test requires a dedicated test-key build: generate an
+ephemeral P-256 private key with OpenSSL, set `TERRARIUM_RELEASE_PUBKEY` to its
+public PEM at compile time, and `TERRARIUM_TEST_SIGNING_KEY` to the private key's
+path at run time. Run `cargo test -p terrariumd --test it
+hosts::a_release_key_host_updates_and_confirms_a_signed_asset -- --ignored`.
+It serves a signed asset through the host listener and checks staging, swap,
+confirmation, and update records. Ordinary no-key builds run the refusal test.
+Never use a production private key for this test.
+With the same test-key build, run `cargo test -p terrarium-host --test
+stub_daemon release_key_host_refuses_ -- --ignored` to prove that missing,
+malformed, other-bytes, and other-key bundles cannot reach staging or execute
+the offered asset. These tests also require the current host to stay online
+and log the refusal. Removing the client's verification call must fail them.
+
 1. It checks that it may update. It does not update when:
    - `auto_update = false` is in its config;
    - it does not run under systemd (no `INVOCATION_ID`), because then

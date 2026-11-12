@@ -3832,11 +3832,22 @@ agent:
   too. Its system prompt says that it ends its turn when it sends the
   card on, and does not run `agent done`.
 - is **parked** while its card waits on others. The wake refuses it
-  (its mail and turns wait), and the lifecycle stops it as soon as it is
+  (its mail, including system mail, waits). Sending a turn, including raw
+  text, returns `409 conflict`
+  with `parked: card <id> is in <column>`. The CLI and dashboard show
+  this error rather than accepting a turn that cannot run. The lifecycle stops it as soon as it is
   at rest, never in a turn, with the status `stopped` and the reason
   `parked`. A live exec session or an open `process` wait keeps it
   running until they end. Its waits, leases, and grants stay. A parked
   agent does not count against `max_concurrent`.
+  An explicit operator start or restart is allowed for recovery. Its response
+  includes `parked` with the binding and reason, and it delivers waiting
+  operator turns without delivering queued card-return work or unparking
+  the card. It stops at rest again. Agent and schedule starts or restarts
+  are refused while parked.
+  On close, each remaining queued turn emits `agent.turn_dropped` with
+  its turn ID, queue, source tag, binding and outcome. An operator turn
+  also sends the operator a system notice that it was not delivered.
 - is **unparked** when the card comes back: the daemon queues a
   `[System:card <id>]` turn with the move, then the move comment and the
   top of the card body (the failure block of the job queue or the

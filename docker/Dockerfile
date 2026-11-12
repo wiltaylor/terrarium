@@ -52,6 +52,7 @@ RUN npm run build && test -d dist
 # ---------------------------------------------------------------------------
 FROM ${RUST_IMAGE} AS rust
 ARG TERRARIUM_GIT_REF
+ARG TERRARIUM_RELEASE_PUBKEY
 WORKDIR /src
 COPY Cargo.toml Cargo.lock harnesses.toml ./
 COPY crates ./crates
@@ -72,6 +73,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # ---------------------------------------------------------------------------
 FROM ${RUST_IMAGE} AS host-build
 ARG TERRARIUM_GIT_REF
+ARG TERRARIUM_RELEASE_PUBKEY
 RUN apt-get update \
     && apt-get install -y --no-install-recommends musl-tools \
     && rm -rf /var/lib/apt/lists/* \

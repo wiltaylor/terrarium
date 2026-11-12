@@ -1051,6 +1051,25 @@ pub async fn close(
         return Ok(Some(sp));
     }
     let agent_id: Option<AgentId> = id.parse().ok();
+    // Remove untouched live turns before stopping the runner. A turn that
+    // already began is not a dropped turn. Store-backed turns are handled
+    // in the close transaction below, once each.
+    let mut dropped = Vec::new();
+    if sp.bound.is_some()
+        && let Some(a) = agent_id
+        && let Ok(pending) = state.supervisor.list_pending(a).await
+    {
+        for turn in pending.items.into_iter().filter(|t| t.queued.is_none()) {
+            if state
+                .supervisor
+                .cancel_pending(a, turn.source, turn.id.clone())
+                .await
+                .unwrap_or(false)
+            {
+                dropped.push((turn.id, turn.source.to_owned(), turn.text));
+            }
+        }
+    }
     let result = match result {
         Some(r) => Some(r),
         None if sp.result.is_none() && outcome != spawns::CANCELLED => match agent_id {
@@ -1086,6 +1105,50 @@ pub async fn close(
                 return spawns::get(t, &key);
             }
             let sp = spawns::get(t, &key)?;
+            if sp.bound.is_some() {
+                for turn in agents::queued_turns(t, &key)? {
+                    dropped.push((turn.id.to_string(), "store".into(), turn.text));
+                    agents::remove_queued_turn(t, &key, turn.id)?;
+                }
+                for (turn_id, queue, text) in &dropped {
+                    let source = terrarium_core::turn_tag::parse_first(text);
+                    t.emit(
+                        EventDraft::new(
+                            "agent.turn_dropped",
+                            format!(
+                                "{}: queued turn {turn_id} dropped on close ({outcome})",
+                                sp.name
+                            ),
+                            json!({"turn_id": turn_id, "queue": queue, "source": source,
+                                   "bound": sp.bound, "outcome": outcome}),
+                        )
+                        .agent(sp.id.clone(), sp.name.clone())
+                        .project(sp.project.clone()),
+                    )?;
+                    if matches!(source, Some(terrarium_core::turn_tag::PartSource::User)) {
+                        mail::send(
+                            t,
+                            mail::Outgoing {
+                                from: &mail::Address::System,
+                                to: &mail::Address::Operator,
+                                subject: &format!(
+                                    "{}: queued operator turn not delivered",
+                                    sp.name
+                                ),
+                                body: &format!(
+                                    "Agent {}/{} ended ({outcome}). Your queued turn {turn_id} \
+                                     was not delivered and has been removed. Binding: {}.",
+                                    sp.project,
+                                    sp.name,
+                                    sp.bound.as_deref().unwrap_or_default()
+                                ),
+                                thread: None,
+                                in_reply_to: None,
+                            },
+                        )?;
+                    }
+                }
+            }
             crate::research_helpers::finish(t, &sp)?;
             let thread = sp.bound.as_deref().and_then(|b| b.strip_prefix("thread:"));
             if let Some(thread) = thread {

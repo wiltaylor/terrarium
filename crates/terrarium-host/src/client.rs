@@ -566,6 +566,11 @@ impl Client {
         offer: &crate::protocol::UpdateOffer,
     ) -> Result<(), crate::selfupdate::UpdateError> {
         use crate::selfupdate as u;
+        let key = crate::update_signature::RELEASE_KEY.ok_or_else(|| {
+            u::UpdateError::Offer(
+                "this dev build has no release verification key; install manually".into(),
+            )
+        })?;
         u::check_writable(&su.binary)?;
         let url = u::http_url(&self.opts.url, &offer.path)?;
         tracing::info!(offered = %offer.version, own = %self.opts.version, %url, "self-update: downloading the daemon's build");
@@ -579,6 +584,16 @@ impl Client {
             message: format!("timed out after {:?}", u::DOWNLOAD_TIMEOUT),
         })??;
         let sha = u::verify(&data, offer)?;
+        let (path, query) = offer.path.split_once('?').unwrap_or((&offer.path, ""));
+        let bundle_path = format!("{path}.sigstore.json?{query}");
+        let bundle_url = u::http_url(&self.opts.url, &bundle_path)?;
+        crate::update_signature::download_and_verify(
+            &data,
+            &bundle_url,
+            self.opts.tls.clone(),
+            Some(key),
+        )
+        .await?;
         u::stage(&su.binary, &data, &offer.version).await?;
         tracing::info!(sha256 = %sha, bytes = data.len(), "self-update: the new binary checks out");
         self.drain_for_update(su).await;

@@ -1039,6 +1039,78 @@ pub fn pick(
     queues: &HashMap<String, QueueOf>,
     caps: &HashMap<String, usize>,
 ) -> Vec<(Job, String)> {
+    let entries = queued.iter().map(QueueEntry::from).collect();
+    let running: Vec<_> = running.iter().map(QueueEntry::from).collect();
+    let mut jobs: HashMap<_, _> = queued.into_iter().map(|j| (j.id.clone(), j)).collect();
+    pick_entries(entries, &running, queues, caps)
+        .into_iter()
+        .filter_map(|(entry, host)| {
+            let mut job = jobs.remove(&entry.id)?;
+            job.slot = entry.slot;
+            Some((job, host))
+        })
+        .collect()
+}
+
+/// Only the fields used to allocate a host and slot. Output and batch JSON
+/// are loaded by primary key only for jobs that the picker selects.
+struct QueueEntry {
+    id: String,
+    project: String,
+    kind: JobKind,
+    host: Option<String>,
+    slot: Option<i64>,
+}
+
+impl From<&Job> for QueueEntry {
+    fn from(j: &Job) -> Self {
+        Self {
+            id: j.id.clone(),
+            project: j.project.clone(),
+            kind: j.kind,
+            host: j.host.clone(),
+            slot: j.slot,
+        }
+    }
+}
+
+const QUEUE_COLS: &str = "id, project, kind, host, slot";
+
+fn queue_entries(conn: &Connection, state: &str) -> ApiResult<Vec<QueueEntry>> {
+    let order = if state == "queued" {
+        "created_at, attempt DESC, split_path, id"
+    } else {
+        "started_at"
+    };
+    let mut st = conn.prepare(&format!(
+        "SELECT {QUEUE_COLS} FROM jobs WHERE state = ?1 ORDER BY {order}"
+    ))?;
+    let mut entries = st
+        .query_map([state], |r| {
+            let kind: String = r.get(2)?;
+            Ok(QueueEntry {
+                id: r.get(0)?,
+                project: r.get(1)?,
+                kind: JobKind::parse(&kind).unwrap_or(JobKind::Validate),
+                host: r.get(3)?,
+                slot: r.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for entry in &mut entries {
+        if let Some(host) = &entry.host {
+            entry.host = Some(canonical_key(conn, host)?);
+        }
+    }
+    Ok(entries)
+}
+
+fn pick_entries(
+    queued: Vec<QueueEntry>,
+    running: &[QueueEntry],
+    queues: &HashMap<String, QueueOf>,
+    caps: &HashMap<String, usize>,
+) -> Vec<(QueueEntry, String)> {
     let mut on_host: HashMap<String, usize> = HashMap::new();
     // The validate jobs that run or start, per project.
     let mut validating: HashMap<String, usize> = HashMap::new();
@@ -1142,11 +1214,11 @@ pub fn startable(
     conn: &Connection,
     draining: &[String],
 ) -> ApiResult<Vec<(Job, String, DeliveryDef)>> {
-    let queued = queued(conn)?;
+    let queued = queue_entries(conn, "queued")?;
     if queued.is_empty() {
         return Ok(Vec::new());
     }
-    let mut running = running(conn)?;
+    let mut running = queue_entries(conn, "running")?;
     for id in draining {
         if running.iter().any(|j| j.id == *id) {
             continue;
@@ -1156,7 +1228,7 @@ pub fn startable(
         if let Ok(j) = get(conn, id)
             && j.state == JobState::Cancelled
         {
-            running.push(j);
+            running.push(QueueEntry::from(&j));
         }
     }
     let mut defs: HashMap<String, DeliveryDef> = HashMap::new();
@@ -1187,13 +1259,16 @@ pub fn startable(
         .into_iter()
         .map(|c| (c.host, c.heavy_jobs as usize))
         .collect();
-    Ok(pick(queued, &running, &queues, &caps)
+    pick_entries(queued, &running, &queues, &caps)
         .into_iter()
         .filter_map(|(j, h)| {
             let def = job_delivery(defs.get(&j.project)?, j.kind)?;
-            Some((j, h, def))
+            Some(get(conn, &j.id).map(|mut job| {
+                job.slot = j.slot;
+                (job, h, def)
+            }))
         })
-        .collect())
+        .collect()
 }
 
 /// The config that a job of `kind` runs with: the project's, or for a
@@ -3005,6 +3080,68 @@ mod tests {
             "     Running tests/card_sessions.rs\n[exit code None, signal Some(9), timeout]\n";
         assert_eq!(failed_step(killed).as_deref(), Some("timeout"));
         assert_eq!(failed_step("ok"), None);
+    }
+
+    #[test]
+    fn queue_queries_use_state_indexes_and_skip_history_payloads() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        conn.execute_batch(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<20000)
+             INSERT INTO jobs (id, project, card, kind, repo, branch, state, created_by,
+                               created_at, started_at, tail)
+             SELECT 'job-' || x, 'p', 'C', 'validate', 'r', 'b',
+                    CASE WHEN x=19999 THEN 'queued' WHEN x=20000 THEN 'running' ELSE 'passed' END,
+                    't', '2026-11-01', '2026-11-01', hex(zeroblob(2000)) FROM n;
+             DROP INDEX jobs_state_created;
+             DROP INDEX jobs_state_started;",
+        )
+        .unwrap();
+        let before = std::time::Instant::now();
+        for _ in 0..20 {
+            assert_eq!(queued(&conn).unwrap().len(), 1);
+            assert_eq!(super::running(&conn).unwrap().len(), 1);
+        }
+        let before = before.elapsed();
+        conn.execute_batch(
+            "CREATE INDEX jobs_state_created ON jobs(state, created_at);
+             CREATE INDEX jobs_state_started ON jobs(state, started_at); ANALYZE;",
+        )
+        .unwrap();
+        let after = std::time::Instant::now();
+        for _ in 0..20 {
+            assert_eq!(queue_entries(&conn, "queued").unwrap()[0].id, "job-19999");
+            assert_eq!(queue_entries(&conn, "running").unwrap()[0].id, "job-20000");
+        }
+        eprintln!(
+            "20 ticks, 20000 jobs with 4000-byte tails: before={before:?}, after={:?}",
+            after.elapsed()
+        );
+        for (state, order, index) in [
+            (
+                "queued",
+                "created_at, attempt DESC, split_path, id",
+                "jobs_state_created",
+            ),
+            ("running", "started_at", "jobs_state_started"),
+        ] {
+            let mut st = conn.prepare(&format!(
+                "EXPLAIN QUERY PLAN SELECT {QUEUE_COLS} FROM jobs WHERE state = ?1 ORDER BY {order}"
+            )).unwrap();
+            let plan = st
+                .query_map([state], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n");
+            // With only one queued row, SQLite may prefer the other
+            // state-leading index and sort that one row. Both bound the
+            // read to this state instead of scanning completed history.
+            let state_index =
+                plan.contains(index) || (state == "queued" && plan.contains("jobs_state_started"));
+            assert!(state_index && plan.contains("state=?"), "{plan}");
+            assert!(!plan.contains("SCAN jobs"), "{plan}");
+        }
     }
 
     #[test]

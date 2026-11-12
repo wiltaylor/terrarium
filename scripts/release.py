@@ -386,6 +386,7 @@ def build_argv(ctx: Ctx, version: str, commit: str) -> list[str]:
         # The commit: the stamp leaves a dirty tree.
         "--build-arg", f"TERRARIUM_GIT_REF={commit}",
         "--build-arg", f"TERRARIUM_VERSION={version}",
+        "--build-arg", f"TERRARIUM_RELEASE_PUBKEY={(ctx.repo_dir / KEY_PATH).read_text().strip()}",
         "--label", f"org.opencontainers.image.version={version}",
         "--label", f"org.opencontainers.image.revision={commit}",
         "--label", f"org.opencontainers.image.source={source}",

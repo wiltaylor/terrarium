@@ -51,6 +51,7 @@ pub mod selfupdate;
 pub mod session;
 pub mod tls;
 pub mod transfer;
+pub mod update_signature;
 pub mod verb;
 pub mod vmlab;
 pub mod workspace;

@@ -66,6 +66,9 @@ pub struct AgentView {
     /// idle stop or `paused`. Absent when not known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_reason: Option<String>,
+    /// A parked binding retained during an explicit operator start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked: Option<String>,
     /// The turns, the mail, and the card and nudge pointers that wait for
     /// the agent ([`queued_count`]). Absent when 0.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -187,6 +190,7 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
         effective_skills: Vec::new(),
         paused: r.get("paused")?,
         status_reason: r.get("status_reason")?,
+        parked: None,
         queued: 0,
         compact_supported: parse::<HarnessId>(&harness, "harness")?
             .compact_command()
@@ -571,6 +575,24 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<AgentView> {
         .optional()?
         .ok_or_else(|| ApiError::not_found(format!("no agent `{id}`")))?;
     complete(conn, v)
+}
+
+/// The event pump needs identity and status, not the API view's queue,
+/// card, spawn, role and wait summaries. Keep its writer lookup to one row.
+pub(crate) fn event_context(
+    conn: &Connection,
+    id: &str,
+) -> ApiResult<(String, String, AgentStatus)> {
+    conn.query_row(
+        "SELECT name, project, status FROM agents WHERE id = ?1",
+        [id],
+        |r| {
+            let status: String = r.get(2)?;
+            Ok((r.get(0)?, r.get(1)?, status_from(&status)))
+        },
+    )
+    .optional()?
+    .ok_or_else(|| ApiError::not_found(format!("no agent `{id}`")))
 }
 
 /// Find an agent by ULID, `project/name`, or a bare name. A bare name looks
@@ -1865,6 +1887,23 @@ mod tests {
     use super::*;
     use crate::db::Db;
     use crate::events::EventHub;
+
+    #[test]
+    fn event_context_needs_only_the_agent_identity_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        // No queue, cards, sessions, spawns or waits tables: the event pump
+        // must not build an API view while holding the writer.
+        conn.execute_batch(
+            "CREATE TABLE agents (id TEXT PRIMARY KEY, name TEXT, project TEXT, status TEXT);
+             INSERT INTO agents VALUES ('A1', 'worker', 'p', 'working');",
+        )
+        .unwrap();
+        assert_eq!(
+            event_context(&conn, "A1").unwrap(),
+            ("worker".into(), "p".into(), AgentStatus::Working)
+        );
+        assert!(event_context(&conn, "missing").is_err());
+    }
 
     fn db() -> Db {
         let mut conn = Connection::open_in_memory().unwrap();
