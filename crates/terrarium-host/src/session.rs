@@ -20,6 +20,7 @@ use nix::sys::signal::killpg;
 use nix::unistd::Pid;
 #[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
 use tokio::sync::mpsc;
 #[cfg(unix)]
 use tokio::sync::oneshot;

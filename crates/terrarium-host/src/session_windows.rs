@@ -166,6 +166,7 @@ pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
             stdout: Vec::new(),
         };
         loop {
+            let queued_write = write.clone();
             tokio::select! {
                 _ = tick.tick() => match process.try_wait() {
                     Ok(Some(code)) => { info.code = Some(code as i32); break; }
@@ -174,9 +175,9 @@ pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
                 },
                 () = &mut deadline => { info.reason = ExitReason::Timeout; break; }
                 Some(()) = overflow_rx.recv() => { info.reason = ExitReason::OutputOverflow; break; }
-                permit = async {
-                    match &write {
-                        Some(write) => write.reserve().await,
+                permit = async move {
+                    match queued_write {
+                        Some(write) => write.reserve_owned().await,
                         None => std::future::pending().await,
                     }
                 },
