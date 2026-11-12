@@ -687,7 +687,10 @@ pub fn create(roots: &Roots, opts: &CreateOptions) -> anyhow::Result<Created> {
 pub fn retention_lock(dir: &Path) -> anyhow::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     let file = fs::OpenOptions::new().write(true).create(true).truncate(false)
-        .mode(0o600).custom_flags(libc::O_NOFOLLOW).open(dir.join(".retention.lock"))?;
+        .mode(0o600).custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK).open(dir.join(".retention.lock"))?;
+    if !file.metadata()?.is_file() {
+        bail!("backup lock is not a regular file");
+    }
     file.lock()?;
     Ok(file)
 }

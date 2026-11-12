@@ -203,7 +203,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         f.write_all(bytes)?;
         f.sync_all()?;
     }
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path)?;
+    std::fs::File::open(dir)?.sync_all()
 }
 
 #[cfg(test)]

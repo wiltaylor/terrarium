@@ -15,10 +15,9 @@
 //! (default `backup-key`: its `passphrase` field, else `value`). With no
 //! key the run fails.
 //!
-//! Each run verifies the new backup (every file against the manifest). A
-//! full backup that verifies prunes the dir: it keeps the newest
-//! `TERRARIUM_BACKUP_KEEP` full backups (default `4`) and their diffs.
-//! Nothing is deleted before a newer full backup is verified. Each run
+//! Each run verifies the new backup (every file against the manifest).
+//! Retention is owned by the updater: newest five plus one per UTC day
+//! for fourteen days, with update and recovery references protected. Each run
 //! writes an audit row and a `backup` event. The first failure of a
 //! streak and a missed run mail the operator.
 //!
@@ -74,6 +73,7 @@ pub struct Config {
     /// `None`: off.
     pub interval: Option<Duration>,
     pub full_every: Duration,
+    /// Legacy configuration, accepted but no longer used for deletion.
     pub keep: usize,
     pub work: bool,
     pub passphrase_file: Option<PathBuf>,
@@ -86,7 +86,7 @@ impl Default for Config {
         Self {
             interval: None,
             full_every: Duration::from_secs(7 * 86_400),
-            keep: 4,
+            keep: 5,
             work: false,
             passphrase_file: None,
             key_secret: DEFAULT_KEY_SECRET.to_owned(),
@@ -154,6 +154,9 @@ impl Config {
     }
 
     pub fn from_env() -> Result<Self, String> {
+        if std::env::var_os(ENV_KEEP).is_some() {
+            tracing::warn!("{ENV_KEEP} is ignored for deletion: updater retention keeps five plus fourteen daily backups");
+        }
         Self::parse(|k| std::env::var(k).ok())
     }
 }

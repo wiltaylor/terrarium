@@ -409,6 +409,8 @@ pub enum DaemonCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum BackupCmd {
+    /// Release a failed update's recovery backup from retention protection (operator)
+    ReleaseRecovery { run: String },
     /// Make a backup in the daemon's backup dir now
     Create {
         /// `full`, or `diff` (the files that changed since the newest full backup)

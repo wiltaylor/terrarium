@@ -65,6 +65,10 @@ pub async fn daemon(ctx: &Ctx, cmd: &DaemonCmd) -> anyhow::Result<()> {
 /// `terrarium daemon backup ...` (docs/cli.md, "Backups").
 async fn backup(ctx: &Ctx, cmd: &BackupCmd) -> anyhow::Result<()> {
     match cmd {
+        BackupCmd::ReleaseRecovery { run } => {
+            let r = ctx.api.post("/api/backups/recovery-release", Some(json!({"run":run}))).await?;
+            ctx.emit(&r, |c, _| c.line(format!("recovery protection released for {run}")))
+        }
         BackupCmd::Create {
             kind,
             work,

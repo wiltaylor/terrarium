@@ -380,6 +380,9 @@ impl Updater {
         };
         let result = async {
             let protected = self.store.retention_protected(release).map_err(|e| e.to_string())?;
+            if let Some(id) = release {
+                return Ok(serde_json::json!({"released": id, "removed": []}));
+            }
             let cur = self.engine.target().await?;
             let protected = serde_json::to_string(&protected).map_err(|e| e.to_string())?;
             let out = self.exec_ok(&cur.id, hot_argv("retain-backups", &[&protected])).await?;

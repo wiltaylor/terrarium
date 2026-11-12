@@ -11966,7 +11966,7 @@ The settings are daemon env vars:
 |---|---|---|
 | `TERRARIUM_BACKUP_SCHEDULE` | `off` | `daily`, `weekly`, or a duration of `1h` or more. |
 | `TERRARIUM_BACKUP_FULL_EVERY` | `7d` | The longest time between two full backups. |
-| `TERRARIUM_BACKUP_KEEP` | `4` | The full backups to keep, each with its diffs. |
+| `TERRARIUM_BACKUP_KEEP` | `5` | Legacy setting, accepted but ignored. Retention uses the operator-approved rule below. |
 | `TERRARIUM_BACKUP_WORK` | `off` | `on`: add the workspaces. |
 | `TERRARIUM_BACKUP_KEY_SECRET` | `backup-key` | The global secret with the passphrase. |
 | `TERRARIUM_BACKUP_PASSPHRASE_FILE` | none | A file whose first line is the passphrase. It wins over the secret. The daemon user must own it, and only the owner may read it (mode `0600` or `0400`); else each run fails. |
@@ -11994,8 +11994,7 @@ secret with it.
 
 **Rotation.** Set a new value on the secret. The next run is a full backup
 with the new key. The older backups keep the old key: keep the old
-passphrase until the retention deletes the last of them (after
-`TERRARIUM_BACKUP_KEEP` newer full backups). Restore or verify an old
+passphrase until retention deletes the last of them. Restore or verify an old
 backup with the old passphrase (`--passphrase-file`).
 
 **Verify and record.** Each run reads the new backup back and checks each
@@ -12010,10 +12009,38 @@ writes a global event of the kind `backup` with `change`: `verified`,
 backup. When the move fails the run deletes the file; when that fails
 too, the error mail says to delete it by hand.
 
-**Retention.** Only a full backup that verified prunes the dir: it keeps
-the newest `TERRARIUM_BACKUP_KEEP` full backups and their diffs, and
-deletes the rest. Nothing is deleted before a newer full backup is
-verified, and nothing is deleted while the runs fail.
+**Retention.** Enabled by the operator's decision: keep the newest **5**
+daemon-written full ZIPs plus the latest backup on each of the last **14
+UTC calendar days**, including today. The updater is the only deletion
+owner and serializes retention with updates and rollbacks. API, CLI and
+scheduled creates request a pass after backup creation. The daemon also
+requests a pass at startup and every minute, including when scheduling
+is off. With no reachable updater, or while an update is running, no
+retention occurs and a warning reports the deferral.
+
+An active update (even before its backup path is recorded), the rollback
+backup in `previous.json`, and failed-recovery ZIPs and snapshots are
+protected. An interrupted updater leaves a durable hold in
+`<updater-state>/retention.json`, blocking deletion and new updates until
+the operator has recovered the run and releases it. Recovery holds survive
+history rotation. Full backups referenced by retained diffs are also kept.
+Unknown names, invalid headers, and future-dated backups are not deleted.
+
+A paused `<ZIP>.hot-swap.sqlite` belongs to its ZIP and is deleted with
+it, unless already removed by hot-swap commit. Each pass deletes at most
+32 files, by exact names inside the backup directory. A cross-process
+directory lock serializes creation and deletion. The durable
+`<backup-dir>/.retention-audit.jsonl` records each deletion's intent and
+completion, exact name and byte size. No deletion proceeds if journaling
+fails. These journals are not included in backups.
+
+After manual recovery, the operator can run
+`terrarium daemon backup release-recovery <run-id>`
+(`POST /api/backups/recovery-release`, body `{"run":"<run-id>"}`). Agents,
+including sysadmins, cannot release a hold. Release is irreversible and
+audited in `<updater-state>/retention-audit.jsonl` before it takes effect.
+It permits retention, not necessarily immediate deletion: the five/daily
+rule and the previous rollback target still apply.
 
 **Alerts.** The first failed run of a streak mails the operator from
 `system` (subject `Scheduled backup failed`, with the error). The next
