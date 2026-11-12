@@ -434,7 +434,10 @@ async fn a_session_starts_in_its_device_policy_and_relays_stdio() {
         assert!(args.contains(&want), "{want} not in {args:?}");
     }
     assert!(!run.contains("nvidia1"), "{run}");
-    assert_eq!(f.log("env.copy"), format!("CUDA_VISIBLE_DEVICES=\"{A}\"\nTOKEN=\"t\\$1\"\n"));
+    assert_eq!(
+        f.log("env.copy"),
+        format!("CUDA_VISIBLE_DEVICES=\"{A}\"\nTOKEN=\"t\\$1\"\n")
+    );
     f.wait_idle().await;
     // The unit is killed at the end, so no descendant keeps a GPU handle,
     // and its environment file is gone.
@@ -473,44 +476,47 @@ async fn reserved_gpu_uses_its_minor_number_not_its_index() {
         (vec![], vec![]),
     ] {
         for caller in [None, Some("0"), Some(A)] {
-        f.write("run.log", "");
-        let mut req = f.start("p/a", Some("L1"), &gpus, &gpus, &["true"]);
-        req.env.clear();
-        if let Some(value) = caller {
-            req.env.insert("CUDA_VISIBLE_DEVICES".into(), value.into());
-        }
-        let (s, r) = send(&f.socket, &Request::Start(req)).await;
-        assert!(matches!(r, Reply::Started { .. }), "{r:?}");
-        let (mut rd, _wr) = s.into_split();
-        loop {
-            match native::read_frame(&mut rd).await.unwrap() {
-                Some((Kind::Exit, d)) => {
-                    assert_eq!(serde_json::from_slice::<Exit>(&d).unwrap().code, Some(0));
-                    break;
-                }
-                Some(_) => {}
-                None => panic!("no exit"),
+            f.write("run.log", "");
+            let mut req = f.start("p/a", Some("L1"), &gpus, &gpus, &["true"]);
+            req.env.clear();
+            if let Some(value) = caller {
+                req.env.insert("CUDA_VISIBLE_DEVICES".into(), value.into());
             }
-        }
-        let run = f.log("run.log");
-        let devices: Vec<_> = run
-            .lines()
-            .filter(|line| line.starts_with("DeviceAllow=/dev/nvidia"))
-            .collect();
-        for minor in 0..=1 {
+            let (s, r) = send(&f.socket, &Request::Start(req)).await;
+            assert!(matches!(r, Reply::Started { .. }), "{r:?}");
+            let (mut rd, _wr) = s.into_split();
+            loop {
+                match native::read_frame(&mut rd).await.unwrap() {
+                    Some((Kind::Exit, d)) => {
+                        assert_eq!(serde_json::from_slice::<Exit>(&d).unwrap().code, Some(0));
+                        break;
+                    }
+                    Some(_) => {}
+                    None => panic!("no exit"),
+                }
+            }
+            let run = f.log("run.log");
+            let devices: Vec<_> = run
+                .lines()
+                .filter(|line| line.starts_with("DeviceAllow=/dev/nvidia"))
+                .collect();
+            for minor in 0..=1 {
+                assert_eq!(
+                    devices.contains(&format!("DeviceAllow=/dev/nvidia{minor} rw").as_str()),
+                    minors.contains(&minor),
+                    "{gpus:?}: {devices:?}"
+                );
+            }
             assert_eq!(
-                devices.contains(&format!("DeviceAllow=/dev/nvidia{minor} rw").as_str()),
-                minors.contains(&minor),
-                "{gpus:?}: {devices:?}"
+                devices.contains(&"DeviceAllow=/dev/nvidiactl rw"),
+                !gpus.is_empty()
             );
-        }
-        assert_eq!(devices.contains(&"DeviceAllow=/dev/nvidiactl rw"), !gpus.is_empty());
-        assert_eq!(devices.len(), minors.len() + usize::from(!gpus.is_empty()));
-        assert_eq!(
-            f.log("env.copy"),
-            format!("CUDA_VISIBLE_DEVICES=\"{}\"\n", gpus.join(","))
-        );
-        f.wait_idle().await;
+            assert_eq!(devices.len(), minors.len() + usize::from(!gpus.is_empty()));
+            assert_eq!(
+                f.log("env.copy"),
+                format!("CUDA_VISIBLE_DEVICES=\"{}\"\n", gpus.join(","))
+            );
+            f.wait_idle().await;
         }
     }
 }
