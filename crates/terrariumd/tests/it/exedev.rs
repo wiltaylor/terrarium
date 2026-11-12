@@ -26,6 +26,7 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -509,6 +510,8 @@ async fn workspace_sync_roundtrip(work_root: bool) {
     let agent = td.agent("p", "worker", json!({})).await;
     let id = agent["id"].as_str().unwrap();
     let local = state(&td).work_dir.join("p/worker");
+    let alias = Path::new("/configured-sandbox-home/work");
+    td.sup.set_workspace_alias(alias.to_owned());
     std::fs::create_dir_all(local.join("repo")).unwrap();
     std::fs::write(local.join("repo/input"), "source").unwrap();
     let response = td
@@ -530,6 +533,28 @@ async fn workspace_sync_roundtrip(work_root: bool) {
     );
     assert_eq!(
         std::fs::read_to_string(local.join("repo/output")).unwrap(),
+        "source"
+    );
+    let response = td
+        .post(
+            "/api/targets/sync/exec",
+            json!({
+                "agent": id,
+                "cwd": alias.join("repo"),
+                "env": {"INPUT": alias.join("repo/input")},
+                "cmd": ["sh", "-c", "cat \"$INPUT\" > \"$1\"; pwd", "sh", alias.join("repo/alias-output")]
+            }),
+        )
+        .await;
+    let session = response.ok()["session_id"].as_str().unwrap();
+    let (stdout, end) = output(&td, "sync", session).await;
+    assert_eq!(end["code"], 0, "{end}");
+    assert_eq!(
+        stdout.trim(),
+        base.join("p/worker/workspace/repo").to_str().unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(local.join("repo/alias-output")).unwrap(),
         "source"
     );
     if work_root {
