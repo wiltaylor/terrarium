@@ -17,6 +17,9 @@ use clap::{Parser, Subcommand};
 use terrarium_host::config::{self, Config, DEFAULT_CONFIG_PATH};
 use terrarium_host::{Client, ClientOptions, SelfUpdateOptions, capabilities, tls};
 
+#[cfg(windows)]
+mod windows_service_host;
+
 /// The Terrarium host agent.
 #[derive(Debug, Parser)]
 #[command(
@@ -54,6 +57,9 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Run under the Windows Service Control Manager as LocalSystem.
+    #[cfg(windows)]
+    Service,
     /// Internal Windows per-session containment process.
     #[cfg(windows)]
     #[command(hide = true)]
@@ -388,7 +394,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let token = cfg.resolve_token()?;
     let name = cfg.resolve_name();
     let mut caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
-    caps.no_workspaces = !terrarium_host::workspace::available(&cfg.paths().work_dir);
+    caps.no_workspaces = cfg!(windows) || !terrarium_host::workspace::available(&cfg.paths().work_dir);
     if caps.no_workspaces {
         tracing::warn!(
             work_dir = %cfg.paths().work_dir.display(),
@@ -478,6 +484,8 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     match std::env::current_exe() {
         Ok(binary) => {
             let supervised = std::env::var_os("INVOCATION_ID").is_some();
+            #[cfg(windows)]
+            let supervised = matches!(Args::parse().command, Some(Cmd::Service));
             tracing::info!(binary = %binary.display(), auto_update = cfg.auto_update, systemd = supervised, "self-update settings");
             opts.self_update = Some(SelfUpdateOptions {
                 binary,
@@ -513,14 +521,26 @@ fn main() -> anyhow::Result<()> {
     if matches!(args.command, Some(Cmd::SessionRunner)) {
         return terrarium_host::session_runner::windows::run();
     }
+    let writer = tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stderr);
+    #[cfg(windows)]
+    let writer = if matches!(args.command, Some(Cmd::Service)) {
+        let dir = terrarium_host::config::data_dir().join("host");
+        terrarium_host::session::private_dir(&dir)?;
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("service.log"))?;
+        tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::sync::Mutex::new(file))
+    } else { writer };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .with_writer(std::io::stderr)
+        .with_writer(writer)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
+    #[cfg(windows)]
+    if matches!(args.command, Some(Cmd::Service)) {
+        return windows_service_host::dispatch();
+    }
     match &args.command {
         Some(Cmd::TokenFile { path }) => return write_token_file(path),
         Some(Cmd::Cert { names, out, force }) => return write_cert(names, out, *force),
@@ -544,6 +564,8 @@ fn main() -> anyhow::Result<()> {
     }
     let rt = tokio::runtime::Runtime::new().context("start the runtime")?;
     match args.command {
+        #[cfg(windows)]
+        Some(Cmd::Service) => unreachable!("handled by the service dispatcher"),
         #[cfg(windows)]
         Some(Cmd::SessionRunner) => unreachable!("handled before the runtime"),
         Some(Cmd::Check { json, probe }) => rt.block_on(check(&cfg, json, probe)),

@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 use crate::protocol::{CONNECT_PATH, DEFAULT_BUFFER_LIMIT};
 
 /// The default config path.
+#[cfg(unix)]
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/terrarium-host/config.toml";
+#[cfg(windows)]
+pub const DEFAULT_CONFIG_PATH: &str = r"C:\ProgramData\Terrarium\host\config.toml";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -225,6 +228,9 @@ impl Default for HostPaths {
 
 /// `$XDG_DATA_HOME`, else `~/.local/share`, else `/var/lib`.
 pub fn data_dir() -> PathBuf {
+    #[cfg(windows)]
+    return PathBuf::from(r"C:\ProgramData\Terrarium");
+    #[cfg(unix)]
     std::env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)

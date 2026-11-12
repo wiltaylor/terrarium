@@ -28,7 +28,7 @@ pub async fn detect_with(
     );
     let display = crate::display::detect(display, docker.present, vmlab.present);
     limits.docker = docker.present;
-    HostCapabilities {
+    let caps = HostCapabilities {
         gpus: crate::gpu::sample().await.unwrap_or_default(),
         gpu_reservations: true,
         capacity: detect_capacity(Path::new("/proc")),
@@ -43,7 +43,19 @@ pub async fn detect_with(
         no_workspaces: false,
         // The caller sets it when `[native_gpu]` is on (`crate::native::capability`).
         native_gpu: None,
-    }
+    };
+    #[cfg(windows)]
+    let caps = HostCapabilities {
+        docker: Default::default(),
+        vmlab: Default::default(),
+        display: Default::default(),
+        gpus: Vec::new(),
+        gpu_reservations: false,
+        reservations: false,
+        no_workspaces: true,
+        ..caps
+    };
+    caps
 }
 
 /// Read host logical CPUs and physical memory, not the process affinity or
@@ -85,6 +97,9 @@ pub fn detect_capacity(proc_root: &Path) -> Option<terrarium_core::resources::Ho
 
 /// `$SHELL` when it exists, else `/bin/sh`.
 pub fn detect_shell() -> Option<String> {
+    #[cfg(windows)]
+    return Some(std::env::var("COMSPEC").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into()));
+    #[cfg(unix)]
     std::env::var("SHELL")
         .ok()
         .filter(|s| !s.is_empty() && Path::new(s).exists())
