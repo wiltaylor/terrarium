@@ -3,45 +3,64 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::error::{ApiError, ApiResult};
 
-/// Uses a separate connection, never the shared DB lock. Registry callers
-/// may hold their own lock while saving without inverting the shared lock.
+fn journal_error(error: rusqlite::Error) -> ApiError {
+    if matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    ) {
+        ApiError::new(crate::error::Code::ResourceBusy, "host journal is busy")
+    } else {
+        error.into()
+    }
+}
+
+/// Shares the daemon writer. Registry users never wait for its mutex:
+/// contention returns ResourceBusy for retry outside their own lock.
 pub struct Journal {
     state_dir: PathBuf,
+    db: crate::db::Db,
+    wait: bool,
 }
 
 impl Journal {
-    pub fn new(state_dir: &Path) -> Self {
+    pub fn with_db(state_dir: &Path, db: crate::db::Db) -> Self {
         Self {
             state_dir: state_dir.to_owned(),
+            db,
+            wait: true,
         }
     }
 
-    fn connect(&self) -> ApiResult<Connection> {
-        let conn = Connection::open(self.state_dir.join("terrarium.db"))?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.pragma_update(None, "synchronous", "FULL")?;
-        Ok(conn)
+    /// Only registry callers require fail-fast locking. Other synchronous
+    /// users may queue behind normal writes, as they do for Db::read_now.
+    pub(crate) fn for_registry(state_dir: &Path, db: crate::db::Db) -> Self {
+        Self {
+            wait: false,
+            ..Self::with_db(state_dir, db)
+        }
     }
 
     pub fn load<T: DeserializeOwned>(&self, id: &str) -> ApiResult<Option<T>> {
-        let mut conn = self.connect()?;
         // The writer lock also serializes us with key rotation. Finish a
         // committed rotation before reading the current key from disk.
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::secrets::migrate::finish_rotation(&tx, &self.state_dir)
-            .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;
-        let sealed: Option<Vec<u8>> = tx
-            .query_row("SELECT sealed FROM host_resume WHERE id=?1", [id], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        let key = crate::secrets::key(&self.state_dir)?;
-        tx.commit()?;
+        let (key, sealed) = self.db.journal_now(self.wait, |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            crate::secrets::migrate::finish_rotation(&tx, &self.state_dir)
+                .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;
+            let sealed: Option<Vec<u8>> = tx
+                .query_row("SELECT sealed FROM host_resume WHERE id=?1", [id], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            let key = crate::secrets::key(&self.state_dir)?;
+            tx.commit()?;
+            Ok((key, sealed))
+        })?;
         let value =
             match sealed {
                 None => None,
@@ -77,56 +96,69 @@ impl Journal {
         ids: &[String],
         prefixes: &[String],
     ) -> ApiResult<()> {
-        let mut conn = self.connect()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::secrets::migrate::finish_rotation(&tx, &self.state_dir)
-            .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;
-        let key = crate::secrets::key(&self.state_dir)?;
-        for id in ids {
-            tx.execute("DELETE FROM host_resume WHERE id=?1", [id])?;
-        }
-        for prefix in prefixes {
-            tx.execute(
-                "DELETE FROM host_resume WHERE id>=?1 AND id<?2",
-                params![prefix, prefix_end(prefix)?],
-            )?;
-        }
-        for (id, value) in values {
-            let plain = zeroize::Zeroizing::new(
-                serde_json::to_vec(value)
-                    .map_err(|_| ApiError::internal("cannot encode the host reconnect journal"))?,
-            );
-            let sealed = key.seal(&plain, &super::resume_aad(id))?;
-            tx.execute(
-                "INSERT INTO host_resume(id,sealed) VALUES (?1,?2)
+        // Encoding is independent of rotation and stays outside the writer.
+        let values = values
+            .iter()
+            .map(|(id, value)| {
+                let plain = serde_json::to_vec(value)
+                    .map_err(|_| ApiError::internal("cannot encode the host reconnect journal"))?;
+                Ok((id, zeroize::Zeroizing::new(plain)))
+            })
+            .collect::<ApiResult<Vec<_>>>()?;
+        self.db.journal_now(self.wait, |conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(journal_error)?;
+            crate::secrets::migrate::finish_rotation(&tx, &self.state_dir)
+                .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;
+            let key = crate::secrets::key(&self.state_dir)?;
+            for id in ids {
+                tx.execute("DELETE FROM host_resume WHERE id=?1", [id])
+                    .map_err(journal_error)?;
+            }
+            for prefix in prefixes {
+                tx.execute(
+                    "DELETE FROM host_resume WHERE id>=?1 AND id<?2",
+                    params![prefix, prefix_end(prefix)?],
+                )
+                .map_err(journal_error)?;
+            }
+            for (id, plain) in values {
+                let sealed = key.seal(&plain, &super::resume_aad(id))?;
+                tx.execute(
+                    "INSERT INTO host_resume(id,sealed) VALUES (?1,?2)
              ON CONFLICT(id) DO UPDATE SET sealed=excluded.sealed",
-                params![id, sealed],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
+                    params![id, sealed],
+                )
+                .map_err(journal_error)?;
+            }
+            tx.commit().map_err(journal_error)?;
+            Ok(())
+        })
     }
 
     pub fn scan<T: DeserializeOwned>(&self, prefix: &str) -> ApiResult<Vec<(String, T)>> {
-        let mut conn = self.connect()?;
         let end = prefix_end(prefix)?;
         let mut cursor = String::new();
         let mut out = Vec::new();
         loop {
             // Capture the key and one sealed page under the rotation lock,
             // then release the writer before decrypting or decoding anything.
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            crate::secrets::migrate::finish_rotation(&tx, &self.state_dir)
-                .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;
-            let key = crate::secrets::key(&self.state_dir)?;
-            let rows = {
-                let mut stmt = tx.prepare(SCAN_PAGE)?;
-                stmt.query_map(params![prefix, end, cursor], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?
-            };
-            tx.commit()?;
+            let (key, rows) = self.db.journal_now(self.wait, |conn| {
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                crate::secrets::migrate::finish_rotation(&tx, &self.state_dir)
+                    .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;
+                let key = crate::secrets::key(&self.state_dir)?;
+                let rows = {
+                    let mut stmt = tx.prepare(SCAN_PAGE)?;
+                    stmt.query_map(params![prefix, end, cursor], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?
+                };
+                tx.commit()?;
+                Ok((key, rows))
+            })?;
             let count = rows.len();
             for (id, sealed) in rows {
                 cursor.clone_from(&id);
@@ -148,6 +180,20 @@ impl Journal {
 const SCAN_PAGE: &str = "SELECT id,sealed FROM host_resume
     WHERE id>=?1 AND id<?2 AND id>?3 ORDER BY id LIMIT 256";
 
+#[cfg(test)]
+impl Journal {
+    #[allow(clippy::expect_used)]
+    pub(crate) fn new(state_dir: &Path) -> Self {
+        Self::with_db(
+            state_dir,
+            crate::db::Db::new(
+                crate::db::open(&state_dir.join("terrarium.db")).expect("test journal DB"),
+                crate::events::EventHub::default(),
+            ),
+        )
+    }
+}
+
 // Journal namespaces are nonempty ASCII paths. Reject other prefixes rather
 // than constructing an invalid UTF-8 bound or silently scanning the table.
 fn prefix_end(prefix: &str) -> ApiResult<String> {
@@ -165,6 +211,101 @@ fn prefix_end(prefix: &str) -> ApiResult<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn waiting_journal_rejects_recursive_shared_writer_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        let journal = Journal::with_db(dir.path(), db.clone());
+        db.read_now(|_| {
+            assert!(
+                journal
+                    .save("nested", &1)
+                    .unwrap_err()
+                    .message
+                    .contains("inside a database closure")
+            );
+            Ok(())
+        })
+        .unwrap();
+        let journal = Journal::with_db(dir.path(), db.clone());
+        db.read(move |_| {
+            assert!(
+                journal
+                    .load::<u32>("nested")
+                    .unwrap_err()
+                    .message
+                    .contains("inside a database closure")
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let journal = Journal::with_db(dir.path(), db.clone());
+        db.write("system", move |_| {
+            assert!(
+                journal
+                    .save("nested", &1)
+                    .unwrap_err()
+                    .message
+                    .contains("inside a database closure")
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(
+            Journal::with_db(dir.path(), db)
+                .load::<u32>("nested")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn file_connections_are_the_main_writer_or_read_only() {
+        fn check(dir: &Path) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    if path.file_name().unwrap() != "tests" {
+                        check(&path);
+                    }
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs")
+                    || path.file_name().unwrap() == "tests.rs"
+                {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).unwrap();
+                // Inline test modules are conventionally gated this way.
+                let production = source.split("#[cfg(test)]").next().unwrap();
+                let direct = ["Connection::", "open("].concat();
+                for (_, _) in production.match_indices(&direct) {
+                    assert!(
+                        path.ends_with("db.rs"),
+                        "second writer in {}",
+                        path.display()
+                    );
+                }
+                let flagged = ["Connection::", "open_with_flags("].concat();
+                for (offset, _) in production.match_indices(&flagged) {
+                    let call = &production[offset..];
+                    let args = call.split(")?").next().unwrap();
+                    assert!(
+                        args.contains("SQLITE_OPEN_READ_ONLY")
+                            && !args.contains("SQLITE_OPEN_READ_WRITE"),
+                        "writable file connection in {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        check(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+    }
 
     #[test]
     fn journal_prefix_pages_use_primary_key_range_at_scale() {
