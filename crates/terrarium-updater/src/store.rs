@@ -19,17 +19,29 @@ use crate::protocol::{Image, Run};
 
 #[derive(Default, Serialize, Deserialize)]
 struct Retention {
+    #[serde(default)]
+    initialized: bool,
+    #[serde(default)]
+    retention_running: Option<RetentionRunning>,
     pending: Option<String>,
     protected: std::collections::BTreeMap<String, String>,
     released: std::collections::BTreeSet<String>,
 }
 
-fn strict_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> std::io::Result<T> {
-    match std::fs::read(path) {
-        Ok(b) => serde_json::from_slice(&b).map_err(std::io::Error::other),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-        Err(e) => Err(e),
-    }
+/// Persisted before exec start. PIDs are observations, never guessed identities.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetentionRunning {
+    pub container: String,
+    pub exec_id: String,
+    pub token: String,
+    pub pid: Option<u64>,
+    pub worker_pid: Option<u64>,
+    pub worker_start: Option<String>,
+}
+
+fn strict_json<T: serde::de::DeserializeOwned>(path: &Path) -> std::io::Result<T> {
+    let bytes = std::fs::read(path).map_err(|e| std::io::Error::other(format!("{} needs repair: {e}", path.display())))?;
+    serde_json::from_slice(&bytes).map_err(|e| std::io::Error::other(format!("{} needs repair: {e}", path.display())))
 }
 
 /// How many runs `history.json` keeps.
@@ -61,6 +73,9 @@ pub struct Store {
 impl Store {
     pub fn retention_begin(&self, run: &Run) -> std::io::Result<()> {
         let mut r: Retention = strict_json(&self.dir.join("retention.json"))?;
+        if r.retention_running.is_some() {
+            return Err(std::io::Error::other("retention helper requires reconciliation before updates"));
+        }
         if r.pending.is_some() {
             return Err(std::io::Error::other(
                 "unfinished update requires operator recovery release",
@@ -86,6 +101,12 @@ impl Store {
     /// Strict reads: corrupt updater state never means permission to delete.
     pub fn retention_protected(&self, release: Option<&str>) -> std::io::Result<Vec<String>> {
         let mut r: Retention = strict_json(&self.dir.join("retention.json"))?;
+        if r.retention_running.is_some() {
+            return Err(std::io::Error::other("retention helper requires reconciliation"));
+        }
+        if !r.initialized {
+            return Err(std::io::Error::other("retention not initialized: operator must run admin backup retention init"));
+        }
         let history: Vec<Run> = strict_json(&self.dir.join(HISTORY))?;
         let previous: Option<Previous> = strict_json(&self.dir.join(PREVIOUS))?;
         for run in history {
@@ -134,6 +155,61 @@ impl Store {
             protected.push(p);
         }
         Ok(protected)
+    }
+
+    /// Only an explicit operator confirmation establishes the initial baseline.
+    /// This is never called by normal retention or update admission.
+    pub fn retention_init(&self, confirm: bool, no_rollback: bool) -> std::io::Result<Vec<String>> {
+        let path = self.dir.join("retention.json");
+        let mut r: Retention = if path.try_exists()? { strict_json(&path)? } else { Retention::default() };
+        if r.retention_running.is_some() {
+            return Err(std::io::Error::other("retention helper requires reconciliation before initialization"));
+        }
+        if r.pending.is_some() {
+            return Err(std::io::Error::other("unfinished update blocks retention initialization"));
+        }
+        let history: Vec<Run> = if no_rollback && !self.dir.join(HISTORY).try_exists()? {
+            Vec::new()
+        } else { strict_json(&self.dir.join(HISTORY))? };
+        let previous: Option<Previous> = if no_rollback && !self.dir.join(PREVIOUS).try_exists()? {
+            None
+        } else { strict_json(&self.dir.join(PREVIOUS))? };
+        if no_rollback && previous.is_some() {
+            return Err(std::io::Error::other("rollback reference exists: cannot assert --no-rollback-reference"));
+        }
+        for run in &history {
+            if !r.released.contains(&run.id) && matches!(run.outcome, crate::protocol::Outcome::RecoveryFailed | crate::protocol::Outcome::RollbackFailed)
+                && let Some(backup) = &run.backup {
+                r.protected.insert(run.id.clone(), backup.clone());
+            }
+        }
+        let mut protected: Vec<_> = r.protected.values().cloned().collect();
+        if let Some(p) = previous.as_ref().and_then(|p| p.backup.clone()) { protected.push(p); }
+        if confirm {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::create_dir_all(&self.dir)?;
+            let mut audit = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(self.dir.join("retention-audit.jsonl"))?;
+            writeln!(audit, "{}", serde_json::json!({"action":"backup.retention.init", "actor":"operator", "no_rollback_reference":no_rollback, "protected":protected, "at":chrono::Utc::now()}))?;
+            audit.sync_all()?;
+            // Explicitly record even an empty baseline. Later loss fails closed.
+            write_json(&self.dir.join(HISTORY), &history)?;
+            write_json(&self.dir.join(PREVIOUS), &previous)?;
+            r.initialized = true;
+            write_json(&path, &r)?;
+        }
+        Ok(protected)
+    }
+
+    pub fn retention_running(&self) -> std::io::Result<Option<RetentionRunning>> {
+        let r: Retention = strict_json(&self.dir.join("retention.json"))?;
+        Ok(r.retention_running)
+    }
+
+    pub fn set_retention_running(&self, running: Option<RetentionRunning>) -> std::io::Result<()> {
+        let path = self.dir.join("retention.json");
+        let mut r: Retention = strict_json(&path)?;
+        r.retention_running = running;
+        write_json(&path, &r)
     }
     pub fn new(dir: impl Into<PathBuf>, keep: usize) -> Self {
         Self {

@@ -25,6 +25,18 @@ pub fn format_uptime(secs: u64) -> String {
     }
 }
 
+pub async fn admin_backup(ctx: &Ctx, cmd: &crate::cli::AdminBackupCmd) -> anyhow::Result<()> {
+    let crate::cli::AdminBackupCmd::Retention { command: crate::cli::RetentionCmd::Init { confirm, no_rollback_reference } } = cmd;
+    let detail = ctx.api.post("/api/backups/retention/init", Some(json!({"confirm":confirm, "no_rollback_reference":no_rollback_reference}))).await?;
+    ctx.emit(&detail, |c, r| {
+        for item in r["preview"].as_array().into_iter().flatten() {
+            c.line(format!("{}  {}  {} bytes", item["name"].as_str().unwrap_or_default(), item["created_at"].as_str().unwrap_or_default(), item["size"]));
+        }
+        c.line(format!("Total: {} files, {} bytes", r["total_files"], r["total_bytes"]));
+        c.line(if *confirm { "Retention initialized" } else { "Preview only. Run with --confirm to enable retention" });
+    })
+}
+
 pub async fn daemon(ctx: &Ctx, cmd: &DaemonCmd) -> anyhow::Result<()> {
     match cmd {
         DaemonCmd::Status => {

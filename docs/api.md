@@ -12009,9 +12009,23 @@ writes a global event of the kind `backup` with `change`: `verified`,
 backup. When the move fails the run deletes the file; when that fails
 too, the error mail says to delete it by hand.
 
-**Retention.** Enabled by the operator's decision: keep the newest **5**
+**Retention.** The operator's rule is to keep the newest **5**
 daemon-written full ZIPs plus the latest backup on each of the last **14
-UTC calendar days**, including today. The updater is the only deletion
+UTC calendar days**, including today. Deletion stays off until explicit
+operator initialization: `terrarium admin backup retention init` shows the
+first bounded pass's exact names, dates, byte sizes and total. Re-run with
+`--confirm` to initialize and enable passes. The operator-only API is
+`POST /api/backups/retention/init` with `confirm` and
+`no_rollback_reference` booleans (both default false). Missing or unreadable
+`history.json` or `previous.json` refuses initialization and names the file
+needing repair. Only a never-updated installation may explicitly establish
+an empty baseline with `--no-rollback-reference --confirm`. Initialization
+and that flag are durably audited. No fresh installation is inferred from
+missing files. Later missing/unreadable safety files, or a missing initialized
+marker in `retention.json`, always prevent deletion. Missing retention state
+also prevents update admission until repaired or explicitly initialized.
+
+The updater is the only deletion
 owner and serializes retention with updates and rollbacks. API, CLI and
 scheduled creates request a pass after backup creation. The daemon also
 requests a pass at startup and every minute, including when scheduling
@@ -12025,6 +12039,17 @@ protected. An interrupted updater leaves a durable hold in
 the operator has recovered the run and releases it. Recovery holds survive
 history rotation. Full backups referenced by retained diffs are also kept.
 Unknown names, invalid headers, and future-dated backups are not deleted.
+
+Before helper launch the updater persists a `retention_running` interlock
+with the Docker exec ID and a unique token, then records the observed host
+PID and helper PID/start time. Updates refuse while that interlock remains.
+Startup and uncertain execution revoke the token, terminate the exact helper
+using its container PID/start time and pidfd, then inspect the exact Docker
+exec to prove it stopped before clearing the interlock. An inspection or
+cancellation failure keeps admission blocked. A delayed start cannot reuse
+a revoked token. The helper re-reads the mirrored token and protections
+under the directory lock immediately before each unlink. Private control,
+identity, receipt and permanent revocation files live in the backup directory.
 
 A paused `<ZIP>.hot-swap.sqlite` belongs to its ZIP and is deleted with
 it, unless already removed by hot-swap commit. Each pass deletes at most

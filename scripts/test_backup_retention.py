@@ -7,6 +7,9 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import subprocess
+import sys
+import time
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -27,6 +30,11 @@ class RetentionTests(unittest.TestCase):
         env = patch.dict(os.environ, {"TERRARIUM_STATE_DIR": str(self.state), "TERRARIUM_BACKUP_DIR": str(self.directory)})
         env.start()
         self.addCleanup(env.stop)
+        self.token = "A" * 26
+
+    def retain(self, protected, now=NOW):
+        HOT.retention_control("prepare", {"token": self.token, "protected": protected})
+        return HOT.retain_backups(protected, now, token=self.token)
 
     def backup(self, age, hour=12, kind="full", base=None):
         created = (NOW - dt.timedelta(days=age)).replace(hour=hour)
@@ -47,7 +55,7 @@ class RetentionTests(unittest.TestCase):
         keep = set(all_full[:5]) | {name for name in names if "T160000Z" in name and name >= "terrarium-backup-20261030"} | {protected}
         # Multiple bounded passes drain the eligible set.
         for _ in range(8):
-            result = HOT.retain_backups([str(self.directory / protected)], NOW)
+            result = self.retain([str(self.directory / protected)])
             self.assertLessEqual(len(result["removed"]), 32)
         self.assertEqual({p.name for p in self.directory.glob("*.zip")}, keep)
         self.assertFalse(snapshot.exists())
@@ -65,7 +73,7 @@ class RetentionTests(unittest.TestCase):
             self.backup(age)
         unknown = self.directory / "manual.zip"
         unknown.write_bytes(b"not ours")
-        HOT.retain_backups([], NOW)
+        self.retain([])
         self.assertTrue((self.directory / base).exists())
         self.assertTrue((self.directory / future).exists())
         self.assertEqual(unknown.read_bytes(), b"not ours")
@@ -73,7 +81,7 @@ class RetentionTests(unittest.TestCase):
     def test_every_future_backup_later_today_is_kept(self):
         names = [self.backup(0, hour) for hour in range(12, 18)]
         before_noon = NOW.replace(hour=11)
-        result = HOT.retain_backups([], before_noon)
+        result = self.retain([], before_noon)
         self.assertEqual(result["removed"], [])
         self.assertTrue(all((self.directory / name).exists() for name in names))
 
@@ -82,7 +90,7 @@ class RetentionTests(unittest.TestCase):
         outside.write_bytes(b"keep")
         (self.directory / "terrarium-backup-20200101T000000Z-full.zip").symlink_to(outside)
         with self.assertRaises(OSError):
-            HOT.retain_backups([], NOW)
+            self.retain([])
         self.assertEqual(outside.read_bytes(), b"keep")
 
     def test_creator_flock_serializes_retention(self):
@@ -91,10 +99,11 @@ class RetentionTests(unittest.TestCase):
         started = threading.Event()
         finished = threading.Event()
         errors = []
+        HOT.retention_control("prepare", {"token": self.token, "protected": []})
         def retain():
             started.set()
             try:
-                HOT.retain_backups([], NOW)
+                HOT.retain_backups([], NOW, token=self.token)
             except Exception as e:
                 errors.append(e)
             finally:
@@ -109,6 +118,69 @@ class RetentionTests(unittest.TestCase):
         worker.join(5)
         self.assertTrue(finished.is_set())
         self.assertEqual(errors, [])
+
+    def test_preview_has_exact_names_dates_sizes_and_total_without_deletion(self):
+        names = [self.backup(age) for age in range(20)]
+        result = HOT.retain_backups([], NOW, preview=True)
+        self.assertTrue(result["preview"])
+        self.assertEqual(result["total_files"], len(result["preview"]))
+        self.assertEqual(result["total_bytes"], sum((self.directory / r["name"]).stat().st_size for r in result["preview"]))
+        self.assertTrue(all("created_at" in r for r in result["preview"]))
+        self.assertTrue(all((self.directory / name).exists() for name in names))
+
+    def test_revocation_prevents_delayed_start_and_prepare(self):
+        names = [self.backup(age) for age in range(20)]
+        HOT.retention_control("prepare", {"token":self.token, "protected":[]})
+        HOT.retention_control("cancel", {"token":self.token})
+        with self.assertRaisesRegex(RuntimeError, "revoked"):
+            HOT.retention_control("prepare", {"token":self.token, "protected":[]})
+        result = HOT.retain_backups([], NOW, token=self.token)
+        self.assertTrue(result["stopped"])
+        self.assertEqual(result["removed"], [])
+        self.assertTrue(all((self.directory / name).exists() for name in names))
+
+    def test_authorization_and_protections_are_reread_before_each_unlink(self):
+        names = [self.backup(age) for age in range(20)]
+        HOT.retention_control("prepare", {"token":self.token, "protected":[]})
+        original = HOT.retention_authorized
+        calls = []
+        def protect(directory, token):
+            calls.append(token)
+            if len(calls) == 2:
+                HOT.retention_json(directory, ".retention-control.json", {"token":token, "protected":names})
+            return original(directory, token)
+        with patch.object(HOT, "retention_authorized", side_effect=protect):
+            result = HOT.retain_backups([], NOW, token=self.token)
+        self.assertEqual(result["removed"], [])
+        self.assertGreater(len(calls), 2)
+        def revoke(directory, token):
+            (directory / (".retention-" + token + ".revoked")).touch()
+            return original(directory, token)
+        with patch.object(HOT, "retention_authorized", side_effect=revoke):
+            self.assertTrue(HOT.retain_backups([], NOW, token=self.token)["stopped"])
+
+    def test_cancel_terminates_exact_worker_waiting_on_backup_flock(self):
+        for age in range(20):
+            self.backup(age)
+        HOT.retention_control("prepare", {"token":self.token, "protected":[]})
+        with (self.directory / ".retention.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            child = subprocess.Popen([sys.executable, str(SPEC.origin), "retain-backups", self.token], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                identity_path = self.directory / (".retention-" + self.token + ".worker.json")
+                deadline = time.monotonic() + 5
+                while not identity_path.exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue(identity_path.exists())
+                identity = HOT.retention_control("cancel", {"token":self.token})
+                self.assertEqual(identity["pid"], child.pid)
+                child.communicate(timeout=5)
+                self.assertEqual(child.returncode, -9)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate()
+        self.assertEqual(len(list(self.directory.glob("*.zip"))), 20)
 
 
 if __name__ == "__main__":

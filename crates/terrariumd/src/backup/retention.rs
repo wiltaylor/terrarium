@@ -2,10 +2,14 @@
 use terrarium_updater::protocol::{Request, Response};
 
 pub async fn request(release: Option<String>) -> Result<serde_json::Value, String> {
+    call(Request::Retention { release }).await
+}
+
+pub async fn call(request: Request) -> Result<serde_json::Value, String> {
     let socket = std::env::var_os(terrarium_updater::protocol::ENV_SOCKET)
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| terrarium_updater::protocol::DEFAULT_SOCKET.into());
-    match terrarium_updater::client::call(&socket, &Request::Retention { release }).await {
+    match terrarium_updater::client::call(&socket, &request).await {
         Ok(Response::Retained { detail }) => Ok(detail),
         Ok(Response::Error { message, .. }) => Err(message),
         Ok(_) => Err("unexpected retention answer".into()),

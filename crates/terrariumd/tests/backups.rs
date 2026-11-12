@@ -33,6 +33,9 @@ async fn the_api_makes_lists_and_serves_backups_for_the_operator_only() {
     .await
     .err(403, "forbidden");
 
+    td.post_as(&sys, "/api/backups/retention/init", json!({"confirm":true,"no_rollback_reference":true}))
+        .await.err(403, "forbidden");
+
     // A diff with no full backup is invalid.
     td.post("/api/backups", json!({"kind": "diff"}))
         .await

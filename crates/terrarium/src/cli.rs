@@ -3374,6 +3374,11 @@ pub struct SnapshotOn {
 
 #[derive(Debug, Subcommand)]
 pub enum AdminCmd {
+    /// Operator-only backup retention initialization
+    Backup {
+        #[command(subcommand)]
+        command: AdminBackupCmd,
+    },
     /// Operator-only job maintenance
     Job {
         #[command(subcommand)]
@@ -3465,6 +3470,26 @@ pub enum AdminCmd {
     Password {
         #[command(subcommand)]
         command: PasswordCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AdminBackupCmd {
+    Retention {
+        #[command(subcommand)]
+        command: RetentionCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RetentionCmd {
+    /// Preview the first deletion pass. Requires --confirm to enable retention.
+    Init {
+        #[arg(long)]
+        confirm: bool,
+        /// Explicitly establish an empty rollback baseline on a never-updated installation
+        #[arg(long)]
+        no_rollback_reference: bool,
     },
 }
 
