@@ -647,7 +647,8 @@ pub(super) async fn start(
     let a = load(&state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "starting an agent")?;
     refuse_paused(&a, "start")?;
-    refuse_parked(&state, &a).await?;
+    let parked = explicit_start_park(&state, &actor, &a).await?;
+    let _wake = parked.as_ref().and_then(|_| crate::lifecycle::WakeGuard::take(&state.lifecycle, agent_id(&a)));
     refuse_disabled(&state, &a).await?;
     if state
         .supervisor
@@ -689,9 +690,13 @@ pub(super) async fn start(
         return Err(supervisor_error(e));
     }
     // A start is a wake: the queued turns go to the agent (PLAN §18).
+    if parked.is_some() {
+        crate::lifecycle::deliver_operator_turns(&state, agent_id(&a)).await;
+    }
     crate::lifecycle::wake_soon(&state, agent_id(&a), "start");
     let id = a.agent.id.to_string();
-    let v = state.db.read(move |c| agents::get(c, &id)).await?;
+    let mut v = state.db.read(move |c| agents::get(c, &id)).await?;
+    v.parked = parked;
     Ok((StatusCode::ACCEPTED, Json(v)))
 }
 
@@ -714,8 +719,23 @@ async fn refuse_disabled(state: &Shared, a: &AgentView) -> ApiResult<()> {
     }
 }
 
-/// Parked card work must not be resumed by a message or an explicit start.
+/// The operator may deliberately run one recovery turn without unparking.
+async fn explicit_start_park(state: &Shared, actor: &Actor, a: &AgentView) -> ApiResult<Option<String>> {
+    let parked = parked_reason(state, a).await?;
+    if !actor.is_operator() && let Some(why) = &parked {
+        return Err(ApiError::conflict(why.clone()));
+    }
+    Ok(parked)
+}
+
 async fn refuse_parked(state: &Shared, a: &AgentView) -> ApiResult<()> {
+    if let Some(why) = parked_reason(state, a).await? {
+        return Err(ApiError::conflict(why));
+    }
+    Ok(())
+}
+
+async fn parked_reason(state: &Shared, a: &AgentView) -> ApiResult<Option<String>> {
     let key = a.agent.id.to_string();
     state
         .db
@@ -724,13 +744,18 @@ async fn refuse_parked(state: &Shared, a: &AgentView) -> ApiResult<()> {
                 && sp.running()
                 && sp.parked_at.is_some()
             {
-                return Err(ApiError::conflict(format!(
+                if let Some(card) = sp.bound.as_deref().and_then(|b| b.strip_prefix("card:")) {
+                    let column = sp.park_reason.as_deref().unwrap_or("waiting on others")
+                        .strip_prefix("card in ").unwrap_or("a waiting column");
+                    return Ok(Some(format!("parked: card {card} is in {column}")));
+                }
+                return Ok(Some(format!(
                     "parked: {} ({})",
                     sp.bound.as_deref().unwrap_or("bound agent"),
                     sp.park_reason.as_deref().unwrap_or("waiting on others")
                 )));
             }
-            Ok(())
+            Ok(None)
         })
         .await
 }
@@ -1047,7 +1072,8 @@ pub(super) async fn restart(
     let a = load(&state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "restarting an agent")?;
     refuse_paused(&a, "restart")?;
-    refuse_parked(&state, &a).await?;
+    let parked = explicit_start_park(&state, &actor, &a).await?;
+    let _wake = parked.as_ref().and_then(|_| crate::lifecycle::WakeGuard::take(&state.lifecycle, agent_id(&a)));
     refuse_disabled(&state, &a).await?;
     let live = state
         .supervisor
@@ -1079,8 +1105,12 @@ pub(super) async fn restart(
     result.map_err(supervisor_error)?;
     // A restart is a retry: a usage-limit hold ends (`crate::usage_limit`).
     crate::usage_limit::release_all(&state, &a.agent.id.to_string()).await?;
+    if parked.is_some() {
+        crate::lifecycle::deliver_operator_turns(&state, agent_id(&a)).await;
+    }
     let id = a.agent.id.to_string();
-    let v = state.db.read(move |c| agents::get(c, &id)).await?;
+    let mut v = state.db.read(move |c| agents::get(c, &id)).await?;
+    v.parked = parked;
     Ok((StatusCode::ACCEPTED, Json(v)))
 }
 
