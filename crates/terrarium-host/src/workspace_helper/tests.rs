@@ -577,7 +577,10 @@ fn unsafe_exception_is_confined_to_audited_syscall_crates() {
             let path = entry.unwrap().path();
             // Both exact exceptions were approved by the operator. All other
             // crates must inherit forbid, including future platform ports.
-            if matches!(path.file_name().unwrap().to_str(), Some("terrarium-sys" | "terrarium-winapi")) {
+            if matches!(
+                path.file_name().unwrap().to_str(),
+                Some("terrarium-sys" | "terrarium-winapi")
+            ) {
                 continue;
             }
             if path.is_dir() {

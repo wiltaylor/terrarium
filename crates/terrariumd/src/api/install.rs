@@ -101,7 +101,12 @@ async fn read_bundle(path: &Path) -> anyhow::Result<Vec<u8>> {
 }
 
 /// Cache by binary hash so a prior release's bundle is never reused for a new binary.
-async fn ensure_bundle(binary: &Path, hash: &str, arch: &str) -> anyhow::Result<()> {
+fn bundle_release_name(version: &str, os: &str, arch: &str) -> String {
+    let extension = if os == "windows" { ".exe" } else { "" };
+    format!("terrarium-host-{version}-{os}-{arch}{extension}.sigstore.json")
+}
+
+async fn ensure_bundle(binary: &Path, hash: &str, os: &str, arch: &str) -> anyhow::Result<()> {
     let path = bundle_cache_path(binary, hash);
     if read_bundle(&path).await.is_ok() {
         return Ok(());
@@ -111,8 +116,9 @@ async fn ensure_bundle(binary: &Path, hash: &str, arch: &str) -> anyhow::Result<
         "dev daemon has no release key; no release bundle available"
     );
     let version = terrarium_version::VERSION;
+    let asset = bundle_release_name(version, os, arch);
     let url = format!(
-        "https://github.com/wiltaylor/terrarium/releases/download/v{version}/terrarium-host-{version}-linux-{arch}.sigstore.json"
+        "https://github.com/wiltaylor/terrarium/releases/download/v{version}/{asset}"
     );
     let tls = terrarium_host::tls::transport(&url, &terrarium_host::tls::TlsSettings::default())?
         .tls
@@ -266,7 +272,7 @@ pub async fn update_offer_for_platform(
         );
         return None;
     }
-    if let Err(e) = ensure_bundle(&path, &sha256, arch).await {
+    if let Err(e) = ensure_bundle(&path, &sha256, os, arch).await {
         warn!(path = %path.display(), "no self-update offer: cannot obtain release signature bundle: {e}");
         return None;
     }
@@ -583,6 +589,8 @@ mod tests {
                 .is_none()
         );
         let sha = terrarium_host::transfer::sha256_hex(b"windows binary");
+        assert_eq!(bundle_release_name("1.0.0", "windows", "x86_64"), "terrarium-host-1.0.0-windows-x86_64.exe.sigstore.json");
+        assert_eq!(bundle_release_name("1.0.0", "linux", "x86_64"), "terrarium-host-1.0.0-linux-x86_64.sigstore.json");
         // TER-1016 also requires an available bundle before offering an asset.
         // The host, not this transport/cache test, authenticates its contents.
         std::fs::write(bundle_cache_path(&path, &sha), b"bundle").unwrap();
