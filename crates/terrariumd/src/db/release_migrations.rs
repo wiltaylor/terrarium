@@ -63,38 +63,54 @@ const BASELINE: &[&str] = &[
 ];
 
 fn check_database(conn: &Connection) {
-    let integrity: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(integrity, "ok");
-    let violations: i64 = conn.query_row(
-        "SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0)
-    ).unwrap();
+    let violations: i64 = conn
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
     assert_eq!(violations, 0, "foreign key violations");
 }
 
 fn seeded_previous_release() -> Connection {
     let mut conn = Connection::open_in_memory().unwrap();
     migrate_with(&mut conn, MIGRATIONS).unwrap();
-    let baseline: Vec<_> = BASELINE.iter().map(|name| {
-        *NAMED_MIGRATIONS.iter().find(|(candidate, _)| candidate == name)
-            .unwrap_or_else(|| panic!("shipped migration disappeared: {name}"))
-    }).collect();
+    let baseline: Vec<_> = BASELINE
+        .iter()
+        .map(|name| {
+            *NAMED_MIGRATIONS
+                .iter()
+                .find(|(candidate, _)| candidate == name)
+                .unwrap_or_else(|| panic!("shipped migration disappeared: {name}"))
+        })
+        .collect();
     migrate_named(&mut conn, &baseline).unwrap();
     // Disable FK enforcement only during the unordered synthetic inserts.
     // Check every FK before enabling production migration behavior.
     conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
-    conn.execute_batch(include_str!("release_fixture.sql")).unwrap();
+    conn.execute_batch(include_str!("release_fixture.sql"))
+        .unwrap();
     conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
     check_database(&conn);
     // Fail closed if any baseline application table was omitted.
-    let mut tables = conn.prepare(
-        "SELECT name FROM pragma_table_list WHERE schema = 'main' AND type = 'table'
-         AND name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations'"
-    ).unwrap();
+    let mut tables = conn
+        .prepare(
+            "SELECT name FROM pragma_table_list WHERE schema = 'main' AND type = 'table'
+         AND name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations'",
+        )
+        .unwrap();
     for name in tables.query_map([], |r| r.get::<_, String>(0)).unwrap() {
         let name = name.unwrap();
-        let count: i64 = conn.query_row(
-            &format!("SELECT count(*) FROM \"{}\"", name.replace('"', "\"\"")), [], |r| r.get(0)
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                &format!("SELECT count(*) FROM \"{}\"", name.replace('"', "\"\"")),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!(count > 0, "empty baseline table: {name}");
     }
     drop(tables);
@@ -109,25 +125,43 @@ fn release_migrations_upgrade_populated_previous_release() {
     assert_eq!(migrate(&mut conn).unwrap(), pending);
     check_database(&conn);
     assert_eq!(migrate(&mut conn).unwrap(), 0);
-    let waits: i64 = conn.query_row(
-        "SELECT count(*) FROM card_waits WHERE card IN ('cards_id_1', 'fixture-card-3')",
-        [], |r| r.get(0)
-    ).unwrap();
+    let waits: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM card_waits WHERE card IN ('cards_id_1', 'fixture-card-3')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(waits, 2, "one wait per dependent card, not per dependency");
-    let links: i64 = conn.query_row(
-        "SELECT count(*) FROM thread_cards WHERE thread = 'threads_id_1'", [], |r| r.get(0)
-    ).unwrap();
+    let links: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM thread_cards WHERE thread = 'threads_id_1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(links, 3, "migration lost thread links");
 }
 
 #[test]
 fn fixture_rejects_unfixed_v057_card_wait_migration() {
     let mut conn = seeded_previous_release();
-    let error = migrate_named(&mut conn, &[(
-        "ter-712-card-waits.sql", include_str!("unfixed_v057_card_waits.sql"),
-    )]).unwrap_err();
+    let error = migrate_named(
+        &mut conn,
+        &[(
+            "ter-712-card-waits.sql",
+            include_str!("unfixed_v057_card_waits.sql"),
+        )],
+    )
+    .unwrap_err();
     let cause = format!("{error:#}");
-    assert!(cause.contains("UNIQUE constraint failed: card_waits.card"), "{cause}");
+    assert!(
+        cause.contains("UNIQUE constraint failed: card_waits.card"),
+        "{cause}"
+    );
     check_database(&conn);
-    assert!(!conn.table_exists(None, "card_waits").unwrap(), "failed migration must roll back");
+    assert!(
+        !conn.table_exists(None, "card_waits").unwrap(),
+        "failed migration must roll back"
+    );
 }

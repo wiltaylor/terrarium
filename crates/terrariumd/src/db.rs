@@ -21,10 +21,10 @@ use crate::store::audit::AuditEntry;
 // build.rs (TER-492).
 include!(concat!(env!("OUT_DIR"), "/named_migrations.rs"));
 
-/// Frozen legacy migrations. Index + 1 is the schema version.
 #[cfg(test)]
 mod release_migrations;
 
+/// Frozen legacy migrations. Index + 1 is the schema version.
 const MIGRATIONS: &[&str] = &[
     // 1: core tables. Board, memory, wiki, artifact, version, and usage
     // tables (PLAN §12-§16) come in later migrations.
