@@ -2009,6 +2009,7 @@ async fn serve_link(
                     }
                     None => break "no sender",
                 };
+                tracing::trace!("host transport frame send");
                 if sink.send(msg).await.is_err() {
                     break "send failed";
                 }

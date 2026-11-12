@@ -6,6 +6,8 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use base64::Engine;
+use tracing_subscriber::util::SubscriberInitExt;
 use terrarium_host::protocol::{DaemonFrame, HostFrame};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
@@ -14,6 +16,48 @@ const ROTATED: &str = "win-rotated-unique-A7b3D9e5F2g8";
 
 #[derive(Clone, Default)]
 struct Trace(Arc<Mutex<Vec<u8>>>);
+
+fn trace_capture() -> Trace {
+    static TRACE: std::sync::OnceLock<Trace> = std::sync::OnceLock::new();
+    TRACE.get_or_init(Trace::default).clone()
+}
+
+// Isolate the global subscriber and log bridge from the other integration
+// tests' subscribers. Each child uses production logging for every spawned
+// server, HTTP client, and WebSocket task, with deliberately hostile verbosity.
+async fn trace_child(name: &str) -> bool {
+    if std::env::var("TER968_TRACE_CHILD").as_deref() == Ok(name) {
+        let writer = trace_capture();
+        terrarium_host::logging::subscriber(move || writer.clone(), false).init();
+        return false;
+    }
+    let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &format!("windows_run_as::{name}"), "--nocapture"])
+        .env("TER968_TRACE_CHILD", name)
+        .env("RUST_LOG", "trace,tungstenite::protocol=trace,tungstenite::protocol::frame=trace,hyper::proto=trace,axum::extract::ws=trace")
+        .output().await.unwrap();
+    assert!(output.status.success(), "TRACE child failed: {}", String::from_utf8_lossy(&output.stdout));
+    true
+}
+
+fn password_representations(password: &str) -> Vec<Vec<u8>> {
+    let lower = password.as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let upper = lower.to_uppercase();
+    let spaced_lower = password.as_bytes().iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+    let spaced_upper = spaced_lower.to_uppercase();
+    let base64 = base64::engine::general_purpose::STANDARD.encode(password);
+    [password.to_owned(), lower, upper, spaced_lower, spaced_upper, base64]
+        .into_iter().map(String::into_bytes).collect()
+}
+
+fn assert_no_password(bytes: &[u8]) {
+    for password in [PASSWORD, ROTATED] {
+        for representation in password_representations(password) {
+            assert!(!bytes.windows(representation.len()).any(|w| w == representation),
+                "password or reversible representation leaked");
+        }
+    }
+}
 
 impl std::io::Write for Trace {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -31,21 +75,12 @@ struct Lab {
     host: tokio::task::JoinHandle<()>,
     server: tokio::task::JoinHandle<()>,
     trace: Trace,
-    _guard: tracing::subscriber::DefaultGuard,
     captures: Vec<String>,
 }
 
 impl Lab {
     async fn new(os: &str, capability: bool) -> Self {
-        let trace = Trace::default();
-        let writer = trace.clone();
-        let guard = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::DEBUG)
-                .with_ansi(false)
-                .with_writer(move || writer.clone())
-                .finish(),
-        );
+        let trace = trace_capture();
         let td = TestDaemon::start().await;
         let state = td.daemon.as_ref().unwrap().state.clone();
         let (server, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
@@ -136,7 +171,6 @@ impl Lab {
             host,
             server,
             trace,
-            _guard: guard,
             captures: vec![],
         }
     }
@@ -217,13 +251,10 @@ impl Lab {
         }
         self.captures
             .push(String::from_utf8_lossy(&self.trace.0.lock().unwrap()).into_owned());
+        assert!(self.captures.last().unwrap().contains("host transport frame send"),
+            "TRACE capture did not observe the actual transport task");
         for capture in &self.captures {
-            for password in [PASSWORD, ROTATED] {
-                assert!(
-                    !capture.contains(password),
-                    "password leaked in captured output"
-                );
-            }
+            assert_no_password(capture.as_bytes());
         }
         // Includes exec replay records, logs and any transcripts, not just API views.
         scan_files(&self.td.state);
@@ -244,19 +275,13 @@ fn scan_files(path: &std::path::Path) {
         }
     } else if path.is_file() {
         let bytes = std::fs::read(path).unwrap();
-        for password in [PASSWORD, ROTATED] {
-            assert!(
-                !bytes
-                    .windows(password.len())
-                    .any(|w| w == password.as_bytes()),
-                "password leaked to disk"
-            );
-        }
+        assert_no_password(&bytes);
     }
 }
 
 #[tokio::test]
 async fn password_reaches_only_the_session_start_and_is_resolved_again_after_rotation() {
+    if trace_child("password_reaches_only_the_session_start_and_is_resolved_again_after_rotation").await { return }
     let mut lab = Lab::new("windows", true).await;
     lab.secret(PASSWORD).await;
     lab.target("win-login").await;
@@ -288,6 +313,7 @@ async fn password_reaches_only_the_session_start_and_is_resolved_again_after_rot
 
 #[tokio::test]
 async fn transfer_sessions_receive_the_same_one_session_credentials() {
+    if trace_child("transfer_sessions_receive_the_same_one_session_credentials").await { return }
     let mut lab = Lab::new("windows", true).await;
     lab.secret(PASSWORD).await;
     lab.target("win-login").await;
@@ -317,6 +343,7 @@ async fn transfer_sessions_receive_the_same_one_session_credentials() {
 
 #[tokio::test]
 async fn unsupported_hosts_never_receive_a_password_even_if_they_claim_the_capability() {
+    if trace_child("unsupported_hosts_never_receive_a_password_even_if_they_claim_the_capability").await { return }
     for (os, capability) in [("linux", true), ("windows", false), ("linux", false)] {
         let mut lab = Lab::new(os, capability).await;
         lab.secret(PASSWORD).await;
@@ -340,6 +367,7 @@ async fn unsupported_hosts_never_receive_a_password_even_if_they_claim_the_capab
 
 #[tokio::test]
 async fn missing_and_ungranted_passwords_refuse_before_sending() {
+    if trace_child("missing_and_ungranted_passwords_refuse_before_sending").await { return }
     let mut lab = Lab::new("windows", true).await;
     lab.target("win-login").await;
     assert_eq!(lab.exec().await.status, 422);
