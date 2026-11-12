@@ -1,0 +1,2 @@
+-- The bounded data repair runs in db::complete_seeded_waits in this
+-- migration's transaction, before its schema_migrations receipt is written.
