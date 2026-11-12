@@ -75,7 +75,7 @@ describe("the Threads screen (TER-466)", () => {
       { id: "live", author: agent.id, author_name: agent.name, kind: "message", text: "Live", at: seeded.created_at, session_id: "known-session" },
       { id: "op", author: "operator", author_name: "operator", kind: "message", text: "Operator", at: seeded.created_at },
       { id: "gone", author: "removed-agent", author_name: "former worker", kind: "message", text: "Gone", at: seeded.created_at },
-    ], questions: [] });
+    ] });
     try {
       const { el } = mount(`/threads/${id}`);
       await waitFor(() => expect(el.querySelectorAll(".thread-post").length).toBeGreaterThanOrEqual(3));

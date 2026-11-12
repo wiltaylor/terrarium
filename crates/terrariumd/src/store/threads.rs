@@ -899,11 +899,14 @@ fn messages(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadMessage>> {
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let keys: Vec<_> = rows.iter().map(|m| crate::store::session_refs::LinkKey {
-        session: None,
-        agent: crate::store::session_refs::agent_of(&m.author),
-        at: &m.at,
-    }).collect();
+    let keys: Vec<_> = rows
+        .iter()
+        .map(|m| crate::store::session_refs::LinkKey {
+            session: None,
+            agent: crate::store::session_refs::agent_of(&m.author),
+            at: &m.at,
+        })
+        .collect();
     let links = crate::store::session_refs::links(conn, &keys)?;
     for (message, link) in rows.iter_mut().zip(links) {
         message.session = crate::store::session_refs::SessionField::of(link);
