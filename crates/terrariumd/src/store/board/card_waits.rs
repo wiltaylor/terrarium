@@ -285,8 +285,17 @@ pub(super) fn on_dependency_reopened(t: &mut Tx<'_>, id: &str) -> ApiResult<()> 
             )?;
             let row = find_row(t, card)?;
             let actor = crate::rules_engine::rule_actor(&row.project, "card-wait-met");
-            let state = if cleared > 0 { "wait pending again" } else { "wait action already ran, state unchanged" };
-            add_comment(t, &actor, card, &format!("Dependency {id} moved back out of accepted or done: {state}."))?;
+            let state = if cleared > 0 {
+                "wait pending again"
+            } else {
+                "wait action already ran, state unchanged"
+            };
+            add_comment(
+                t,
+                &actor,
+                card,
+                &format!("Dependency {id} moved back out of accepted or done: {state}."),
+            )?;
         }
         after = page.last().cloned().unwrap_or_default();
     }

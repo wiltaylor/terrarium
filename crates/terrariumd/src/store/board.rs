@@ -1878,7 +1878,7 @@ fn apply_move(
         [card.column_id],
         |r| r.get(0),
     )?;
-    if was_complete && !to.is("accepted") && !to.is(DONE) {
+    if was_complete && !matches!(to.role.as_deref().unwrap_or(&to.name), "accepted" | "done") {
         card_waits::on_dependency_reopened(t, &card.id)?;
     }
     card_waits::on_dependency_changed(t, &card.id, false)?;
