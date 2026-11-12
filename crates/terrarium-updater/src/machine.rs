@@ -798,10 +798,16 @@ impl Updater {
             .step(
                 "snapshot-cleanup",
                 async {
-                    let out = tokio::time::timeout_at(deadline, self
-                        .engine
-                        .run_once(cur, &cur.image, bounded_command(hot_argv("commit", &[backup]), deadline)?))
-                        .await.map_err(|_| "snapshot cleanup deadline elapsed".to_owned())??;
+                    let out = tokio::time::timeout_at(
+                        deadline,
+                        self.engine.run_once(
+                            cur,
+                            &cur.image,
+                            bounded_command(hot_argv("commit", &[backup]), deadline)?,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| "snapshot cleanup deadline elapsed".to_owned())??;
                     if out.code != 0 {
                         return Err(out.reason());
                     }
@@ -1384,8 +1390,11 @@ impl Updater {
             return self.recover_inner(cur, backup, None).await;
         }
         let deadline = tokio::time::Instant::now() + HOT_SWAP_RECOVERY_RESERVE;
-        let recovered = tokio::time::timeout_at(deadline - HOT_SWAP_STOP_RESERVE,
-            self.recover_inner(cur, backup, Some(deadline - HOT_SWAP_STOP_RESERVE))).await;
+        let recovered = tokio::time::timeout_at(
+            deadline - HOT_SWAP_STOP_RESERVE,
+            self.recover_inner(cur, backup, Some(deadline - HOT_SWAP_STOP_RESERVE)),
+        )
+        .await;
         match recovered {
             Ok(Ok(())) => Ok(()),
             failure => {
@@ -1396,17 +1405,26 @@ impl Updater {
                         self.engine.stop_for_recovery(&now.id).await?;
                     }
                     Ok::<(), String>(())
-                }).await;
+                })
+                .await;
                 let reason = match failure {
                     Ok(Err(Fail(e))) => e,
                     _ => "recreate recovery deadline elapsed".into(),
                 };
-                Err(Fail(format!("{reason}; recreate recovery failed; stop confirmed: {}; manual restore required: {backup}.hot-swap.sqlite; verify any outstanding helper has stopped", matches!(stop, Ok(Ok(()))))))
+                Err(Fail(format!(
+                    "{reason}; recreate recovery failed; stop confirmed: {}; manual restore required: {backup}.hot-swap.sqlite; verify any outstanding helper has stopped",
+                    matches!(stop, Ok(Ok(())))
+                )))
             }
         }
     }
 
-    async fn recover_inner(&self, cur: &Container, backup: &str, snapshot_deadline: Option<tokio::time::Instant>) -> Result<(), Fail> {
+    async fn recover_inner(
+        &self,
+        cur: &Container,
+        backup: &str,
+        snapshot_deadline: Option<tokio::time::Instant>,
+    ) -> Result<(), Fail> {
         let idx = self.begin_step("rollback");
         self.end_step(
             idx,

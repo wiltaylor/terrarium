@@ -1255,6 +1255,49 @@ async fn supervised_recreate_snapshot_failure_resumes_without_replacing() {
 }
 
 #[tokio::test]
+async fn supervised_recreate_backup_failure_never_drains() {
+    let r = rig();
+    r.fake.0.lock().unwrap().supervised = true;
+    r.fake.fail("backup");
+    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    assert_eq!(run.outcome, Outcome::Failed);
+    assert!(!r.fake.calls().iter().any(|c| c.starts_with("drain") || c == "hot:pause"));
+}
+
+#[tokio::test]
+async fn supervised_recreate_uncertain_restore_never_starts_old_daemon_or_cleans_snapshot() {
+    let r = rig();
+    r.fake.0.lock().unwrap().supervised = true;
+    r.fake.fail(&format!("health:{}", new_ref()));
+    r.fake.fail("hot:restore-database");
+    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    assert_eq!(run.outcome, Outcome::RollbackFailed, "{run:#?}");
+    let calls = r.fake.calls();
+    assert!(!calls.iter().any(|c| c == &format!("create:{OLD} new") || c == "hot:commit"));
+    assert!(r.fake.running_image().is_none());
+}
+
+#[tokio::test]
+async fn supervised_recreate_pending_snapshot_recovers_within_original_hold_budget() {
+    let mut r = rig();
+    Arc::get_mut(&mut r.updater).unwrap().hot_budget = (
+        Duration::from_secs(12), Duration::from_secs(6), Duration::from_secs(1));
+    {
+        let mut s = r.fake.0.lock().unwrap();
+        s.supervised = true;
+        s.pending_once = Some("snapshot".into());
+    }
+    let run = tokio::time::timeout(Duration::from_secs(13),
+        r.updater.run_now(RunKind::Update, "latest", "operator")).await.unwrap();
+    assert_eq!(run.outcome, Outcome::Failed, "{run:#?}");
+    let calls = r.fake.calls();
+    assert!(calls.iter().any(|c| c == "pending-once"));
+    assert!(calls.iter().any(|c| c == "hot:cancel-pause"));
+    assert!(calls.iter().any(|c| c == "resume c0"));
+    assert!(!calls.iter().any(|c| c.starts_with("remove ")));
+}
+
+#[tokio::test]
 async fn an_update_drains_backs_up_and_switches_the_image() {
     let r = rig();
     let run = r
