@@ -390,6 +390,12 @@ pub enum IssueCmd {
         repo: String,
         #[arg(long)]
         dry_run: bool,
+        /// Explicit legacy issue (operator only, requires --version)
+        #[arg(long, requires = "version")]
+        issue: Option<u64>,
+        /// Published tag version for an explicit issue (operator only)
+        #[arg(long, requires = "issue")]
+        version: Option<String>,
     },
     /// Import an issue from a configured repository (idempotent)
     Import {

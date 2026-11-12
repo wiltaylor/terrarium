@@ -151,7 +151,7 @@ async fn issue_close_done_sends_dry_run_and_displays_plan() {
     );
     assert_eq!(
         run.reqs[0].body,
-        Some(json!({"repo":"terrarium","dry_run":true}))
+        Some(json!({"repo":"terrarium","dry_run":true,"issue":null,"version":null}))
     );
 }
 

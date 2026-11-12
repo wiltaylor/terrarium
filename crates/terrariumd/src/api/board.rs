@@ -151,6 +151,8 @@ struct ImportIssue {
 #[serde(deny_unknown_fields)]
 struct CloseDoneIssues {
     repo: String,
+    issue: Option<u64>,
+    version: Option<String>,
     #[serde(default)]
     dry_run: bool,
 }
@@ -161,9 +163,12 @@ async fn close_done_issues(
     Path(name): Path<String>,
     ApiJson(body): ApiJson<CloseDoneIssues>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    if body.issue.is_some() != body.version.is_some() {
+        return Err(crate::error::ApiError::invalid("issue and version must be supplied together"));
+    }
     Ok(Json(
         serde_json::to_value(
-            crate::github_issues::close_done(&state, actor, name, body.repo, body.dry_run).await?,
+            crate::github_issues::close_done(&state, actor, name, body.repo, body.dry_run, body.issue.zip(body.version)).await?,
         )
         .map_err(|_| crate::error::ApiError::internal("cannot serialize issue closures"))?,
     ))

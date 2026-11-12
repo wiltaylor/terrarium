@@ -51,7 +51,7 @@ use crate::transport::encode;
 pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
     match cmd {
         Command::Issue {
-            command: crate::cli::IssueCmd::CloseDone { repo, dry_run },
+            command: crate::cli::IssueCmd::CloseDone { repo, dry_run, issue, version },
         } => {
             let project = ctx.project_or(None).await?;
             let result = ctx
@@ -61,7 +61,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
                         "/api/projects/{}/github-issues/close-done",
                         encode(&project)
                     ),
-                    Some(serde_json::json!({"repo":repo,"dry_run":dry_run})),
+                    Some(serde_json::json!({"repo":repo,"dry_run":dry_run,"issue":issue,"version":version})),
                 )
                 .await?;
             ctx.emit(&result, |ctx, v| ctx.line(v.to_string()))
