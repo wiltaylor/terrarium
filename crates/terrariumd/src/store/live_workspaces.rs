@@ -47,7 +47,7 @@ fn durable(t: &Tx<'_>) -> ApiResult<()> {
 pub fn admit_generic_agent(t: &Tx<'_>, agent: &str) -> ApiResult<()> {
     durable(t)?;
     let sealed: bool = t.query_row(
-        "SELECT EXISTS(SELECT 1 FROM live_workspace_reservations r
+        "SELECT EXISTS(SELECT 1 FROM workspace_reservations r
          JOIN live_workspaces w ON w.workspace_id = r.workspace_id
          WHERE w.agent_id = ?1)",
         [agent],
