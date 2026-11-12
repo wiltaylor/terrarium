@@ -127,7 +127,8 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or(std::path::Path::new("."));
-            let staged = ReleaseDownload(parent.join(format!(".terrarium-release-{}", ulid::Ulid::new())));
+            let staged =
+                ReleaseDownload(parent.join(format!(".terrarium-release-{}", ulid::Ulid::new())));
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create_new(true);
             #[cfg(unix)]
