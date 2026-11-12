@@ -2605,31 +2605,31 @@ impl Db {
             .then(std::time::Instant::now);
         let caller = std::panic::Location::caller();
         async move {
-        crate::links::spawn_blocking(move || {
-            let started = queued.map(|_| std::time::Instant::now());
-            let guard = match conn.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            let acquired = queued.map(|_| std::time::Instant::now());
-            let result = f(&guard);
-            let finished = queued.map(|_| std::time::Instant::now());
-            drop(guard);
-            if let (Some(queued), Some(started), Some(acquired), Some(finished)) =
-                (queued, started, acquired, finished)
-            {
-                tracing::debug!(target: "terrariumd::db_timing", operation = "read",
+            crate::links::spawn_blocking(move || {
+                let started = queued.map(|_| std::time::Instant::now());
+                let guard = match conn.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                let acquired = queued.map(|_| std::time::Instant::now());
+                let result = f(&guard);
+                let finished = queued.map(|_| std::time::Instant::now());
+                drop(guard);
+                if let (Some(queued), Some(started), Some(acquired), Some(finished)) =
+                    (queued, started, acquired, finished)
+                {
+                    tracing::debug!(target: "terrariumd::db_timing", operation = "read",
                     caller_file = caller.file(),
                     caller_line = caller.line(),
                     scheduling_us = started.duration_since(queued).as_micros() as u64,
                     mutex_wait_us = acquired.duration_since(started).as_micros() as u64,
                     sql_us = finished.duration_since(acquired).as_micros() as u64,
                     "database access");
-            }
-            result
-        })
-        .await
-        .map_err(|e| ApiError::internal(format!("database task failed: {e}")))?
+                }
+                result
+            })
+            .await
+            .map_err(|e| ApiError::internal(format!("database task failed: {e}")))?
         }
     }
 
@@ -3401,18 +3401,41 @@ mod tests {
         let selected = selection_cards(&conn, "p", "accepted").unwrap();
         let after = start.elapsed();
         eprintln!("2000 cards, 2000 2KB comments: full board {before:?}, rule selection {after:?}");
-        let expected: Vec<_> = old.cards.iter().filter(|c| c.column == "accepted" && c.kind != "group")
-            .map(|c| (&c.id, &c.labels, &c.created_at)).collect();
-        let actual: Vec<_> = selected.iter().map(|c| (&c.id, &c.labels, &c.created_at)).collect();
+        let expected: Vec<_> = old
+            .cards
+            .iter()
+            .filter(|c| c.column == "accepted" && c.kind != "group")
+            .map(|c| (&c.id, &c.labels, &c.created_at))
+            .collect();
+        let actual: Vec<_> = selected
+            .iter()
+            .map(|c| (&c.id, &c.labels, &c.created_at))
+            .collect();
         assert_eq!(actual, expected);
         assert_eq!(selected.len(), 1);
         assert!(selected[0].comments.is_empty());
+        let pick = crate::store::version_groups::pick(&conn, "p").unwrap();
+        assert_eq!(pick.waiting, 1);
+        assert_eq!(pick.cards[0].id, "P-1");
         assert!(selection_cards(&conn, "p", "missing").unwrap().is_empty());
-        let plan: Vec<String> = conn.prepare(&format!("EXPLAIN QUERY PLAN {SELECTION_SQL}"))
-            .unwrap().query_map(["p", "accepted"], |r| r.get(3)).unwrap()
-            .collect::<Result<_, _>>().unwrap();
-        assert!(plan.iter().any(|p| p.contains("SEARCH c USING INDEX cards_column")), "{plan:?}");
-        assert!(!plan.iter().any(|p| p.contains("SCAN c") || p.contains("TEMP B-TREE")), "{plan:?}");
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {SELECTION_SQL}"))
+            .unwrap()
+            .query_map(["p", "accepted"], |r| r.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|p| p.contains("SEARCH c USING INDEX cards_column")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|p| p.contains("SCAN c") || p.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
     }
 
     #[tokio::test]

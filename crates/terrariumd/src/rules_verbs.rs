@@ -785,6 +785,7 @@ fn job_queue(
 #[derive(Debug, Clone, Default)]
 pub struct BatchPick {
     /// The cards that the batch takes: board order, at most the limit.
+    /// Routing fields only, not rendered card details (`board::selection_cards`).
     pub cards: Vec<Card>,
     /// The cards of the column that wait for a batch (not held, no open
     /// job), apart from the limit.
