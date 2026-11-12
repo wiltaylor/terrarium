@@ -56,6 +56,12 @@ fn prune(state: &Shared) -> ApiResult<()> {
 #[derive(Serialize, Deserialize)]
 struct Checkpoint {
     def: TargetDef,
+    #[serde(default)]
+    identity: Option<String>,
+    #[serde(default)]
+    vm: Option<String>,
+    #[serde(default)]
+    host_keys: Vec<String>,
     cmd: RemoteCmd,
     token: String,
     created: i64,
@@ -63,6 +69,59 @@ struct Checkpoint {
 
 fn journal(state: &Shared) -> crate::hosts::resume::Journal {
     crate::hosts::resume::Journal::new(&state.state_dir)
+}
+
+fn host_keys(state: &Shared, def: &TargetDef) -> ApiResult<Vec<String>> {
+    let host = def.address.as_deref().unwrap_or("").rsplit('@').next().unwrap_or("");
+    let host = match def.port {
+        Some(port) => format!("[{host}]:{port}"),
+        None => host.to_owned(),
+    };
+    let found = std::process::Command::new("ssh-keygen")
+        .arg("-F").arg(host).arg("-f").arg(known_hosts(&state.state_dir)?)
+        .output().map_err(|e| ApiError::internal(format!("cannot read SSH host identity: {e}")))?;
+    let mut keys = Vec::new();
+    for line in String::from_utf8_lossy(&found.stdout).lines().filter(|line| !line.starts_with('#')) {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() >= 3 {
+            let key = ssh_key::PublicKey::from_openssh(&format!("{} {}", fields[1], fields[2]))
+                .map_err(|e| ApiError::internal(format!("invalid SSH host identity: {e}")))?;
+            keys.push(key.fingerprint(ssh_key::HashAlg::Sha256).to_string());
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    Ok(keys)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn durable_missing_tool_is_terminal() {
+        let cmd = RemoteCmd { argv: vec!["true".into()], ..RemoteCmd::default() };
+        let output = tokio::process::Command::new("/bin/sh")
+            .arg("-c").arg(script("/unused/.terrarium-runs/test", &cmd, chrono::Utc::now().timestamp()))
+            .env("PATH", "/nonexistent")
+            .output().await.unwrap();
+        // Even the encoder is absent here, but the failure frame is terminal.
+        assert!(!output.status.success());
+        assert!(output.stdout.starts_with(b"B"));
+    }
+
+    #[tokio::test]
+    async fn durable_spool_failure_is_terminal() {
+        let cmd = RemoteCmd { argv: vec!["true".into()], ..RemoteCmd::default() };
+        let output = tokio::process::Command::new("sh")
+            .arg("-c").arg(script("/dev/null/.terrarium-runs/test", &cmd, chrono::Utc::now().timestamp()))
+            .output().await.unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).starts_with("B"));
+        let encoded = String::from_utf8_lossy(&output.stdout);
+        let message = base64::engine::general_purpose::STANDARD.decode(encoded.trim().trim_start_matches('B')).unwrap();
+        assert!(String::from_utf8_lossy(&message).contains("spool error"));
+    }
 }
 
 pub(crate) fn exists(state: &Shared, key: &str) -> ApiResult<bool> {
@@ -75,7 +134,20 @@ pub(crate) fn resume(state: &Shared, key: &str) -> ApiResult<Running> {
     let saved = journal(state)
         .load::<Checkpoint>(&format!("ssh/{key}"))?
         .ok_or_else(|| ApiError::internal("missing durable SSH checkpoint"))?;
-    start_cmd_locked(state, &saved.def, &saved.cmd)
+    let name = saved.def.name.clone();
+    let current = state.db.read_now(move |c| crate::store::targets::get(c, &name))?;
+    if saved.identity.as_deref() != Some(crate::job_logs::target_identity(&current).as_str()) {
+        return Err(ApiError::conflict("interrupted (target changed): target incarnation differs"));
+    }
+    let name = current.def.name.clone();
+    let vm = state.db.read_now(move |c| Ok(crate::exedev::record_of(c, &name)?.map(|vm| vm.name)))?;
+    if saved.vm != vm {
+        return Err(ApiError::conflict("interrupted (target changed): exe.dev VM differs"));
+    }
+    if saved.vm.is_none() && (saved.host_keys.is_empty() || saved.host_keys != host_keys(state, &saved.def)?) {
+        return Err(ApiError::conflict("interrupted (target changed): SSH host identity differs or was not recorded"));
+    }
+    start_cmd_locked(state, &current.def, &saved.cmd)
 }
 
 pub(super) fn start(
@@ -96,11 +168,19 @@ pub(super) fn start(
         .ok_or_else(|| ApiError::invalid("durable execution needs a resume identity"))?;
     let j = journal(state);
     let id = format!("ssh/{key}");
-    let saved = match j.load::<Checkpoint>(&id)? {
+    let mut saved = match j.load::<Checkpoint>(&id)? {
         Some(saved) => saved,
         None => {
+            let name = def.name.clone();
+            let (identity, vm) = state.db.read_now(move |c| {
+                let row = crate::store::targets::get(c, &name)?;
+                Ok((crate::job_logs::target_identity(&row), crate::exedev::record_of(c, &name)?.map(|vm| vm.name)))
+            })?;
             let saved = Checkpoint {
                 def: def.clone(),
+                identity: Some(identity),
+                vm,
+                host_keys: Vec::new(),
                 cmd: cmd.clone(),
                 token: ulid::Ulid::new().to_string(),
                 created: chrono::Utc::now().timestamp(),
@@ -109,6 +189,11 @@ pub(super) fn start(
             saved
         }
     };
+    let name = def.name.clone();
+    let current = state.db.read_now(move |c| crate::store::targets::get(c, &name))?;
+    if saved.identity.as_deref() != Some(crate::job_logs::target_identity(&current).as_str()) {
+        return Err(ApiError::conflict("interrupted (target changed): target incarnation differs"));
+    }
     // Never launch from an expired checkpoint, even if remote GC has removed
     // its claim. This is the exactly-once boundary after retention expires.
     if chrono::Utc::now().timestamp() - saved.created > (MAX_RUN + RETAIN) as i64 {
@@ -121,28 +206,60 @@ pub(super) fn start(
         .unwrap_or(crate::target_roots::DEFAULT_BASE);
     crate::target_roots::check_base(root)?;
     let path = format!("{root}/.terrarium-runs/{}", saved.token);
-    let script = script(&path, &saved.cmd, saved.created + (MAX_RUN + RETAIN) as i64);
+    let script = script(&path, &saved.cmd, saved.created);
     *plan
         .args
         .last_mut()
         .ok_or_else(|| ApiError::internal("empty SSH plan"))? = script;
-    let mut process = tokio::process::Command::new(&plan.program);
-    process.args(&plan.args);
-    let mut raw = pump_process(process, plan.stdin_prefix, None, guard);
     let (tx, events) = mpsc::channel(EVENT_QUEUE);
     let (ctl, mut controls) = mpsc::unbounded_channel();
     let state = state.clone();
-    let def = saved.def;
+    let def = saved.def.clone();
     tokio::spawn(async move {
+        // Authenticate before detaching anything. A crash before this checkpoint
+        // remains unbound and is refused on recovery rather than guessing a host.
+        if saved.vm.is_none() && saved.host_keys.is_empty() {
+            let mut probe = tokio::process::Command::new(&plan.program);
+            probe.args(&plan.args[..plan.args.len()-1]).arg("true");
+            probe.kill_on_drop(true);
+            let authenticated = tokio::time::timeout(Duration::from_secs(20), probe.output()).await;
+            match authenticated {
+                Ok(Ok(output)) if output.status.success() => {},
+                _ => { let _ = tx.send(Ev::End(End::error("interrupted", "SSH identity probe failed"))).await; return; }
+            }
+            match host_keys(&state, &def) {
+                Ok(keys) if !keys.is_empty() => saved.host_keys = keys,
+                _ => { let _ = tx.send(Ev::End(End::error("interrupted", "SSH identity was not recorded"))).await; return; }
+            }
+            if journal(&state).save(&id, &saved).is_err() {
+                let _ = tx.send(Ev::End(End::error("interrupted", "cannot save SSH identity"))).await; return;
+            }
+        }
+        // Never allow TOFU on a bound SSH run. The saved fingerprint was checked
+        // against this trust store before recovery starts a connection.
+        if saved.vm.is_none() {
+            for arg in &mut plan.args {
+                if arg == "StrictHostKeyChecking=accept-new" { *arg = "StrictHostKeyChecking=yes".into(); }
+            }
+        }
+        let mut process = tokio::process::Command::new(&plan.program);
+        process.args(&plan.args);
+        let mut raw = pump_process(process, plan.stdin_prefix, None, guard);
         // Keep the local SSH client's control owner alive. Capturing just
         // raw.events would drop raw.ctl and pump_process would kill SSH.
         let _transport_control = raw.ctl;
         let mut pending = Vec::new();
         let mut ended = false;
+        let startup = tokio::time::Instant::now();
+        let mut ready = false;
         loop {
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_millis(100)) => {
                     if state.executor.hosts.is_stopped() { break; }
+                    if !ready && startup.elapsed() >= Duration::from_secs(30) {
+                        let _ = tx.send(Ev::End(End::error("unsupported", "durable SSH startup handshake timed out"))).await;
+                        break;
+                    }
                 }
                 control = controls.recv() => match control {
                     Some(Control::Kill | Control::Signal(_)) => {
@@ -168,7 +285,10 @@ pub(super) fn start(
                         while let Some(end) = pending.iter().position(|b| *b == b'\n') {
                             let line: Vec<_> = pending.drain(..=end).collect();
                             let payload = &line[1..line.len()-1];
+                            if line[0] == b'R' { ready = true; }
                             let event = match line[0] {
+                                b'B' => base64::engine::general_purpose::STANDARD.decode(payload).ok()
+                                    .map(|bytes| Ev::End(End::error("unsupported", String::from_utf8_lossy(&bytes).to_string()))),
                                 b'O' | b'E' => base64::engine::general_purpose::STANDARD.decode(payload).ok()
                                     .map(|bytes| Ev::Data(if line[0] == b'O' { Stream::Stdout } else { Stream::Stderr }, bytes)),
                                 b'X' => std::str::from_utf8(payload).ok().and_then(|s| s.parse::<i32>().ok())
@@ -198,7 +318,7 @@ pub(super) fn start(
     })
 }
 
-fn script(path: &str, cmd: &RemoteCmd, expires: i64) -> String {
+fn script(path: &str, cmd: &RemoteCmd, created: i64) -> String {
     let command = format!(
         "{}exec {}",
         cmd.cwd
@@ -216,15 +336,15 @@ fn script(path: &str, cmd: &RemoteCmd, expires: i64) -> String {
         .filter(|n| *n > 0)
         .unwrap_or(86400)
         .min(MAX_RUN);
+    let deadline = created + timeout as i64;
+    let expires = created + (MAX_RUN + RETAIN) as i64;
     let janitor = format!(
         r#"
 p={path}
 echo $$ > "$p/janitor"
-n=0
-while test "$n" -lt {timeout}; do
+while :; do
   test ! -f "$p/exit" || break
-  sleep 60
-  n=$((n+60))
+  sleep 1
 done
 sleep {RETAIN}
 : > "$p/expired"
@@ -234,8 +354,7 @@ test "$left" -le 0 || sleep "$left"
 rm -f "$p/expired" "$p/janitor"
 rmdir "$p"
 "#,
-        path = sh_quote(path),
-        timeout = timeout + 60
+        path = sh_quote(path)
     );
     // Each logger retains at most 64 MiB and then drains the rest. Output
     // limits do not impose a file-size limit on the user's other files.
@@ -245,13 +364,21 @@ umask 077
 p={path}
 mkdir "$p" 2>/dev/null || exit 0
 echo $$ > "$p/pid"
-setsid nohup sh -c {janitor} </dev/null >/dev/null 2>&1 &
-mkfifo "$p/o" "$p/e" || exit 1
+if ! mkfifo "$p/o" "$p/e"; then printf '%s' 'spool error: mkfifo failed' > "$p/startup-error"; exit 1; fi
+: > "$p/out"; : > "$p/err"
+left=$(({deadline}-$(date +%s)))
+if test "$left" -le 0; then
+  printf '124\n' > "$p/exit"
+  : > "$p/ready"
+  setsid nohup sh -c {janitor} </dev/null >/dev/null 2>&1 &
+  exit
+fi
+: > "$p/ready"
 (head -c 67108864 > "$p/out"; cat > /dev/null) < "$p/o" &
 o=$!
 (head -c 67108864 > "$p/err"; cat > /dev/null) < "$p/e" &
 e=$!
-timeout -k 5 {timeout} sh -c {command} > "$p/o" 2> "$p/e" &
+timeout -k 5 "$left" sh -c {command} > "$p/o" 2> "$p/e" &
 c=$!
 trap 'kill -TERM "$c" 2>/dev/null' TERM
 (while test ! -f "$p/cancel"; do sleep 0.1; done; kill -TERM "$c" 2>/dev/null) &
@@ -261,6 +388,7 @@ kill "$w" 2>/dev/null
 wait "$o" "$e" 2>/dev/null
 printf '%s\n' "$code" > "$p/exit.part"
 mv "$p/exit.part" "$p/exit"
+setsid nohup sh -c {janitor} </dev/null >/dev/null 2>&1 &
 "#,
         path = sh_quote(path),
         command = sh_quote(&command),
@@ -275,8 +403,18 @@ mv "$p/exit.part" "$p/exit"
         r#"{env}
 umask 077
 p={path}
-mkdir -p {parent} || exit 1
+fail() {{ printf B; printf '%s' "$1" | base64 | tr -d '\n'; printf '\n'; exit 1; }}
+for tool in setsid nohup mkfifo timeout date head tail base64 tr wc cat mkdir mv rm rmdir sleep; do
+  command -v "$tool" >/dev/null 2>&1 || fail "unsupported: $tool missing"
+done
+mkdir -p {parent} || fail 'spool error: cannot create parent'
+test -w {parent} || fail 'spool error: parent is not writable'
 setsid nohup sh -c {supervisor} </dev/null >/dev/null 2>&1 &
+until test -f "$p/ready"; do
+  test ! -f "$p/startup-error" || fail "$(cat "$p/startup-error")"
+  sleep 0.1
+done
+printf 'R\n'
 o=0; e=0
 while :; do
   if test -f "$p/expired"; then printf 'L\n'; exit; fi
