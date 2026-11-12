@@ -625,14 +625,27 @@ async fn actual_daemon_startup_refuses_second_owner_and_worker_fence_outlives_sh
     restarted.shutdown_and_wait().await;
     // The waiting shutdown variant drains both workers and their fence writes
     // before returning, so immediate ownership transfer needs no retry loop.
-    let mut daemon = crate::start(config(root.path(), "fourth.sock")).await.unwrap();
+    let mut daemon = crate::start(config(root.path(), "fourth.sock"))
+        .await
+        .unwrap();
     let grant = seed(&daemon.state.db).await;
     let (transport, mut calls) = fake();
-    let wait = daemon.workspace_dispatch.submit(grant.registration, Command::Grant(Box::new(grant)), transport).unwrap();
+    let wait = daemon
+        .workspace_dispatch
+        .submit(
+            grant.registration,
+            Command::Grant(Box::new(grant)),
+            transport,
+        )
+        .unwrap();
     let _unknown = calls.recv().await.unwrap();
     daemon.shutdown_and_wait().await;
     assert!(wait.await.is_err());
-    crate::start(config(root.path(), "fifth.sock")).await.unwrap().shutdown_and_wait().await;
+    crate::start(config(root.path(), "fifth.sock"))
+        .await
+        .unwrap()
+        .shutdown_and_wait()
+        .await;
 }
 
 #[tokio::test]
@@ -643,11 +656,25 @@ async fn transport_permit_bound_is_shared_only_by_runnable_owners() {
     let first = f.submit(transport.clone());
     let first_call = calls.recv().await.unwrap();
     let second = seed(&f.dispatch.db).await;
-    let second = f.dispatch.submit(second.registration, Command::Grant(Box::new(second)), transport.clone()).unwrap();
+    let second = f
+        .dispatch
+        .submit(
+            second.registration,
+            Command::Grant(Box::new(second)),
+            transport.clone(),
+        )
+        .unwrap();
     let second_call = calls.recv().await.unwrap();
     let third = seed(&f.dispatch.db).await;
     let third_id = third.registration.0.to_string();
-    let third = f.dispatch.submit(third.registration, Command::Grant(Box::new(third)), transport).unwrap();
+    let third = f
+        .dispatch
+        .submit(
+            third.registration,
+            Command::Grant(Box::new(third)),
+            transport,
+        )
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let id = third_id.clone();

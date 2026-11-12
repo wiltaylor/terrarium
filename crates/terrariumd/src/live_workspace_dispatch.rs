@@ -142,7 +142,9 @@ impl Dispatcher {
         // Workers have ended, so no new fence can be registered. Never carry
         // the bookkeeping mutex over await or into a database transaction.
         let fences = std::mem::take(&mut *self.fences.lock().unwrap_or_else(|e| e.into_inner()));
-        for fence in fences { let _ = fence.await; }
+        for fence in fences {
+            let _ = fence.await;
+        }
     }
 }
 
@@ -202,7 +204,11 @@ impl Drop for InFlight<'_> {
                     tracing::error!(%error, "workspace poison persistence failed; owner retained");
                 }
             });
-            self.owner.fences.lock().unwrap_or_else(|e| e.into_inner()).push(task);
+            self.owner
+                .fences
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(task);
         }
     }
 }
