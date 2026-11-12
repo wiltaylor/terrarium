@@ -144,13 +144,7 @@ pub fn effective(
 ) -> ApiResult<(bool, Identity, bool)> {
     let project = settings(c, false, &repo.project)?;
     let local = settings(c, true, &repo.id)?;
-    let own = repo
-        .url
-        .strip_prefix("git@github.com:")
-        .or_else(|| repo.url.strip_prefix("https://github.com/"))
-        .or_else(|| repo.url.strip_prefix("ssh://git@github.com/"))
-        .and_then(|s| s.split('/').next())
-        .is_some_and(|owner| owner.eq_ignore_ascii_case("wiltaylor"));
+    let own = operator_owned(&repo.url);
     let mut identity = Identity::from_env();
     if let Some(name) = local.name.or(project.name) {
         identity.name = name;
@@ -163,6 +157,15 @@ pub fn effective(
         identity,
         local.warn_only.or(project.warn_only).unwrap_or(false),
     ))
+}
+
+fn operator_owned(url: &str) -> bool {
+    url
+        .strip_prefix("git@github.com:")
+        .or_else(|| repo.url.strip_prefix("https://github.com/"))
+        .or_else(|| repo.url.strip_prefix("ssh://git@github.com/"))
+        .and_then(|s| s.split('/').next())
+        .is_some_and(|owner| owner.eq_ignore_ascii_case("wiltaylor"))
 }
 
 pub async fn for_repo(
@@ -357,6 +360,16 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn only_operator_owned_github_remotes_default_to_provenance() {
+        for url in ["https://github.com/wiltaylor/repo.git", "git@github.com:wiltaylor/repo.git", "ssh://git@github.com/WilTaylor/repo.git"] {
+            assert!(operator_owned(url), "{url}");
+        }
+        for url in ["https://github.com/customer/repo.git", "https://github.com/wiltaylor-other/repo.git", "https://github.com.evil/wiltaylor/repo.git", "file:///repos/wiltaylor/repo.git", "https://gitlab.com/wiltaylor/repo.git"] {
+            assert!(!operator_owned(url), "{url}");
+        }
+    }
 
     #[test]
     fn provenance_off_push_hook_refuses_metadata_and_allows_warn_override() {

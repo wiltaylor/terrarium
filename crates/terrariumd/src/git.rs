@@ -239,14 +239,15 @@ TERRARIUM_REFS
 test -n "$refused" && exit 1
 if test "$(git config --get terrarium.provenance)" = false; then
   while read -r local_ref local_oid remote_ref remote_oid; do
-    case "$local_oid" in ''|0000000000000000000000000000000000000000) continue;; esac
+    case "$local_oid" in *[!0]*) ;; *) continue;; esac
     case "$remote_oid" in
-      0000000000000000000000000000000000000000)
+      *[!0]*) commits=$(git rev-list "$remote_oid..$local_oid") || exit 1;;
+      *)
         commits=$(git rev-list "$local_oid" --not --remotes="$1") || exit 1;;
-      *) commits=$(git rev-list "$remote_oid..$local_oid") || exit 1;;
     esac
     for commit in $commits; do
-      if git show -s --format='%B%n%an%n%ae%n%cn%n%ce' "$commit" | grep -Eiq '^(Terrarium-[A-Za-z-]+:|Terrarium$|terrarium@localhost$)'; then
+      metadata=$(git show -s --format='%B%n%an%n%ae%n%cn%n%ce' "$commit") || exit 1
+      if printf '%s\n' "$metadata" | grep -Eiq '^(Terrarium-[A-Za-z-]+:|Terrarium$|terrarium@localhost$)'; then
         echo "Terrarium: provenance is off but outgoing commit $commit contains Terrarium trailers or the default identity; configure repo identity and remove metadata before pushing" >&2
         test "$(git config --get terrarium.provenanceWarnOnly)" = true || exit 1
       fi
