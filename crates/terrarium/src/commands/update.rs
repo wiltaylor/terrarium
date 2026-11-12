@@ -53,8 +53,17 @@ pub async fn update(ctx: &Ctx, cmd: &UpdateCmd) -> anyhow::Result<()> {
         UpdateCmd::DrainJobs { wait } => drain(ctx, Duration::from_secs(*wait), true).await,
         UpdateCmd::Resume => {
             let v = ctx.api.post("/api/system/update/resume", None).await?;
-            ctx.emit(&v, |c, _| {
-                c.line("the drain ended: the daemon takes new turns")
+            ctx.emit(&v, |c, v| {
+                c.line("the drain ended: the daemon takes new turns");
+                let errors = v["wake_errors"].as_u64().unwrap_or(0);
+                if errors > 0 {
+                    c.line(format!(
+                        "warning: {errors} wake error(s); queued work remains queued"
+                    ));
+                }
+                if v["wake_pending"].as_bool().unwrap_or(false) {
+                    c.line("warning: waking queued work continues in the background");
+                }
             })
         }
     }

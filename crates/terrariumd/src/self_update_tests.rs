@@ -2,6 +2,39 @@
 
 use super::*;
 
+#[tokio::test]
+async fn resume_reports_wake_errors_without_failing_admission() {
+    let answer = resume_answer(async { 3 }).await;
+    assert!(!answer.on);
+    assert!(answer.jobs_drain.is_none());
+    assert_eq!(answer.wake_errors, 3);
+    assert!(!answer.wake_pending);
+    let answer = resume_answer(async { panic!("wake task failed") }).await;
+    assert!(!answer.on);
+    assert_eq!(answer.wake_errors, 1);
+}
+
+#[tokio::test]
+async fn resume_does_not_cancel_a_slow_wake_or_wait_for_it() {
+    let (release, wait) = tokio::sync::oneshot::channel();
+    let (done, completed) = tokio::sync::oneshot::channel();
+    let answer = tokio::time::timeout(
+        Duration::from_secs(5),
+        resume_answer(async move {
+            let _ = wait.await;
+            let _ = done.send(());
+            0
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!answer.on);
+    assert_eq!(answer.wake_errors, 0);
+    assert!(answer.wake_pending);
+    release.send(()).unwrap();
+    completed.await.unwrap();
+}
+
 #[test]
 fn the_policy_and_the_channel_parse() {
     assert_eq!("".parse::<Policy>().unwrap(), Policy::Notify);
