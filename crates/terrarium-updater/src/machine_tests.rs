@@ -172,12 +172,24 @@ impl Engine for Fake {
                     let failed = self.call(format!("control-{action}"));
                     let mut s = self.0.lock().unwrap();
                     let value = serde_json::from_str::<serde_json::Value>(&argv[4]).unwrap();
-                    if action == "prepare" { s.retention_protected = value["protected"].clone(); }
-                    if action == "cancel" && !failed { s.retention_running = false; }
-                    let answer = if action == "receipt" { serde_json::json!({"removed":[],"protected":s.retention_protected}) }
-                        else if action == "status" { serde_json::json!({"pid":42,"start":"123"}) }
-                        else { serde_json::json!({}) };
-                    return Ok(ExecOut { code: i64::from(failed), stdout: answer.to_string(), stderr: "control failed".into() });
+                    if action == "prepare" {
+                        s.retention_protected = value["protected"].clone();
+                    }
+                    if action == "cancel" && !failed {
+                        s.retention_running = false;
+                    }
+                    let answer = if action == "receipt" {
+                        serde_json::json!({"removed":[],"protected":s.retention_protected})
+                    } else if action == "status" {
+                        serde_json::json!({"pid":42,"start":"123"})
+                    } else {
+                        serde_json::json!({})
+                    };
+                    return Ok(ExecOut {
+                        code: i64::from(failed),
+                        stdout: answer.to_string(),
+                        stderr: "control failed".into(),
+                    });
                 }
                 let failed = self.call(format!("hot:{cmd}"));
                 let pending = {
@@ -250,7 +262,10 @@ impl Engine for Fake {
     }
 
     fn exec_create<'a>(&'a self, _id: &'a str, _argv: Vec<String>) -> BoxFut<'a, Res<String>> {
-        Box::pin(async move { self.call("exec-create".into()); Ok("exact-exec".into()) })
+        Box::pin(async move {
+            self.call("exec-create".into());
+            Ok("exact-exec".into())
+        })
     }
 
     fn exec_start<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
@@ -259,15 +274,25 @@ impl Engine for Fake {
             let failed = self.call("exec-start".into());
             // Lost response does not imply the Docker process stopped.
             self.0.lock().unwrap().retention_running = failed;
-            if failed { Err("exec transport lost while helper runs".into()) } else { Ok(()) }
+            if failed {
+                Err("exec transport lost while helper runs".into())
+            } else {
+                Ok(())
+            }
         })
     }
 
     fn exec_inspect<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<ExecState>> {
         Box::pin(async move {
             assert_eq!(id, "exact-exec");
-            if self.call("exec-inspect".into()) { return Err("inspection unavailable".into()); }
-            Ok(ExecState { running: self.0.lock().unwrap().retention_running, pid: 4242, code: 0 })
+            if self.call("exec-inspect".into()) {
+                return Err("inspection unavailable".into());
+            }
+            Ok(ExecState {
+                running: self.0.lock().unwrap().retention_running,
+                pid: 4242,
+                code: 0,
+            })
         })
     }
 
@@ -522,7 +547,19 @@ async fn retention_pass_forwards_previous_backup_to_the_private_worker() {
         panic!("retention did not complete");
     };
     assert_eq!(detail["protected"], serde_json::json!([BACKUP]));
-    assert_eq!(r.fake.calls(), vec!["exec-create", "control-prepare", "exec-start", "exec-inspect", "control-status", "control-receipt", "control-cancel", "exec-inspect"]);
+    assert_eq!(
+        r.fake.calls(),
+        vec![
+            "exec-create",
+            "control-prepare",
+            "exec-start",
+            "exec-inspect",
+            "control-status",
+            "control-receipt",
+            "control-cancel",
+            "exec-inspect"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -530,20 +567,35 @@ async fn retention_missing_safety_files_never_launches_helper() {
     for missing in ["history.json", "previous.json", "retention.json"] {
         let r = rig();
         // Include both a pending update and a hold already rotated out of history.
-        let (mut run, guard) = r.updater.begin(RunKind::Update, "latest", "operator").unwrap();
+        let (mut run, guard) = r
+            .updater
+            .begin(RunKind::Update, "latest", "operator")
+            .unwrap();
         run.outcome = Outcome::RecoveryFailed;
         run.backup = Some(BACKUP.into());
         r.store.retention_finish(&run).unwrap();
         drop(guard);
         std::fs::remove_file(r.store.dir().join(missing)).unwrap();
-        assert!(matches!(r.updater.handle(Request::Retention { release: None }).await, Response::Error { .. }), "{missing}");
+        assert!(
+            matches!(
+                r.updater.handle(Request::Retention { release: None }).await,
+                Response::Error { .. }
+            ),
+            "{missing}"
+        );
         assert!(r.fake.calls().is_empty());
     }
     let r = rig();
-    let (_, guard) = r.updater.begin(RunKind::Update, "latest", "operator").unwrap();
+    let (_, guard) = r
+        .updater
+        .begin(RunKind::Update, "latest", "operator")
+        .unwrap();
     drop(guard);
     std::fs::remove_file(r.store.dir().join("retention.json")).unwrap();
-    assert!(matches!(r.updater.handle(Request::Retention { release: None }).await, Response::Error { .. }));
+    assert!(matches!(
+        r.updater.handle(Request::Retention { release: None }).await,
+        Response::Error { .. }
+    ));
     assert!(r.fake.calls().is_empty());
 }
 
@@ -551,7 +603,13 @@ async fn retention_missing_safety_files_never_launches_helper() {
 fn retention_init_is_explicit_and_does_not_infer_a_fresh_install() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path(), 10);
-    assert!(store.retention_init(false, false).unwrap_err().to_string().contains("history.json"));
+    assert!(
+        store
+            .retention_init(false, false)
+            .unwrap_err()
+            .to_string()
+            .contains("history.json")
+    );
     store.retention_init(false, true).unwrap();
     assert!(!dir.path().join("retention.json").exists());
     store.retention_init(true, true).unwrap();
@@ -559,22 +617,41 @@ fn retention_init_is_explicit_and_does_not_infer_a_fresh_install() {
     for missing in ["history.json", "previous.json"] {
         let bytes = std::fs::read(dir.path().join(missing)).unwrap();
         std::fs::remove_file(dir.path().join(missing)).unwrap();
-        assert!(store.retention_init(true, false).unwrap_err().to_string().contains(missing));
+        assert!(
+            store
+                .retention_init(true, false)
+                .unwrap_err()
+                .to_string()
+                .contains(missing)
+        );
         std::fs::write(dir.path().join(missing), bytes).unwrap();
     }
-    assert!(std::fs::read_to_string(dir.path().join("retention-audit.jsonl")).unwrap().contains("no_rollback_reference"));
+    assert!(
+        std::fs::read_to_string(dir.path().join("retention-audit.jsonl"))
+            .unwrap()
+            .contains("no_rollback_reference")
+    );
 }
 
 #[tokio::test]
 async fn retention_transport_error_revokes_and_verifies_the_exact_helper_before_updates() {
     let r = rig();
     r.fake.fail("exec-start");
-    assert!(matches!(r.updater.handle(Request::Retention { release: None }).await, Response::Error { .. }));
+    assert!(matches!(
+        r.updater.handle(Request::Retention { release: None }).await,
+        Response::Error { .. }
+    ));
     assert!(!r.fake.0.lock().unwrap().retention_running);
     assert!(r.store.retention_running().unwrap().is_none());
     let calls = r.fake.calls();
-    assert!(calls.iter().position(|s| s == "control-cancel").unwrap() < calls.iter().position(|s| s == "exec-inspect").unwrap());
-    let (_, guard) = r.updater.begin(RunKind::Update, "latest", "operator").unwrap();
+    assert!(
+        calls.iter().position(|s| s == "control-cancel").unwrap()
+            < calls.iter().position(|s| s == "exec-inspect").unwrap()
+    );
+    let (_, guard) = r
+        .updater
+        .begin(RunKind::Update, "latest", "operator")
+        .unwrap();
     drop(guard);
 }
 
@@ -583,20 +660,43 @@ async fn retention_failed_cancellation_survives_restart_and_blocks_update_admiss
     let r = rig();
     r.fake.fail("exec-start");
     r.fake.fail("control-cancel");
-    assert!(matches!(r.updater.handle(Request::Retention { release: None }).await, Response::Error { .. }));
+    assert!(matches!(
+        r.updater.handle(Request::Retention { release: None }).await,
+        Response::Error { .. }
+    ));
     assert!(r.fake.0.lock().unwrap().retention_running);
     let persisted = r.store.retention_running().unwrap().unwrap();
     assert_eq!(persisted.exec_id, "exact-exec");
     assert!(persisted.pid.is_none()); // Start's response was lost before observation.
-    assert!(r.updater.begin(RunKind::Update, "latest", "operator").is_err());
-    let restarted = Arc::new(Updater::new(Arc::new(r.fake.clone()), Arc::new(FakeRegistry), r.verify.clone(), r.store.clone(), r.updater.cfg.clone()));
-    assert!(matches!(restarted.handle(Request::Update { target:"latest".into(), actor:"operator".into() }).await, Response::Error { .. }));
+    assert!(
+        r.updater
+            .begin(RunKind::Update, "latest", "operator")
+            .is_err()
+    );
+    let restarted = Arc::new(Updater::new(
+        Arc::new(r.fake.clone()),
+        Arc::new(FakeRegistry),
+        r.verify.clone(),
+        r.store.clone(),
+        r.updater.cfg.clone(),
+    ));
+    assert!(matches!(
+        restarted
+            .handle(Request::Update {
+                target: "latest".into(),
+                actor: "operator".into()
+            })
+            .await,
+        Response::Error { .. }
+    ));
     assert!(r.store.retention_running().unwrap().is_some());
     r.fake.0.lock().unwrap().fail.remove("control-cancel");
     restarted.reconcile_retention().await.unwrap();
     assert!(r.store.retention_running().unwrap().is_none());
     assert!(!r.fake.0.lock().unwrap().retention_running);
-    let (_, guard) = restarted.begin(RunKind::Update, "latest", "operator").unwrap();
+    let (_, guard) = restarted
+        .begin(RunKind::Update, "latest", "operator")
+        .unwrap();
     drop(guard);
 }
 
@@ -604,9 +704,16 @@ async fn retention_failed_cancellation_survives_restart_and_blocks_update_admiss
 async fn retention_inspection_failure_preserves_interlock_even_after_cancellation() {
     let r = rig();
     r.fake.fail("exec-inspect");
-    assert!(matches!(r.updater.handle(Request::Retention { release: None }).await, Response::Error { .. }));
+    assert!(matches!(
+        r.updater.handle(Request::Retention { release: None }).await,
+        Response::Error { .. }
+    ));
     assert!(r.store.retention_running().unwrap().is_some());
-    assert!(r.updater.begin(RunKind::Update, "latest", "operator").is_err());
+    assert!(
+        r.updater
+            .begin(RunKind::Update, "latest", "operator")
+            .is_err()
+    );
     r.fake.0.lock().unwrap().fail.remove("exec-inspect");
     r.updater.reconcile_retention().await.unwrap();
     assert!(r.store.retention_running().unwrap().is_none());
@@ -616,7 +723,15 @@ async fn retention_inspection_failure_preserves_interlock_even_after_cancellatio
 async fn retention_lock_rejects_update_requests_while_helper_is_authorized() {
     let r = rig();
     let guard = r.updater.busy.clone().lock_owned().await;
-    assert!(matches!(r.updater.handle(Request::Update { target:"latest".into(), actor:"operator".into() }).await, Response::Error { busy:true, .. }));
+    assert!(matches!(
+        r.updater
+            .handle(Request::Update {
+                target: "latest".into(),
+                actor: "operator".into()
+            })
+            .await,
+        Response::Error { busy: true, .. }
+    ));
     assert!(r.fake.calls().is_empty());
     drop(guard);
 }

@@ -264,14 +264,20 @@ impl Updater {
     /// Answer one request. An update or a rollback runs in the background.
     pub async fn handle(self: &Arc<Self>, req: Request) -> Response {
         let (kind, target, actor) = match req {
-            Request::RetentionInit { confirm, no_rollback_reference } => return self.retention_init(confirm, no_rollback_reference).await,
+            Request::RetentionInit {
+                confirm,
+                no_rollback_reference,
+            } => return self.retention_init(confirm, no_rollback_reference).await,
             Request::Retention { release } => return self.retention(release.as_deref()).await,
             Request::Status => return Response::Status(Box::new(self.status().await)),
             Request::Update { target, actor } => (RunKind::Update, target, actor),
             Request::Rollback { actor } => (RunKind::Rollback, "previous".to_owned(), actor),
         };
         if let Err(message) = self.reconcile_retention().await {
-            return Response::Error { message, busy: true };
+            return Response::Error {
+                message,
+                busy: true,
+            };
         }
         match self.begin(kind, &target, &actor) {
             Ok((run, guard)) => {
@@ -383,74 +389,148 @@ impl Updater {
 
     async fn retention_init(&self, confirm: bool, no_rollback: bool) -> Response {
         let Ok(_guard) = self.busy.clone().try_lock_owned() else {
-            return Response::Error { message: "update or rollback in progress".into(), busy: true };
+            return Response::Error {
+                message: "update or rollback in progress".into(),
+                busy: true,
+            };
         };
         let result = async {
-            let protected = self.store.retention_init(false, no_rollback).map_err(|e| e.to_string())?;
+            let protected = self
+                .store
+                .retention_init(false, no_rollback)
+                .map_err(|e| e.to_string())?;
             let cur = self.engine.target().await?;
             let protected = serde_json::to_string(&protected).map_err(|e| e.to_string())?;
-            let out = self.exec_ok(&cur.id, hot_argv("preview-backups", &[&protected])).await?;
-            let mut detail: serde_json::Value = serde_json::from_str(&out).map_err(|e| format!("bad retention preview: {e}"))?;
-            if confirm { self.store.retention_init(true, no_rollback).map_err(|e| e.to_string())?; }
+            let out = self
+                .exec_ok(&cur.id, hot_argv("preview-backups", &[&protected]))
+                .await?;
+            let mut detail: serde_json::Value =
+                serde_json::from_str(&out).map_err(|e| format!("bad retention preview: {e}"))?;
+            if confirm {
+                self.store
+                    .retention_init(true, no_rollback)
+                    .map_err(|e| e.to_string())?;
+            }
             detail["initialized"] = confirm.into();
-            detail["confirmation"] = "Run with --confirm to initialize retention and enable bounded deletion passes".into();
+            detail["confirmation"] =
+                "Run with --confirm to initialize retention and enable bounded deletion passes"
+                    .into();
             Ok(detail)
-        }.await;
-        match result { Ok(detail) => Response::Retained { detail }, Err(message) => Response::Error { message, busy: false } }
+        }
+        .await;
+        match result {
+            Ok(detail) => Response::Retained { detail },
+            Err(message) => Response::Error {
+                message,
+                busy: false,
+            },
+        }
     }
 
-    async fn retention_control(&self, container: &str, action: &str, value: serde_json::Value) -> Result<serde_json::Value, String> {
+    async fn retention_control(
+        &self,
+        container: &str,
+        action: &str,
+        value: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         let arg = serde_json::to_string(&value).map_err(|e| e.to_string())?;
-        let out = self.exec_ok(container, hot_argv("retention-control", &[action, &arg])).await?;
+        let out = self
+            .exec_ok(container, hot_argv("retention-control", &[action, &arg]))
+            .await?;
         serde_json::from_str(&out).map_err(|e| format!("bad retention control response: {e}"))
     }
 
     /// Startup and update admission use the same durable reconciliation path.
     pub async fn reconcile_retention(&self) -> Result<(), String> {
-        let _guard = self.busy.clone().try_lock_owned().map_err(|_| "update or retention in progress".to_owned())?;
+        let _guard = self
+            .busy
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| "update or retention in progress".to_owned())?;
         self.reconcile_retention_locked().await
     }
 
     async fn reconcile_retention_locked(&self) -> Result<(), String> {
-        let Some(running) = self.store.retention_running().map_err(|e| e.to_string())? else { return Ok(()); };
+        let Some(running) = self.store.retention_running().map_err(|e| e.to_string())? else {
+            return Ok(());
+        };
         // First revoke the token durably. A delayed exec start or prepare can
         // never restore it. The control command kills only its exact pidfd.
-        self.retention_control(&running.container, "cancel", serde_json::json!({"token":running.token})).await?;
+        self.retention_control(
+            &running.container,
+            "cancel",
+            serde_json::json!({"token":running.token}),
+        )
+        .await?;
         for _ in 0..20 {
             let info = self.engine.exec_inspect(&running.exec_id).await?;
             if !info.running {
-                return self.store.set_retention_running(None).map_err(|e| e.to_string());
+                return self
+                    .store
+                    .set_retention_running(None)
+                    .map_err(|e| e.to_string());
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         Err("retention helper still running: update admission remains blocked".into())
     }
 
-    async fn retention_execute(&self, container: &str, protected: Vec<String>) -> Result<serde_json::Value, String> {
+    async fn retention_execute(
+        &self,
+        container: &str,
+        protected: Vec<String>,
+    ) -> Result<serde_json::Value, String> {
         let token = ulid::Ulid::new().to_string();
-        let exec_id = self.engine.exec_create(container, hot_argv("retain-backups", &[&token])).await?;
+        let exec_id = self
+            .engine
+            .exec_create(container, hot_argv("retain-backups", &[&token]))
+            .await?;
         let mut running = crate::store::RetentionRunning {
-            container: container.into(), exec_id, token: token.clone(), pid: None, worker_pid: None, worker_start: None,
+            container: container.into(),
+            exec_id,
+            token: token.clone(),
+            pid: None,
+            worker_pid: None,
+            worker_start: None,
         };
-        self.store.set_retention_running(Some(running.clone())).map_err(|e| e.to_string())?;
+        self.store
+            .set_retention_running(Some(running.clone()))
+            .map_err(|e| e.to_string())?;
         let execution = async {
-            self.retention_control(container, "prepare", serde_json::json!({"token":token,"protected":protected})).await?;
+            self.retention_control(
+                container,
+                "prepare",
+                serde_json::json!({"token":token,"protected":protected}),
+            )
+            .await?;
             self.engine.exec_start(&running.exec_id).await?;
             loop {
                 let info = self.engine.exec_inspect(&running.exec_id).await?;
-                if info.pid != 0 { running.pid = Some(info.pid); }
-                let identity = self.retention_control(container, "status", serde_json::json!({"token":token})).await?;
+                if info.pid != 0 {
+                    running.pid = Some(info.pid);
+                }
+                let identity = self
+                    .retention_control(container, "status", serde_json::json!({"token":token}))
+                    .await?;
                 running.worker_pid = identity["pid"].as_u64();
                 running.worker_start = identity["start"].as_str().map(str::to_owned);
-                self.store.set_retention_running(Some(running.clone())).map_err(|e| e.to_string())?;
+                self.store
+                    .set_retention_running(Some(running.clone()))
+                    .map_err(|e| e.to_string())?;
                 if !info.running {
-                    if info.code != 0 { return Err(format!("retention helper exit {}", info.code)); }
-                    return self.retention_control(container, "receipt", serde_json::json!({"token":token})).await;
+                    if info.code != 0 {
+                        return Err(format!("retention helper exit {}", info.code));
+                    }
+                    return self
+                        .retention_control(container, "receipt", serde_json::json!({"token":token}))
+                        .await;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         };
-        let result = tokio::time::timeout(Duration::from_secs(900), execution).await.unwrap_or_else(|_| Err("retention helper timed out".into()));
+        let result = tokio::time::timeout(Duration::from_secs(900), execution)
+            .await
+            .unwrap_or_else(|_| Err("retention helper timed out".into()));
         // Even success revokes the token before clearing the durable hold.
         // On any failure to revoke/inspect/stop, the interlock stays on disk.
         self.reconcile_retention_locked().await?;

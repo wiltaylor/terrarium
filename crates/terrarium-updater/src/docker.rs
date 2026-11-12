@@ -864,23 +864,47 @@ impl Engine for Docker {
 
     fn exec_create<'a>(&'a self, id: &'a str, argv: Vec<String>) -> BoxFut<'a, Res<String>> {
         Box::pin(async move {
-            let made = self.ok(Method::POST, &format!("/containers/{}/exec", enc(id)), Some(json!({"AttachStdout":false,"AttachStderr":false,"Cmd":argv}))).await?;
-            made["Id"].as_str().filter(|id| !id.is_empty()).map(str::to_owned).ok_or_else(|| "exec create omitted identity".into())
+            let made = self
+                .ok(
+                    Method::POST,
+                    &format!("/containers/{}/exec", enc(id)),
+                    Some(json!({"AttachStdout":false,"AttachStderr":false,"Cmd":argv})),
+                )
+                .await?;
+            made["Id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| "exec create omitted identity".into())
         })
     }
 
     fn exec_start<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
         Box::pin(async move {
-            let (status, bytes) = self.call(Method::POST, &format!("/exec/{}/start", enc(id)), Some(json!({"Detach":true,"Tty":false}))).await?;
-            if status.is_success() { Ok(()) } else { Err(format!("exec start: {status}: {}", message(&bytes))) }
+            let (status, bytes) = self
+                .call(
+                    Method::POST,
+                    &format!("/exec/{}/start", enc(id)),
+                    Some(json!({"Detach":true,"Tty":false})),
+                )
+                .await?;
+            if status.is_success() {
+                Ok(())
+            } else {
+                Err(format!("exec start: {status}: {}", message(&bytes)))
+            }
         })
     }
 
     fn exec_inspect<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<ExecState>> {
         Box::pin(async move {
-            let info = self.ok(Method::GET, &format!("/exec/{}/json", enc(id)), None).await?;
+            let info = self
+                .ok(Method::GET, &format!("/exec/{}/json", enc(id)), None)
+                .await?;
             Ok(ExecState {
-                running: info["Running"].as_bool().ok_or("exec inspect omitted running state")?,
+                running: info["Running"]
+                    .as_bool()
+                    .ok_or("exec inspect omitted running state")?,
                 pid: info["Pid"].as_u64().ok_or("exec inspect omitted PID")?,
                 code: info["ExitCode"].as_i64().unwrap_or(-1),
             })

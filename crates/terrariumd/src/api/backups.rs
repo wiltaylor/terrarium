@@ -56,7 +56,10 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
         .route(
             "/backups/retention/init",
             axum::routing::post(retention_init),
-            &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)],
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
         )
         .route(
             "/backups/recovery-release",
@@ -221,12 +224,18 @@ struct InitBody {
     no_rollback_reference: bool,
 }
 
-async fn retention_init(actor: Actor, Json(body): Json<InitBody>) -> ApiResult<Json<serde_json::Value>> {
+async fn retention_init(
+    actor: Actor,
+    Json(body): Json<InitBody>,
+) -> ApiResult<Json<serde_json::Value>> {
     policy::operator_only(&actor, "initializing backup retention")?;
     backup::retention::call(terrarium_updater::protocol::Request::RetentionInit {
         confirm: body.confirm,
         no_rollback_reference: body.no_rollback_reference,
-    }).await.map(Json).map_err(ApiError::invalid)
+    })
+    .await
+    .map(Json)
+    .map_err(ApiError::invalid)
 }
 
 #[derive(Deserialize)]
