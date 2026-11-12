@@ -463,7 +463,7 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
     // Pre-upgrade native jobs have no continuation checkpoint. Keep the
     // old kill/requeue path for them instead of replaying prepare beneath
     // an untracked recipe. Read outside the shared DB writer transaction.
-    let journal = crate::hosts::resume::Journal::new(&state.state_dir);
+    let journal = crate::hosts::resume::Journal::with_db(&state.state_dir, state.db.clone());
     let remote_checkpoints: HashSet<String> = journal
         .scan::<serde_json::Value>("ssh/recipe/")
         .unwrap_or_default()
@@ -3137,7 +3137,7 @@ async fn steps(
     guard: tokio::sync::OwnedMutexGuard<()>,
 ) -> ApiResult<JobEnd> {
     let job = x.job;
-    let journal = crate::hosts::resume::Journal::new(&x.state.state_dir);
+    let journal = crate::hosts::resume::Journal::with_db(&x.state.state_dir, x.state.db.clone());
     let resume_key = recipe_resume_key(job);
     let host_bound = journal.load::<(String, u32)>(&format!("bound/{resume_key}"))?;
     let remote_bound = crate::executor::durable::exists(x.state, &resume_key)?;

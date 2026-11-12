@@ -2550,8 +2550,29 @@ const MIGRATIONS: &[&str] = &[
     "#,
 ];
 
-/// The shared database handle. One connection behind a mutex; every call
-/// runs on the blocking pool, so the async runtime never waits on SQLite.
+thread_local! {
+    static HELD_DATABASES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+struct DatabaseScope;
+
+impl DatabaseScope {
+    fn enter(conn: &Arc<Mutex<Connection>>) -> Self {
+        HELD_DATABASES.with(|held| held.borrow_mut().push(Arc::as_ptr(conn) as usize));
+        Self
+    }
+}
+
+impl Drop for DatabaseScope {
+    fn drop(&mut self) {
+        HELD_DATABASES.with(|held| {
+            held.borrow_mut().pop();
+        });
+    }
+}
+
+/// The shared database handle. One connection behind a mutex; async calls
+/// run on the blocking pool. Synchronous journal calls document their locks.
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
@@ -2612,6 +2633,7 @@ impl Db {
                     Err(poisoned) => poisoned.into_inner(),
                 };
                 let acquired = queued.map(|_| std::time::Instant::now());
+                let _scope = DatabaseScope::enter(&conn);
                 let result = f(&guard);
                 let finished = queued.map(|_| std::time::Instant::now());
                 drop(guard);
@@ -2640,7 +2662,47 @@ impl Db {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
+        let _scope = DatabaseScope::enter(&self.conn);
         f(&guard)
+    }
+
+    /// Journal calls may hold the host registry lock. Never wait for the
+    /// writer here: a write can itself need registry state. Callers retain
+    /// uncommitted events and retry ResourceBusy outside both locks.
+    pub(crate) fn journal_now<T>(
+        &self,
+        wait: bool,
+        f: impl FnOnce(&mut Connection) -> ApiResult<T>,
+    ) -> ApiResult<T> {
+        if wait
+            && HELD_DATABASES
+                .with(|held| held.borrow().contains(&(Arc::as_ptr(&self.conn) as usize)))
+        {
+            return Err(ApiError::internal(
+                "journal cannot wait inside a database closure",
+            ));
+        }
+        let mut guard = if wait {
+            match self.conn.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            }
+        } else {
+            match self.conn.try_lock() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(ApiError::new(
+                        crate::error::Code::ResourceBusy,
+                        "host journal writer is busy",
+                    ));
+                }
+            }
+        };
+        let _scope = DatabaseScope::enter(&self.conn);
+        // Journal ACKs promise durable output, including across power loss.
+        guard.pragma_update(None, "synchronous", "FULL")?;
+        f(&mut guard)
     }
 
     /// Run a write in one transaction. `actor` labels the events and audit
@@ -2682,6 +2744,7 @@ impl Db {
                     Err(poisoned) => poisoned.into_inner(),
                 };
                 let acquired = queued.map(|_| std::time::Instant::now());
+                let _scope = DatabaseScope::enter(&conn);
                 // The snapshot comes after the lock: a write that changed a
                 // secret swapped its matcher in before it let the lock go.
                 let result = (|| {
