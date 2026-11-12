@@ -532,7 +532,11 @@ fn main() -> anyhow::Result<()> {
         writer
     };
     use tracing_subscriber::util::SubscriberInitExt;
-    terrarium_host::logging::subscriber(writer, std::io::IsTerminal::is_terminal(&std::io::stderr())).init();
+    terrarium_host::logging::subscriber(
+        writer,
+        std::io::IsTerminal::is_terminal(&std::io::stderr()),
+    )
+    .init();
     #[cfg(windows)]
     if matches!(args.command, Some(Cmd::Service)) {
         return windows_service_host::dispatch();
