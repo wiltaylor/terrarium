@@ -135,10 +135,14 @@ pub fn reserve(
         "SELECT EXISTS(SELECT 1 FROM live_workspace_use_history WHERE workspace_id = ?1
          AND (kind = 'other' OR (kind = 'owner_sandbox' AND scope != ?2)
              OR (kind = 'live' AND scope != ?3)))",
-        params![e.workspace.0.to_string(), owning_sandbox, domain], |r| r.get(0),
+        params![e.workspace.0.to_string(), owning_sandbox, domain],
+        |r| r.get(0),
     )?;
     if incompatible_history {
-        return Err(ApiError::new(Code::Conflict, "workspace has incompatible retained-use history"));
+        return Err(ApiError::new(
+            Code::Conflict,
+            "workspace has incompatible retained-use history",
+        ));
     }
     let valid: bool = t.query_row(
         "SELECT EXISTS(SELECT 1 FROM live_workspace_targets
@@ -263,7 +267,11 @@ pub fn admit_workspace_use(
 /// Persist before the caller's side effect. The immediate transaction gives a
 /// generic writer racing reservation exactly one permitted outcome. A generic
 /// use that wins leaves permanent history and prevents a later opt-in.
-pub fn record_workspace_use(t: &Tx<'_>, e: &Enrollment, use_kind: WorkspaceUse<'_>) -> ApiResult<()> {
+pub fn record_workspace_use(
+    t: &Tx<'_>,
+    e: &Enrollment,
+    use_kind: WorkspaceUse<'_>,
+) -> ApiResult<()> {
     durable(t)?;
     admit_workspace_use(t, e, use_kind)?;
     let (kind, scope) = match use_kind {
@@ -271,8 +279,16 @@ pub fn record_workspace_use(t: &Tx<'_>, e: &Enrollment, use_kind: WorkspaceUse<'
         WorkspaceUse::OwnerSandbox { incarnation } => ("owner_sandbox", incarnation),
         WorkspaceUse::Live { domain, .. } => ("live", domain),
     };
-    t.execute("INSERT INTO live_workspace_use_history VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![Ulid::new().to_string(), e.workspace.0.to_string(), kind, scope, crate::db::now()])?;
+    t.execute(
+        "INSERT INTO live_workspace_use_history VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            Ulid::new().to_string(),
+            e.workspace.0.to_string(),
+            kind,
+            scope,
+            crate::db::now()
+        ],
+    )?;
     Ok(())
 }
 
@@ -280,34 +296,66 @@ pub fn record_workspace_use(t: &Tx<'_>, e: &Enrollment, use_kind: WorkspaceUse<'
 /// Lease expiry/revoke preserves a live holder's independent policy authority.
 /// This fences admission only. It is not proof of path disappearance and must
 /// be followed by ordered revoke dispatch before reporting revoke completion.
-pub fn end_holder_authority(t: &Tx<'_>, agent: &str, target: Option<&str>, force: bool) -> ApiResult<usize> {
+pub fn end_holder_authority(
+    t: &Tx<'_>,
+    agent: &str,
+    target: Option<&str>,
+    force: bool,
+) -> ApiResult<usize> {
     durable(t)?;
     let mut statement = t.prepare("SELECT a.attachment_id, w.workspace_id, w.host_id, w.agent_id,
         w.project_hint, w.agent_hint, w.source_dev, w.source_ino, a.registration_id
         FROM live_workspace_attachments a JOIN live_workspaces w ON w.workspace_id = a.workspace_id
         JOIN live_workspace_targets r ON r.registration_id = a.registration_id
         WHERE a.agent_id = ?1 AND a.state = 'attached_verified' AND (?2 IS NULL OR r.target_id = ?2)")?;
-    let rows = statement.query_map(params![agent, target], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?,
-            r.get::<_, String>(6)?, r.get::<_, String>(7)?, r.get::<_, String>(8)?))
-    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = statement
+        .query_map(params![agent, target], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, String>(8)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
     let mut changed = 0;
-    for (attachment, workspace, host, agent_id, project, name, device, inode, registration) in rows {
+    for (attachment, workspace, host, agent_id, project, name, device, inode, registration) in rows
+    {
         let e = Enrollment {
-            workspace: terrarium_core::live_workspace::WorkspaceId(workspace.parse().map_err(|_| ApiError::internal("invalid stored workspace ID"))?),
-            host: host.parse().map_err(|_| ApiError::internal("invalid stored host ID"))?,
-            agent: agent_id.parse().map_err(|_| ApiError::internal("invalid stored agent ID"))?,
-            project, name,
+            workspace: terrarium_core::live_workspace::WorkspaceId(
+                workspace
+                    .parse()
+                    .map_err(|_| ApiError::internal("invalid stored workspace ID"))?,
+            ),
+            host: host
+                .parse()
+                .map_err(|_| ApiError::internal("invalid stored host ID"))?,
+            agent: agent_id
+                .parse()
+                .map_err(|_| ApiError::internal("invalid stored agent ID"))?,
+            project,
+            name,
             source: terrarium_core::live_workspace::SourceIdentity {
-                device: device.parse().map_err(|_| ApiError::internal("invalid stored workspace device"))?,
-                inode: inode.parse().map_err(|_| ApiError::internal("invalid stored workspace inode"))?,
+                device: device
+                    .parse()
+                    .map_err(|_| ApiError::internal("invalid stored workspace device"))?,
+                inode: inode
+                    .parse()
+                    .map_err(|_| ApiError::internal("invalid stored workspace inode"))?,
             },
         };
         if force || !current_authority(t, &e, &registration)? {
-            changed += t.execute("UPDATE live_workspace_attachments SET state = 'authority_ended'
-                WHERE attachment_id = ?1 AND state = 'attached_verified'", [&attachment])?;
+            changed += t.execute(
+                "UPDATE live_workspace_attachments SET state = 'authority_ended'
+                WHERE attachment_id = ?1 AND state = 'attached_verified'",
+                [&attachment],
+            )?;
             t.audit("workspace.authority_ended", &attachment, Some(&e.project),
                 json!({"registration": registration, "forced": force, "path_revocation": "pending"}))?;
         }
@@ -552,11 +600,18 @@ mod tests {
     #[tokio::test]
     async fn generic_use_and_reservation_race_have_one_permitted_outcome() {
         let (dir, db, e) = fixture().await;
-        let other = Db::new(crate::db::open(&dir.path().join("test.sqlite")).unwrap(), EventHub::default());
+        let other = Db::new(
+            crate::db::open(&dir.path().join("test.sqlite")).unwrap(),
+            EventHub::default(),
+        );
         let generic = e.clone();
         let (reserved, used) = tokio::join!(
             db.write_full("system", move |t| reserve(t, &e, "r1", "d1", "sandbox")),
-            other.write_full("system", move |t| record_workspace_use(t, &generic, WorkspaceUse::Other)),
+            other.write_full("system", move |t| record_workspace_use(
+                t,
+                &generic,
+                WorkspaceUse::Other
+            )),
         );
         assert_ne!(reserved.is_ok(), used.is_ok());
     }
@@ -564,11 +619,16 @@ mod tests {
     #[tokio::test]
     async fn cross_target_reservations_race_without_moving_the_domain_seal() {
         let (dir, db, e) = fixture().await;
-        let other = Db::new(crate::db::open(&dir.path().join("test.sqlite")).unwrap(), EventHub::default());
+        let other = Db::new(
+            crate::db::open(&dir.path().join("test.sqlite")).unwrap(),
+            EventHub::default(),
+        );
         let second = e.clone();
         let (first, second) = tokio::join!(
             db.write_full("system", move |t| reserve(t, &e, "r1", "d1", "sandbox")),
-            other.write_full("system", move |t| reserve(t, &second, "r2", "d2", "sandbox")),
+            other.write_full("system", move |t| reserve(
+                t, &second, "r2", "d2", "sandbox"
+            )),
         );
         assert_ne!(first.is_ok(), second.is_ok());
     }

@@ -367,9 +367,13 @@ pub async fn after_end(state: &Shared, l: &LeaseRow) {
     // Live attachment authority is fenced before either legacy shortcut below.
     // A stopped/deleted holder still needs ordered path-revoke processing.
     let (holder, target) = (l.agent.clone(), l.target.clone());
-    if let Err(e) = state.db.write_full("system", move |t| {
-        crate::store::live_workspaces::end_holder_authority(t, &holder, Some(&target), false)
-    }).await {
+    if let Err(e) = state
+        .db
+        .write_full("system", move |t| {
+            crate::store::live_workspaces::end_holder_authority(t, &holder, Some(&target), false)
+        })
+        .await
+    {
         warn!(agent = %l.agent, target = %l.target, "cannot fence live workspace authority after lease end: {e}");
     }
     let a = l.agent.clone();

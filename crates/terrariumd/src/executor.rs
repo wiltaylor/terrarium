@@ -5357,9 +5357,13 @@ pub async fn on_agent_stop(
 ) -> Vec<(String, ApiError)> {
     let mut errors = Vec::new();
     let holder = agent.to_owned();
-    if let Err(e) = state.db.write_full("system", move |t| {
-        crate::store::live_workspaces::end_holder_authority(t, &holder, None, true)
-    }).await {
+    if let Err(e) = state
+        .db
+        .write_full("system", move |t| {
+            crate::store::live_workspaces::end_holder_authority(t, &holder, None, true)
+        })
+        .await
+    {
         errors.push(("live-workspaces".into(), e));
     }
     for t in held_targets(state, agent, policy_targets).await {
