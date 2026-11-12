@@ -1113,6 +1113,7 @@ async fn owned_target_root_first_exec_with_explicit_cwd() {
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let out = drain(&lab.td, "terra-box", r.body["session_id"].as_str().unwrap()).await;
+    assert_eq!(out.end["code"], 0, "{out:?}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
         root.to_str().unwrap()
