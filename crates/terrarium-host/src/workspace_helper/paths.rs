@@ -72,12 +72,27 @@ impl ProtectedRoot {
     }
 
     pub(super) fn try_clone(&self) -> Result<Self, Reply> {
-        Ok(Self { fd: self.fd.try_clone().map_err(|_| Reply::Failed)?, ancestors: self.ancestors.iter().map(File::try_clone).collect::<std::io::Result<_>>().map_err(|_| Reply::Failed)? })
+        Ok(Self {
+            fd: self.fd.try_clone().map_err(|_| Reply::Failed)?,
+            ancestors: self
+                .ancestors
+                .iter()
+                .map(File::try_clone)
+                .collect::<std::io::Result<_>>()
+                .map_err(|_| Reply::Failed)?,
+        })
     }
 
     #[cfg(test)]
     pub(super) fn fixture(path: &Path) -> Self {
-        Self { fd: File::open(path).unwrap(), ancestors: path.ancestors().skip(1).map(|p| File::open(p).unwrap()).collect() }
+        Self {
+            fd: File::open(path).unwrap(),
+            ancestors: path
+                .ancestors()
+                .skip(1)
+                .map(|p| File::open(p).unwrap())
+                .collect(),
+        }
     }
 
     /// Mapping parents are administrative, the final workspace may be owned by
@@ -160,7 +175,12 @@ impl RevokePoint {
         protected(&self.parent)?;
         let fd = directory(&self.parent, Path::new(&self.name), false)?;
         let m = fd.metadata().map_err(|_| Reply::Failed)?;
-        if (m.dev(), m.ino()) != (self.source.device, self.source.inode) || mount_id(&fd)? != self.mount || self.mount == mount_id(&self.parent)? { return Err(Reply::Quarantined); }
+        if (m.dev(), m.ino()) != (self.source.device, self.source.inode)
+            || mount_id(&fd)? != self.mount
+            || self.mount == mount_id(&self.parent)?
+        {
+            return Err(Reply::Quarantined);
+        }
         Ok(fd)
     }
     pub(super) fn ordinary(&self) -> Result<super::mounts::Unmount, Reply> {
@@ -186,11 +206,18 @@ fn empty(fd: &File) -> Result<(), Reply> {
 
 impl ProtectedRoot {
     pub(super) fn revoke_point(&self, e: &Enrollment) -> Result<RevokePoint, Reply> {
-        if !e.matches(e) { return Err(Reply::Unauthorized); }
+        if !e.matches(e) {
+            return Err(Reply::Unauthorized);
+        }
         let parent = directory(&self.fd, Path::new(&e.project), true)?;
         protected(&parent)?;
         let mounted = directory(&parent, Path::new(&e.name), false)?;
-        let point = RevokePoint { parent, name: e.name.clone(), source: e.source.clone(), mount: mount_id(&mounted)? };
+        let point = RevokePoint {
+            parent,
+            name: e.name.clone(),
+            source: e.source.clone(),
+            mount: mount_id(&mounted)?,
+        };
         drop(mounted);
         point.current()?;
         Ok(point)

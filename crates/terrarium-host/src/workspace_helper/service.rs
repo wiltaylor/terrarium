@@ -48,7 +48,8 @@ fn config() -> Result<(Config, ProtectedRoot, File), Reply> {
         return Err(Reply::Unauthorized);
     }
     let mut bytes = Vec::new();
-    (&file).take(MAX_FRAME_BYTES as u64 + 1)
+    (&file)
+        .take(MAX_FRAME_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| Reply::Failed)?;
     Ok((parse_config(&bytes)?, root, file))
@@ -109,17 +110,31 @@ pub async fn run() -> std::io::Result<()> {
     }
     let (c, config_root, _config_file) = config().map_err(|_| failed())?;
     let source = ProtectedRoot::open(&c.work_root).map_err(|_| failed())?;
-    let socket_root = ProtectedRoot::open(std::path::Path::new("/run/terrarium-workspace-helper")).map_err(|_| failed())?;
+    let socket_root = ProtectedRoot::open(std::path::Path::new("/run/terrarium-workspace-helper"))
+        .map_err(|_| failed())?;
     let metadata = socket_root.fd.metadata()?;
-    if metadata.gid() != c.host_agent_gid || metadata.mode() & 0o777 != 0o750 { return Err(failed()); }
-    struct Opened { publisher: ProtectedRoot, staging: ProtectedRoot, state: ProtectedRoot }
+    if metadata.gid() != c.host_agent_gid || metadata.mode() & 0o777 != 0o750 {
+        return Err(failed());
+    }
+    struct Opened {
+        publisher: ProtectedRoot,
+        staging: ProtectedRoot,
+        state: ProtectedRoot,
+    }
     let mut opened = Vec::new();
     for r in &c.registrations {
-        opened.push(Opened { publisher: ProtectedRoot::open(&r.publisher_root).map_err(|_| failed())?, staging: ProtectedRoot::open(&r.staging_root).map_err(|_| failed())?, state: ProtectedRoot::open(&r.state_root).map_err(|_| failed())? });
+        opened.push(Opened {
+            publisher: ProtectedRoot::open(&r.publisher_root).map_err(|_| failed())?,
+            staging: ProtectedRoot::open(&r.staging_root).map_err(|_| failed())?,
+            state: ProtectedRoot::open(&r.state_root).map_err(|_| failed())?,
+        });
     }
     let mut data = vec![&source];
     let mut controls = vec![&config_root, &socket_root];
-    for r in &opened { data.extend([&r.publisher, &r.staging]); controls.push(&r.state); }
+    for r in &opened {
+        data.extend([&r.publisher, &r.staging]);
+        controls.push(&r.state);
+    }
     // Complete read-only preflight for EVERY registration, not one at a time.
     // Even lock creation and startup quarantine snapshots must wait until the
     // state/config/socket roots and their bind aliases are known not to export.

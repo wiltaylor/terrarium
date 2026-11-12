@@ -379,7 +379,8 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
         let destination = self.publisher.destination(&holder.enrollment)?;
         let tree = mounts::clone_nonrecursive(&source)?;
         mounts::attach(&tree, stage.placeholder()?)?;
-        #[cfg(test)] super::crash("stage_move");
+        #[cfg(test)]
+        super::crash("stage_move");
         let staged = stage.mounted()?;
         let view = host_view()?;
         let observed = at(&view, &path(&staged)?)?;
@@ -407,13 +408,15 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
             return Err(Reply::Conflict);
         }
         mounts::make_private(&p.staged)?;
-        #[cfg(test)] super::crash("private");
+        #[cfg(test)]
+        super::crash("private");
         let view = host_view()?;
         if !at(&view, &path(&p.staged)?)?.optional_fields.is_empty() {
             return Err(Reply::Quarantined);
         }
         self.attributes.workspace(&p.staged)?;
-        #[cfg(test)] super::crash("attributes");
+        #[cfg(test)]
+        super::crash("attributes");
         let view = host_view()?;
         mountinfo::private_stage(at(&view, &path(&p.staged)?)?, &p.root, &p.device)
     }
@@ -432,7 +435,8 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
         }
         scan_source(&p.source)?;
         mounts::attach(&p.staged, p.destination.placeholder()?)?;
-        #[cfg(test)] super::crash("publish_move");
+        #[cfg(test)]
+        super::crash("publish_move");
         p.stage.take().ok_or(Reply::Failed)?.remove()?;
         self.live.insert(holder.attachment, holder.clone());
         Ok(())
@@ -449,7 +453,10 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
         self.topology()?;
         let point = self.publisher.revoke_point(&holder.enrollment)?;
         let busy = point.ordinary()? == Unmount::Busy;
-        #[cfg(test)] if !busy { super::crash("ordinary_unmount"); }
+        #[cfg(test)]
+        if !busy {
+            super::crash("ordinary_unmount");
+        }
         self.revoking = Some((holder.clone(), point));
         Ok(busy)
     }
@@ -460,7 +467,8 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
             return Err(Reply::Conflict);
         }
         mount.detach()?;
-        #[cfg(test)] super::crash("lazy_unmount");
+        #[cfg(test)]
+        super::crash("lazy_unmount");
         Ok(())
     }
 
@@ -472,7 +480,8 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
         self.publisher
             .unmounted_destination(&holder.enrollment)?
             .remove()?;
-        #[cfg(test)] super::crash("placeholder_remove");
+        #[cfg(test)]
+        super::crash("placeholder_remove");
         self.live.remove(&holder.attachment);
         Ok(())
     }

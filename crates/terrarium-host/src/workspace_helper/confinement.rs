@@ -18,11 +18,19 @@ struct Location {
     filesystem_path: PathBuf,
 }
 fn location(fd: &File, view: &[MountEvidence]) -> Result<Location, Reply> {
-    Ok(Location { identity: identity(fd)?, path: kernel::path(fd)?, filesystem_path: PathBuf::from(kernel::root_of(fd, view)?.0) })
+    Ok(Location {
+        identity: identity(fd)?,
+        path: kernel::path(fd)?,
+        filesystem_path: PathBuf::from(kernel::root_of(fd, view)?.0),
+    })
 }
 fn overlap(a: &Location, b: &Location) -> bool {
-    a.identity == b.identity || a.path.starts_with(&b.path) || b.path.starts_with(&a.path)
-        || (a.identity.0 == b.identity.0 && (a.filesystem_path.starts_with(&b.filesystem_path) || b.filesystem_path.starts_with(&a.filesystem_path)))
+    a.identity == b.identity
+        || a.path.starts_with(&b.path)
+        || b.path.starts_with(&a.path)
+        || (a.identity.0 == b.identity.0
+            && (a.filesystem_path.starts_with(&b.filesystem_path)
+                || b.filesystem_path.starts_with(&a.filesystem_path)))
 }
 
 /// Controls include the entire config/socket/state directories, so their
@@ -31,17 +39,36 @@ fn overlap(a: &Location, b: &Location) -> bool {
 /// their single-link file guards. No mount or filesystem mutation occurs here.
 pub(super) fn validate(data: &[&ProtectedRoot], controls: &[&ProtectedRoot]) -> Result<(), Reply> {
     let view = kernel::host_view()?;
-    let data_locations = data.iter().map(|r| location(&r.fd, &view)).collect::<Result<Vec<_>, _>>()?;
-    let control_locations = controls.iter().map(|r| location(&r.fd, &view)).collect::<Result<Vec<_>, _>>()?;
+    let data_locations = data
+        .iter()
+        .map(|r| location(&r.fd, &view))
+        .collect::<Result<Vec<_>, _>>()?;
+    let control_locations = controls
+        .iter()
+        .map(|r| location(&r.fd, &view))
+        .collect::<Result<Vec<_>, _>>()?;
     for (index, tree) in data.iter().enumerate() {
         let tree_location = &data_locations[index];
         for other in &data_locations[index + 1..] {
-            if overlap(tree_location, other) { return Err(Reply::Unauthorized); }
+            if overlap(tree_location, other) {
+                return Err(Reply::Unauthorized);
+            }
         }
         for (control, control_location) in controls.iter().zip(&control_locations) {
             if overlap(tree_location, control_location)
-                || control.ancestors.iter().map(identity).collect::<Result<Vec<_>, _>>()?.contains(&tree_location.identity)
-                || tree.ancestors.iter().map(identity).collect::<Result<Vec<_>, _>>()?.contains(&control_location.identity) {
+                || control
+                    .ancestors
+                    .iter()
+                    .map(identity)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .contains(&tree_location.identity)
+                || tree
+                    .ancestors
+                    .iter()
+                    .map(identity)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .contains(&control_location.identity)
+            {
                 return Err(Reply::Unauthorized);
             }
         }
@@ -49,13 +76,39 @@ pub(super) fn validate(data: &[&ProtectedRoot], controls: &[&ProtectedRoot]) -> 
         // not just aliased at a configured tree root. Inspect every mounted
         // descendant before allowing any store or helper to mutate state.
         for mount in &view {
-            let Ok(relative) = std::path::Path::new(&mount.mountpoint).strip_prefix(&tree_location.path) else { continue; };
-            if relative.as_os_str().is_empty() { continue; }
-            use nix::fcntl::{openat2, OpenHow, OFlag, ResolveFlag};
-            let fd = File::from(openat2(&tree.fd, relative, OpenHow::new().flags(OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC).resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS | ResolveFlag::RESOLVE_NO_MAGICLINKS)).map_err(|_| Reply::Unauthorized)?);
-            if mount_id(&fd)? != mount.mount_id { return Err(Reply::Unauthorized); }
+            let Ok(relative) =
+                std::path::Path::new(&mount.mountpoint).strip_prefix(&tree_location.path)
+            else {
+                continue;
+            };
+            if relative.as_os_str().is_empty() {
+                continue;
+            }
+            use nix::fcntl::{OFlag, OpenHow, ResolveFlag, openat2};
+            let fd = File::from(
+                openat2(
+                    &tree.fd,
+                    relative,
+                    OpenHow::new()
+                        .flags(OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC)
+                        .resolve(
+                            ResolveFlag::RESOLVE_BENEATH
+                                | ResolveFlag::RESOLVE_NO_SYMLINKS
+                                | ResolveFlag::RESOLVE_NO_MAGICLINKS,
+                        ),
+                )
+                .map_err(|_| Reply::Unauthorized)?,
+            );
+            if mount_id(&fd)? != mount.mount_id {
+                return Err(Reply::Unauthorized);
+            }
             let child = location(&fd, &view)?;
-            if control_locations.iter().any(|control| overlap(&child, control)) { return Err(Reply::Unauthorized); }
+            if control_locations
+                .iter()
+                .any(|control| overlap(&child, control))
+            {
+                return Err(Reply::Unauthorized);
+            }
         }
     }
     Ok(())
@@ -67,7 +120,9 @@ mod tests {
     #[test]
     fn controls_cannot_be_equal_below_or_above_exported_trees() {
         let temp = tempfile::tempdir().unwrap();
-        for name in ["data", "state", "data/nested", "state/publisher"] { std::fs::create_dir(temp.path().join(name)).unwrap(); }
+        for name in ["data", "state", "data/nested", "state/publisher"] {
+            std::fs::create_dir(temp.path().join(name)).unwrap();
+        }
         let data = ProtectedRoot::fixture(&temp.path().join("data"));
         let state = ProtectedRoot::fixture(&temp.path().join("state"));
         assert_eq!(validate(&[&data], &[&state]), Ok(()));
