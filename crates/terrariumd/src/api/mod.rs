@@ -33,6 +33,7 @@ mod project_folders;
 mod projects;
 mod questions;
 mod read_positions;
+pub(crate) mod release_handoffs;
 mod records;
 mod remotes;
 pub(crate) mod repo_trees;
@@ -411,6 +412,7 @@ fn routes_with_registry(
         .merge(threads::routes())
         .merge(inbox::routes())
         .merge(jobs::routes())
+        .merge(release_handoffs::routes())
         .merge(config::routes())
         .merge(skills::routes())
         .merge(system_prompts::routes())

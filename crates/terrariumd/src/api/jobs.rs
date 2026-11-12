@@ -594,6 +594,8 @@ struct MergeBody {
 #[serde(deny_unknown_fields)]
 struct ReleaseBody {
     #[serde(default)]
+    after: Option<String>,
+    #[serde(default)]
     repo: Option<String>,
     /// The release merge commit: the head of `main` on the remote. With
     /// none, the head now.
@@ -1051,14 +1053,30 @@ async fn release(
         })
         .await?;
     // A release builds what is on `main`: the head on the remote now.
-    let head = rt::remote_head(&state, &card.project, &repo, jobs::RELEASE_BRANCH)
+    let previous = if let Some(id) = b.after.clone() {
+        let a = actor.clone();
+        let project = card.project.clone();
+        let repo = repo.clone();
+        Some(state.db.read(move |c| {
+            let previous = jobs::get(c, &id)?;
+            super::release_handoffs::authorize(&a, &previous)?;
+            crate::release_handoff::check_predecessor(c, &previous)?;
+            if previous.project != project || previous.repo != repo {
+                return Err(ApiError::invalid("release phases must have the same project and repo"));
+            }
+            Ok(previous)
+        }).await?)
+    } else { None };
+    let head = if let Some(previous) = &previous {
+        previous.commit.clone().ok_or_else(|| ApiError::invalid("phase 1 has no release commit"))?
+    } else { rt::remote_head(&state, &card.project, &repo, jobs::RELEASE_BRANCH)
         .await?
         .ok_or_else(|| {
             ApiError::conflict(format!(
                 "repo `{repo}` has no `{}` branch on its remote",
                 jobs::RELEASE_BRANCH
             ))
-        })?;
+        })? };
     rt::check_commit(&head)?;
     if let Some(c) = &b.commit
         && !head.starts_with(&c.to_lowercase())
@@ -1089,6 +1107,9 @@ async fn release(
                     planned_secs,
                 },
             )?;
+            if let Some(previous) = previous {
+                crate::release_handoff::link(t, &job, &previous.id)?;
+            }
             board::system_comment(t, &card.id, &rt::queue_comment(&job, &card.id), None)?;
             let place = jobs::place(t, &job)?;
             Ok((job, place))

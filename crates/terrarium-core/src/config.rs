@@ -926,6 +926,9 @@ pub struct DeliveryDef {
     /// [`DeliveryDef::DEFAULT_RELEASE_RECIPE`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_recipe: Option<String>,
+    /// Repository-relative directory of named regular release output files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_outputs: Option<String>,
     /// The secrets of the release recipe's env (TER-623), by env name:
     /// `@secret:<name>[.<field>]` references, resolved only for a release
     /// job on `release_target`, through a `delivery:<project>` run grant
@@ -1030,6 +1033,7 @@ impl DeliveryDef {
             timeout_secs: self.timeout_secs,
             release_target: self.release_target.clone(),
             release_recipe: self.release_recipe.clone(),
+            release_outputs: self.release_outputs.clone(),
             release_secrets: self.release_secrets.clone(),
             docker_release: self.docker_release.clone(),
         })

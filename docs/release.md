@@ -351,6 +351,60 @@ build context, in an image layer, or on the release VM: docker (the gate and
 the image build, and the `--version` checks) gets an env without them, and the client runs no code of the
 release (`scripts/test_release.py` checks each of these).
 
+### Private signed-smoke handoff
+
+A release recipe may declare a repository-relative output directory with
+`terrarium project delivery set --release-outputs release-out/handoff`.
+Only the direct regular files in that directory are published. Names use ASCII
+letters, digits, dots, underscores and hyphens. Directories, symlinks, hardlinks,
+duplicate names and unsafe paths are refused. Keep credentials out of this
+directory. Publication happens only after the recipe succeeds and is atomic:
+an invalid or oversized set fails the job without keeping partial outputs.
+
+The daemon stores the files privately under its state directory, recording each
+name, size and SHA-256. The default aggregate limit is 200 MiB and 1024 files per
+job. The operator may set `TERRARIUM_RELEASE_ARTIFACT_LIMIT_BYTES` in the daemon
+environment to change the byte limit. These files have no public artifact URL.
+Only the owning project's lead (`project_admin`) or the operator can list,
+download or attach files. Another project's agents cannot read them, even with
+cross-project admin roles. No agent receives target access or a credential.
+
+```sh
+terrarium job artifacts JOB1
+terrarium job artifact-get JOB1 signed.apk ./signed.apk
+terrarium job attach JOB1 ./signed-smoke.json
+terrarium job release VERSION_CARD --after JOB1
+```
+
+Downloads verify SHA-256 before atomically creating the destination, and never
+overwrite an existing file. Attachments are limited to 1 MiB. Attach only after
+phase 1 has passed. Its recorded SHA-256 is frozen when phase 2 is queued.
+
+Phase 2 is a **new release job**, not a waiting process on the target. `--after`
+requires a passed phase-1 job of the same project and repo, and pins the new job
+to its exact commit, even if `main` has since advanced. A second phase 2 is
+refused while one is queued, running, or passed. Failed or cancelled phase-2
+jobs permit a new attempt after the lead checks any external side effects.
+The original attachment cannot be replaced while a successor is queued,
+running, or passed.
+
+The same release recipe runs again, so it **must branch on phase** before any
+build, signing, or publishing side effect. Phase 1 receives
+`TERRARIUM_RELEASE_PHASE=1`. Phase 2 receives:
+
+| Environment | Value |
+| --- | --- |
+| `TERRARIUM_RELEASE_PHASE` | `2` |
+| `TERRARIUM_RELEASE_AFTER` | phase-1 job ID |
+| `TERRARIUM_RELEASE_ARTIFACTS` | absolute checkout path `.terrarium/release-input/artifacts` |
+| `TERRARIUM_RELEASE_ATTACHMENT` | absolute checkout path `.terrarium/release-input/attachment` |
+| `TERRARIUM_RELEASE_ATTACHMENT_SHA256` | recorded attachment SHA-256 |
+
+The daemon verifies stored inputs before copying them to the fresh checkout.
+Input files are read-only. Phase 2 can consume the signed APK without rebuilding
+or re-signing it. No target, host slot or running job is held while the lead
+tests phase 1. Existing release recipes without declared outputs are unchanged.
+
 ### Fallback if the local release fails
 
 Revert the TER-622 merge commit on both `next` and `main` to restore

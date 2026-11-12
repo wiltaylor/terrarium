@@ -612,6 +612,9 @@ pub struct DeliverySetArgs {
     /// The release command (default `just release::publish`); `""` resets it
     #[arg(long)]
     pub release_recipe: Option<String>,
+    /// Repository-relative directory of named release output files
+    #[arg(long)]
+    pub release_outputs: Option<String>,
     /// A secret of the release recipe's env, NAME=@secret:name[.field]
     /// Name: upper-case letter, then upper-case letters, digits or underscores
     /// (at most 64). Job and tool environment names are reserved.
@@ -685,6 +688,9 @@ pub enum JobCmd {
     Release {
         /// The card of the release, for example the version card
         card: String,
+        /// Passed phase-1 release job. Reuses its repo and commit.
+        #[arg(long)]
+        after: Option<String>,
         /// The repo, when the project has more than one
         #[arg(long)]
         repo: Option<String>,
@@ -698,6 +704,12 @@ pub enum JobCmd {
     /// The host caps: the most jobs of all projects that run on a host at
     /// once, and the jobs that run on each host now
     Hosts,
+    /// List private named outputs of a release job (project lead only)
+    Artifacts { id: String },
+    /// Download a private release output, verifying its SHA-256
+    ArtifactGet { id: String, name: String, destination: std::path::PathBuf },
+    /// Attach a smoke result (at most 1 MiB) to a passed phase-1 release
+    Attach { id: String, file: std::path::PathBuf },
     /// Set the cap of a host, or take it away with `--clear`
     /// (sysadmin). The host is the target's host agent, else the host of
     /// its address, else the target name
