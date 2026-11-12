@@ -35,15 +35,18 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
   }
   let tabs!: HTMLElement;
 
-  // A route change can select a tab outside the horizontal viewport. Keep the
-  // active tab visible on a phone without scrolling the page on a desktop.
+  // Creating a page can leave the row scrolled to Add page at the far end.
+  // Reveal the selected tab without moving the document vertically.
   createEffect(
     on(
-      () => location.pathname,
+      [() => location.pathname, () => pages.latest],
       () => {
-        if (typeof matchMedia === "function" && matchMedia("(max-width: 760px)").matches) {
-          tabs.querySelector<HTMLElement>("a.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
-        }
+        const active = tabs.querySelector<HTMLElement>("a.active");
+        if (!active) return;
+        const bounds = tabs.getBoundingClientRect();
+        const selected = active.getBoundingClientRect();
+        if (selected.left < bounds.left) tabs.scrollLeft += selected.left - bounds.left;
+        else if (selected.right > bounds.right) tabs.scrollLeft += selected.right - bounds.right;
       },
     ),
   );

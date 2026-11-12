@@ -5,7 +5,7 @@ import { render } from "solid-js/web";
 import { expect, it, vi } from "vitest";
 import { waitFor } from "../../test/wait";
 import { createMockApi } from "../../api/mock";
-import type { AgentEvent } from "../../api/types";
+import type { AgentEvent, PageWidget } from "../../api/types";
 import { ApiError } from "../../api/http";
 
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
@@ -16,9 +16,9 @@ vi.mock("../../stores", async () => { const { instanceTestStores } = await impor
 } }); });
 const { default: CustomPage } = await import("./CustomPage");
 
-async function mount() {
+async function mount(widgets: PageWidget[] = []) {
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
-  await api.pages.save("terrarium", "overview", { title: "Overview", position: 0, widgets: [] });
+  await api.pages.save("terrarium", "overview", { title: "Overview", position: 0, widgets });
   const history = createMemoryHistory(); history.set({ value: "/p/terrarium/pages/overview" });
   const host = document.createElement("div"); document.body.append(host);
   const dispose = render(() => createComponent(MemoryRouter, { history, get children() { return createComponent(Route, { path: "/p/:project/pages/:slug", component: CustomPage }); } }), host);
@@ -94,4 +94,27 @@ it("keeps widget input mounted and focused while typing and moving", async () =>
     await waitFor(() => expect(host.textContent).not.toContain("Save page"));
     expect((await api.pages.get("terrarium", "overview")).widgets[0]?.text).toBe("First line and more");
   } finally { dispose(); }
+});
+
+it("preserves saved grid positions on reload and throughout a pending live refresh", async () => {
+  const widgets: PageWidget[] = [{ id: "intro", kind: "markdown", text: "Content", x: 2, y: 3, w: 5, h: 2, auto_height: false }];
+  let mounted = await mount(widgets);
+  const position = () => mounted.host.querySelector<HTMLElement>('[data-widget-id="intro"]')?.style.cssText;
+  try {
+    await waitFor(() => expect(position()).toContain("grid-column"));
+    const initial = position();
+    const original = await api.pages.get("terrarium", "overview");
+    let resolve!: (p: typeof original) => void;
+    vi.spyOn(api.pages, "get").mockImplementation(() => new Promise(r => { resolve = r; }));
+    const section = mounted.host.querySelector("section");
+    listeners.forEach(fn => fn(pageEvent()));
+    expect(position()).toBe(initial);
+    expect(mounted.host.textContent).toContain("Content");
+    resolve(structuredClone(original));
+    await waitFor(() => expect(position()).toBe(initial));
+    expect(mounted.host.querySelector("section")).toBe(section);
+    mounted.dispose();
+    mounted = await mount(widgets);
+    await waitFor(() => expect(position()).toBe(initial));
+  } finally { mounted.dispose(); }
 });
