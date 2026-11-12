@@ -3,12 +3,12 @@
 
 mod board_summary_growth;
 mod card_waits;
-mod pages;
 #[path = "../common/mod.rs"]
 mod common;
 mod exedev;
 mod host_restart;
 mod live_workspace;
+mod pages;
 mod read_positions;
 mod remotes;
 mod ter221_latency;
