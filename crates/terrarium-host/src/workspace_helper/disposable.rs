@@ -832,7 +832,12 @@ fn interrupted_syscalls_reopen_without_replay_or_resurrection() {
             "{point} revoke={revoke}: child did not abort: {}",
             String::from_utf8_lossy(&output.stdout)
         );
-        assert!(String::from_utf8_lossy(&output.stderr).lines().any(|line| line == format!("B2_CRASH_POINT={point}")), "{point}: selected post-syscall hook was not reached");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .any(|line| line == format!("B2_CRASH_POINT={point}")),
+            "{point}: selected post-syscall hook was not reached"
+        );
         let before = fixture.tables();
         let mut reopened = fixture.helper();
         let revision = if revoke { 3 } else { 2 };
@@ -841,7 +846,10 @@ fn interrupted_syscalls_reopen_without_replay_or_resurrection() {
             if revoke { Kind::Revoke } else { Kind::Grant },
             "agent",
         );
-        let operation = terrarium_core::live_workspace::decode_frame(&request).unwrap().original.operation;
+        let operation = terrarium_core::live_workspace::decode_frame(&request)
+            .unwrap()
+            .original
+            .operation;
         let expected_phase = match point {
             "stage_move" | "ordinary_unmount" => Phase::Prepared,
             "private" | "attributes" => Phase::Staged,
@@ -850,7 +858,11 @@ fn interrupted_syscalls_reopen_without_replay_or_resurrection() {
             "committed" => Phase::Committed,
             _ => unreachable!(),
         };
-        assert_eq!(reopened.journal().operations[&operation].phase, expected_phase, "{point}: wrong durable crash boundary");
+        assert_eq!(
+            reopened.journal().operations[&operation].phase,
+            expected_phase,
+            "{point}: wrong durable crash boundary"
+        );
         if point == "committed" {
             assert!(!reopened.journal().quarantined);
             assert_eq!(
