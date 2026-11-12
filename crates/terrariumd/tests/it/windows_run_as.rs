@@ -86,18 +86,15 @@ impl Lab {
                     continue;
                 };
                 let frame: DaemonFrame = serde_json::from_str(&text).unwrap();
-                match &frame {
-                    DaemonFrame::Ping { nonce } => {
-                        socket
-                            .send(Message::Text(
-                                serde_json::to_string(&HostFrame::Pong { nonce: *nonce })
-                                    .unwrap()
-                                    .into(),
-                            ))
-                            .await
-                            .unwrap();
-                    }
-                    _ => {}
+                if let DaemonFrame::Ping { nonce } = &frame {
+                    socket
+                        .send(Message::Text(
+                            serde_json::to_string(&HostFrame::Pong { nonce: *nonce })
+                                .unwrap()
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
                 }
                 let session = match &frame {
                     DaemonFrame::Exec(req) => Some(req.session),
