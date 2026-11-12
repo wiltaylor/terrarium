@@ -29,11 +29,22 @@ struct Registration {
 
 impl Registration {
     fn id(&self) -> Result<terrarium_core::live_workspace::RegistrationId, Reply> {
-        let component = self.state_root.file_name().and_then(|s| s.to_str()).ok_or(Reply::Unauthorized)?;
+        let component = self
+            .state_root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or(Reply::Unauthorized)?;
         let id: terrarium_core::live_workspace::RegistrationId =
-            serde_json::from_value(serde_json::Value::String(component.into())).map_err(|_| Reply::Unauthorized)?;
-        for (path, parent) in [(&self.publisher_root, "publishers"), (&self.staging_root, "staging"), (&self.state_root, "registrations")] {
-            if path.to_str() != Some(format!("/var/lib/terrarium-workspace-helper/{parent}/{}", id.0).as_str()) {
+            serde_json::from_value(serde_json::Value::String(component.into()))
+                .map_err(|_| Reply::Unauthorized)?;
+        for (path, parent) in [
+            (&self.publisher_root, "publishers"),
+            (&self.staging_root, "staging"),
+            (&self.state_root, "registrations"),
+        ] {
+            if path.to_str()
+                != Some(format!("/var/lib/terrarium-workspace-helper/{parent}/{}", id.0).as_str())
+            {
                 return Err(Reply::Unauthorized);
             }
         }
@@ -87,7 +98,8 @@ fn parse_config(bytes: &[u8]) -> Result<Config, Reply> {
                 || config.work_root.starts_with(p)
         })
         || config.registrations.iter().any(|r| {
-            r.id().is_err() || !r.publisher_root.is_absolute()
+            r.id().is_err()
+                || !r.publisher_root.is_absolute()
                 || !r.staging_root.is_absolute()
                 || !r.state_root.is_absolute()
                 || [&r.publisher_root, &r.staging_root, &r.state_root]
@@ -142,7 +154,11 @@ pub async fn run() -> std::io::Result<()> {
             publisher: ProtectedRoot::open(&r.publisher_root).map_err(|_| failed())?,
             staging: ProtectedRoot::open(&r.staging_root).map_err(|_| failed())?,
             state: ProtectedRoot::open(&r.state_root).map_err(|_| failed())?,
-            bootstrap: ProtectedRoot::open(&PathBuf::from(format!("/var/lib/terrarium-workspace-helper/bootstrap/{}", r.id().map_err(|_| failed())?.0))).map_err(|_| failed())?,
+            bootstrap: ProtectedRoot::open(&PathBuf::from(format!(
+                "/var/lib/terrarium-workspace-helper/bootstrap/{}",
+                r.id().map_err(|_| failed())?.0
+            )))
+            .map_err(|_| failed())?,
         });
     }
     let mut data = vec![&source];
@@ -164,13 +180,26 @@ pub async fn run() -> std::io::Result<()> {
         let bootstrap_store = Store::open(r.bootstrap).map_err(|_| failed())?;
         let bootstrap = bootstrap_store.load_bootstrap().map_err(|_| failed())?;
         let identities = [&r.publisher, &r.staging, &r.state].map(|root| {
-            root.fd.metadata().map(|m| terrarium_core::live_workspace::SourceIdentity { device: m.dev(), inode: m.ino() })
+            root.fd
+                .metadata()
+                .map(|m| terrarium_core::live_workspace::SourceIdentity {
+                    device: m.dev(),
+                    inode: m.ino(),
+                })
         });
         let store = Store::open(r.state).map_err(|_| failed())?;
         let journal = store.load().map_err(|_| failed())?;
-        let ownership = bootstrap.runtime_ownership(&journal).map_err(|_| failed())?;
-        for (observed, expected) in identities.into_iter().zip([&ownership.publisher, &ownership.staging, &ownership.state]) {
-            if &observed? != expected { return Err(failed()); }
+        let ownership = bootstrap
+            .runtime_ownership(&journal)
+            .map_err(|_| failed())?;
+        for (observed, expected) in
+            identities
+                .into_iter()
+                .zip([&ownership.publisher, &ownership.staging, &ownership.state])
+        {
+            if &observed? != expected {
+                return Err(failed());
+            }
         }
         _bootstrap_stores.push(bootstrap_store);
         let registration = journal.runtime.registration;
@@ -263,7 +292,11 @@ mod tests {
         assert!(parse_config(value.to_string().as_bytes()).is_ok());
         for role in ["publisher_root", "staging_root", "state_root"] {
             let original = value["registrations"][0][role].clone();
-            for path in ["/admin/arbitrary", "/var/lib/terrarium-workspace-helper/publishers/00000000000000000000000002", "/var/lib/terrarium-workspace-helper/registrations/../registrations/00000000000000000000000001"] {
+            for path in [
+                "/admin/arbitrary",
+                "/var/lib/terrarium-workspace-helper/publishers/00000000000000000000000002",
+                "/var/lib/terrarium-workspace-helper/registrations/../registrations/00000000000000000000000001",
+            ] {
                 value["registrations"][0][role] = path.into();
                 assert!(parse_config(value.to_string().as_bytes()).is_err());
             }

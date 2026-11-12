@@ -27,12 +27,18 @@ fn request() -> Request {
 fn normal_journal_requires_exact_committed_bootstrap_ownership() {
     let r = request();
     let all = steps(&r);
-    let Step::ReceiverVerified(runtime) = &all[4] else { panic!("fixture") };
+    let Step::ReceiverVerified(runtime) = &all[4] else {
+        panic!("fixture")
+    };
     let normal = terrarium_core::live_workspace::Journal {
         state_version: terrarium_core::live_workspace::STATE_VERSION,
-        host: r.host, target: r.target.clone(), runtime: runtime.clone(),
-        last_contiguous_revision: 0, quarantined: false,
-        operations: Default::default(), tombstones: Default::default(),
+        host: r.host,
+        target: r.target.clone(),
+        runtime: runtime.clone(),
+        last_contiguous_revision: 0,
+        quarantined: false,
+        operations: Default::default(),
+        tombstones: Default::default(),
     };
     let mut bootstrap = Journal::new(r).unwrap();
     for step in &all[1..] {

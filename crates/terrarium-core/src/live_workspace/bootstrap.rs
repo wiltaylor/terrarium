@@ -149,7 +149,10 @@ impl Journal {
         }
         match (self.steps.get(1), self.steps.get(4)) {
             (Some(Step::ScaffoldVerified(scaffold)), Some(Step::ReceiverVerified(runtime)))
-                if runtime == &journal.runtime => Ok(scaffold),
+                if runtime == &journal.runtime =>
+            {
+                Ok(scaffold)
+            }
             _ => Err(Reply::Quarantined),
         }
     }
