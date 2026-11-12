@@ -1541,7 +1541,7 @@ export interface InboxEventData {
 export type ThreadStatus = "waiting_operator" | "waiting_agent" | "tracking" | "closed";
 
 /** One message of a thread. `text` is Markdown: untrusted data. */
-export interface ThreadMessage {
+export interface ThreadMessage extends LogSessionLink {
   id: string;
   /** `operator`, or an agent ULID. */
   author: string;

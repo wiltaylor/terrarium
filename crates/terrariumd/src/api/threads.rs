@@ -358,7 +358,12 @@ async fn show(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Thread>> {
     let th = state.db.read(move |c| threads::get(c, &id)).await?;
-    Ok(Json(readable(&actor, th)?))
+    let mut th = readable(&actor, th)?;
+    let mut linker = super::session_links::Linker::new(&state, &actor);
+    for message in th.messages.iter_mut().flatten() {
+        linker.show(&mut message.session);
+    }
+    Ok(Json(th))
 }
 
 #[derive(Debug, Deserialize)]
