@@ -553,7 +553,10 @@ fn valid_env_key(k: &str) -> bool {
 
 pub(crate) fn path_kind(state: &Shared, def: &TargetDef) -> terrarium_host::protocol::PathKind {
     if def.kind == TargetKind::Host {
-        def.host.as_deref().map(|h| state.executor.hosts.path_kind(h)).unwrap_or_default()
+        def.host
+            .as_deref()
+            .map(|h| state.executor.hosts.path_kind(h))
+            .unwrap_or_default()
     } else {
         terrarium_host::protocol::PathKind::Posix
     }
@@ -736,7 +739,13 @@ pub fn host_frame(
     cmd: &RemoteCmd,
     limits: Option<ExecLimits>,
 ) -> ApiResult<impl FnOnce(u32) -> DaemonFrame + use<>> {
-    host_frame_paths(def, shell, cmd, limits, terrarium_host::protocol::PathKind::Posix)
+    host_frame_paths(
+        def,
+        shell,
+        cmd,
+        limits,
+        terrarium_host::protocol::PathKind::Posix,
+    )
 }
 
 fn host_frame_paths(
@@ -2698,7 +2707,8 @@ pub async fn start_cp(
         && let Some(a) = actor.agent()
     {
         let kind = path_kind(state, &def);
-        let root = kind.workspace(&a.project, &a.name)
+        let root = kind
+            .workspace(&a.project, &a.name)
             .ok_or_else(|| ApiError::invalid("invalid Windows workspace name"))?;
         if !kind.inside(&root, &body.path, true) {
             return Err(ApiError::invalid(format!("path must be inside {root}")));

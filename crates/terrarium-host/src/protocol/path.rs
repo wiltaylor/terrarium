@@ -56,15 +56,22 @@ impl PathKind {
             return false;
         };
         let strict = match self {
-            Self::Posix => path.split('/').skip(1).all(|p| !matches!(p, "" | "." | "..")),
+            Self::Posix => path
+                .split('/')
+                .skip(1)
+                .all(|p| !matches!(p, "" | "." | "..")),
             Self::Windows => true,
         };
-        strict && ((allow_root && path == root)
-            || path.starts_with(&format!("{}/", root.trim_end_matches('/'))))
+        strict
+            && ((allow_root && path == root)
+                || path.starts_with(&format!("{}/", root.trim_end_matches('/'))))
     }
 
     pub fn workspace(self, project: &str, agent: &str) -> Option<String> {
-        if [project, agent].iter().any(|s| s.is_empty() || s.contains(['/', '\\'])) {
+        if [project, agent]
+            .iter()
+            .any(|s| s.is_empty() || s.contains(['/', '\\']))
+        {
             return None;
         }
         let path = match self {
@@ -77,13 +84,15 @@ impl PathKind {
 }
 
 fn windows_component(part: &str) -> bool {
-    if part.is_empty()
-        || part.ends_with(['.', ' '])
-        || part.chars().any(|c| "<>:\"|?*".contains(c))
+    if part.is_empty() || part.ends_with(['.', ' ']) || part.chars().any(|c| "<>:\"|?*".contains(c))
     {
         return false;
     }
-    let stem = part.split('.').next().unwrap_or_default().trim_end_matches(' ');
+    let stem = part
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ');
     !matches!(stem, "con" | "prn" | "aux" | "nul" | "conin$" | "conout$")
         && !(stem.len() == 4
             && (stem.starts_with("com") || stem.starts_with("lpt"))
@@ -96,10 +105,34 @@ mod tests {
 
     #[test]
     fn windows_path_table() {
-        for path in [r"C:\", r"C:\Terrarium\work\p\a", "d:/src/file.txt", r"\\server\share", r"\\server\share\dir"] {
+        for path in [
+            r"C:\",
+            r"C:\Terrarium\work\p\a",
+            "d:/src/file.txt",
+            r"\\server\share",
+            r"\\server\share\dir",
+        ] {
             assert!(Windows.key(path).is_some(), "{path}");
         }
-        for path in ["C:relative", "/root", r"\root", r"C:\a\..\b", r"C:\a\.\b", r"C:\a\\b", r"C:\CON.txt", r"C:\nul", r"C:\LPT9.log", r"C:\bad.", r"C:\bad ", r"C:\x:stream", r"\\?\C:\x", r"\\.\pipe\x", r"\\server", "C:/x\n", "C:/é"] {
+        for path in [
+            "C:relative",
+            "/root",
+            r"\root",
+            r"C:\a\..\b",
+            r"C:\a\.\b",
+            r"C:\a\\b",
+            r"C:\CON.txt",
+            r"C:\nul",
+            r"C:\LPT9.log",
+            r"C:\bad.",
+            r"C:\bad ",
+            r"C:\x:stream",
+            r"\\?\C:\x",
+            r"\\.\pipe\x",
+            r"\\server",
+            "C:/x\n",
+            "C:/é",
+        ] {
             assert!(Windows.key(path).is_none(), "{path}");
         }
     }
@@ -110,7 +143,12 @@ mod tests {
         assert!(Windows.inside(&root, "c:/TERRARIUM/work/PROJECT/AGENT/src", false));
         assert!(Windows.inside(&root, &root, true));
         assert!(!Windows.inside(&root, &root, false));
-        for path in ["C:/Terrarium/work/project/agent2/src", "D:/Terrarium/work/project/agent/src", "C:/Terrarium/work/project/agent/../other", "C:/Terrarium/work/project/agent/NUL"] {
+        for path in [
+            "C:/Terrarium/work/project/agent2/src",
+            "D:/Terrarium/work/project/agent/src",
+            "C:/Terrarium/work/project/agent/../other",
+            "C:/Terrarium/work/project/agent/NUL",
+        ] {
             assert!(!Windows.inside(&root, path, true));
         }
         assert!(!Posix.inside("/work/p/a", "/work/p/a/../b", true));
