@@ -64,7 +64,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
                     Some(serde_json::json!({"repo":repo,"dry_run":dry_run})),
                 )
                 .await?;
-            ctx.emit(&result, |ctx, v| ctx.line(&v.to_string()))
+            ctx.emit(&result, |ctx, v| ctx.line(v.to_string()))
         }
         Command::Issue {
             command: crate::cli::IssueCmd::Import { number, repo },

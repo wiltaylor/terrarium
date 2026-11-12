@@ -38,7 +38,6 @@ pub async fn close_done(
         Actor::Agent(a)
             if a.project == project && a.roles.contains(&terrarium_core::Role::ProjectAdmin) =>
         {
-            ()
         }
         _ => {
             return Err(ApiError::forbidden(
