@@ -34,7 +34,10 @@ fn source(root: &ProtectedRoot) -> Result<SourceIdentity, Reply> {
     if m.uid() != 0 || !m.is_dir() || m.mode() & 0o077 != 0 {
         return Err(Reply::Unauthorized);
     }
-    Ok(SourceIdentity { device: m.dev(), inode: m.ino() })
+    Ok(SourceIdentity {
+        device: m.dev(),
+        inode: m.ino(),
+    })
 }
 
 fn private_surrounding(record: &MountEvidence) -> Result<(), Reply> {
@@ -54,7 +57,10 @@ fn isolate(root: &mut ProtectedRoot, id: RegistrationId, shared: bool) -> Result
         return Err(Reply::Quarantined);
     }
     let before = kernel::host_view()?;
-    let surrounding = before.iter().find(|m| m.mount_id == old_id).ok_or(Reply::Quarantined)?;
+    let surrounding = before
+        .iter()
+        .find(|m| m.mount_id == old_id)
+        .ok_or(Reply::Quarantined)?;
     private_surrounding(surrounding)?;
     let (expected_root, device) = kernel::root_of(&root.fd, &before)?;
     let tree = mounts::clone_nonrecursive(&root.fd)?;
@@ -67,16 +73,30 @@ fn isolate(root: &mut ProtectedRoot, id: RegistrationId, shared: bool) -> Result
     mounts::LinuxAttributes.scaffold(&root.fd)?;
     let view = kernel::host_view()?;
     let current_id = mount_id(&root.fd)?;
-    let record = view.iter().find(|m| m.mount_id == current_id).ok_or(Reply::Quarantined)?;
+    let record = view
+        .iter()
+        .find(|m| m.mount_id == current_id)
+        .ok_or(Reply::Quarantined)?;
     mountinfo::private_stage(record, &expected_root, &device)?;
     mountinfo::exact_children(&view, record, &[])?;
     if shared {
         mounts::make_shared(&root.fd)?;
         let view = kernel::host_view()?;
-        let record = view.iter().find(|m| m.mount_id == current_id).ok_or(Reply::Quarantined)?;
-        let [group] = record.optional_fields.as_slice() else { return Err(Reply::Quarantined) };
-        if !group.strip_prefix("shared:").is_some_and(|n| n.parse::<u64>().is_ok_and(|id| id > 0))
-            || view.iter().filter(|m| m.optional_fields.contains(group)).count() != 1
+        let record = view
+            .iter()
+            .find(|m| m.mount_id == current_id)
+            .ok_or(Reply::Quarantined)?;
+        let [group] = record.optional_fields.as_slice() else {
+            return Err(Reply::Quarantined);
+        };
+        if !group
+            .strip_prefix("shared:")
+            .is_some_and(|n| n.parse::<u64>().is_ok_and(|id| id > 0))
+            || view
+                .iter()
+                .filter(|m| m.optional_fields.contains(group))
+                .count()
+                != 1
         {
             return Err(Reply::Quarantined);
         }
@@ -105,7 +125,9 @@ pub fn build(store: &Store, mut directories: Directories) -> Result<Mounted, Rep
             (&directories.registration, "registrations"),
         ];
         for (root, parent) in expected {
-            let path = Path::new("/var/lib/terrarium-workspace-helper").join(parent).join(id.0.to_string());
+            let path = Path::new("/var/lib/terrarium-workspace-helper")
+                .join(parent)
+                .join(id.0.to_string());
             if kernel::path(&root.fd)? != path {
                 return Err(Reply::Unauthorized);
             }
@@ -119,7 +141,10 @@ pub fn build(store: &Store, mut directories: Directories) -> Result<Mounted, Rep
             staging: source(&directories.staging)?,
             state: source(&directories.registration)?,
         };
-        Ok(Mounted { directories, evidence })
+        Ok(Mounted {
+            directories,
+            evidence,
+        })
     })();
     if result.is_err() {
         journal.recover_without_evidence();
@@ -151,14 +176,20 @@ mod tests {
         let directories = roots.create_directories(&store).unwrap();
         let pinned = directories.publisher.fd.try_clone().unwrap();
         let before = mount_id(&pinned).unwrap();
-        assert!(matches!(build(&store, directories), Err(Reply::Unauthorized)));
+        assert!(matches!(
+            build(&store, directories),
+            Err(Reply::Unauthorized)
+        ));
         assert_eq!(mount_id(&pinned).unwrap(), before);
         assert!(store.load_bootstrap().unwrap().quarantined());
     }
 
     #[test]
     fn parent_propagation_must_be_private_before_first_attachment() {
-        let namespace = terrarium_core::live_workspace::NamespaceIdentity { device: 1, inode: 2 };
+        let namespace = terrarium_core::live_workspace::NamespaceIdentity {
+            device: 1,
+            inode: 2,
+        };
         for optional in ["shared:9", "master:9", "shared:9 master:8", "unbindable"] {
             let line = format!("1 2 0:1 / / rw {optional} - tmpfs tmpfs rw\n");
             let records = mountinfo::parse(line.as_bytes(), namespace.clone()).unwrap();
