@@ -182,7 +182,7 @@ pub fn clear(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
 /// Authorized presentation. Completion is latched, dependency conditions are live.
 pub fn view(conn: &Connection, actor: &Actor, id: &str) -> ApiResult<serde_json::Value> {
     let card = find_row(conn, id)?;
-    crate::store::threads::read_card_project(conn, actor, &card.project, None)?;
+    crate::store::threads::read_linked_card(conn, actor, &card.project, Some(&card.id))?;
     let Some(wait) = get(conn, &card.id)? else {
         return Ok(json!(null));
     };
@@ -381,43 +381,65 @@ fn act_inner(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiRe
     Ok(true)
 }
 
-/// Calendar scopes are capped at MAX_EVENTS. Read only the two relevant scopes
-/// through the project index, including recurring events and their exceptions.
+/// Read only freezes in the two relevant scopes, including recurrence exceptions.
 fn check_freeze(conn: &Connection, project: &str) -> ApiResult<()> {
     use crate::store::calendar;
     let at = chrono::Utc::now();
-    for scope in [Some(project), None] {
-        let mut stmt = conn.prepare(
-            "SELECT id FROM calendar_events WHERE project IS ?1 ORDER BY start_at, id LIMIT ?2",
-        )?;
-        let ids = stmt
-            .query_map(params![scope, calendar::MAX_EVENTS + 1], |r| {
-                r.get::<_, String>(0)
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        if ids.len() > calendar::MAX_EVENTS {
-            return Err(ApiError::conflict(
-                "calendar freeze check exceeds event limit",
-            ));
-        }
-        for id in ids {
-            let event = calendar::get(conn, &id)?;
-            if event.kind != "freeze" {
-                continue;
-            }
-            let (occurrences, cut) =
-                calendar::expand(&[event], at, at + chrono::Duration::milliseconds(1));
-            if cut
-                || occurrences.iter().any(|o| {
-                    calendar::parse_utc(&o.start).is_some_and(|start| start <= at)
-                        && calendar::parse_utc(&o.end).is_some_and(|end| at < end)
-                })
-            {
-                return Err(ApiError::conflict(format!(
-                    "calendar freeze `{id}` prevents automatic move"
-                )));
-            }
+    for event in calendar::freeze_events(conn, project)? {
+        let id = event.id.clone();
+        let (occurrences, cut) =
+            calendar::expand(&[event], at, at + chrono::Duration::milliseconds(1));
+        if cut
+            || occurrences.iter().any(|o| {
+                calendar::parse_utc(&o.start).is_some_and(|start| start <= at)
+                    && calendar::parse_utc(&o.end).is_some_and(|end| at < end)
+            })
+        {
+            return Err(ApiError::conflict(format!(
+                "calendar freeze `{id}` prevents automatic move"
+            )));
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freeze_check_skips_non_freeze_events_with_bounded_vm_steps() -> anyhow::Result<()> {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        };
+        let mut conn = Connection::open_in_memory()?;
+        crate::db::migrate(&mut conn)?;
+        conn.execute(
+            "INSERT INTO projects(name,description,created_at,updated_at) VALUES ('p','','a','a')",
+            [],
+        )?;
+        for n in 0..1000 {
+            conn.execute("INSERT INTO calendar_events(id,project,title,kind,start_at,end_at,created_by,updated_by,created_at,updated_at)
+                VALUES (?1,?2,'noise','task','2026-01-01T00:00:00Z','2026-01-02T00:00:00Z','operator','operator','a','a')",
+                params![format!("noise-{n}"), if n % 2 == 0 {Some("p")} else {None}])?;
+        }
+        let steps = Arc::new(AtomicU64::new(0));
+        let counter = steps.clone();
+        conn.progress_handler(
+            100,
+            Some(move || {
+                counter.fetch_add(100, Ordering::Relaxed);
+                false
+            }),
+        );
+        check_freeze(&conn, "p")?;
+        conn.progress_handler(0, None::<fn() -> bool>);
+        assert!(
+            steps.load(Ordering::Relaxed) < 1000,
+            "{} VM steps",
+            steps.load(Ordering::Relaxed)
+        );
+        Ok(())
+    }
 }

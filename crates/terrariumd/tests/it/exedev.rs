@@ -448,11 +448,72 @@ async fn workspace_sync_roundtrip(work_root: bool) {
     let session = response.ok()["session_id"].as_str().unwrap();
     let (stdout, end) = output(&td, "sync", session).await;
     assert_eq!(end["code"], 0, "{end}");
-    assert_eq!(stdout.trim(), base.join("p/worker/repo").to_str().unwrap());
+    assert_eq!(
+        stdout.trim(),
+        base.join("p/worker/workspace/repo").to_str().unwrap()
+    );
     assert_eq!(
         std::fs::read_to_string(local.join("repo/output")).unwrap(),
         "source"
     );
+    if work_root {
+        // Turn the holder into a bound card worker. Its first exec must not
+        // adopt the directory made by the earlier non-card sync.
+        let owned = base.join("p/worker");
+        db(&td)
+            .execute(
+                "INSERT INTO spawns (id, owner, owner_name, project, name, template, harness, task,
+             spawned_by, spawned_at, deadline_at, bound_kind, bound_id)
+             VALUES (?1, 'operator', 'operator', 'p', 'worker', 'worker', 'claude', 'test',
+             'operator', '2026-01-01', '2099-01-01', 'card', 'TER-918')",
+                [id],
+            )
+            .unwrap();
+        let actor = terrariumd::actor::Actor::Agent(terrariumd::actor::AgentActor {
+            id: id.into(),
+            name: "worker".into(),
+            project: "p".into(),
+            roles: vec![terrarium_core::Role::Sysadmin],
+            policy: terrarium_core::config::Policy {
+                targets: vec!["sync".into()],
+                ..Default::default()
+            },
+        });
+        let command = || terrariumd::executor::RemoteCmd {
+            argv: vec!["sh".into(), "-c".into(), "cat input; pwd".into()],
+            cwd: Some(local.join("repo").display().to_string()),
+            ..Default::default()
+        };
+        let error = terrariumd::executor::start_exec(&state(&td), &actor, "sync", command())
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error.message.contains("cannot prepare owned target root"),
+            "{error:?}"
+        );
+        assert!(!owned.join(".terrarium-owner").exists());
+        std::fs::remove_dir_all(&owned).unwrap();
+        for run in [false, false, true] {
+            let session = if run {
+                terrariumd::executor::start_run_exec(&state(&td), &actor, "sync", command(), vec![])
+                    .await
+            } else {
+                terrariumd::executor::start_exec(&state(&td), &actor, "sync", command()).await
+            }
+            .unwrap();
+            let (stdout, end) = output(&td, "sync", &session.id).await;
+            assert_eq!(end["code"], 0, "{end}: {stdout}");
+            assert!(stdout.contains("source"), "{stdout}");
+            assert!(owned.join(".terrarium-owner").is_file());
+            assert!(owned.join("workspace/repo/input").is_file());
+        }
+        db(&td)
+            .execute("DELETE FROM agents WHERE id=?1", [id])
+            .unwrap();
+        terrariumd::target_roots::sweep(&state(&td)).await.unwrap();
+        assert!(!owned.exists());
+    }
 }
 
 #[tokio::test]
