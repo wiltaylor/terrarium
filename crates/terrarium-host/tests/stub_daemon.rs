@@ -143,6 +143,8 @@ async fn release_key_host_refuses_bundle(case: &str) {
             token: None,
             metrics: false,
             update: Some(terrarium_host::protocol::UpdateOffer {
+                os: Some("linux".into()),
+                arch: Some("x86_64".into()),
                 version: terrarium_version::FULL.into(),
                 path: "/install/terrarium-host?arch=x86_64".into(),
                 sha256: terrarium_host::transfer::sha256_hex(&asset),
