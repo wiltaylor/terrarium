@@ -705,7 +705,39 @@ impl DeviceNodes for HostDevices {
     }
 }
 
-/// Parse `nvidia-smi --query-gpu=uuid,minor_number --format=csv,noheader,nounits`.
+/// Parse the UUID and Minor Number fields in `nvidia-smi -q` GPU sections.
+/// Never infer a device minor from the display index.
+pub fn parse_gpu_details(text: &str) -> Result<Vec<(String, u32)>, String> {
+    let mut rows = String::new();
+    let mut gpu = false;
+    let mut uuid = None;
+    let mut minor = None;
+    for line in text.lines().chain(std::iter::once("GPU end")) {
+        if line.starts_with("GPU ") {
+            if gpu {
+                let uuid = uuid.take().ok_or("GPU UUID missing")?;
+                let minor = minor.take().ok_or("GPU Minor Number missing")?;
+                rows.push_str(&format!("{uuid},{minor}\n"));
+            }
+            gpu = true;
+        } else if gpu && let Some((key, value)) = line.trim().split_once(':') {
+            let field = match key.trim() {
+                "GPU UUID" => &mut uuid,
+                "Minor Number" => &mut minor,
+                _ => continue,
+            };
+            if field.replace(value.trim()).is_some() {
+                return Err(format!("duplicate GPU field {key}"));
+            }
+        }
+    }
+    if rows.is_empty() {
+        return Err("GPU inventory missing".into());
+    }
+    parse_minors(&rows)
+}
+
+/// Validate UUID/minor pairs extracted from the GPU inventory.
 pub fn parse_minors(text: &str) -> Result<Vec<(String, u32)>, String> {
     let mut out: Vec<(String, u32)> = Vec::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
@@ -1494,16 +1526,10 @@ impl Helper {
     }
 
     async fn inventory(&self) -> Result<Vec<(String, u32)>, Refusal> {
-        let text = call(
-            &self.nvidia_smi,
-            &[
-                "--query-gpu=uuid,minor_number".to_owned(),
-                "--format=csv,noheader,nounits".to_owned(),
-            ],
-        )
-        .await
-        .map_err(|e| Refusal::new(ErrorKind::Unsupported, e))?;
-        parse_minors(&text).map_err(|e| Refusal::new(ErrorKind::Unsupported, e))
+        let text = call(&self.nvidia_smi, &["-q".to_owned()])
+            .await
+            .map_err(|e| Refusal::new(ErrorKind::Unsupported, e))?;
+        parse_gpu_details(&text).map_err(|e| Refusal::new(ErrorKind::Unsupported, e))
     }
 
     fn kill_unit(&self, unit: &str, signal: i32) -> BoxFuture<'static, ()> {

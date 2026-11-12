@@ -123,7 +123,11 @@ impl Fake {
         );
         script(
             &d.join("nvidia-smi"),
-            &format!("printf '{A}, 0\\n{B}, 1\\n'\n"),
+            &format!(
+                "case \"$*\" in *minor_number*) exit 2 ;; esac\n\
+                 [ \"$*\" = -q ] || exit 2\n\
+                 printf 'GPU 00000000:01:00.0\\n    GPU UUID : {A}\\n    Minor Number : 0\\nGPU 00000000:02:00.0\\n    GPU UUID : {B}\\n    Minor Number : 1\\n'\n"
+            ),
         );
         std::fs::create_dir(d.join("sessions")).unwrap();
         // A fake cgroup v2 tree: `cgroup` names a unit cgroup under it.
@@ -1108,4 +1112,22 @@ async fn the_shim_relays_the_terminal_size_after_sigwinch() {
     assert!(found, "{:?}", String::from_utf8_lossy(&out));
     assert!(f.log("run.log").lines().any(|l| l == "--pty"));
     let _ = tokio::task::spawn_blocking(move || child.wait()).await;
+}
+#[test]
+fn gpu_details_fail_closed() {
+    use terrarium_host::native::parse_gpu_details;
+    let details = format!("GPU bus\n GPU UUID : {A}\n Minor Number : 7\n");
+    assert_eq!(parse_gpu_details(&details).unwrap(), vec![(A.into(), 7)]);
+    for bad in [
+        String::new(),
+        format!("GPU bus\n GPU UUID : {A}\n"),
+        "GPU bus\n Minor Number : 0\n".into(),
+        details.replace(": 7", ": N/A"),
+        details.replace(": 7", ": 255"),
+        format!("{details} Minor Number : 8\n"),
+        format!("{details}{details}"),
+        format!("{details}GPU other\n GPU UUID : {B}\n Minor Number : 7\n"),
+    ] {
+        assert!(parse_gpu_details(&bad).is_err(), "accepted {bad:?}");
+    }
 }
