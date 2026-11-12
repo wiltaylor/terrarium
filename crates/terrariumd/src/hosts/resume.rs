@@ -19,11 +19,12 @@ fn journal_error(error: rusqlite::Error) -> ApiError {
     }
 }
 
-/// Shares the daemon writer. Never waits for its mutex while a registry
-/// caller may hold its own lock: contention returns ResourceBusy for retry.
+/// Shares the daemon writer. Registry users never wait for its mutex:
+/// contention returns ResourceBusy for retry outside their own lock.
 pub struct Journal {
     state_dir: PathBuf,
     db: crate::db::Db,
+    wait: bool,
 }
 
 impl Journal {
@@ -31,13 +32,20 @@ impl Journal {
         Self {
             state_dir: state_dir.to_owned(),
             db,
+            wait: true,
         }
+    }
+
+    /// Only registry callers require fail-fast locking. Other synchronous
+    /// users may queue behind normal writes, as they do for Db::read_now.
+    pub(crate) fn for_registry(state_dir: &Path, db: crate::db::Db) -> Self {
+        Self { wait: false, ..Self::with_db(state_dir, db) }
     }
 
     pub fn load<T: DeserializeOwned>(&self, id: &str) -> ApiResult<Option<T>> {
         // The writer lock also serializes us with key rotation. Finish a
         // committed rotation before reading the current key from disk.
-        let (key, sealed) = self.db.journal_now(|conn| {
+        let (key, sealed) = self.db.journal_now(self.wait, |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             crate::secrets::migrate::finish_rotation(&tx, &self.state_dir)
                 .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;
@@ -94,7 +102,7 @@ impl Journal {
                 Ok((id, zeroize::Zeroizing::new(plain)))
             })
             .collect::<ApiResult<Vec<_>>>()?;
-        self.db.journal_now(|conn| {
+        self.db.journal_now(self.wait, |conn| {
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(journal_error)?;
@@ -133,7 +141,7 @@ impl Journal {
         loop {
             // Capture the key and one sealed page under the rotation lock,
             // then release the writer before decrypting or decoding anything.
-            let (key, rows) = self.db.journal_now(|conn| {
+            let (key, rows) = self.db.journal_now(self.wait, |conn| {
                 let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 crate::secrets::migrate::finish_rotation(&tx, &self.state_dir)
                     .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;

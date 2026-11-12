@@ -81,6 +81,26 @@ const JOURNAL_RETRY_DEADLINE: Duration = Duration::from_secs(30);
 const JOURNAL_RETRY_EVENTS: usize = 64;
 const JOURNAL_RETRY_BYTES: usize = 4 * 1024 * 1024;
 
+// Metadata calls do not have a host event to retain. Retry the whole
+// operation after its registry guard has gone, never sleeping under it.
+fn retry_metadata<T, E>(mut operation: impl FnMut() -> Result<T, E>, busy: impl Fn(&E) -> bool) -> Result<T, E> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        match operation() {
+            Err(error) if busy(&error) && Instant::now() < deadline => {
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn retry_metadata_api<T>(operation: impl FnMut() -> crate::error::ApiResult<T>) -> crate::error::ApiResult<T> {
+    retry_metadata(operation, |error| error.code == Code::ResourceBusy)
+}
+
 struct PendingJournal {
     events: VecDeque<SessionEvent>,
     bytes: usize,
@@ -180,6 +200,8 @@ pub enum HostError {
     Busy(String, u32),
     #[error("cannot persist host session state")]
     Persistence,
+    #[error("host journal writer is busy")]
+    JournalBusy,
 }
 
 impl From<HostError> for ApiError {
@@ -188,6 +210,7 @@ impl From<HostError> for ApiError {
             HostError::Offline(_) => ApiError::conflict(e.to_string()),
             HostError::Busy(..) => ApiError::new(Code::RateLimited, e.to_string()),
             HostError::Persistence => ApiError::internal(e.to_string()),
+            HostError::JournalBusy => ApiError::new(Code::ResourceBusy, e.to_string()),
         }
     }
 }
@@ -389,7 +412,7 @@ impl HostRegistry {
         state_dir: &std::path::Path,
         db: crate::db::Db,
     ) -> crate::error::ApiResult<()> {
-        self.restore_journal(resume::Journal::with_db(state_dir, db))
+        self.restore_journal(resume::Journal::for_registry(state_dir, db))
     }
 
     fn restore_journal(&self, journal: resume::Journal) -> crate::error::ApiResult<()> {
@@ -522,6 +545,10 @@ impl HostRegistry {
 
     /// Forget an explicitly closed or expired exec and its replay together.
     pub fn forget_exec(&self, id: &str) -> crate::error::ApiResult<()> {
+        retry_metadata_api(|| self.try_forget_exec(id))
+    }
+
+    fn try_forget_exec(&self, id: &str) -> crate::error::ApiResult<()> {
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
@@ -572,6 +599,10 @@ impl HostRegistry {
 
     /// Discard checkpoints only after the queue stored the job's final result.
     pub fn forget_job(&self, job: &str) -> crate::error::ApiResult<()> {
+        retry_metadata_api(|| self.try_forget_job(job))
+    }
+
+    fn try_forget_job(&self, job: &str) -> crate::error::ApiResult<()> {
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
@@ -685,6 +716,10 @@ impl HostRegistry {
     /// Finished helper sessions have no durable owner. Keep a five-minute
     /// grace for a fast exec to acquire its owner before removing replay.
     fn prune_unowned(&self, before: i64) -> crate::error::ApiResult<()> {
+        retry_metadata_api(|| self.try_prune_unowned(before))
+    }
+
+    fn try_prune_unowned(&self, before: i64) -> crate::error::ApiResult<()> {
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
@@ -756,6 +791,10 @@ impl HostRegistry {
     }
 
     pub fn save_exec(&self, id: &str, value: &impl Serialize) -> crate::error::ApiResult<()> {
+        retry_metadata_api(|| self.try_save_exec(id, value))
+    }
+
+    fn try_save_exec(&self, id: &str, value: &impl Serialize) -> crate::error::ApiResult<()> {
         let _entries = self.lock();
         if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
             return Err(ApiError::internal("host registry is stopping"));
@@ -919,6 +958,16 @@ impl HostRegistry {
         binding: Option<&str>,
         make: impl FnOnce(SessionId) -> DaemonFrame,
     ) -> Result<HostSession, HostError> {
+        let mut make = Some(make);
+        retry_metadata(|| self.try_open_bound(host, binding, &mut make), |error| matches!(error, HostError::JournalBusy))
+    }
+
+    fn try_open_bound(
+        self: &Arc<Self>,
+        host: &str,
+        binding: Option<&str>,
+        make: &mut Option<impl FnOnce(SessionId) -> DaemonFrame>,
+    ) -> Result<HostSession, HostError> {
         let mut g = self.lock();
         let e = g
             .get_mut(host)
@@ -949,13 +998,11 @@ impl HostRegistry {
                 restored: None,
             },
         );
-        if self
-            .persist_bound(host, e, None, binding.map(|key| (key, id)))
-            .is_err()
-        {
+        if let Err(error) = self.persist_bound(host, e, None, binding.map(|key| (key, id))) {
             e.sessions.remove(&id);
-            return Err(HostError::Persistence);
+            return Err(if error.code == Code::ResourceBusy { HostError::JournalBusy } else { HostError::Persistence });
         }
+        let Some(make) = make.take() else { return Err(HostError::Persistence) };
         if let Some(c) = &e.conn {
             let _ = c.tx.send(Outgoing::frame(make(id)));
         }
@@ -973,6 +1020,15 @@ impl HostRegistry {
     /// The host sent `hello` on a new link. Returns the `welcome`, the link
     /// it replaces, and how many sessions it resumes.
     fn attach(
+        &self,
+        row: &Host,
+        hello: &Hello,
+        conn: Conn,
+    ) -> crate::error::ApiResult<(Welcome, Option<Conn>, usize, u64)> {
+        retry_metadata_api(|| self.try_attach(row, hello, conn.clone()))
+    }
+
+    fn try_attach(
         &self,
         row: &Host,
         hello: &Hello,

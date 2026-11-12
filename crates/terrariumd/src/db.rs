@@ -2642,9 +2642,15 @@ impl Db {
     /// uncommitted events and retry ResourceBusy outside both locks.
     pub(crate) fn journal_now<T>(
         &self,
+        wait: bool,
         f: impl FnOnce(&mut Connection) -> ApiResult<T>,
     ) -> ApiResult<T> {
-        let mut guard = match self.conn.try_lock() {
+        let mut guard = if wait {
+            match self.conn.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            }
+        } else { match self.conn.try_lock() {
             Ok(g) => g,
             Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => {
@@ -2653,7 +2659,7 @@ impl Db {
                     "host journal writer is busy",
                 ));
             }
-        };
+        }};
         // Journal ACKs promise durable output, including across power loss.
         guard.pragma_update(None, "synchronous", "FULL")?;
         f(&mut guard)
