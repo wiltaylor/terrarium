@@ -1058,27 +1058,65 @@ async fn owned_target_root_first_exec_with_explicit_cwd() {
     lab.td.project("terra").await;
     let base = lab.bins.path().join("first-exec");
     lab.target(json!({"name": "terra-box", "kind": "host", "host": "lab1",
-        "project": "terra", "work_root": base})).await;
-    let owner = lab.td.agent("terra", "lead", json!({"roles": ["project_admin"],
+        "project": "terra", "work_root": base}))
+        .await;
+    let owner = lab
+        .td
+        .agent(
+            "terra",
+            "lead",
+            json!({"roles": ["project_admin"],
         "policy": {"targets": ["terra-box"], "spawn": {"templates": ["project:*"],
-        "max_concurrent": 1, "max_lifetime": "5m", "bound": true}}})).await;
-    lab.td.post("/api/templates", json!({"name": "builder", "project": "terra",
-        "spec": {"harness": "claude", "policy": {"targets": ["terra-box"]}}})).await.ok();
-    let card = lab.td.post("/api/projects/terra/cards",
-        json!({"title": "Build", "column": "in_progress"})).await.ok().clone();
+        "max_concurrent": 1, "max_lifetime": "5m", "bound": true}}}),
+        )
+        .await;
+    lab.td
+        .post(
+            "/api/templates",
+            json!({"name": "builder", "project": "terra",
+        "spec": {"harness": "claude", "policy": {"targets": ["terra-box"]}}}),
+        )
+        .await
+        .ok();
+    let card = lab
+        .td
+        .post(
+            "/api/projects/terra/cards",
+            json!({"title": "Build", "column": "in_progress"}),
+        )
+        .await
+        .ok()
+        .clone();
     let owner_id = owner["id"].as_str().unwrap();
-    let worker = lab.td.post_as(owner_id, &format!("/api/agents/{owner_id}/spawn"),
-        json!({"template": "builder", "task": "Build",
-        "bind": format!("card:{}", card["id"].as_str().unwrap())})).await.ok().clone();
+    let worker = lab
+        .td
+        .post_as(
+            owner_id,
+            &format!("/api/agents/{owner_id}/spawn"),
+            json!({"template": "builder", "task": "Build",
+        "bind": format!("card:{}", card["id"].as_str().unwrap())}),
+        )
+        .await
+        .ok()
+        .clone();
     let id = worker["id"].as_str().unwrap();
     let root = base.join("terra").join(worker["name"].as_str().unwrap());
     assert!(!root.exists());
     // No warm-up exec or checkout may prepare the root before this request.
-    let r = lab.td.post_as(id, "/api/targets/terra-box/exec",
-        json!({"cmd": ["pwd"], "cwd": root})).await;
+    let r = lab
+        .td
+        .post_as(
+            id,
+            "/api/targets/terra-box/exec",
+            json!({"cmd": ["pwd"], "cwd": root}),
+        )
+        .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let out = drain(&lab.td, "terra-box", r.body["session_id"].as_str().unwrap()).await;
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), root.to_str().unwrap());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        root.to_str().unwrap()
+    );
     assert!(root.join(".terrarium-owner").is_file());
 }
 
