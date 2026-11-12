@@ -24,6 +24,15 @@ const HOST_COLS: &[(&str, &str)] = &[
     ("AT", "updated_at"),
 ];
 
+/// Removes an incomplete download on every error path, including cancellation.
+struct ReleaseDownload(std::path::PathBuf);
+
+impl Drop for ReleaseDownload {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 pub async fn admin_job(ctx: &Ctx, cmd: &crate::cli::AdminJobCmd) -> anyhow::Result<()> {
     match cmd {
         crate::cli::AdminJobCmd::LegacyLogs {
@@ -118,7 +127,15 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or(std::path::Path::new("."));
-            let mut file = tempfile::NamedTempFile::new_in(parent)?;
+            let staged = ReleaseDownload(parent.join(format!(".terrarium-release-{}", ulid::Ulid::new())));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&staged.0)?;
             let mut offset = 0;
             let mut digest = Sha256::new();
             while offset < size {
@@ -153,8 +170,11 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
                     == hash,
                 "release artifact SHA-256 mismatch"
             );
-            file.as_file().sync_all()?;
-            file.persist_noclobber(destination)?;
+            file.sync_all()?;
+            drop(file);
+            // Hard linking in the same directory atomically publishes without
+            // replacing an existing destination, unlike rename on Unix.
+            std::fs::hard_link(&staged.0, destination)?;
             ctx.emit(
                 &json!({"path":destination,"size":size,"sha256":hash}),
                 print_object,
