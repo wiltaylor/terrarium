@@ -310,7 +310,12 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
     // Agent commands use checkout Git configuration. Do not inherit the
     // host agent's own commit identity over that repo-local configuration.
     if plan.env.contains_key("TERRARIUM_GIT_TRAILERS") {
-        for key in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] {
+        for key in [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ] {
             cmd.env_remove(key);
         }
     }
@@ -506,7 +511,12 @@ fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
     let mut cmd = CommandBuilder::new(&plan.program);
     cmd.args(&plan.args);
     if plan.env.contains_key("TERRARIUM_GIT_TRAILERS") {
-        for key in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] {
+        for key in [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ] {
             cmd.env_remove(key);
         }
     }
