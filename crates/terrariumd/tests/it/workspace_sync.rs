@@ -94,6 +94,10 @@ impl Ssh {
             copy_binary(&jail, binary);
         }
         copy_python(&jail);
+        let probe = std::process::Command::new("chroot").arg(&jail)
+            .args(["/usr/bin/python3", "-S", "-c", "import os, stat, sys; assert hasattr(os, 'O_NOFOLLOW')"])
+            .output().unwrap();
+        assert!(probe.status.success(), "fixture Python bootstrap: {}", String::from_utf8_lossy(&probe.stderr));
         std::fs::rename(jail.join("usr/bin/rsync"), jail.join("usr/bin/rsync-real")).unwrap();
         std::fs::write(
             jail.join("usr/bin/rsync"),

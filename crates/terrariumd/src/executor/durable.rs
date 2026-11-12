@@ -446,6 +446,7 @@ pub(super) fn start(
                 },
                 ev = raw.events.recv() => match ev {
                     Some(Ev::Started) => { let _ = tx.send(Ev::Started).await; }
+                    Some(Ev::Data(Stream::Stderr, bytes)) => { let _ = tx.send(Ev::Data(Stream::Stderr, bytes)).await; }
                     Some(Ev::Data(Stream::Stdout, bytes)) => {
                         pending.extend(bytes);
                         while let Some(end) = pending.iter().position(|b| *b == b'\n') {
@@ -490,9 +491,7 @@ fn script(path: &str, cmd: &RemoteCmd, created: i64) -> String {
 
 #[cfg(test)]
 fn script_with_retention(path: &str, cmd: &RemoteCmd, created: i64, retain: u64) -> String {
-    let (root, _) = path
-        .rsplit_once("/.terrarium-runs/")
-        .unwrap_or((path, ""));
+    let (root, _) = path.rsplit_once("/.terrarium-runs/").unwrap_or((path, ""));
     script_for_spool(
         path,
         cmd,

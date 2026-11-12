@@ -3177,6 +3177,14 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
         .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
         .count();
     assert_eq!(spool_count, 1, "remote claim count after reboot");
+    // Job finalization publishes the terminal state before its after_end
+    // continuation queues the intentional retry. Do not confuse that brief
+    // idle interval with the retry having finished.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while lab.jobs().await.len() < 2 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.unwrap();
     let jobs = lab.until_idle().await;
     let ended = jobs.iter().find(|j| j["id"] == jid).unwrap();
     assert_eq!(ended["exit_code"], 7, "{ended}");
