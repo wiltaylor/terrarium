@@ -823,8 +823,9 @@ impl Updater {
             replace.await
         };
         if let Some((end, _, recovery)) = deadlines
-            && let Err(e) = self.end_helper(&mut replacement.helper, recovery).await {
-                return Err(self.stop_recreate(&cur, &backup, end, e).await);
+            && let Err(e) = self.end_helper(&mut replacement.helper, recovery).await
+        {
+            return Err(self.stop_recreate(&cur, &backup, end, e).await);
         }
         match replaced {
             Ok(()) => {
@@ -907,7 +908,11 @@ impl Updater {
         // helper's ID, and callers must verify its termination before restart.
         *helper = Some(id.clone());
         let idx = self.begin_step("offline-helper");
-        self.end_step(idx, StepState::Ok, format!("recorded helper {id} before start; termination must be verified"));
+        self.end_step(
+            idx,
+            StepState::Ok,
+            format!("recorded helper {id} before start; termination must be verified"),
+        );
         self.engine.run_prepared_once(&id).await
     }
 

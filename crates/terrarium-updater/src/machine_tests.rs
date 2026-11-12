@@ -437,7 +437,8 @@ impl Engine for Fake {
     fn remove_once<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
         Box::pin(async move {
             if self.call(format!("helper-remove {id}"))
-                || self.0.lock().unwrap().helper_remove_fail.as_deref() == Some(id) {
+                || self.0.lock().unwrap().helper_remove_fail.as_deref() == Some(id)
+            {
                 return Err("helper termination unverified".into());
             }
             self.0.lock().unwrap().helpers.remove(id);
@@ -1435,27 +1436,52 @@ async fn supervised_recreate_local_resume_timeout_never_commits_or_rewinds() {
             let updater = Arc::get_mut(&mut r.updater).unwrap();
             updater.cfg.health_poll = Duration::from_millis(100);
             updater.hot_budget = (
-                Duration::from_secs(100), Duration::from_secs(35), Duration::from_secs(5));
+                Duration::from_secs(100),
+                Duration::from_secs(35),
+                Duration::from_secs(5),
+            );
             {
                 let mut s = r.fake.0.lock().unwrap();
                 s.supervised = true;
                 // Resume commands succeed, but status never proves admission.
                 s.resume_status = Some(r#"{"drain":{"on":true,"jobs_drain":{}}}"#.into());
             }
-            if recovering { r.fake.fail(&format!("health:{}", new_ref())); }
-            let run = tokio::time::timeout(Duration::from_secs(45),
-                r.updater.run_now(RunKind::Update, "latest", "operator")).await.unwrap();
-            assert_eq!(run.outcome, Outcome::RecoveryFailed, "{recovering}: {run:#?}");
+            if recovering {
+                r.fake.fail(&format!("health:{}", new_ref()));
+            }
+            let run = tokio::time::timeout(
+                Duration::from_secs(45),
+                r.updater.run_now(RunKind::Update, "latest", "operator"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                run.outcome,
+                Outcome::RecoveryFailed,
+                "{recovering}: {run:#?}"
+            );
             let calls = r.fake.calls();
-            let restored = calls.iter().filter(|c| *c == "hot:restore-database").count();
+            let restored = calls
+                .iter()
+                .filter(|c| *c == "hot:restore-database")
+                .count();
             assert_eq!(restored, usize::from(recovering));
             assert!(!calls.iter().any(|c| c == "hot:commit"));
             assert!(calls.last().unwrap().starts_with("stop-for-recovery "));
-            assert!(run.steps.iter().any(|s| s.name == "resume" && s.state == StepState::Failed));
-            assert!(!run.error.unwrap().contains("hold safety deadline"), "must exhaust the local 30-second timeout before switch expiry");
+            assert!(
+                run.steps
+                    .iter()
+                    .any(|s| s.name == "resume" && s.state == StepState::Failed)
+            );
+            assert!(
+                !run.error.unwrap().contains("hold safety deadline"),
+                "must exhaust the local 30-second timeout before switch expiry"
+            );
         });
     }
-    while let Some(result) = cases.join_next().await { result.unwrap(); }
+    while let Some(result) = cases.join_next().await {
+        result.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1465,39 +1491,77 @@ async fn supervised_explicit_rollback_verifies_pending_restore_helper_before_rec
         cases.spawn(async move {
             let mut r = rig();
             Arc::get_mut(&mut r.updater).unwrap().hot_budget = (
-                Duration::from_secs(30), Duration::from_secs(12), Duration::from_secs(2));
-            r.store.set_previous(&Previous { image: old_image(),
-                spec: Some(serde_json::json!({"Name":"/terrarium"})),
-                backup: Some("/state/backups/previous.zip".into()) }).unwrap();
+                Duration::from_secs(30),
+                Duration::from_secs(12),
+                Duration::from_secs(2),
+            );
+            r.store
+                .set_previous(&Previous {
+                    image: old_image(),
+                    spec: Some(serde_json::json!({"Name":"/terrarium"})),
+                    backup: Some("/state/backups/previous.zip".into()),
+                })
+                .unwrap();
             {
                 let mut s = r.fake.0.lock().unwrap();
                 s.supervised = true;
                 s.pending_once = Some("restore".into());
                 s.helper_remove_fail = (!verified).then(|| "helper2".into());
             }
-            let run = tokio::time::timeout(Duration::from_secs(31),
-                r.updater.run_now(RunKind::Rollback, "previous", "operator")).await.unwrap();
+            let run = tokio::time::timeout(
+                Duration::from_secs(31),
+                r.updater.run_now(RunKind::Rollback, "previous", "operator"),
+            )
+            .await
+            .unwrap();
             let calls = r.fake.calls();
             assert!(calls.iter().any(|c| c == "pending-restore"));
             assert!(calls.iter().any(|c| c == "helper-remove helper2"));
-            let created = calls.iter().position(|c| c == "helper-created helper2").unwrap();
-            let started = calls.iter().position(|c| c == "helper-start helper2").unwrap();
+            let created = calls
+                .iter()
+                .position(|c| c == "helper-created helper2")
+                .unwrap();
+            let started = calls
+                .iter()
+                .position(|c| c == "helper-start helper2")
+                .unwrap();
             assert!(created < started);
-            assert!(run.steps.iter().any(|s| s.detail.contains("recorded helper helper2 before start")));
+            assert!(
+                run.steps
+                    .iter()
+                    .any(|s| s.detail.contains("recorded helper helper2 before start"))
+            );
             if verified {
                 assert_eq!(run.outcome, Outcome::RolledBack, "{run:#?}");
-                let gone = calls.iter().position(|c| c == "helper-gone helper2").unwrap();
-                assert!(gone < calls.iter().position(|c| c == "hot:restore-database").unwrap());
-                assert!(gone < calls.iter().position(|c| c == &format!("create:{OLD} new")).unwrap());
+                let gone = calls
+                    .iter()
+                    .position(|c| c == "helper-gone helper2")
+                    .unwrap();
+                assert!(
+                    gone < calls
+                        .iter()
+                        .position(|c| c == "hot:restore-database")
+                        .unwrap()
+                );
+                assert!(
+                    gone < calls
+                        .iter()
+                        .position(|c| c == &format!("create:{OLD} new"))
+                        .unwrap()
+                );
                 assert!(r.fake.0.lock().unwrap().helpers.is_empty());
             } else {
                 assert_eq!(run.outcome, Outcome::RecoveryFailed, "{run:#?}");
-                assert!(!calls.iter().any(|c| c == "hot:restore-database" || c.starts_with("create:") || c == "hot:commit"));
+                assert!(!calls.iter().any(|c| c == "hot:restore-database"
+                    || c.starts_with("create:")
+                    || c == "hot:commit"));
                 assert!(calls.last().unwrap().starts_with("stop-for-recovery "));
             }
         });
     }
-    while let Some(result) = cases.join_next().await { result.unwrap(); }
+    while let Some(result) = cases.join_next().await {
+        result.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1509,7 +1573,10 @@ async fn hot_rollback_unverified_restore_helper_never_restarts_old_release() {
         s.helper_remove_fail = Some("helper2".into());
     }
     r.fake.fail(&format!("health:{}", new_ref()));
-    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
     assert_eq!(run.outcome, Outcome::RecoveryFailed, "{run:#?}");
     let calls = r.fake.calls();
     assert!(calls.iter().any(|c| c == "helper-remove helper2"));

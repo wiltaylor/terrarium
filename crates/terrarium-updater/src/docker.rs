@@ -1488,17 +1488,32 @@ mod tests {
             let socket = dir.path().join("docker.sock");
             let listener = tokio::net::UnixListener::bind(&socket).unwrap();
             let server = tokio::spawn(async move {
-                for expected in ["DELETE /containers/owned-helper?force=1 HTTP/1.1", "GET /containers/owned-helper/json HTTP/1.1"] {
+                for expected in [
+                    "DELETE /containers/owned-helper?force=1 HTTP/1.1",
+                    "GET /containers/owned-helper/json HTTP/1.1",
+                ] {
                     let (mut stream, _) = listener.accept().await.unwrap();
                     let mut header = Vec::new();
-                    while !header.ends_with(b"\r\n\r\n") { header.push(stream.read_u8().await.unwrap()); }
+                    while !header.ends_with(b"\r\n\r\n") {
+                        header.push(stream.read_u8().await.unwrap());
+                    }
                     assert!(String::from_utf8(header).unwrap().starts_with(expected));
-                    let status = if expected.starts_with("DELETE") { 204 } else { inspect_status };
+                    let status = if expected.starts_with("DELETE") {
+                        204
+                    } else {
+                        inspect_status
+                    };
                     stream.write_all(format!("HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
                 }
             });
-            let docker = Docker { socket, target: None };
-            let result = tokio::time::timeout(Duration::from_secs(5), docker.remove_once("owned-helper")).await.unwrap();
+            let docker = Docker {
+                socket,
+                target: None,
+            };
+            let result =
+                tokio::time::timeout(Duration::from_secs(5), docker.remove_once("owned-helper"))
+                    .await
+                    .unwrap();
             assert_eq!(result.is_ok(), inspect_status == 404);
             server.await.unwrap();
         }
