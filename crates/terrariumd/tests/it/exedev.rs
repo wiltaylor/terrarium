@@ -341,18 +341,60 @@ async fn durable_exedev_recreated_vm_is_not_contacted() {
     def["work_root"] = json!(root);
     td.post("/api/targets", def).await.ok();
     td.post_empty("/api/targets/replacement-ex/up").await.ok();
-    let opened = td.post("/api/targets/replacement-ex/exec", json!({"durable":true,"cmd":["sh","-c","echo retained; exit 19"]})).await;
+    let opened = td
+        .post(
+            "/api/targets/replacement-ex/exec",
+            json!({"durable":true,"cmd":["sh","-c","echo retained; exit 19"]}),
+        )
+        .await;
     let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
     assert_eq!(output(&td, "replacement-ex", &sid).await.1["code"], 19);
     td.daemon.take().unwrap().shutdown_and_wait().await;
     let before = std::fs::read_to_string(&ssh_log).unwrap();
     // Same target definition and SSH destination, but a different VM incarnation.
-    db(&td).execute("UPDATE exedev_vms SET name=name || '-replacement' WHERE target='replacement-ex'", []).unwrap();
+    db(&td)
+        .execute(
+            "UPDATE exedev_vms SET name=name || '-replacement' WHERE target='replacement-ex'",
+            [],
+        )
+        .unwrap();
     reboot(&mut td, &url, &ssh).await;
     let (_, end) = output(&td, "replacement-ex", &sid).await;
     assert_eq!(end["code"], "interrupted", "{end}");
-    assert!(end["message"].as_str().unwrap().contains("target changed"), "{end}");
+    assert!(
+        end["message"].as_str().unwrap().contains("target changed"),
+        "{end}"
+    );
     assert_eq!(std::fs::read_to_string(&ssh_log).unwrap(), before);
+}
+
+#[tokio::test]
+async fn durable_startup_failures_end_promptly_with_reason() {
+    let (td, _fake, _, _, _) = daemon().await;
+    let tools = td.dir.path().join("limited-tools");
+    std::fs::create_dir(&tools).unwrap();
+    // Keep every prerequisite except mkfifo. No remote command may start.
+    for tool in ["setsid", "nohup", "flock", "sh", "timeout", "date", "head", "tail", "base64", "tr", "wc", "cat", "mkdir", "mv", "rm", "rmdir", "sleep"] {
+        std::os::unix::fs::symlink(format!("/usr/bin/{tool}"), tools.join(tool)).unwrap();
+    }
+    for (name, env, reason) in [
+        ("missing-tool-ex", json!({"PATH":tools}), "unsupported: mkfifo missing"),
+        ("bad-spool-ex", json!({}), "spool error"),
+    ] {
+        let root = td.dir.path().join(name);
+        let mut def = target(name, 8 * 3600);
+        def["work_root"] = json!(root);
+        td.post("/api/targets", def).await.ok();
+        td.post_empty(&format!("/api/targets/{name}/up")).await.ok();
+        if name == "bad-spool-ex" { std::fs::write(&root, "not a directory").unwrap(); }
+        let began = tokio::time::Instant::now();
+        let opened = td.post(&format!("/api/targets/{name}/exec"), json!({"durable":true,"env":env,"cmd":["true"]})).await;
+        let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
+        let (_, end) = output(&td, name, &sid).await;
+        assert_eq!(end["code"], "unsupported", "{end}");
+        assert!(end["message"].as_str().unwrap().contains(reason), "{end}");
+        assert!(began.elapsed() < Duration::from_secs(5));
+    }
 }
 
 fn db(td: &TestDaemon) -> rusqlite::Connection {

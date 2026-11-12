@@ -179,17 +179,27 @@ async fn durable_ssh_finishes_offline_once_with_real_exit() {
 }
 
 #[tokio::test]
-async fn durable_ssh_redefined_target_is_not_contacted() {
-    let Some(sshd) = std::env::var_os("TERRARIUM_TEST_SSHD") else { return; };
+async fn durable_ssh_redefined_target_or_host_identity_is_not_contacted() {
+    let Some(sshd) = std::env::var_os("TERRARIUM_TEST_SSHD") else {
+        return;
+    };
     let mut ssh = super::workspace_sync::Ssh::start(sshd).await;
     let root = ssh.jail.join("tmp/redefined");
     let _cleanup = RemoteCleanup(root);
     let mut td = TestDaemon::start().await;
     td.post("/api/secrets", json!({"name":"restart-key","kind":"ssh_key","fields":{"private_key":std::fs::read_to_string(&ssh.key).unwrap()}})).await.ok();
     td.post("/api/targets", json!({"name":"redefined-ssh","kind":"ssh","address":"root@127.0.0.1","port":ssh.port,"credential":"restart-key","work_root":"/tmp/redefined"})).await.ok();
-    let opened = td.post("/api/targets/redefined-ssh/exec", json!({"durable":true,"cmd":["sh","-c","echo retained; exit 19"]})).await;
+    let opened = td
+        .post(
+            "/api/targets/redefined-ssh/exec",
+            json!({"durable":true,"cmd":["sh","-c","echo retained; exit 19"]}),
+        )
+        .await;
     let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
-    assert_eq!(super::exedev::output(&td, "redefined-ssh", &sid).await.1["code"], 19);
+    assert_eq!(
+        super::exedev::output(&td, "redefined-ssh", &sid).await.1["code"],
+        19
+    );
     td.daemon.take().unwrap().shutdown_and_wait().await;
     let conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
     conn.execute("UPDATE targets SET def=json_set(def,'$.address','root@127.0.0.2') WHERE name='redefined-ssh'", []).unwrap();
@@ -197,6 +207,20 @@ async fn durable_ssh_redefined_target_is_not_contacted() {
     td.boot(None, None).await;
     let (_, end) = super::exedev::output(&td, "redefined-ssh", &sid).await;
     assert_eq!(end["code"], "interrupted", "{end}");
-    assert!(end["message"].as_str().unwrap().contains("target changed"), "{end}");
+    assert!(
+        end["message"].as_str().unwrap().contains("target changed"),
+        "{end}"
+    );
+    td.daemon.take().unwrap().shutdown_and_wait().await;
+    let conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
+    conn.execute("UPDATE targets SET def=json_set(def,'$.address','root@127.0.0.1') WHERE name='redefined-ssh'", []).unwrap();
+    drop(conn);
+    // Restore the target definition, but replace its cached host trust. The
+    // client's unrelated public key is a valid, different host fingerprint.
+    std::fs::write(td.state.join("ssh/known_hosts"), format!("[127.0.0.1]:{} {}", ssh.port, std::fs::read_to_string(ssh.key.with_extension("pub")).unwrap())).unwrap();
+    td.boot(None, None).await;
+    let (_, end) = super::exedev::output(&td, "redefined-ssh", &sid).await;
+    assert_eq!(end["code"], "interrupted", "{end}");
+    assert!(end["message"].as_str().unwrap().contains("SSH host identity"), "{end}");
     ssh.server.kill().await.unwrap();
 }

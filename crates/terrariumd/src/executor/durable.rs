@@ -92,16 +92,18 @@ fn host_trust(state: &Shared, def: &TargetDef) -> ApiResult<String> {
         .arg(known_hosts(&state.state_dir)?)
         .output()
         .map_err(|e| ApiError::internal(format!("cannot read SSH host identity: {e}")))?;
-    Ok(String::from_utf8_lossy(&found.stdout).lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>().join("\n") + "\n")
+    Ok(String::from_utf8_lossy(&found.stdout)
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n")
 }
 
 fn host_keys(state: &Shared, def: &TargetDef) -> ApiResult<Vec<String>> {
     let trust = host_trust(state, def)?;
     let mut keys = Vec::new();
-    for line in trust
-        .lines()
-        .filter(|line| !line.starts_with('#'))
-    {
+    for line in trust.lines().filter(|line| !line.starts_with('#')) {
         let fields: Vec<_> = line.split_whitespace().collect();
         if fields.len() >= 3 {
             let key = ssh_key::PublicKey::from_openssh(&format!("{} {}", fields[1], fields[2]))
@@ -112,96 +114,6 @@ fn host_keys(state: &Shared, def: &TargetDef) -> ApiResult<Vec<String>> {
     keys.sort();
     keys.dedup();
     Ok(keys)
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn durable_missing_tool_is_terminal() {
-        let cmd = RemoteCmd {
-            argv: vec!["true".into()],
-            ..RemoteCmd::default()
-        };
-        let output = tokio::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(script(
-                "/unused/.terrarium-runs/test",
-                &cmd,
-                chrono::Utc::now().timestamp(),
-            ))
-            .env("PATH", "/nonexistent")
-            .output()
-            .await
-            .unwrap();
-        assert!(!output.status.success());
-        assert_eq!(output.stdout, b"Bunsupported: setsid missing\n");
-    }
-
-    #[tokio::test]
-    async fn durable_spool_failure_is_terminal() {
-        let cmd = RemoteCmd {
-            argv: vec!["true".into()],
-            ..RemoteCmd::default()
-        };
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(script(
-                "/dev/null/.terrarium-runs/test",
-                &cmd,
-                chrono::Utc::now().timestamp(),
-            ))
-            .output()
-            .await
-            .unwrap();
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).starts_with("B"));
-        assert!(String::from_utf8_lossy(&output.stdout).contains("spool error"));
-    }
-
-    async fn late_launch(age: i64, timeout: u64) -> (tempfile::TempDir, std::process::Output) {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join(".terrarium-runs/late");
-        let command = format!("echo child-started; sleep 60; touch '{}'", root.path().join("escaped").display());
-        let cmd = RemoteCmd { argv: vec!["sh".into(), "-c".into(), command], timeout_secs: Some(timeout), ..RemoteCmd::default() };
-        let output = tokio::time::timeout(Duration::from_secs(12), tokio::process::Command::new("sh")
-            .arg("-c").arg(script(path.to_str().unwrap(), &cmd, chrono::Utc::now().timestamp()-age))
-            .output()).await.unwrap().unwrap();
-        // Kill only this test's detached janitor group, after it records its ID.
-        for _ in 0..100 {
-            if let Ok(pid) = std::fs::read_to_string(path.join("janitor")) {
-                assert!(std::process::Command::new("kill").args(["-KILL", "--", &format!("-{}", pid.trim())]).status().unwrap().success());
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(path.join("exit").exists());
-        assert!(!path.join("expired").exists());
-        assert!(!root.path().join("escaped").exists());
-        (root, output)
-    }
-
-    #[tokio::test]
-    async fn durable_late_launch_keeps_original_deadline() {
-        let start = tokio::time::Instant::now();
-        let (root, output) = late_launch(28, 30).await;
-        assert!(start.elapsed() < Duration::from_secs(10));
-        assert!(String::from_utf8_lossy(&output.stdout).contains("X124\n"));
-        let path = root.path().join(".terrarium-runs/late");
-        assert!(std::fs::read_to_string(path.join("out")).unwrap().contains("child-started"));
-        // The output/claim are retained after the child exits, not removed at
-        // the original deadline while a fresh full-timeout child still runs.
-        assert_eq!(std::fs::read_to_string(path.join("exit")).unwrap(), "124\n");
-    }
-
-    #[tokio::test]
-    async fn durable_expired_first_launch_never_starts_child() {
-        let (root, output) = late_launch((MAX_RUN + RETAIN - 1) as i64, MAX_RUN).await;
-        assert!(String::from_utf8_lossy(&output.stdout).contains("X124\n"));
-        assert!(std::fs::read(root.path().join(".terrarium-runs/late/out")).unwrap().is_empty());
-    }
 }
 
 pub(crate) fn exists(state: &Shared, key: &str) -> ApiResult<bool> {
@@ -260,7 +172,9 @@ pub(super) fn start(
         .ok_or_else(|| ApiError::invalid("durable execution needs a resume identity"))?;
     let j = journal(state);
     let id = format!("ssh/{key}");
-    let mut saved = match j.load::<Checkpoint>(&id)? {
+    let existing = j.load::<Checkpoint>(&id)?;
+    let recovering = existing.is_some();
+    let mut saved = match existing {
         Some(saved) => saved,
         None => {
             let name = def.name.clone();
@@ -293,6 +207,13 @@ pub(super) fn start(
         return Err(ApiError::conflict(
             "interrupted (target changed): target incarnation differs",
         ));
+    }
+    if recovering {
+        let name = current.def.name.clone();
+        let vm = state.db.read_now(move |c| Ok(crate::exedev::record_of(c, &name)?.map(|vm| vm.name)))?;
+        if vm != saved.vm || (vm.is_none() && (saved.host_keys.is_empty() || saved.host_keys != host_keys(state, &saved.def)?)) {
+            return Err(ApiError::conflict("interrupted (target changed): remote identity differs or was not recorded"));
+        }
     }
     // Never launch from an expired checkpoint, even if remote GC has removed
     // its claim. This is the exactly-once boundary after retention expires.
@@ -349,7 +270,15 @@ pub(super) fn start(
             }
             match host_trust(&state, &def) {
                 Ok(trust) => saved.host_trust = trust,
-                Err(_) => { let _ = tx.send(Ev::End(End::error("interrupted", "cannot pin SSH host identity"))).await; return; }
+                Err(_) => {
+                    let _ = tx
+                        .send(Ev::End(End::error(
+                            "interrupted",
+                            "cannot pin SSH host identity",
+                        )))
+                        .await;
+                    return;
+                }
             }
             if journal(&state).save(&id, &saved).is_err() {
                 let _ = tx
@@ -372,16 +301,28 @@ pub(super) fn start(
             })();
             let (run, path) = match pin {
                 Ok(pin) => pin,
-                Err(_) => { let _ = tx.send(Ev::End(End::error("interrupted", "cannot pin SSH host identity"))).await; return; }
+                Err(_) => {
+                    let _ = tx
+                        .send(Ev::End(End::error(
+                            "interrupted",
+                            "cannot pin SSH host identity",
+                        )))
+                        .await;
+                    return;
+                }
             };
             for arg in &mut plan.args {
                 if arg == "StrictHostKeyChecking=accept-new" {
                     *arg = "StrictHostKeyChecking=yes".into();
                 }
-                if arg.starts_with("UserKnownHostsFile=") { *arg = format!("UserKnownHostsFile={}", path.display()); }
+                if arg.starts_with("UserKnownHostsFile=") {
+                    *arg = format!("UserKnownHostsFile={}", path.display());
+                }
             }
+            plan.args.splice(0..0, ["-o".into(), "GlobalKnownHostsFile=/dev/null".into(), "-o".into(), "VerifyHostKeyDNS=no".into()]);
             pinned = Some(run);
         }
+        if state.executor.hosts.is_stopped() { return; }
         let mut process = tokio::process::Command::new(&plan.program);
         process.args(&plan.args);
         let mut raw = pump_process(process, plan.stdin_prefix, None, guard);
@@ -459,6 +400,10 @@ pub(super) fn start(
 }
 
 fn script(path: &str, cmd: &RemoteCmd, created: i64) -> String {
+    script_with_retention(path, cmd, created, RETAIN)
+}
+
+fn script_with_retention(path: &str, cmd: &RemoteCmd, created: i64, retain: u64) -> String {
     let command = format!(
         "{}exec {}",
         cmd.cwd
@@ -486,12 +431,14 @@ while :; do
   test ! -f "$p/exit" || break
   sleep 1
 done
-sleep {RETAIN}
+sleep {retain}
+exec 9> "$p/live"
+flock -x 9
 : > "$p/expired"
-rm -f "$p/o" "$p/e" "$p/out" "$p/err" "$p/pid" "$p/exit" "$p/exit.part" "$p/cancel"
+rm -f "$p/o" "$p/e" "$p/out" "$p/err" "$p/pid" "$p/exit" "$p/exit.part" "$p/cancel" "$p/ready" "$p/startup-error"
 left=$(({expires}-$(date +%s)+120))
 test "$left" -le 0 || sleep "$left"
-rm -f "$p/expired" "$p/janitor"
+rm -f "$p/expired" "$p/janitor" "$p/live"
 rmdir "$p"
 "#,
         path = sh_quote(path)
@@ -503,8 +450,18 @@ rmdir "$p"
 umask 077
 p={path}
 mkdir "$p" 2>/dev/null || exit 0
+exec 9> "$p/live"
+flock -x 9 || exit 1
 echo $$ > "$p/pid"
-if ! mkfifo "$p/o" "$p/e"; then printf '%s' 'spool error: mkfifo failed' > "$p/startup-error"; exit 1; fi
+bad_spool() {{
+  printf '%s' "$1" > "$p/startup-error"
+  : > "$p/out"; : > "$p/err"
+  printf '127\n' > "$p/exit"
+  : > "$p/ready"
+  setsid nohup sh -c {janitor} </dev/null >/dev/null 2>&1 &
+  exit 1
+}}
+mkfifo "$p/o" "$p/e" || bad_spool 'spool error: mkfifo failed'
 : > "$p/out"; : > "$p/err"
 left=$(({deadline}-$(date +%s)))
 if test "$left" -le 0; then
@@ -544,7 +501,7 @@ setsid nohup sh -c {janitor} </dev/null >/dev/null 2>&1 &
 umask 077
 p={path}
 fail() {{ printf 'B%s\n' "$1"; exit 1; }}
-for tool in setsid nohup mkfifo timeout date head tail base64 tr wc cat mkdir mv rm rmdir sleep; do
+for tool in setsid nohup flock sh mkfifo timeout date head tail base64 tr wc cat mkdir mv rm rmdir sleep; do
   command -v "$tool" >/dev/null 2>&1 || fail "unsupported: $tool missing"
 done
 mkdir -p {parent} || fail 'spool error: cannot create parent'
@@ -552,10 +509,12 @@ test -w {parent} || fail 'spool error: parent is not writable'
 setsid nohup sh -c {supervisor} </dev/null >/dev/null 2>&1 &
 startup=$(date +%s)
 until test -f "$p/ready"; do
+  if test -f "$p/expired"; then printf 'L\n'; exit; fi
   test ! -f "$p/startup-error" || fail "$(cat "$p/startup-error")"
   test $(($(date +%s)-startup)) -lt 30 || fail 'spool error: supervisor did not become ready'
   sleep 0.1
 done
+test ! -f "$p/startup-error" || fail "$(cat "$p/startup-error")"
 printf 'R\n'
 o=0; e=0
 while :; do
@@ -585,4 +544,146 @@ done"#,
         )),
         supervisor = sh_quote(&supervisor)
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn durable_missing_tool_is_terminal() {
+        let cmd = RemoteCmd {
+            argv: vec!["true".into()],
+            ..RemoteCmd::default()
+        };
+        let output = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script(
+                "/unused/.terrarium-runs/test",
+                &cmd,
+                chrono::Utc::now().timestamp(),
+            ))
+            .env("PATH", "/nonexistent")
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        assert_eq!(output.stdout, b"Bunsupported: setsid missing\n");
+    }
+
+    #[tokio::test]
+    async fn durable_spool_failure_is_terminal() {
+        let cmd = RemoteCmd {
+            argv: vec!["true".into()],
+            ..RemoteCmd::default()
+        };
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(script(
+                "/dev/null/.terrarium-runs/test",
+                &cmd,
+                chrono::Utc::now().timestamp(),
+            ))
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).starts_with("B"));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("spool error"));
+    }
+
+    async fn late_launch(age: i64, timeout: u64) -> (tempfile::TempDir, std::process::Output) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".terrarium-runs/late");
+        let command = format!(
+            "echo child-started; sleep 60; touch '{}'",
+            root.path().join("escaped").display()
+        );
+        let cmd = RemoteCmd {
+            argv: vec!["sh".into(), "-c".into(), command],
+            timeout_secs: Some(timeout),
+            ..RemoteCmd::default()
+        };
+        let output = tokio::time::timeout(
+            Duration::from_secs(12),
+            tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(script(
+                    path.to_str().unwrap(),
+                    &cmd,
+                    chrono::Utc::now().timestamp() - age,
+                ))
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // Kill only this test's detached janitor group, after it records its ID.
+        for _ in 0..100 {
+            if let Ok(pid) = std::fs::read_to_string(path.join("janitor")) {
+                assert!(
+                    std::process::Command::new("kill")
+                        .args(["-KILL", "--", &format!("-{}", pid.trim())])
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(path.join("exit").exists());
+        assert!(!path.join("expired").exists());
+        assert!(!root.path().join("escaped").exists());
+        (root, output)
+    }
+
+    #[tokio::test]
+    async fn durable_late_launch_keeps_original_deadline() {
+        let start = tokio::time::Instant::now();
+        let (root, output) = late_launch(28, 30).await;
+        assert!(start.elapsed() < Duration::from_secs(10));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("X124\n"));
+        let path = root.path().join(".terrarium-runs/late");
+        assert!(
+            std::fs::read_to_string(path.join("out"))
+                .unwrap()
+                .contains("child-started")
+        );
+        // The output/claim are retained after the child exits, not removed at
+        // the original deadline while a fresh full-timeout child still runs.
+        assert_eq!(std::fs::read_to_string(path.join("exit")).unwrap(), "124\n");
+    }
+
+    #[tokio::test]
+    async fn durable_expired_first_launch_never_starts_child() {
+        let (root, output) = late_launch((MAX_RUN + RETAIN - 1) as i64, MAX_RUN).await;
+        assert!(String::from_utf8_lossy(&output.stdout).contains("X124\n"));
+        assert!(
+            std::fs::read(root.path().join(".terrarium-runs/late/out"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_cleanup_follows_child_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".terrarium-runs/cleanup");
+        let child = root.path().join("child");
+        let cmd = RemoteCmd { argv: vec!["sh".into(), "-c".into(), format!("echo $$ > '{}'; exec sleep 60", child.display())], timeout_secs: Some(30), ..RemoteCmd::default() };
+        let result = tokio::time::timeout(Duration::from_secs(12), tokio::process::Command::new("sh").arg("-c").arg(script_with_retention(path.to_str().unwrap(), &cmd, chrono::Utc::now().timestamp()-28, 1)).output()).await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&result.stdout).contains("X124\n"));
+        let pid = std::fs::read_to_string(child).unwrap();
+        assert!(!std::process::Command::new("kill").args(["-0", pid.trim()]).status().unwrap().success());
+        assert!(path.join("out").exists());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !path.join("expired").exists() || path.join("out").exists() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.unwrap();
+        // The tombstone outlives output, and the original child is already gone.
+        assert!(path.exists());
+        let janitor = std::fs::read_to_string(path.join("janitor")).unwrap();
+        assert!(std::process::Command::new("kill").args(["-KILL", "--", &format!("-{}", janitor.trim())]).status().unwrap().success());
+    }
 }

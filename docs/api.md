@@ -7484,7 +7484,12 @@ Ordinary execs, PTYs, and shells retain the previous interruption behavior.
 The private remote output spool is under `<work_root>/.terrarium-runs`,
 retains the first 64 MiB per stream, and is removed after 24 hours of result
 retention (at most the command timeout plus 24 hours and two minutes).
-The remote lifetime is at most seven days. See host-protocol.md, Reconnect.
+The remote lifetime is at most seven days, measured from the original
+checkpoint even if first launch is delayed. Recovery refuses a changed
+target incarnation, SSH host key or exe.dev VM ID with `interrupted (target
+changed)`, without connecting to the replacement. Startup probes report
+missing tools or spool errors, with a 30-second readiness deadline.
+See host-protocol.md, Reconnect.
 
 The input body: `data` is base64, at most 1 MiB of bytes (`413
 too_large` above). In a push, `data` is file bytes. `resize` is

@@ -1183,16 +1183,25 @@ replays that directory, never launches a second command under the same
 identity, and resumes the existing process wait or queue phase.
 
 The remote side needs the usual POSIX shell and coreutils, including
-`setsid`, `nohup`, `timeout`, `mkfifo`, `head`, `tail`, and `base64`. No host
+`setsid`, `nohup`, `flock`, `timeout`, `mkfifo`, `head`, `tail`, and `base64`. No host
 installation is performed. Private spool files live under
 `<work_root>/.terrarium-runs` (the normal default root is `/src/terrarium`).
 Each stdout/stderr spool retains the first 64 MiB and drains further output.
 Commands have a maximum seven-day lifetime, with a 24-hour default when no
-timeout is supplied. An independent janitor removes the files 24 hours after
-completion, or after the timeout when completion was not recorded, with up
-to two minutes of polling slack. The empty claim and expiry marker remain
+timeout is supplied. The deadline is absolute from the original checkpoint:
+a delayed first launch gets only the remaining time, not a new timeout.
+An independent janitor removes the files 24 hours after completion, only
+after acquiring the supervisor's lifetime lock. The empty claim and expiry marker remain
 until the checkpoint's eight-day absolute deadline, then are removed too.
 An expired checkpoint is never relaunched.
+
+Recovery compares the target's definition, creation and lifecycle stamps.
+SSH also records the authenticated host key fingerprints and pins a private
+trust file. exe.dev records the VM ID, not just its SSH address. A changed
+incarnation ends as `interrupted (target changed)` without connecting.
+Remote tool and spool probes precede detachment. Missing tools and spool
+errors are terminal `unsupported` errors. The supervisor must acknowledge
+readiness within 30 seconds or the reader ends with a startup error.
 
 PTY and shell sessions, ordinary SSH execs without `durable: true`, and
 stdin-fed queue setup/bundle transfers stay on the existing transport. They

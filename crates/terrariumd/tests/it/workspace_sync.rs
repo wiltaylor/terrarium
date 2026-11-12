@@ -59,6 +59,7 @@ impl Ssh {
             "/usr/bin/base64",
             "/usr/bin/tr",
             "/usr/bin/setsid",
+            "/usr/bin/flock",
             "/usr/bin/nohup",
             "/usr/bin/head",
             "/usr/bin/tail",
