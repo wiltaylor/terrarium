@@ -103,6 +103,10 @@ fn the_mails_name_the_versions_and_the_way_back() {
         "{b}"
     );
     assert!(b.contains("restore the backup by hand"), "{b}");
+    let (s, b) = result_mail(&sample_run(Outcome::RecoveryFailed), "l");
+    assert!(s.starts_with("ACTION NEEDED:"));
+    assert!(b.contains("Keep the daemon container stopped"), "{b}");
+    assert!(b.contains("Outcome: recovery_failed"), "{b}");
     let (s, b) = result_mail(&sample_run(Outcome::Succeeded), "l");
     assert_eq!(s, "Terrarium update to 0.2.0 succeeded");
     assert!(b.contains("terrarium admin update rollback"), "{b}");

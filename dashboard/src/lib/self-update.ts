@@ -18,6 +18,8 @@ export function outcomeChip(o: UpdateOutcome): { label: string; cls: string } {
       return { label: "failed, rolled back", cls: "chip warn" };
     case "rollback_failed":
       return { label: "failed, rollback failed", cls: "chip bad" };
+    case "recovery_failed":
+      return { label: "recovery uncertain, manual restore required", cls: "chip bad" };
   }
 }
 

@@ -545,7 +545,9 @@ pub fn result_mail(run: &Run, link: &str) -> (String, String) {
         Outcome::Current => format!("Terrarium {what}: already on {to}"),
         Outcome::Failed => format!("Terrarium {what} to {to} failed"),
         Outcome::RolledBack => format!("Terrarium {what} to {to} failed and was rolled back"),
-        Outcome::RollbackFailed => format!("ACTION NEEDED: Terrarium {what} to {to} failed"),
+        Outcome::RollbackFailed | Outcome::RecoveryFailed => {
+            format!("ACTION NEEDED: Terrarium {what} to {to} failed")
+        }
         Outcome::Running => format!("Terrarium {what} to {to} runs"),
     };
     let mut body = format!(
@@ -572,6 +574,9 @@ pub fn result_mail(run: &Run, link: &str) -> (String, String) {
             "\nThe way back failed too. Look at the updater log on the host \
              (`docker compose logs terrarium-updater`) and restore the backup by hand \
              (docs/api.md §32.3).\n",
+        ),
+        Outcome::RecoveryFailed => body.push_str(
+            "\nRecovery completion is uncertain. Keep the daemon container stopped. Verify the database and restore the recorded paused snapshot or ZIP by hand before restarting (docs/api.md §32.3).\n",
         ),
         _ => {}
     }

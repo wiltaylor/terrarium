@@ -18,6 +18,28 @@ SPEC.loader.exec_module(HOT)
 
 
 class HotSwapTests(unittest.TestCase):
+    def test_supervisor_reports_daemon_exit_one_immediately(self):
+        source = (ROOT / "docker/entrypoint.sh").read_text()
+        loop = source[source.index('RUN_DIR="'):]
+        supervisor = self.path / "crash-supervisor.sh"
+        supervisor.write_text('log() { printf "entrypoint: %s\\n" "$*" >&2; }\n' + loop)
+        daemon = self.path / "crashing-daemon"
+        daemon.write_text('#!/bin/sh\nprintf "Error: FOREIGN KEY constraint failed\\n" >&2\nexit 1\n')
+        daemon.chmod(0o700)
+        output = self.path / "crash.log"
+        with output.open("w") as log:
+            process = subprocess.Popen(["bash", str(supervisor), str(daemon)], stderr=log)
+        def cleanup():
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=10)
+        self.addCleanup(cleanup)
+        started = time.monotonic()
+        while "entrypoint: terrariumd ended (status 1)" not in output.read_text():
+            self.assertLess(time.monotonic() - started, 3, "daemon exit was not reported promptly")
+            time.sleep(.02)
+        self.assertIn("Error: FOREIGN KEY constraint failed", output.read_text())
+
     def test_ready_rejects_non_ok_health(self):
         HOT.main(["init"])
         for status, body in ((200, b'{"status":"activating"}'),
@@ -229,14 +251,71 @@ class HotSwapTests(unittest.TestCase):
                 self.assertLess(time.monotonic(), deadline, "supervisor timed out")
                 time.sleep(.02)
         wait(lambda: log.exists() and len(log.read_text().splitlines()) == 1)
+        # Default CI uses a small fixture. The production-size card check sets
+        # TERRARIUM_HOT_SWAP_SEED_MIB=2048 on the build target. SQLite allocates
+        # real pages, not a sparse file. Copy cost scales with DB bytes, not
+        # the size of the agent directories or logs in the full ZIP.
+        db = self.state / "terrarium.db"
+        seed_mib = int(os.environ.get("TERRARIUM_HOT_SWAP_SEED_MIB", "1"))
+        with sqlite3.connect(db) as conn:
+            conn.execute("CREATE TABLE payload(value BLOB)")
+            for _ in range(seed_mib):
+                conn.execute("INSERT INTO payload VALUES (zeroblob(1048576))")
+            conn.execute("CREATE TABLE journal(value TEXT)")
+            conn.execute("INSERT INTO journal VALUES ('before-backup')")
+        # Represent the write between the online ZIP and the pause. Automatic
+        # rollback must retain it, unlike manual restore of the earlier ZIP.
+        with sqlite3.connect(db) as conn:
+            conn.execute("INSERT INTO journal VALUES ('after-backup-before-pause')")
+        state_mib = int(os.environ.get("TERRARIUM_HOT_SWAP_STATE_MIB", "0"))
+        data = b'x' * 1048576
+        for n in range(state_mib):
+            directory = self.state / ("agents/A1/logs" if n % 2 else "archive")
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / f"{n}.log").write_bytes(data)
+        started = time.monotonic()
         (self.run / "upgrade-pause").touch()
         process.send_signal(signal.SIGUSR1)
         wait(lambda: (self.run / "upgrade-paused").exists())
         self.assertIsNone(process.poll())
         self.assertEqual(len(log.read_text().splitlines()), 1)
+        backup = str(self.state / "pre-update.zip")
+        copy_started = time.monotonic()
+        HOT.main(["snapshot", backup])
+        copy_seconds = time.monotonic() - copy_started
         (self.run / "upgrade-pause").unlink()
         wait(lambda: len(log.read_text().splitlines()) == 2)
-        self.assertNotEqual(*log.read_text().splitlines())
+        pause_seconds = time.monotonic() - started
+        self.assertLess(pause_seconds, 30, "paused snapshot and restart exceeded 30 seconds")
+        # Failed-new-release rollback is a separate pause, not part of the
+        # successful swap latency. Still verify the exact paused state and
+        # report recovery time without conflating these two paths.
+        with sqlite3.connect(db) as conn:
+            conn.execute("DELETE FROM journal")
+            conn.execute("INSERT INTO journal VALUES ('new-release-write')")
+        recovery_started = time.monotonic()
+        HOT.main(["pause", "5"])
+        restore_started = time.monotonic()
+        HOT.main(["restore-database", backup])
+        restore_seconds = time.monotonic() - restore_started
+        with sqlite3.connect(db) as conn:
+            self.assertEqual(conn.execute("SELECT value FROM journal ORDER BY value").fetchall(),
+                             [("after-backup-before-pause",), ("before-backup",)])
+        (self.run / "upgrade-pause").unlink()
+        wait(lambda: len(log.read_text().splitlines()) == 3)
+        recovery_seconds = time.monotonic() - recovery_started
+        rollback_hold_seconds = time.monotonic() - started
+        # Match the updater's 15-minute hold minus its one-minute safety
+        # margin, counted from the original pause, not a fresh recovery timer.
+        self.assertLess(rollback_hold_seconds, 15 * 60 - 60,
+                        "rollback exceeded the runner hold safety deadline")
+        print(f"hot-swap seed_bytes={db.stat().st_size} state_file_bytes={state_mib * 1048576} "
+              f"snapshot_seconds={copy_seconds:.3f} "
+              f"pause_seconds={pause_seconds:.3f} restore_seconds={restore_seconds:.3f} "
+              f"rollback_pause_seconds={recovery_seconds:.3f} "
+              f"rollback_hold_seconds={rollback_hold_seconds:.3f}")
+        self.assertEqual(len(set(log.read_text().splitlines())), 3)
+        HOT.main(["commit", backup])
 
         # Force a timeout after SIGUSR1. Cleanup must request a restart rather
         # than letting the later clean daemon exit stop the whole container.
@@ -244,7 +323,7 @@ class HotSwapTests(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 HOT.main(["pause"])
         HOT.main(["cancel-pause", "5"])
-        wait(lambda: len(log.read_text().splitlines()) == 3)
+        wait(lambda: len(log.read_text().splitlines()) == 4)
         self.assertIsNone(process.poll())
         self.assertFalse((self.run / "upgrade-pause").exists())
 

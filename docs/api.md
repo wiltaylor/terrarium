@@ -11853,17 +11853,22 @@ passphrase (§31.2).
 
 | Root | Dir | Content |
 |---|---|---|
-| `state` | `TERRARIUM_STATE_DIR` | The database (as a `VACUUM INTO` copy), the agent dirs, the trash, the artifacts, the credentials, `secrets.key`, `session.key`, `operator.password`. |
+| `state` | `TERRARIUM_STATE_DIR` | The database (as a `VACUUM INTO` copy), the agent dirs, the artifacts, the credentials, `secrets.key`, `session.key`, `operator.password`. |
 | `config` | `TERRARIUM_CONFIG_REPO` | The config repo, with its `.git`. |
 | `work` | `TERRARIUM_WORK_DIR` | The agent workspaces. Only with `work` (`--work`). |
 
 The database is never a raw file copy: the daemon copies it with
 `VACUUM INTO`, which gives one consistent snapshot while the daemon writes.
-The walk skips the backup dir, the live database files (`terrarium.db`,
+The walk skips the backup dir, `<state>/trash` (deleted agents and
+workspaces retained for cleanup, not included in full or diff backups),
+the live database files (`terrarium.db`,
 `-wal`, `-shm`, `-journal`), the restore dirs (§32.3), sockets, and the
 dirs named `target`, `node_modules`, and `.cache`, at any depth. The tools
 dir is not a root. Symlinks stay symlinks. The manifest records the mode of
 each file and dir and the time of each file.
+The manifest's optional `excluded_paths` metadata records the `state/trash`
+policy exclusion. It does not change the ZIP format or restore procedure;
+older readers ignore this field and older manifests omit it.
 
 The entries of the zip:
 
@@ -12621,6 +12626,43 @@ and so does a restart (it lives in memory). A running job that must not
 wait for its end is cancelled with the job cancel.
 
 ### 34.8 Mail
+
+For a hot swap, the updater creates the full ZIP backup **before** pausing
+the daemon. The backup CLI uses SQLite `VACUUM INTO` for a consistent online
+database copy. The `backup` step records when backup creation began. This
+ZIP is the manual pre-update restore point: writes after that time may
+not be included (normally a few minutes). Other state files and logs are
+copied while the service is still running, not inside the pause.
+
+Once paused, only the database is copied to `.hot-swap.sqlite` for exact
+automatic rollback to the moment of the swap. That temporary snapshot is
+deleted on commit and is not part of the manual ZIP restore point. A failed
+switch restores this database before restarting the old daemon. The pause
+budget starts before `pause-daemon`: switching must finish before the
+15-minute runner hold limit minus a one-minute recovery reserve. Exceeding
+that safety deadline fails the update and attempts recovery of the old daemon.
+Once admission is attempted, errors never rewind the database automatically.
+During hot-swap health checks, the updater reads only startup-attempt-scoped
+supervisor logs. A daemon child exit fails the health step and starts rollback
+on the next poll (normally within two seconds), even if the container stays
+healthy while its entrypoint restarts the child. The run records an allowlisted
+error category from the last daemon error line, with all other values hidden.
+It never copies raw daemon logs into update history.
+Every Docker request has an absolute deadline covering connect, handshake,
+request write and complete response read (at most 15 minutes outside the
+shorter hot-swap budget). Recovery uses the original hold deadline, not a new
+timer. The final five seconds are reserved for an emergency container stop
+or ending jobs drain after verified recovery.
+
+If recovery fails or its completion is uncertain, the update outcome is
+`recovery_failed`. The updater requests an immediate manual Docker stop
+(`stop?t=0`, which prevents automatic restart), records the paused SQLite
+snapshot path and pre-update ZIP path, and never starts a daemon on an
+unverified database. If Docker does not acknowledge the stop within the hold
+budget, the run explicitly says the stop is unconfirmed and the operator must
+stop the container. Verify any outstanding restore helper is stopped, then
+verify/restore the database by hand before restarting. This outcome is a
+failure and produces an ACTION NEEDED report, not a successful update.
 
 The daemon sends the operator Inbox mail (from `system`):
 

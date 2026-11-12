@@ -189,6 +189,72 @@ fn a_full_backup_round_trips() {
 }
 
 #[test]
+fn online_zip_restore_is_the_pre_pause_point_not_the_swap_point() {
+    let legacy: Manifest = serde_json::from_value(serde_json::json!({
+        "id": "old-backup", "entries": []
+    }))
+    .unwrap();
+    assert!(legacy.excluded_paths.is_empty());
+    let fx = fixture();
+    let live = rusqlite::Connection::open(fx.state.join(DB_FILE)).unwrap();
+    live.execute_batch("PRAGMA journal_mode=WAL; INSERT INTO t VALUES ('before-backup');")
+        .unwrap();
+    // Optional production-size exercise. Keep normal CI small. Use real
+    // allocated pages and files so local copy and ZIP costs are measurable.
+    let seed_mib: usize = std::env::var("BACKUP_TEST_SEED_MIB")
+        .ok()
+        .map(|s| s.parse().unwrap())
+        .unwrap_or(0);
+    if seed_mib > 0 {
+        live.execute_batch("CREATE TABLE bulk(value BLOB);")
+            .unwrap();
+        for _ in 0..seed_mib {
+            live.execute("INSERT INTO bulk VALUES (zeroblob(1048576))", [])
+                .unwrap();
+        }
+        live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let data = vec![b'x'; 1024 * 1024];
+        for dir in ["agents/A1/logs", "archive"] {
+            fs::create_dir_all(fx.state.join(dir)).unwrap();
+            for n in 0..512 {
+                fs::write(fx.state.join(dir).join(format!("{n}.log")), &data).unwrap();
+            }
+        }
+    }
+    fs::create_dir_all(fx.state.join("trash/deleted-agent")).unwrap();
+    fs::write(fx.state.join("trash/deleted-agent/log"), "deleted").unwrap();
+    let started = std::time::Instant::now();
+    let full = fx.make(Kind::Full, false, None);
+    let manifest = Archive::open(&full.path, None).unwrap().manifest().unwrap();
+    assert_eq!(manifest.excluded_paths, ["state/trash"]);
+    eprintln!(
+        "online ZIP: seed_mib={seed_mib} db_bytes={} stored_bytes={} stored_files={} zip_bytes={} seconds={:.3}",
+        fs::metadata(fx.state.join(DB_FILE)).unwrap().len(),
+        full.header.stored_bytes,
+        full.header.stored_files,
+        full.size,
+        started.elapsed().as_secs_f64(),
+    );
+    assert!(
+        !names(&full)
+            .iter()
+            .any(|n| n.starts_with("files/state/trash/"))
+    );
+    assert!(
+        names(&full)
+            .iter()
+            .any(|n| n.starts_with("files/state/agents/"))
+    );
+    live.execute_batch("INSERT INTO t VALUES ('after-backup-before-pause');")
+        .unwrap();
+    assert!(fx.db_value().contains(&"after-backup-before-pause".into()));
+    drop(live);
+    fx.restore(&full, None);
+    assert_eq!(fx.db_value(), ["before-backup", "one"]);
+}
+
+#[test]
 fn a_diff_stores_the_changes_and_restores_the_exact_tree() {
     let fx = fixture();
     let full = fx.make(Kind::Full, false, None);
@@ -313,6 +379,7 @@ fn a_bad_file_stops_the_restore_and_changes_nothing() {
 fn a_manifest_path_out_of_the_root_is_refused() {
     let m = Manifest {
         id: "X".into(),
+        excluded_paths: Vec::new(),
         entries: vec![Entry {
             path: "state/../../etc/passwd".into(),
             kind: EntryKind::File,
@@ -360,6 +427,7 @@ fn a_manifest_path_below_a_symlink_entry_is_refused() {
     ] {
         let m = Manifest {
             id: "X".into(),
+            excluded_paths: Vec::new(),
             entries,
         };
         let err = check_paths(&m).unwrap_err();
@@ -369,6 +437,7 @@ fn a_manifest_path_below_a_symlink_entry_is_refused() {
     for path in ["state/a/./x", "state/a//x", "state/a/x/"] {
         let m = Manifest {
             id: "X".into(),
+            excluded_paths: Vec::new(),
             entries: vec![
                 entry("state/a", EntryKind::Symlink, Some("/etc")),
                 entry(path, EntryKind::File, None),
@@ -386,6 +455,7 @@ fn a_manifest_path_below_a_symlink_entry_is_refused() {
     ] {
         let m = Manifest {
             id: "X".into(),
+            excluded_paths: Vec::new(),
             entries: kinds
                 .iter()
                 .map(|k| entry("state/a", *k, Some("/root/.ssh")))
@@ -397,6 +467,7 @@ fn a_manifest_path_below_a_symlink_entry_is_refused() {
     // A symlink next to a file of the same prefix is fine.
     let m = Manifest {
         id: "X".into(),
+        excluded_paths: Vec::new(),
         entries: vec![
             entry("state/a", EntryKind::Symlink, Some("b")),
             entry("state/ab/x", EntryKind::File, None),

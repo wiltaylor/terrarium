@@ -8,6 +8,7 @@ describe("self-update (docs/api.md §34)", () => {
     expect(outcomeChip("succeeded")).toEqual({ label: "succeeded", cls: "chip ok" });
     expect(outcomeChip("rolled_back").label).toBe("failed, rolled back");
     expect(outcomeChip("rollback_failed").cls).toContain("bad");
+    expect(outcomeChip("recovery_failed")).toEqual({ label: "recovery uncertain, manual restore required", cls: "chip bad" });
   });
 
   it("blocks the buttons without an updater or during a run", async () => {

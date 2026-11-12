@@ -20,6 +20,11 @@ struct State {
     jobs_hang: bool,
     fail_once: HashSet<String>,
     hot: bool,
+    startup_crash: bool,
+    pending_exec: Option<String>,
+    pending_once: Option<String>,
+    pending_old_health: bool,
+    pending_stop: bool,
     staged: Option<Image>,
     /// The containers by name.
     containers: HashMap<String, Container>,
@@ -161,6 +166,16 @@ impl Engine for Fake {
             if argv[0] == "python3" {
                 let cmd = &argv[2];
                 let failed = self.call(format!("hot:{cmd}"));
+                let pending = {
+                    let s = self.0.lock().unwrap();
+                    let key = format!("hot:{cmd}");
+                    let count = s.calls.iter().filter(|c| *c == &key).count();
+                    s.pending_exec.as_deref() == Some(format!("hot:{cmd}:{count}").as_str())
+                };
+                if pending {
+                    self.call("pending-exec".into());
+                    std::future::pending::<()>().await;
+                }
                 if cmd == "start" && !failed {
                     let mut s = self.0.lock().unwrap();
                     let image = if argv[3] == "b".repeat(64) {
@@ -235,6 +250,18 @@ impl Engine for Fake {
         })
     }
 
+    fn stop_for_recovery<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
+        Box::pin(async move {
+            self.call(format!("stop-for-recovery {id}"));
+            let pending = self.0.lock().unwrap().pending_stop;
+            if pending {
+                self.call("pending-stop".into());
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        })
+    }
+
     fn create<'a>(&'a self, spec: &'a Container, image: &'a Image) -> BoxFut<'a, Res<Container>> {
         Box::pin(async move {
             if self.call(format!("create:{} new", image.reference)) {
@@ -285,11 +312,17 @@ impl Engine for Fake {
             }
             if argv[0] == "python3" {
                 let command = &argv[2];
-                self.call(format!("hot:{command}"));
+                let failed = self.call(format!("hot:{command}"));
+                let pending = self.0.lock().unwrap().pending_once.as_deref() == Some(command);
+                if pending {
+                    self.call("pending-once".into());
+                    std::future::pending::<()>().await;
+                }
                 if command == "stage" {
                     self.0.lock().unwrap().staged = Some(image.clone());
                 }
                 return Ok(ExecOut {
+                    code: i64::from(failed),
                     stdout: if command == "stage" {
                         "b".repeat(64)
                     } else {
@@ -321,12 +354,33 @@ impl Engine for Fake {
 
     fn health<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<Health>> {
         Box::pin(async move {
+            let pending = self.0.lock().unwrap().pending_old_health;
+            if pending && self.image_of(id).as_deref() == Some(OLD) {
+                self.call("pending-old-health".into());
+                std::future::pending::<()>().await;
+            }
             let image = self.image_of(id).unwrap_or_default();
             let s = self.0.lock().unwrap();
             if s.fail.contains(&format!("health:{image}")) {
                 return Ok(Health::Unhealthy("the check failed 3 times".into()));
             }
             Ok(Health::Healthy)
+        })
+    }
+
+    fn daemon_failure_since<'a>(
+        &'a self,
+        id: &'a str,
+        since: &'a str,
+    ) -> BoxFut<'a, Res<Option<String>>> {
+        Box::pin(async move {
+            assert!(chrono::DateTime::parse_from_rfc3339(since).is_ok());
+            let crashes = self.0.lock().unwrap().startup_crash;
+            if crashes && self.image_of(id).as_deref() == Some(new_ref().as_str()) {
+                self.call("daemon-exit-1".into());
+                return Ok(Some("new daemon exited during startup; last error: FOREIGN KEY constraint failed (values hidden)".into()));
+            }
+            Ok(None)
         })
     }
 }
@@ -489,8 +543,20 @@ async fn hot_swap_keeps_container_and_commits_only_after_health() {
             < calls.iter().position(|c| c == "resume c0").unwrap()
     );
     assert!(
+        calls.iter().position(|c| c == "backup c0").unwrap()
+            < calls.iter().position(|c| c == "hot:pause").unwrap()
+    );
+    assert!(
         calls.iter().position(|c| c == "hot:pause").unwrap()
-            < calls.iter().position(|c| c == "offline-backup").unwrap()
+            < calls.iter().position(|c| c == "hot:snapshot").unwrap()
+    );
+    assert!(!calls.iter().any(|c| c == "offline-backup"));
+    let backup = run.steps.iter().find(|s| s.name == "backup").unwrap();
+    assert!(backup.detail.contains("began at"));
+    assert!(
+        backup
+            .detail
+            .contains("writes after that time may not be included")
     );
     // The hot swap records the original engine spec: a rollback replaces
     // the container with it instead of reusing the hot-swapped one.
@@ -524,6 +590,199 @@ async fn hot_swap_failed_health_restores_before_old_release_admission() {
             .unwrap()
             < calls.iter().position(|c| c == "hot:commit").unwrap()
     );
+}
+
+#[tokio::test]
+async fn hot_swap_daemon_exit_rolls_back_without_waiting_for_health_timeout() {
+    let mut r = rig();
+    Arc::get_mut(&mut r.updater).unwrap().cfg.health_timeout = Duration::from_secs(240);
+    {
+        let mut state = r.fake.0.lock().unwrap();
+        state.hot = true;
+        state.startup_crash = true;
+    }
+    // Docker health deliberately remains healthy: it still describes the
+    // supervisor/old process, not the just-crashed daemon child.
+    let run = tokio::time::timeout(
+        Duration::from_secs(3),
+        r.updater.run_now(RunKind::Update, "latest", "operator"),
+    )
+    .await
+    .expect("crash rollback must not wait four minutes");
+    assert_eq!(run.outcome, Outcome::RolledBack, "{run:#?}");
+    assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
+    let health = run.steps.iter().find(|s| s.name == "health").unwrap();
+    assert_eq!(health.state, StepState::Failed);
+    assert!(
+        health
+            .detail
+            .contains("FOREIGN KEY constraint failed (values hidden)")
+    );
+    let calls = r.fake.calls();
+    assert!(
+        calls.iter().position(|c| c == "daemon-exit-1").unwrap()
+            < calls
+                .iter()
+                .position(|c| c == "hot:restore-database")
+                .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn every_pending_hot_recovery_stage_ends_inside_the_original_hold_budget() {
+    let mut cases = tokio::task::JoinSet::new();
+    for case in [
+        "cancel",
+        "cancel-health",
+        "snapshot-start",
+        "snapshot-health",
+        "snapshot-commit",
+        "pause",
+        "restore",
+        "start",
+        "health",
+        "commit",
+        "stop",
+    ] {
+        cases.spawn(async move {
+            let mut r = rig();
+            let updater = Arc::get_mut(&mut r.updater).unwrap();
+            // Keep >5 s for the real helper kill grace, but make all cases
+            // concurrent and short. Production uses 900/60/5 seconds.
+            updater.hot_budget = (
+                Duration::from_secs(12),
+                Duration::from_secs(6),
+                Duration::from_secs(1),
+            );
+            updater.cfg.health_timeout = Duration::from_secs(240);
+            {
+                let mut s = r.fake.0.lock().unwrap();
+                s.hot = true;
+                if case.starts_with("cancel") {
+                    s.fail.insert("hot:pause".into());
+                } else if case.starts_with("snapshot") {
+                    s.fail.insert("hot:snapshot".into());
+                } else {
+                    s.startup_crash = true;
+                }
+                s.pending_exec = match case {
+                    "cancel" => Some("hot:cancel-pause:1".into()),
+                    "snapshot-start" => Some("hot:start:1".into()),
+                    "snapshot-commit" | "commit" => Some("hot:commit:1".into()),
+                    "pause" => Some("hot:pause:2".into()),
+                    "start" => Some("hot:start:2".into()),
+                    _ => None,
+                };
+                s.pending_old_health =
+                    matches!(case, "cancel-health" | "snapshot-health" | "health");
+                if case == "restore" {
+                    s.pending_once = Some("restore-database".into());
+                }
+                if case == "stop" {
+                    s.fail.insert("hot:restore-database".into());
+                    s.pending_stop = true;
+                }
+            }
+            let started = tokio::time::Instant::now();
+            let run = tokio::time::timeout(
+                Duration::from_secs(13),
+                r.updater.run_now(RunKind::Update, "latest", "operator"),
+            )
+            .await
+            .expect("pending recovery must not hold the daemon indefinitely");
+            assert!(
+                started.elapsed() < Duration::from_millis(12500),
+                "{case}: {:?}",
+                started.elapsed()
+            );
+            assert_eq!(run.outcome, Outcome::RecoveryFailed, "{case}: {run:#?}");
+            assert_eq!(r.store.history()[0].outcome, Outcome::RecoveryFailed);
+            assert!(run.outcome.is_failure());
+            let error = run.error.unwrap();
+            assert!(
+                error.contains(&format!("{BACKUP}.hot-swap.sqlite")),
+                "{case}: {error}"
+            );
+            let calls = r.fake.calls();
+            assert!(
+                calls.iter().any(|c| c.starts_with("pending-")),
+                "{case}: {calls:?}"
+            );
+            assert!(
+                calls.iter().any(|c| c == "stop-for-recovery c0"),
+                "{case}: {calls:?}"
+            );
+            assert!(
+                !calls.iter().any(|c| c.starts_with("resume ")),
+                "{case}: {calls:?}"
+            );
+            if case == "restore" || case == "stop" {
+                assert_eq!(
+                    calls.iter().filter(|c| *c == "hot:start").count(),
+                    1,
+                    "never start old daemon after an uncertain restore"
+                );
+            }
+            if case == "stop" {
+                assert!(error.contains("stop unconfirmed"));
+            }
+        });
+    }
+    while let Some(result) = cases.join_next().await {
+        result.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn failed_restore_stops_the_container_and_never_starts_or_admits_the_old_daemon() {
+    let r = rig();
+    {
+        let mut s = r.fake.0.lock().unwrap();
+        s.hot = true;
+        s.startup_crash = true;
+        s.fail.insert("hot:restore-database".into());
+    }
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::RecoveryFailed, "{run:#?}");
+    let calls = r.fake.calls();
+    assert_eq!(calls.iter().filter(|c| *c == "hot:start").count(), 1);
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c == "hot:commit" || c.starts_with("resume "))
+    );
+    assert_eq!(calls.last().unwrap(), "stop-for-recovery c0");
+}
+
+#[tokio::test]
+async fn hot_swap_backup_failure_never_pauses() {
+    let r = rig();
+    r.fake.0.lock().unwrap().hot = true;
+    r.fake.fail("backup");
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Failed);
+    assert!(!r.fake.calls().iter().any(|c| c == "hot:pause"));
+}
+
+#[tokio::test]
+async fn hot_swap_snapshot_failure_resumes_old_release_without_restore() {
+    let r = rig();
+    r.fake.0.lock().unwrap().hot = true;
+    r.fake.fail("hot:snapshot");
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Failed, "{run:#?}");
+    assert!(r.fake.calls().iter().any(|c| c == "hot:start"));
+    assert!(!r.fake.calls().iter().any(|c| c == "hot:restore-database"));
+    assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
 }
 
 #[tokio::test]
@@ -607,6 +866,20 @@ fn total_hold_budget_reserves_recovery_and_bounds_offline_work() {
     assert_eq!(&command[..2], ["timeout", "--kill-after=5"]);
     assert_eq!(command[3], "backup");
     assert!(command[2].trim_end_matches('s').parse::<f64>().unwrap() <= 95.0);
+}
+
+#[tokio::test]
+async fn hung_switch_fails_at_safety_deadline_with_recovery_time_left() {
+    let hold = tokio::time::Instant::now() + HOT_SWAP_RECOVERY_RESERVE + Duration::from_millis(20);
+    let deadline = hold - HOT_SWAP_RECOVERY_RESERVE;
+    let result = switch_before_deadline::<()>(deadline, std::future::pending()).await;
+    assert!(
+        result
+            .unwrap_err()
+            .0
+            .contains("runner hold safety deadline")
+    );
+    assert!(tokio::time::Instant::now() < hold);
 }
 
 fn steps(run: &Run) -> Vec<String> {

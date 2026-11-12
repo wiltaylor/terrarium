@@ -82,6 +82,9 @@ pub enum Outcome {
     RolledBack,
     /// The way back failed too. The operator must act.
     RollbackFailed,
+    /// Recovery is uncertain. The container must remain stopped for manual
+    /// database verification/restore, never resumed automatically.
+    RecoveryFailed,
 }
 
 impl Outcome {
@@ -93,12 +96,16 @@ impl Outcome {
             Self::Failed => "failed",
             Self::RolledBack => "rolled_back",
             Self::RollbackFailed => "rollback_failed",
+            Self::RecoveryFailed => "recovery_failed",
         }
     }
 
     /// True for an outcome that changed nothing for the good.
     pub fn is_failure(self) -> bool {
-        matches!(self, Self::Failed | Self::RolledBack | Self::RollbackFailed)
+        matches!(
+            self,
+            Self::Failed | Self::RolledBack | Self::RollbackFailed | Self::RecoveryFailed
+        )
     }
 }
 
@@ -226,6 +233,8 @@ mod tests {
         assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), a);
         assert_eq!(Outcome::RolledBack.as_str(), "rolled_back");
         assert!(Outcome::RollbackFailed.is_failure());
+        assert!(Outcome::RecoveryFailed.is_failure());
+        assert_eq!(Outcome::RecoveryFailed.as_str(), "recovery_failed");
         assert!(!Outcome::Current.is_failure());
     }
 }

@@ -538,6 +538,7 @@ async fn run(
     }
     let command = b.cmd.join(" ");
     let cmd = RemoteCmd {
+        prepare_root: None,
         resume_key: None,
         argv: b.cmd.clone(),
         cwd: b.cwd.clone(),
