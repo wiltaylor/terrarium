@@ -87,6 +87,7 @@ impl Store {
     pub fn retention_protected(&self, release: Option<&str>) -> std::io::Result<Vec<String>> {
         let mut r: Retention = strict_json(&self.dir.join("retention.json"))?;
         let history: Vec<Run> = strict_json(&self.dir.join(HISTORY))?;
+        let previous: Option<Previous> = strict_json(&self.dir.join(PREVIOUS))?;
         for run in history {
             if !r.released.contains(&run.id)
                 && matches!(
@@ -128,7 +129,6 @@ impl Store {
                 "unfinished update blocks retention until operator recovery release",
             ));
         }
-        let previous: Option<Previous> = strict_json(&self.dir.join(PREVIOUS))?;
         let mut protected: Vec<_> = r.protected.into_values().collect();
         if let Some(p) = previous.and_then(|p| p.backup) {
             protected.push(p);
