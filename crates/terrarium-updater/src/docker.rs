@@ -1439,12 +1439,16 @@ mod tests {
 
     #[tokio::test]
     async fn startup_crash_log_is_scoped_and_redacted_through_the_docker_socket() {
+        startup_log_request("1794448800.123456789", true).await;
+        startup_log_request("2026-11-12T02:00:00.123456789+00:00", false).await;
+    }
+
+    async fn startup_log_request(since: &'static str, valid_timestamp: bool) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("docker.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let since = "1794448800.123456789";
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut header = Vec::new();
@@ -1486,14 +1490,18 @@ mod tests {
             socket,
             target: None,
         };
-        let failure = tokio::time::timeout(
+        let result = tokio::time::timeout(
             Duration::from_secs(3),
             docker.daemon_failure_since("daemon", since),
         )
         .await
-        .unwrap()
-        .unwrap()
         .unwrap();
+        if !valid_timestamp {
+            assert_eq!(result.unwrap_err(), "cannot read daemon startup log (values hidden)");
+            server.await.unwrap();
+            return;
+        }
+        let failure = result.unwrap().unwrap();
         assert!(failure.contains("FOREIGN KEY constraint failed"));
         assert!(!failure.contains("do-not-record"));
         server.await.unwrap();

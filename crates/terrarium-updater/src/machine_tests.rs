@@ -473,6 +473,30 @@ fn rig() -> Rig {
     rig_with("gh", true)
 }
 
+#[cfg(feature = "bin")]
+#[tokio::test]
+#[ignore = "requires owned tiny containers on terrarium-docker-scratch"]
+async fn real_docker_startup_health() {
+    let healthy = std::env::var("TER984_HEALTHY_CONTAINER").unwrap();
+    let crashed = std::env::var("TER984_CRASHED_CONTAINER").unwrap();
+    assert!(healthy.starts_with("ter-984-"));
+    assert!(crashed.starts_with("ter-984-"));
+    let mut r = rig();
+    let updater = Arc::get_mut(&mut r.updater).unwrap();
+    updater.engine = Arc::new(crate::docker::Docker {
+        socket: "/var/run/docker.sock".into(),
+        target: None,
+    });
+    updater.cfg.health_timeout = Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    // The fixtures are started after the epoch. This exercises dockerd's
+    // fractional UNIX timestamp parser as well as the real health/exec path.
+    updater.wait_hot_healthy_until(&healthy, deadline, Some("0.000000000")).await.unwrap();
+    let reason = updater.wait_hot_healthy_until(&crashed, deadline, Some("0.000000000")).await.unwrap_err();
+    assert!(reason.contains("FOREIGN KEY constraint failed"), "{reason}");
+    assert!(!reason.contains("private-fixture-value"));
+}
+
 #[tokio::test]
 async fn missing_jobs_endpoint_warns_without_exposing_values_and_continues() {
     let r = rig();
