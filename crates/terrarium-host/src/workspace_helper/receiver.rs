@@ -29,6 +29,10 @@ struct Canonical<'a> {
 }
 
 impl Specification {
+    pub(super) fn image_reference(&self) -> &str {
+        &self.image
+    }
+
     /// The caller reads these bytes from its pinned protected configuration,
     /// never from the bootstrap request or the unprivileged host forwarder.
     pub fn from_config(bytes: &[u8]) -> Result<Self, Reply> {
