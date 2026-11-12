@@ -421,23 +421,27 @@ pub async fn root_vm_absent(state: &Shared, def: &TargetDef, saved: &str) -> Api
     let old: TargetDef = serde_json::from_str(saved)
         .map_err(|e| ApiError::invalid(format!("invalid saved root definition: {e}")))?;
     let host = old.address.as_deref().and_then(|a| a.rsplit('@').next());
-    let name = host.and_then(|h| h.strip_suffix(".exe.xyz"))
+    let name = host
+        .and_then(|h| h.strip_suffix(".exe.xyz"))
         .filter(|n| !n.is_empty() && !n.contains(['/', ':', '@']));
     let Some(name) = name else {
-        return Err(ApiError::conflict("cannot identify the saved root's exe.dev VM"));
+        return Err(ApiError::conflict(
+            "cannot identify the saved root's exe.dev VM",
+        ));
     };
-    let account = state.db.read_now(|c| {
-        match record_of(c, &def.name)? {
-            Some(vm) => Ok(vm.account()),
-            None => Account::of_target(c, def),
-        }
+    let account = state.db.read_now(|c| match record_of(c, &def.name)? {
+        Some(vm) => Ok(vm.account()),
+        None => Account::of_target(c, def),
     })?;
     let value = api_for(state, &account)?.run("ls --json").await?;
-    let vms = value["vms"].as_array()
+    let vms = value["vms"]
+        .as_array()
         .ok_or_else(|| ApiError::internal("exe.dev listing has no VM array"))?;
     let mut found = false;
     for vm in vms {
-        let listed = vm["vm_name"].as_str().or_else(|| vm["name"].as_str())
+        let listed = vm["vm_name"]
+            .as_str()
+            .or_else(|| vm["name"].as_str())
             .filter(|n| !n.is_empty())
             .ok_or_else(|| ApiError::internal("exe.dev listing has an unnamed VM"))?;
         found |= listed == name;
