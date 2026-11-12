@@ -348,8 +348,12 @@ impl Engine for Fake {
                 }
                 if !failed {
                     let mut s = self.0.lock().unwrap();
-                    if command == "snapshot" { s.snapshot_database = s.database; }
-                    if command == "restore-database" { s.database = s.snapshot_database; }
+                    if command == "snapshot" {
+                        s.snapshot_database = s.database;
+                    }
+                    if command == "restore-database" {
+                        s.database = s.snapshot_database;
+                    }
                 }
                 return Ok(ExecOut {
                     code: i64::from(failed),
@@ -1188,12 +1192,27 @@ fn new_ref() -> String {
 async fn supervised_recreate_backs_up_before_both_drains_and_snapshots_before_replacement() {
     let r = rig();
     r.fake.0.lock().unwrap().supervised = true;
-    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
     assert_eq!(run.outcome, Outcome::Succeeded, "{run:#?}");
     let calls = r.fake.calls();
-    let expected = ["backup c0", "drain-jobs c0", "drain c0", "hot:probe",
-        "hot:begin", "hot:pause", "hot:snapshot", "stop c0", "remove c0"];
-    let positions: Vec<_> = expected.iter().map(|name| calls.iter().position(|s| s == name).unwrap()).collect();
+    let expected = [
+        "backup c0",
+        "drain-jobs c0",
+        "drain c0",
+        "hot:probe",
+        "hot:begin",
+        "hot:pause",
+        "hot:snapshot",
+        "stop c0",
+        "remove c0",
+    ];
+    let positions: Vec<_> = expected
+        .iter()
+        .map(|name| calls.iter().position(|s| s == name).unwrap())
+        .collect();
     assert!(positions.windows(2).all(|p| p[0] < p[1]), "{calls:?}");
     assert!(calls.iter().any(|c| c == "hot:commit"));
     assert_eq!(r.fake.0.lock().unwrap().snapshot_database, 2);
@@ -1204,10 +1223,16 @@ async fn supervised_recreate_rollback_keeps_the_post_zip_write() {
     let r = rig();
     r.fake.0.lock().unwrap().supervised = true;
     r.fake.fail(&format!("health:{}", new_ref()));
-    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
     assert_eq!(run.outcome, Outcome::RolledBack, "{run:#?}");
     let calls = r.fake.calls();
-    assert!(calls.iter().any(|c| c == "hot:restore-database"), "{calls:?}");
+    assert!(
+        calls.iter().any(|c| c == "hot:restore-database"),
+        "{calls:?}"
+    );
     assert!(!calls.iter().any(|c| c.starts_with("restore ")));
     assert_eq!(r.fake.0.lock().unwrap().database, 2);
     assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
@@ -1218,7 +1243,10 @@ async fn supervised_recreate_snapshot_failure_resumes_without_replacing() {
     let r = rig();
     r.fake.0.lock().unwrap().supervised = true;
     r.fake.fail("hot:snapshot");
-    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
     assert_eq!(run.outcome, Outcome::Failed, "{run:#?}");
     let calls = r.fake.calls();
     assert!(calls.iter().any(|c| c == "hot:cancel-pause"));
@@ -1272,7 +1300,11 @@ async fn an_update_drains_backs_up_and_switches_the_image() {
     assert_eq!(run.from.unwrap().reference, OLD);
     assert_eq!(run.to.unwrap().version.as_deref(), Some("0.2.0"));
     assert_eq!(run.backup.as_deref(), Some(BACKUP));
-    assert!(run.steps.iter().any(|s| s.detail.contains("legacy recreate: backup after drain")));
+    assert!(
+        run.steps
+            .iter()
+            .any(|s| s.detail.contains("legacy recreate: backup after drain"))
+    );
     // The way back and the image for the deploy wrapper.
     let prev = r.store.previous().unwrap();
     assert_eq!(prev.image.reference, OLD);

@@ -745,12 +745,16 @@ impl Engine for Docker {
     fn supervised_snapshot<'a>(&'a self, cur: &'a Container) -> BoxFut<'a, Res<bool>> {
         Box::pin(async move {
             let physical = cur.spec["container"]["Image"].as_str().unwrap_or_default();
-            let old = self.inspect_image(physical).await?
+            let old = self
+                .inspect_image(physical)
+                .await?
                 .ok_or_else(|| "cannot inspect source image".to_owned())?;
             if old["Config"]["Labels"]["io.terrarium.hot-swap-layout"] != "1" {
                 return Ok(false);
             }
-            let out = self.exec(&cur.id, crate::machine::hot_argv("probe", &[])).await?;
+            let out = self
+                .exec(&cur.id, crate::machine::hot_argv("probe", &[]))
+                .await?;
             if out.code != 0 {
                 return Err(out.reason());
             }

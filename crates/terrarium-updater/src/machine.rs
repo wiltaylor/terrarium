@@ -648,16 +648,19 @@ impl Updater {
                 .await
                 .map_err(failed)?;
 
-        let supervised = !hot && self.engine.supervised_snapshot(&cur).await
-            .map_err(|e| failed(Fail(e)))?;
+        let supervised = !hot
+            && self
+                .engine
+                .supervised_snapshot(&cur)
+                .await
+                .map_err(|e| failed(Fail(e)))?;
         let online_backup = if supervised {
-            let backup = self.step("backup", async {
-                let out = self.exec_ok(&cur.id, backup_argv()).await?;
-                backup_path(&out)
-            }, |p| format!("online full backup {p}; manual pre-update restore point")).await.map_err(failed)?;
+            let backup = self.online_backup(&cur).await.map_err(failed)?;
             self.with_run(|r| r.backup = Some(backup.clone()));
             Some(backup)
-        } else { None };
+        } else {
+            None
+        };
 
         // Older daemons may not support jobs-only drain. Never prevent an
         // update for that reason, and never record their error values.
@@ -710,23 +713,27 @@ impl Updater {
             self.resume(&cur).await;
             return Err(failed(f));
         }
-        let backup = if let Some(backup) = online_backup { backup } else { match self
-            .step(
-                "backup",
-                async {
-                    let out = self.exec_ok(&cur.id, backup_argv()).await?;
-                    backup_path(&out)
-                },
-                |p| format!("full backup {p}; legacy recreate: backup after drain"),
-            )
-            .await
-        {
-            Ok(p) => p,
-            Err(f) => {
-                self.resume(&cur).await;
-                return Err(failed(f));
+        let backup = if let Some(backup) = online_backup {
+            backup
+        } else {
+            match self
+                .step(
+                    "backup",
+                    async {
+                        let out = self.exec_ok(&cur.id, backup_argv()).await?;
+                        backup_path(&out)
+                    },
+                    |p| format!("full backup {p}; legacy recreate: backup after drain"),
+                )
+                .await
+            {
+                Ok(p) => p,
+                Err(f) => {
+                    self.resume(&cur).await;
+                    return Err(failed(f));
+                }
             }
-        }};
+        };
         self.with_run(|r| r.backup = Some(backup.clone()));
 
         if supervised {
@@ -734,7 +741,10 @@ impl Updater {
         }
 
         // From here the container changes: a failure goes back.
-        match self.replace(&prepared, &to, restore.as_deref(), supervised).await {
+        match self
+            .replace(&prepared, &to, restore.as_deref(), supervised)
+            .await
+        {
             Ok(()) => {
                 if supervised {
                     self.finish_recreate(&cur, &backup).await;
@@ -754,9 +764,11 @@ impl Updater {
             }
             Err(f) => match self.recover(&cur, &backup, supervised).await {
                 Ok(()) => {
-                    if supervised { self.finish_recreate(&cur, &backup).await; }
+                    if supervised {
+                        self.finish_recreate(&cur, &backup).await;
+                    }
                     Err((Outcome::RolledBack, f))
-                },
+                }
                 Err(Fail(e)) => Err((
                     Outcome::RollbackFailed,
                     Fail(format!("{}; the way back failed too: {e}", f.0)),
@@ -765,49 +777,111 @@ impl Updater {
         }
     }
 
+    async fn online_backup(&self, cur: &Container) -> Result<String, Fail> {
+        let backup_started = Utc::now();
+        self.step(
+            "backup",
+            async {
+                let out = self.exec_ok(&cur.id, backup_argv()).await?;
+                backup_path(&out)
+            },
+            |p| format!("full backup {p}; began at {backup_started}; writes after that time may not be included; manual pre-update restore point"),
+        ).await
+    }
+
     async fn finish_recreate(&self, cur: &Container, backup: &str) {
         // Use the source helper even when the destination is a legacy image.
-        if let Err(e) = self.step("snapshot-cleanup", async {
-            let out = self.engine.run_once(cur, &cur.image, hot_argv("commit", &[backup])).await?;
-            if out.code != 0 { return Err(out.reason()); }
-            Ok(())
-        }, |()| "recreate transaction committed; snapshot released".into()).await {
+        if let Err(e) = self
+            .step(
+                "snapshot-cleanup",
+                async {
+                    let out = self
+                        .engine
+                        .run_once(cur, &cur.image, hot_argv("commit", &[backup]))
+                        .await?;
+                    if out.code != 0 {
+                        return Err(out.reason());
+                    }
+                    Ok(())
+                },
+                |()| "recreate transaction committed; snapshot released".into(),
+            )
+            .await
+        {
             tracing::warn!("snapshot cleanup failed, retained for recovery: {}", e.0);
         }
     }
 
-    async fn recreate_snapshot(&self, cur: &Container, backup: &str) -> Result<(), (Outcome, Fail)> {
-        let deadline = tokio::time::Instant::now() + HOT_SWAP_HOLD_LIMIT;
-        let switch_deadline = deadline - HOT_SWAP_RECOVERY_RESERVE;
-        let work = self.step("snapshot-database", async {
-            tokio::time::timeout_at(switch_deadline, async {
-                let old = self.exec_ok(&cur.id, hot_argv("probe", &[])).await?;
-                // begin clears a prior completed transaction's admission flag.
-                self.exec_ok(&cur.id, hot_argv("begin", &[old.trim()])).await?;
-                self.exec_ok(&cur.id, hot_argv("pause", &["960"])).await?;
-                let out = self.engine.run_once(cur, &cur.image,
-                    bounded_command(hot_argv("snapshot", &[backup]), switch_deadline)?).await?;
-                if out.code != 0 { return Err(out.reason()); }
-                // End the supervisor hold before container replacement. Once
-                // stopped there are no retained runners or automatic restart.
-                self.engine.stop(&cur.id).await?;
-                Ok(())
-            }).await.map_err(|_| "recreate snapshot exceeded the hold safety deadline".to_owned())?
-        }, |()| "exact paused database snapshot for automatic recreate rollback".into()).await;
+    async fn recreate_snapshot(
+        &self,
+        cur: &Container,
+        backup: &str,
+    ) -> Result<(), (Outcome, Fail)> {
+        #[cfg(not(test))]
+        let (hold, reserve, stop) = (HOT_SWAP_HOLD_LIMIT, HOT_SWAP_RECOVERY_RESERVE, HOT_SWAP_STOP_RESERVE);
+        #[cfg(test)]
+        let (hold, reserve, stop) = self.hot_budget;
+        let deadline = tokio::time::Instant::now() + hold;
+        let switch_deadline = deadline - reserve;
+        let work = self
+            .step(
+                "snapshot-database",
+                async {
+                    tokio::time::timeout_at(switch_deadline, async {
+                        let old = self.exec_ok(&cur.id, hot_argv("probe", &[])).await?;
+                        // begin clears a prior completed transaction's admission flag.
+                        self.exec_ok(&cur.id, hot_argv("begin", &[old.trim()]))
+                            .await?;
+                        self.exec_ok(&cur.id, hot_argv("pause", &["960"])).await?;
+                        let out = self
+                            .engine
+                            .run_once(
+                                cur,
+                                &cur.image,
+                                bounded_command(hot_argv("snapshot", &[backup]), switch_deadline)?,
+                            )
+                            .await?;
+                        if out.code != 0 {
+                            return Err(out.reason());
+                        }
+                        // End the supervisor hold before container replacement. Once
+                        // stopped there are no retained runners or automatic restart.
+                        self.step("stop", self.engine.stop(&cur.id), |()| "stopped the paused source container".into())
+                            .await.map_err(|f| f.0)?;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(|_| "recreate snapshot exceeded the hold safety deadline".to_owned())?
+                },
+                |()| "exact paused database snapshot for automatic recreate rollback".into(),
+            )
+            .await;
         if let Err(f) = work {
-            let recovery_deadline = deadline - HOT_SWAP_STOP_RESERVE;
+            let recovery_deadline = deadline - stop;
             let recovery = recovery_before_deadline(recovery_deadline, async {
-                let left = budget_left(recovery_deadline, Duration::ZERO)?.as_secs_f64().to_string();
-                self.exec_ok(&cur.id, hot_argv("cancel-pause", &[&left])).await?;
-                self.wait_hot_healthy_until(&cur.id, recovery_deadline, None).await
-            }).await;
+                let left = budget_left(recovery_deadline, Duration::ZERO)?
+                    .as_secs_f64()
+                    .to_string();
+                self.exec_ok(&cur.id, hot_argv("cancel-pause", &[&left]))
+                    .await?;
+                self.wait_hot_healthy_until(&cur.id, recovery_deadline, None)
+                    .await
+            })
+            .await;
             return Err(match recovery {
                 Ok(_) => {
                     let _ = tokio::time::timeout_at(deadline, self.resume(cur)).await;
                     (Outcome::Failed, f)
-                },
-                Err(e) => self.failed_hot_recovery(cur, backup, deadline,
-                    format!("{}; recreate snapshot recovery: {e}", f.0)).await,
+                }
+                Err(e) => {
+                    self.failed_hot_recovery(
+                        cur,
+                        backup,
+                        deadline,
+                        format!("{}; recreate snapshot recovery: {e}", f.0),
+                    )
+                    .await
+                }
             });
         }
         Ok(())
@@ -840,18 +914,7 @@ impl Updater {
         // VACUUM INTO in the daemon's backup CLI is safe while it is live.
         // The ZIP is the manual pre-update restore point, not the exact
         // automatic rollback point (the paused database snapshot below).
-        let backup_started = Utc::now();
-        let backup = self
-            .step(
-                "backup",
-                async {
-                    let out = self.exec_ok(&cur.id, backup_argv()).await?;
-                    backup_path(&out)
-                },
-                |p| format!("full backup {p}; began at {backup_started}; writes after that time may not be included; manual pre-update restore point"),
-            )
-            .await
-            .map_err(failed)?;
+        let backup = self.online_backup(cur).await.map_err(failed)?;
         self.with_run(|r| r.backup = Some(backup.clone()));
         self.exec_ok(&cur.id, hot_argv("begin", &[&release]))
             .await
@@ -1228,10 +1291,10 @@ impl Updater {
         already_stopped: bool,
     ) -> Result<(), Fail> {
         if !already_stopped {
-        self.step("stop", self.engine.stop(&cur.id), |()| {
-            format!("stopped {}", cur.name)
-        })
-        .await?;
+            self.step("stop", self.engine.stop(&cur.id), |()| {
+                format!("stopped {}", cur.name)
+            })
+            .await?;
         }
         if let Some(path) = restore {
             self.step(
@@ -1326,9 +1389,15 @@ impl Updater {
             async {
                 let out = self
                     .engine
-                    .run_once(cur, &cur.image, if snapshot {
-                        hot_argv("restore-database", &[backup])
-                    } else { restore_argv(backup) })
+                    .run_once(
+                        cur,
+                        &cur.image,
+                        if snapshot {
+                            hot_argv("restore-database", &[backup])
+                        } else {
+                            restore_argv(backup)
+                        },
+                    )
                     .await?;
                 if out.code == 0 {
                     Ok(())
