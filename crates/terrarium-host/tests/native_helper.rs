@@ -371,7 +371,7 @@ async fn a_session_takes_multi_line_environment_values() {
     assert_eq!(exit.code, Some(0));
     assert_eq!(
         f.log("env.copy"),
-        "TERRARIUM_COMMIT_HOOK=\"#!/bin/sh\nexec \\\"\\$1\\\" \\`x\\`\r\n\"\n\
+        "CUDA_VISIBLE_DEVICES=\"\"\nTERRARIUM_COMMIT_HOOK=\"#!/bin/sh\nexec \\\"\\$1\\\" \\`x\\`\r\n\"\n\
          TERRARIUM_GIT_TRAILERS=\"Card: TER-566\nAgent: p/a\n\"\n"
     );
     assert_eq!(f.log("env.copy.mode").trim(), "600");
@@ -434,7 +434,10 @@ async fn a_session_starts_in_its_device_policy_and_relays_stdio() {
         assert!(args.contains(&want), "{want} not in {args:?}");
     }
     assert!(!run.contains("nvidia1"), "{run}");
-    assert_eq!(f.log("env.copy"), "TOKEN=\"t\\$1\"\n");
+    assert_eq!(
+        f.log("env.copy"),
+        format!("CUDA_VISIBLE_DEVICES=\"{A}\"\nTOKEN=\"t\\$1\"\n")
+    );
     f.wait_idle().await;
     // The unit is killed at the end, so no descendant keeps a GPU handle,
     // and its environment file is gone.
@@ -448,6 +451,74 @@ async fn a_session_starts_in_its_device_policy_and_relays_stdio() {
             .count(),
         0
     );
+}
+
+#[tokio::test]
+async fn reserved_gpu_uses_its_minor_number_not_its_index() {
+    let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
+    // Helios (TER-954): enumeration index 0 has minor 1, index 1 has minor 0.
+    let first = "GPU-cfe1df42-789e-7d5a-3df7-bded6b36e2eb";
+    let second = "GPU-1b303823-5ac9-74a6-1072-3c4e16f729a4";
+    script(
+        &f.dir.path().join("nvidia-smi"),
+        &format!(
+            "case \"$*\" in\n\
+             -L) printf 'GPU 0: NVIDIA GPU (UUID: {first})\\nGPU 1: NVIDIA GPU (UUID: {second})\\n' ;;\n\
+             -q) printf 'GPU 00000000:01:00.0\\n    GPU UUID : {first}\\n    Minor Number : 1\\nGPU 00000000:05:00.0\\n    GPU UUID : {second}\\n    Minor Number : 0\\n' ;;\n\
+             *) exit 2 ;;\n\
+             esac\n"
+        ),
+    );
+    for (gpus, minors) in [
+        (vec![first], vec![1]),
+        (vec![second], vec![0]),
+        (vec![second, first], vec![0, 1]),
+        (vec![], vec![]),
+    ] {
+        for caller in [None, Some("0"), Some(A)] {
+            f.write("run.log", "");
+            let mut req = f.start("p/a", Some("L1"), &gpus, &gpus, &["true"]);
+            req.env.clear();
+            if let Some(value) = caller {
+                req.env.insert("CUDA_VISIBLE_DEVICES".into(), value.into());
+            }
+            let (s, r) = send(&f.socket, &Request::Start(req)).await;
+            assert!(matches!(r, Reply::Started { .. }), "{r:?}");
+            let (mut rd, _wr) = s.into_split();
+            loop {
+                match native::read_frame(&mut rd).await.unwrap() {
+                    Some((Kind::Exit, d)) => {
+                        assert_eq!(serde_json::from_slice::<Exit>(&d).unwrap().code, Some(0));
+                        break;
+                    }
+                    Some(_) => {}
+                    None => panic!("no exit"),
+                }
+            }
+            let run = f.log("run.log");
+            let devices: Vec<_> = run
+                .lines()
+                .filter(|line| line.starts_with("DeviceAllow=/dev/nvidia"))
+                .collect();
+            for minor in 0..=1 {
+                assert_eq!(
+                    devices.contains(&format!("DeviceAllow=/dev/nvidia{minor} rw").as_str()),
+                    minors.contains(&minor),
+                    "{gpus:?}: {devices:?}"
+                );
+            }
+            assert_eq!(
+                devices.contains(&"DeviceAllow=/dev/nvidiactl rw"),
+                !gpus.is_empty()
+            );
+            assert_eq!(devices.len(), minors.len() + usize::from(!gpus.is_empty()));
+            assert_eq!(
+                f.log("env.copy"),
+                format!("CUDA_VISIBLE_DEVICES=\"{}\"\n", gpus.join(","))
+            );
+            f.wait_idle().await;
+        }
+    }
 }
 
 #[tokio::test]

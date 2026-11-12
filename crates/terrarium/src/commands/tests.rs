@@ -136,6 +136,26 @@ async fn issue_import_uses_the_daemon_endpoint() {
 }
 
 #[tokio::test]
+async fn issue_close_done_sends_dry_run_and_displays_plan() {
+    let run = exec(
+        true,
+        &["issue", "close-done", "--repo", "terrarium", "--dry-run"],
+        vec![(200, json!([{"number":7,"comment":"Done in Terrarium 1.0.0-alpha (cards TER-1). Closing.","dry_run":true}]))],
+        None,
+    ).await;
+    run.result.unwrap();
+    assert!(run.out.contains("TER-1") && run.out.contains("1.0.0-alpha"));
+    assert_eq!(
+        run.reqs[0].path,
+        "/api/projects/terra/github-issues/close-done"
+    );
+    assert_eq!(
+        run.reqs[0].body,
+        Some(json!({"repo":"terrarium","dry_run":true,"issue":null,"version":null}))
+    );
+}
+
+#[tokio::test]
 async fn reservation_commands_send_amounts_and_queue_options() {
     let run = exec(
         true,
@@ -476,6 +496,45 @@ async fn daemon_and_system() {
         "{out}"
     );
     assert!(out.contains("roles: sysadmin,project_admin"), "{out}");
+}
+
+/// TER-140: the operator sets the GitHub author gate with `project set`.
+#[tokio::test]
+async fn project_and_repo_git_settings() {
+    ok(
+        true,
+        &["project", "set", "--provenance", "off", "--git-name", "Project Author", "--git-email", "project@example.test"],
+        vec![(200, json!({"provenance": false}))],
+        vec![(Patch, "/api/projects/terra/git", vec![], Some(json!({"provenance": false, "name": "Project Author", "email": "project@example.test"})))],
+    ).await;
+    ok(
+        true,
+        &[
+            "repo",
+            "set",
+            "app",
+            "--provenance",
+            "off",
+            "--git-name",
+            "Repo Author",
+            "--warn-only",
+            "false",
+        ],
+        vec![
+            (200, json!([{"id": "R1", "name": "app"}])),
+            (200, json!({"provenance": false})),
+        ],
+        vec![
+            req(Get, "/api/projects/terra/repos"),
+            (
+                Patch,
+                "/api/repos/R1/git",
+                vec![],
+                Some(json!({"provenance": false, "name": "Repo Author", "warn_only": false})),
+            ),
+        ],
+    )
+    .await;
 }
 
 /// TER-140: the operator sets the GitHub author gate with `project set`.

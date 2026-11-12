@@ -915,6 +915,8 @@ enum PtyArg {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExecBody {
+    #[serde(default)]
+    durable: bool,
     /// The program and its arguments. Empty with `shell`.
     #[serde(default)]
     cmd: Vec<String>,
@@ -966,6 +968,7 @@ async fn exec(
         Some(PtyArg::Size(s)) => Some(s),
     };
     let cmd = RemoteCmd {
+        durable: b.durable,
         prepare_root: None,
         resume_key: None,
         argv: b.cmd,
@@ -1147,6 +1150,9 @@ async fn session_input(
     ApiJson(b): ApiJson<InputBody>,
 ) -> ApiResult<Json<Value>> {
     let s = state.executor.session(&actor, &name, &id)?;
+    if b.data.is_some() && !s.takes_stdin.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(ApiError::invalid("this session does not accept stdin"));
+    }
     let mut controls = Vec::new();
     if let Some(d) = &b.data {
         let bytes = base64::engine::general_purpose::STANDARD

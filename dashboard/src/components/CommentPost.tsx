@@ -15,7 +15,7 @@ export function CommentPost(props: { comment: CardComment; index: number; card: 
     return renderMarkdown(props.comment.body, props.project, { textBody: true, cardKeys: keys, cardPrefixes: new Set(Object.keys(keys)), prefixProject: keys });
   };
   const id = () => `comment-${props.card}-${props.index + 1}`;
-  return <ForumPost id={id()} number={props.index + 1} href={`${targetHref({ kind: "card", project: props.project, id: props.card })}#${id()}`} author={props.comment.author_name ?? props.comment.author} label="Comment" at={props.comment.created_at}
+  return <ForumPost id={id()} number={props.index + 1} href={`${targetHref({ kind: "card", project: props.project, id: props.card })}#${id()}`} author={props.comment.author_name ?? props.comment.author} authorId={props.comment.author} label="Comment" at={props.comment.created_at}
     onQuote={props.onQuote ? (post) => props.onQuote?.(quotePost(props.comment.body, post)) : undefined}
     badges={<Show when={props.comment.session}>{(s) => <A href={sessionHref(s().id)} title={`${s().harness} session ${s().id}`}>View session</A>}</Show>}>
     <SafeHtml class="prose text-markdown" html={html()} onClick={(e) => openCardLink(e, instance.cardPeek)} />

@@ -7,11 +7,14 @@ mod card_waits;
 mod common;
 mod exedev;
 mod host_restart;
+mod live_workspace;
 mod read_positions;
 mod remotes;
+mod ssh_restart;
 mod ter221_latency;
 #[path = "../trouble.rs"]
 mod trouble;
+mod windows_paths;
 mod workspace_sync;
 
 mod reservations;

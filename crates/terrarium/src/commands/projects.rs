@@ -204,6 +204,9 @@ pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
             })
         }
         ProjectCmd::Set {
+            provenance,
+            git_name,
+            git_email,
             name,
             description,
             prefix,
@@ -213,6 +216,31 @@ pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
             home_board_columns,
         } => {
             let name = ctx.project_or(name.as_deref()).await?;
+            if provenance.is_some() || git_name.is_some() || git_email.is_some() {
+                let mut git = json!({});
+                if let Some(p) = provenance {
+                    git["provenance"] = (p == "on").into();
+                }
+                set_opt(&mut git, "name", git_name.clone());
+                set_opt(&mut git, "email", git_email.clone());
+                let v = ctx
+                    .api
+                    .patch(&format!("{}/git", project_path(&name)), git)
+                    .await?;
+                if description.is_none()
+                    && prefix.is_none()
+                    && idle_alert.is_none()
+                    && github_author.is_empty()
+                    && !github_authors_clear
+                    && home_board_columns.is_none()
+                {
+                    return ctx.emit(&v, |c, _| {
+                        c.line(format!(
+                            "updated git settings of project {name}; refresh checkouts"
+                        ))
+                    });
+                }
+            }
             let mut body = json!({});
             set_opt(&mut body, "description", description.clone());
             set_opt(&mut body, "card_prefix", prefix.clone());
@@ -290,6 +318,53 @@ async fn repo_add(ctx: &Ctx, a: &RepoAddArgs) -> anyhow::Result<()> {
 
 pub async fn repo(ctx: &Ctx, cmd: &RepoCmd) -> anyhow::Result<()> {
     match cmd {
+        RepoCmd::PushChecked { repo } => {
+            use std::io::Read as _;
+            let mut updates = String::new();
+            std::io::stdin().take(65537).read_to_string(&mut updates)?;
+            ctx.api
+                .post(
+                    &format!("/api/repos/{}/push-checked", encode(repo)),
+                    Some(json!({"updates": updates})),
+                )
+                .await?;
+            Ok(())
+        }
+        RepoCmd::Set {
+            repo,
+            provenance,
+            git_name,
+            git_email,
+            warn_only,
+        } => {
+            let name = ctx.project_or(None).await?;
+            let all = ctx
+                .api
+                .list(&format!("{}/repos", project_path(&name)), vec![], None)
+                .await?;
+            let id = all
+                .iter()
+                .find(|r| r["name"] == repo.as_str() || r["id"] == repo.as_str())
+                .map_or_else(|| repo.clone(), |r| field(r, "id"));
+            let mut body = json!({});
+            if let Some(p) = provenance {
+                body["provenance"] = (p == "on").into();
+            }
+            set_opt(&mut body, "name", git_name.clone());
+            set_opt(&mut body, "email", git_email.clone());
+            if let Some(warn) = warn_only {
+                body["warn_only"] = (*warn).into();
+            }
+            let v = ctx
+                .api
+                .patch(&format!("/api/repos/{}/git", encode(&id)), body)
+                .await?;
+            ctx.emit(&v, |c, _| {
+                c.line(format!(
+                    "updated git settings of repo {repo}; refresh checkouts"
+                ))
+            })
+        }
         RepoCmd::Ls => repos(ctx, None).await,
         RepoCmd::Add(a) => repo_add(ctx, a).await,
         RepoCmd::Checkout {
