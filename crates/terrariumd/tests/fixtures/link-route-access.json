@@ -330,6 +330,12 @@
     },
     {
       "source": "api/board.rs",
+      "registration": "\"/projects/{name}/github-issues/close-done\",post(close_done_issues)",
+      "access": "operator-only",
+      "cases": []
+    },
+    {
+      "source": "api/board.rs",
       "registration": "\"/projects/{name}/github-issues/import\",post(import_issue)",
       "access": "other",
       "cases": []

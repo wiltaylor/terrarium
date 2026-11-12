@@ -384,6 +384,13 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum IssueCmd {
+    /// Close shipped issues in the approved repository (operator only)
+    CloseDone {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Import an issue from a configured repository (idempotent)
     Import {
         number: u64,

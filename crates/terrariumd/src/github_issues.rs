@@ -11,6 +11,9 @@ use crate::policy;
 use crate::secrets::{self, Secret};
 use crate::store::{board, repos};
 
+mod close;
+pub use close::close_done;
+
 #[derive(Deserialize)]
 pub(crate) struct Issue {
     number: u64,
