@@ -32,6 +32,140 @@ pub trait Backend {
     -> Result<(), Reply>;
 }
 
+
+/// Owns the exclusive store lock throughout all external actions and syncs.
+pub struct Bootstrap<B> {
+    store: Store,
+    backend: B,
+    fenced: bool,
+    prepared: Option<Request>,
+}
+
+impl<B: Backend> Bootstrap<B> {
+    pub fn new(store: Store, backend: B) -> Self {
+        Self {
+            store,
+            backend,
+            fenced: false,
+            prepared: None,
+        }
+    }
+
+    /// Mint a one-use continuation only for freshly allocated metadata. An
+    /// existing journal directory can never mint this token after a crash.
+    pub fn allocate(
+        roots: &super::registration_roots::Roots,
+        request: Request,
+        mut backend: B,
+    ) -> Result<Self, Reply> {
+        Journal::new(request.clone())?;
+        backend.check_configuration(&request)?;
+        backend.check_absent(&request)?;
+        let store = roots.begin(request.clone())?;
+        Ok(Self {
+            store,
+            backend,
+            fenced: false,
+            prepared: Some(request),
+        })
+    }
+
+    pub fn create_prepared(&mut self) -> Result<(), Reply> {
+        if self.fenced {
+            return Err(Reply::Quarantined);
+        }
+        let request = self.prepared.take().ok_or(Reply::Conflict)?;
+        self.fenced = true;
+        let journal = self.store.load_bootstrap()?;
+        if !journal.initial() || journal.original() != &request {
+            return Err(Reply::Quarantined);
+        }
+        self.execute(request, journal)
+    }
+
+    /// No automatic recovery adoption is implemented. A committed duplicate
+    /// returns only its stored identity, never invokes the backend again.
+    pub fn retry(&mut self, request: &Request) -> Result<(), Reply> {
+        if self.fenced {
+            return Err(Reply::Quarantined);
+        }
+        let mut journal = self.store.load_bootstrap()?;
+        if journal.original() != request {
+            return Err(Reply::Conflict);
+        }
+        self.check_configuration(&mut journal)?;
+        journal.recover_without_evidence();
+        self.store.save_bootstrap(&journal)?;
+        journal.retry(request)
+    }
+
+    fn advance(&mut self, journal: &mut Journal, step: Step) -> Result<(), Reply> {
+        journal.advance(step)?;
+        self.store.save_bootstrap(journal)
+    }
+
+    fn check_configuration(&mut self, journal: &mut Journal) -> Result<(), Reply> {
+        if self
+            .backend
+            .check_configuration(journal.original())
+            .is_err()
+        {
+            self.fenced = true;
+            journal.quarantine();
+            self.store
+                .save_bootstrap(journal)
+                .map_err(|_| Reply::Quarantined)?;
+            return Err(Reply::Quarantined);
+        }
+        Ok(())
+    }
+
+    /// The caller has already authenticated the peer and admitted authority.
+    /// Every error after intent fences this instance, even a failed sync. No
+    /// cleanup deletes foreign objects, and no external action is retried.
+    pub fn create(&mut self, request: Request) -> Result<(), Reply> {
+        if self.fenced {
+            return Err(Reply::Quarantined);
+        }
+        if self.prepared.is_some() {
+            return Err(Reply::Conflict);
+        }
+        let journal = Journal::new(request.clone())?;
+        self.backend.check_configuration(&request)?;
+        self.backend.check_absent(&request)?;
+        self.fenced = true;
+        self.store.begin_bootstrap(&journal)?;
+        self.execute(request, journal)
+    }
+
+    fn execute(&mut self, request: Request, mut journal: Journal) -> Result<(), Reply> {
+        self.check_configuration(&mut journal)?;
+        let result = (|| {
+            let scaffold = self.backend.create_scaffold(&request, &self.store)?;
+            self.advance(&mut journal, Step::ScaffoldVerified(scaffold.clone()))?;
+            self.advance(&mut journal, Step::CreatePending)?;
+            let container = self.backend.create_receiver(&request, &scaffold)?;
+            self.advance(&mut journal, Step::ContainerBound(container.clone()))?;
+            let runtime = self
+                .backend
+                .start_and_verify(&request, &scaffold, &container)?;
+            self.advance(&mut journal, Step::ReceiverVerified(runtime.clone()))?;
+            self.backend.commit_runtime(&request, &runtime)?;
+            self.advance(&mut journal, Step::Committed)
+        })();
+        if result.is_err() {
+            self.fenced = true;
+            journal.recover_without_evidence();
+            // Failure to persist quarantine never permits another action in
+            // this instance. An incomplete durable journal fences on restart.
+            let _ = self.store.save_bootstrap(&journal);
+            return Err(Reply::Quarantined);
+        }
+        self.fenced = false;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -247,138 +381,5 @@ mod tests {
             assert_eq!(b.create(r), Err(Reply::Conflict));
             assert_eq!(b.backend.calls, calls);
         }
-    }
-}
-
-/// Owns the exclusive store lock throughout all external actions and syncs.
-pub struct Bootstrap<B> {
-    store: Store,
-    backend: B,
-    fenced: bool,
-    prepared: Option<Request>,
-}
-
-impl<B: Backend> Bootstrap<B> {
-    pub fn new(store: Store, backend: B) -> Self {
-        Self {
-            store,
-            backend,
-            fenced: false,
-            prepared: None,
-        }
-    }
-
-    /// Mint a one-use continuation only for freshly allocated metadata. An
-    /// existing journal directory can never mint this token after a crash.
-    pub fn allocate(
-        roots: &super::registration_roots::Roots,
-        request: Request,
-        mut backend: B,
-    ) -> Result<Self, Reply> {
-        Journal::new(request.clone())?;
-        backend.check_configuration(&request)?;
-        backend.check_absent(&request)?;
-        let store = roots.begin(request.clone())?;
-        Ok(Self {
-            store,
-            backend,
-            fenced: false,
-            prepared: Some(request),
-        })
-    }
-
-    pub fn create_prepared(&mut self) -> Result<(), Reply> {
-        if self.fenced {
-            return Err(Reply::Quarantined);
-        }
-        let request = self.prepared.take().ok_or(Reply::Conflict)?;
-        self.fenced = true;
-        let journal = self.store.load_bootstrap()?;
-        if !journal.initial() || journal.original() != &request {
-            return Err(Reply::Quarantined);
-        }
-        self.execute(request, journal)
-    }
-
-    /// No automatic recovery adoption is implemented. A committed duplicate
-    /// returns only its stored identity, never invokes the backend again.
-    pub fn retry(&mut self, request: &Request) -> Result<(), Reply> {
-        if self.fenced {
-            return Err(Reply::Quarantined);
-        }
-        let mut journal = self.store.load_bootstrap()?;
-        if journal.original() != request {
-            return Err(Reply::Conflict);
-        }
-        self.check_configuration(&mut journal)?;
-        journal.recover_without_evidence();
-        self.store.save_bootstrap(&journal)?;
-        journal.retry(request)
-    }
-
-    fn advance(&mut self, journal: &mut Journal, step: Step) -> Result<(), Reply> {
-        journal.advance(step)?;
-        self.store.save_bootstrap(journal)
-    }
-
-    fn check_configuration(&mut self, journal: &mut Journal) -> Result<(), Reply> {
-        if self
-            .backend
-            .check_configuration(journal.original())
-            .is_err()
-        {
-            self.fenced = true;
-            journal.quarantine();
-            self.store
-                .save_bootstrap(journal)
-                .map_err(|_| Reply::Quarantined)?;
-            return Err(Reply::Quarantined);
-        }
-        Ok(())
-    }
-
-    /// The caller has already authenticated the peer and admitted authority.
-    /// Every error after intent fences this instance, even a failed sync. No
-    /// cleanup deletes foreign objects, and no external action is retried.
-    pub fn create(&mut self, request: Request) -> Result<(), Reply> {
-        if self.fenced {
-            return Err(Reply::Quarantined);
-        }
-        if self.prepared.is_some() {
-            return Err(Reply::Conflict);
-        }
-        let journal = Journal::new(request.clone())?;
-        self.backend.check_configuration(&request)?;
-        self.backend.check_absent(&request)?;
-        self.fenced = true;
-        self.store.begin_bootstrap(&journal)?;
-        self.execute(request, journal)
-    }
-
-    fn execute(&mut self, request: Request, mut journal: Journal) -> Result<(), Reply> {
-        self.check_configuration(&mut journal)?;
-        let result = (|| {
-            let scaffold = self.backend.create_scaffold(&request, &self.store)?;
-            self.advance(&mut journal, Step::ScaffoldVerified(scaffold.clone()))?;
-            self.advance(&mut journal, Step::CreatePending)?;
-            let container = self.backend.create_receiver(&request, &scaffold)?;
-            self.advance(&mut journal, Step::ContainerBound(container.clone()))?;
-            let runtime = self
-                .backend
-                .start_and_verify(&request, &scaffold, &container)?;
-            self.advance(&mut journal, Step::ReceiverVerified(runtime.clone()))?;
-            self.backend.commit_runtime(&request, &runtime)?;
-            self.advance(&mut journal, Step::Committed)
-        })();
-        if result.is_err() {
-            self.fenced = true;
-            journal.recover_without_evidence();
-            // Failure to persist quarantine never permits another action in
-            // this instance. An incomplete durable journal fences on restart.
-            let _ = self.store.save_bootstrap(&journal);
-            return Err(Reply::Quarantined);
-        }
-        self.fenced = false;
-        Ok(())
     }
 }

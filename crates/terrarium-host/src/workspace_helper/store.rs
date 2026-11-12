@@ -18,115 +18,6 @@ pub struct Store {
     owner: u32,
 }
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod bootstrap_tests {
-    use super::*;
-    use terrarium_core::live_workspace::bootstrap::{
-        Journal as Bootstrap, Request, Scaffold, Step,
-    };
-    use terrarium_core::live_workspace::{Caller, PROTOCOL_VERSION, Provenance, SourceIdentity};
-
-    fn id<T: serde::de::DeserializeOwned>(n: u64) -> T {
-        serde_json::from_str(&format!("\"{n:026}\"")).unwrap()
-    }
-
-    fn initial() -> Bootstrap {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        let n = NEXT.fetch_add(10, Ordering::Relaxed);
-        Bootstrap::new(Request {
-            version: PROTOCOL_VERSION,
-            operation: id(n),
-            provenance: Provenance {
-                daemon_instance: id(n + 1),
-                caller: Caller::LocalOperator,
-            },
-            host: id(n + 2),
-            target: "synthetic".into(),
-            registration: id(n + 3),
-            incarnation: id(n + 4),
-            domain: id(n + 5),
-            configuration: [1; 32],
-        })
-        .unwrap()
-    }
-
-    fn scaffold() -> Step {
-        Step::ScaffoldVerified(Scaffold {
-            publisher: SourceIdentity {
-                device: 1,
-                inode: 1,
-            },
-            staging: SourceIdentity {
-                device: 1,
-                inode: 2,
-            },
-            state: SourceIdentity {
-                device: 1,
-                inode: 3,
-            },
-        })
-    }
-
-    #[test]
-    fn bootstrap_snapshot_is_locked_ordered_and_identity_immutable() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::fixture(dir.path()).unwrap();
-        assert!(matches!(Store::fixture(dir.path()), Err(Reply::Busy)));
-        let first = initial();
-        store.begin_bootstrap(&first).unwrap();
-        assert_eq!(store.begin_bootstrap(&first), Err(Reply::Conflict));
-        assert_eq!(store.load_bootstrap().unwrap(), first);
-        let mut next = first.clone();
-        next.advance(scaffold()).unwrap();
-        store.save_bootstrap(&next).unwrap();
-        assert_eq!(store.save_bootstrap(&first), Err(Reply::Conflict));
-        assert_eq!(store.save_bootstrap(&initial()), Err(Reply::Conflict));
-        next.advance(Step::CreatePending).unwrap();
-        next.advance(Step::ContainerBound("a".repeat(64))).unwrap();
-        // Neither observation may bypass its own durable boundary.
-        assert_eq!(store.save_bootstrap(&next), Err(Reply::Conflict));
-        assert_eq!(store.load_bootstrap().unwrap().original(), first.original());
-    }
-
-    #[test]
-    fn bootstrap_cannot_start_after_a_side_effect_or_clear_quarantine() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::fixture(dir.path()).unwrap();
-        let first = initial();
-        let mut advanced = first.clone();
-        advanced.advance(scaffold()).unwrap();
-        assert_eq!(store.save_bootstrap(&advanced), Err(Reply::Quarantined));
-        store.save_bootstrap(&first).unwrap();
-        let mut fenced = first.clone();
-        fenced.recover_without_evidence();
-        store.save_bootstrap(&fenced).unwrap();
-        assert_eq!(store.save_bootstrap(&first), Err(Reply::Conflict));
-        assert_eq!(store.save_bootstrap(&advanced), Err(Reply::Conflict));
-    }
-
-    #[test]
-    fn bootstrap_foreign_state_and_partial_write_are_never_adopted() {
-        use std::os::unix::fs::symlink;
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::fixture(dir.path()).unwrap();
-        let canary = dir.path().join("canary");
-        std::fs::write(&canary, b"unchanged").unwrap();
-        symlink(&canary, dir.path().join("bootstrap.json")).unwrap();
-        assert!(store.save_bootstrap(&initial()).is_err());
-        assert_eq!(std::fs::read(&canary).unwrap(), b"unchanged");
-        std::fs::remove_file(dir.path().join("bootstrap.json")).unwrap();
-        std::fs::write(dir.path().join("bootstrap.json"), b"unknown history").unwrap();
-        assert!(store.save_bootstrap(&initial()).is_err());
-        std::fs::write(dir.path().join("bootstrap.next"), b"interrupted").unwrap();
-        drop(store);
-        assert!(matches!(
-            Store::fixture(dir.path()),
-            Err(Reply::Quarantined)
-        ));
-    }
-}
 
 fn checked(file: &File, owner: u32) -> Result<(), Reply> {
     let m = file.metadata().map_err(|_| Reply::Failed)?;
@@ -303,5 +194,115 @@ impl Store {
         self.root.fd.sync_all().map_err(|_| Reply::Failed)?;
         renameat(&self.root.fd, next_name, &self.root.fd, final_name).map_err(|_| Reply::Failed)?;
         self.root.fd.sync_all().map_err(|_| Reply::Failed)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod bootstrap_tests {
+    use super::*;
+    use terrarium_core::live_workspace::bootstrap::{
+        Journal as Bootstrap, Request, Scaffold, Step,
+    };
+    use terrarium_core::live_workspace::{Caller, PROTOCOL_VERSION, Provenance, SourceIdentity};
+
+    fn id<T: serde::de::DeserializeOwned>(n: u64) -> T {
+        serde_json::from_str(&format!("\"{n:026}\"")).unwrap()
+    }
+
+    fn initial() -> Bootstrap {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let n = NEXT.fetch_add(10, Ordering::Relaxed);
+        Bootstrap::new(Request {
+            version: PROTOCOL_VERSION,
+            operation: id(n),
+            provenance: Provenance {
+                daemon_instance: id(n + 1),
+                caller: Caller::LocalOperator,
+            },
+            host: id(n + 2),
+            target: "synthetic".into(),
+            registration: id(n + 3),
+            incarnation: id(n + 4),
+            domain: id(n + 5),
+            configuration: [1; 32],
+        })
+        .unwrap()
+    }
+
+    fn scaffold() -> Step {
+        Step::ScaffoldVerified(Scaffold {
+            publisher: SourceIdentity {
+                device: 1,
+                inode: 1,
+            },
+            staging: SourceIdentity {
+                device: 1,
+                inode: 2,
+            },
+            state: SourceIdentity {
+                device: 1,
+                inode: 3,
+            },
+        })
+    }
+
+    #[test]
+    fn bootstrap_snapshot_is_locked_ordered_and_identity_immutable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::fixture(dir.path()).unwrap();
+        assert!(matches!(Store::fixture(dir.path()), Err(Reply::Busy)));
+        let first = initial();
+        store.begin_bootstrap(&first).unwrap();
+        assert_eq!(store.begin_bootstrap(&first), Err(Reply::Conflict));
+        assert_eq!(store.load_bootstrap().unwrap(), first);
+        let mut next = first.clone();
+        next.advance(scaffold()).unwrap();
+        store.save_bootstrap(&next).unwrap();
+        assert_eq!(store.save_bootstrap(&first), Err(Reply::Conflict));
+        assert_eq!(store.save_bootstrap(&initial()), Err(Reply::Conflict));
+        next.advance(Step::CreatePending).unwrap();
+        next.advance(Step::ContainerBound("a".repeat(64))).unwrap();
+        // Neither observation may bypass its own durable boundary.
+        assert_eq!(store.save_bootstrap(&next), Err(Reply::Conflict));
+        assert_eq!(store.load_bootstrap().unwrap().original(), first.original());
+    }
+
+    #[test]
+    fn bootstrap_cannot_start_after_a_side_effect_or_clear_quarantine() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::fixture(dir.path()).unwrap();
+        let first = initial();
+        let mut advanced = first.clone();
+        advanced.advance(scaffold()).unwrap();
+        assert_eq!(store.save_bootstrap(&advanced), Err(Reply::Quarantined));
+        store.save_bootstrap(&first).unwrap();
+        let mut fenced = first.clone();
+        fenced.recover_without_evidence();
+        store.save_bootstrap(&fenced).unwrap();
+        assert_eq!(store.save_bootstrap(&first), Err(Reply::Conflict));
+        assert_eq!(store.save_bootstrap(&advanced), Err(Reply::Conflict));
+    }
+
+    #[test]
+    fn bootstrap_foreign_state_and_partial_write_are_never_adopted() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::fixture(dir.path()).unwrap();
+        let canary = dir.path().join("canary");
+        std::fs::write(&canary, b"unchanged").unwrap();
+        symlink(&canary, dir.path().join("bootstrap.json")).unwrap();
+        assert!(store.save_bootstrap(&initial()).is_err());
+        assert_eq!(std::fs::read(&canary).unwrap(), b"unchanged");
+        std::fs::remove_file(dir.path().join("bootstrap.json")).unwrap();
+        std::fs::write(dir.path().join("bootstrap.json"), b"unknown history").unwrap();
+        assert!(store.save_bootstrap(&initial()).is_err());
+        std::fs::write(dir.path().join("bootstrap.next"), b"interrupted").unwrap();
+        drop(store);
+        assert!(matches!(
+            Store::fixture(dir.path()),
+            Err(Reply::Quarantined)
+        ));
     }
 }
