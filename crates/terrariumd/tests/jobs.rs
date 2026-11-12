@@ -3116,6 +3116,8 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
     assert_eq!(std::fs::read_to_string(&started).unwrap(), "started\n", "initial launch");
     let journal = terrariumd::hosts::resume::Journal::new(&lab.td.state);
     let prefix = format!("ssh/recipe/{jid}/");
+    let bindings = journal.scan::<Value>(&prefix).unwrap();
+    assert_eq!(bindings[0].0, format!("{prefix}{}", original["attempt"]), "checkpoint attempt");
     assert_eq!(journal.scan::<Value>(&prefix).unwrap().len(), 1, "recipe binding before shutdown");
     lab.td.daemon.take().unwrap().shutdown_and_wait().await;
     assert_eq!(journal.scan::<Value>(&prefix).unwrap().len(), 1, "recipe binding after shutdown");
@@ -3130,6 +3132,8 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
     assert_eq!(std::fs::read_to_string(spool.join("exit")).unwrap(), "7\n");
     assert_eq!(std::fs::read_to_string(&started).unwrap(), "started\n", "offline completion");
     lab.td.boot_with_ssh(None, None, Some(&ssh)).await;
+    let spool_count = std::fs::read_dir(spool_root.join(".terrarium-runs")).unwrap().count();
+    assert_eq!(spool_count, 1, "remote claim count after reboot");
     let jobs = lab.until_idle().await;
     let ended = jobs.iter().find(|j| j["id"] == jid).unwrap();
     assert_eq!(ended["exit_code"], 7, "{ended}");
