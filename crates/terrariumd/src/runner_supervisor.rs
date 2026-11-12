@@ -2785,7 +2785,9 @@ impl RunnerSupervisor {
     }
 
     async fn connect_runner_for_adoption(
-        &self, id: AgentId, since: Option<u64>,
+        &self,
+        id: AgentId,
+        since: Option<u64>,
     ) -> Result<RemoteRunner, SupervisorError> {
         // Adoption retains workspace use. A cleanup-only connection used to
         // kill a stray runner must remain possible even when admission fails.
@@ -2795,9 +2797,15 @@ impl RunnerSupervisor {
 
     async fn admit_legacy_workspace(&self, id: AgentId) -> Result<(), SupervisorError> {
         if let Some(state) = self.state() {
-            state.db.write_full("workspace:legacy-runner", move |t| {
-                crate::store::live_workspaces::admit_generic_agent(t, &id.to_string())
-            }).await.map_err(|e| SupervisorError::NotReady(format!("workspace admission refused: {e}")))?;
+            state
+                .db
+                .write_full("workspace:legacy-runner", move |t| {
+                    crate::store::live_workspaces::admit_generic_agent(t, &id.to_string())
+                })
+                .await
+                .map_err(|e| {
+                    SupervisorError::NotReady(format!("workspace admission refused: {e}"))
+                })?;
         }
         Ok(())
     }
@@ -5699,7 +5707,10 @@ impl Supervisor for RunnerSupervisor {
                 Err(SupervisorError::AlreadyRunning(_)) => return Ok(Recovery::Attached),
                 Err(e) => return Err(e),
             };
-            let remote = match self.connect_runner_for_adoption(id, Some(events_since)).await {
+            let remote = match self
+                .connect_runner_for_adoption(id, Some(events_since))
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     self.release(id, epoch, AgentStatus::Error);

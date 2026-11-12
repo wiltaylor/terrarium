@@ -575,8 +575,12 @@ pub fn acknowledge(t: &Tx<'_>, receipt: &Envelope, result: Reply) -> ApiResult<R
             [&operation],
         )?;
         t.execute("UPDATE live_workspace_targets SET state = 'quarantined' WHERE registration_id = ?1 AND state != 'destroyed'", [&registration])?;
-        t.audit("workspace.receipt_quarantined", &operation, None,
-            json!({"registration": registration, "reason": "receipt_or_order_mismatch"}))?;
+        t.audit(
+            "workspace.receipt_quarantined",
+            &operation,
+            None,
+            json!({"registration": registration, "reason": "receipt_or_order_mismatch"}),
+        )?;
         return Ok(Reply::Quarantined);
     }
     let stored = valid?;
