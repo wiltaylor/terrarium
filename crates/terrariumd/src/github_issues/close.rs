@@ -142,12 +142,12 @@ fn validate_override(
     explicit: &Option<(u64, String)>,
     published: &BTreeSet<String>,
 ) -> ApiResult<()> {
-    if let Some((number, version)) = explicit {
-        if *number == 0 || !published.contains(&format!("v{version}")) {
-            return Err(ApiError::invalid(
-                "explicit issue version must name an existing published tag vV",
-            ));
-        }
+    if let Some((number, version)) = explicit
+        && (*number == 0 || !published.contains(&format!("v{version}")))
+    {
+        return Err(ApiError::invalid(
+            "explicit issue version must name an existing published tag vV",
+        ));
     }
     Ok(())
 }
