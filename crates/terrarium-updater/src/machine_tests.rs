@@ -167,6 +167,9 @@ impl Engine for Fake {
         Box::pin(async move {
             if argv[0] == "python3" {
                 let cmd = &argv[2];
+                if cmd == "retention-inventory" {
+                    return Ok(ExecOut { code: 0, stdout: "{}".into(), stderr: String::new() });
+                }
                 if cmd == "retention-control" {
                     let action = &argv[3];
                     let failed = self.call(format!("control-{action}"));
@@ -296,6 +299,10 @@ impl Engine for Fake {
                 code: 0,
             })
         })
+    }
+
+    fn running_retention_helpers<'a>(&'a self, _id: &'a str) -> BoxFut<'a, Res<Vec<String>>> {
+        Box::pin(async move { Ok(if self.0.lock().unwrap().retention_running { vec!["exact-exec".into()] } else { Vec::new() }) })
     }
 
     fn stop<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
@@ -659,13 +666,22 @@ async fn retention_transport_error_revokes_and_verifies_the_exact_helper_before_
 }
 
 #[tokio::test]
+async fn lost_state_init_and_repair_refuse_a_live_old_helper_after_restart() {
+    let r = rig();
+    r.fake.0.lock().unwrap().retention_running = true;
+    std::fs::remove_file(r.store.dir().join("retention.json")).unwrap();
+    assert!(matches!(r.updater.handle(Request::RetentionInit { confirm:true, no_rollback_reference:false }).await, Response::Error { .. }));
+    assert!(matches!(r.updater.handle(Request::RetentionRepair { confirm:true }).await, Response::Error { .. }));
+    assert!(!r.store.dir().join("retention.json").exists());
+    assert!(r.fake.0.lock().unwrap().retention_running);
+}
+
+#[tokio::test]
 async fn retention_init_previews_without_enabling_until_operator_confirms() {
     let r = rig();
     let path = r.store.dir().join("retention.json");
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    value.as_object_mut().unwrap().remove("initialized");
-    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    std::fs::remove_file(path).unwrap();
+    std::fs::write(r.store.dir().join("history.json"), "[]").unwrap();
     for confirm in [false, true] {
         let Response::Retained { detail } = r
             .updater

@@ -18,6 +18,7 @@ pub const MAX_REQUEST: usize = 64 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
+    RetentionRepair { confirm: bool },
     /// Trusted operator initialization. Preview unless explicitly confirmed.
     RetentionInit {
         confirm: bool,

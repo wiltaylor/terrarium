@@ -58,7 +58,9 @@ def retention_authorized(directory, token):
     if not token or (directory / (".retention-" + token + ".revoked")).exists():
         return None
     control = retention_read(directory, ".retention-control.json")
-    return control if control.get("token") == token else None
+    expiry = control.get("expires_at")
+    return control if (control.get("token") == token and isinstance(expiry, (int, float))
+                       and time.time() < expiry <= time.time() + 10.0) else None
 
 
 def process_start(pid):
@@ -72,12 +74,17 @@ def retention_control(action, value):
     directory = backup_directory()
     directory.mkdir(parents=True, exist_ok=True)
     worker_name = ".retention-" + token + ".worker.json"
-    if action == "prepare":
-        fd = os.open(directory / ".retention.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    if action in ("prepare", "renew"):
+        fd = os.open(directory / ".retention-control.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             if (directory / (".retention-" + token + ".revoked")).exists():
                 raise RuntimeError("retention token already revoked")
+            if action == "renew" and retention_authorized(directory, token) is None:
+                raise RuntimeError("retention lease is no longer current")
+            expiry = value.get("expires_at")
+            if not isinstance(expiry, (int, float)) or not time.time() < expiry <= time.time() + 10.0:
+                raise RuntimeError("invalid or expired retention lease")
             retention_json(directory, ".retention-control.json", value)
         return {}
     if action == "cancel":
@@ -205,6 +212,8 @@ def retain_backups(protected, now=None, preview=False, token=None):
                                 return {"removed": removed, "stopped": True}
                             if name in {Path(path).name for path in control["protected"]}:
                                 break
+                            if control.get("first_pass") is not None and item not in control["first_pass"]:
+                                continue
                         try:
                             metadata = os.stat(item, dir_fd=fd, follow_symlinks=False)
                         except FileNotFoundError:
@@ -218,6 +227,10 @@ def retain_backups(protected, now=None, preview=False, token=None):
                         audit.write(json.dumps({**record, "action": "backup.prune.intent"}) + "\n")
                         audit.flush()
                         os.fsync(audit.fileno())
+                        # An audit fsync may stall past expiry. Check again at
+                        # the unlink boundary, not just before journal IO.
+                        if retention_authorized(directory, token) is None:
+                            return {"removed": removed, "stopped": True}
                         os.unlink(item, dir_fd=fd)
                         os.fsync(fd)
                         audit.write(json.dumps({**record, "action": "backup.prune"}) + "\n")
@@ -229,6 +242,30 @@ def retain_backups(protected, now=None, preview=False, token=None):
     if preview:
         return {"preview": removed, "total_bytes": sum(item["size"] for item in removed), "total_files": len(removed)}
     return {"removed": removed}
+
+
+def retention_inventory():
+    """Conservative recovery holds, never infer a leftover snapshot is unused."""
+    directory = backup_directory()
+    if not directory.exists():
+        return {}
+    fd = os.open(directory / ".retention.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    holds = {}
+    with os.fdopen(fd, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for snapshot in directory.iterdir():
+            if not snapshot.name.endswith(".hot-swap.sqlite"):
+                continue
+            name = snapshot.name.removesuffix(".hot-swap.sqlite")
+            if not re.fullmatch(r"terrarium-backup-\d{8}T\d{6}Z-full(?:-[2-9]\d*|-[1-9]\d+)?\.zip", name):
+                raise RuntimeError("unknown recovery snapshot needs manual repair: " + snapshot.name)
+            if not stat.S_ISREG(snapshot.lstat().st_mode):
+                raise RuntimeError("non-regular recovery snapshot: " + snapshot.name)
+            archive = directory / name
+            if archive.exists() and not stat.S_ISREG(archive.lstat().st_mode):
+                raise RuntimeError("non-regular recovery archive: " + name)
+            holds["snapshot:" + name] = str(archive)
+    return holds
 
 
 def paths():
@@ -340,6 +377,8 @@ def main(argv):
             (release / "image.json").unlink(missing_ok=True)
             select(root, release)
             initialized.touch()
+    elif command == "retention-inventory":
+        print(json.dumps(retention_inventory()))
     elif command == "retention-control":
         print(json.dumps(retention_control(argv[1], json.loads(argv[2]))))
     elif command == "preview-backups":

@@ -33,7 +33,7 @@ class RetentionTests(unittest.TestCase):
         self.token = "A" * 26
 
     def retain(self, protected, now=NOW):
-        HOT.retention_control("prepare", {"token": self.token, "protected": protected})
+        HOT.retention_control("prepare", {"token": self.token, "protected": protected, "expires_at": time.time() + 10})
         return HOT.retain_backups(protected, now, token=self.token)
 
     def backup(self, age, hour=12, kind="full", base=None):
@@ -99,7 +99,7 @@ class RetentionTests(unittest.TestCase):
         started = threading.Event()
         finished = threading.Event()
         errors = []
-        HOT.retention_control("prepare", {"token": self.token, "protected": []})
+        HOT.retention_control("prepare", {"token": self.token, "protected": [], "expires_at": time.time() + 10})
         def retain():
             started.set()
             try:
@@ -130,10 +130,10 @@ class RetentionTests(unittest.TestCase):
 
     def test_revocation_prevents_delayed_start_and_prepare(self):
         names = [self.backup(age) for age in range(20)]
-        HOT.retention_control("prepare", {"token":self.token, "protected":[]})
+        HOT.retention_control("prepare", {"token":self.token, "protected":[], "expires_at":time.time() + 10})
         HOT.retention_control("cancel", {"token":self.token})
         with self.assertRaisesRegex(RuntimeError, "revoked"):
-            HOT.retention_control("prepare", {"token":self.token, "protected":[]})
+            HOT.retention_control("prepare", {"token":self.token, "protected":[], "expires_at":time.time() + 10})
         result = HOT.retain_backups([], NOW, token=self.token)
         self.assertTrue(result["stopped"])
         self.assertEqual(result["removed"], [])
@@ -141,13 +141,13 @@ class RetentionTests(unittest.TestCase):
 
     def test_authorization_and_protections_are_reread_before_each_unlink(self):
         names = [self.backup(age) for age in range(20)]
-        HOT.retention_control("prepare", {"token":self.token, "protected":[]})
+        HOT.retention_control("prepare", {"token":self.token, "protected":[], "expires_at":time.time() + 10})
         original = HOT.retention_authorized
         calls = []
         def protect(directory, token):
             calls.append(token)
             if len(calls) == 2:
-                HOT.retention_json(directory, ".retention-control.json", {"token":token, "protected":names})
+                HOT.retention_json(directory, ".retention-control.json", {"token":token, "protected":names, "expires_at":time.time() + 10})
             return original(directory, token)
         with patch.object(HOT, "retention_authorized", side_effect=protect):
             result = HOT.retain_backups([], NOW, token=self.token)
@@ -159,10 +159,48 @@ class RetentionTests(unittest.TestCase):
         with patch.object(HOT, "retention_authorized", side_effect=revoke):
             self.assertTrue(HOT.retain_backups([], NOW, token=self.token)["stopped"])
 
+    def test_first_pass_never_adds_a_name_after_concurrent_create(self):
+        # Older same-day backups avoid the daily keeper masking the fifth.
+        names = [self.backup(20, hour) for hour in range(8, 14)]
+        preview = HOT.retain_backups([], NOW, preview=True)
+        confirmed = {item["name"] for item in preview["preview"]}
+        fifth = sorted(names, reverse=True)[4]
+        self.assertNotIn(fifth, confirmed)
+        self.backup(0)
+        HOT.retention_control("prepare", {"token":self.token, "protected":[],
+            "expires_at":time.time() + 10, "first_pass":sorted(confirmed)})
+        result = HOT.retain_backups([], NOW, token=self.token)
+        removed = {item["name"] for item in result["removed"]}
+        self.assertEqual(removed, confirmed)
+        self.assertTrue((self.directory / fifth).exists())
+        self.assertIn(fifth, {item["name"] for item in HOT.retain_backups([], NOW, preview=True)["preview"]})
+
+    def test_expired_lease_stops_a_paused_helper_without_unlink(self):
+        names = [self.backup(age) for age in range(20)]
+        HOT.retention_control("prepare", {"token":self.token, "protected":[], "expires_at":time.time() + 10})
+        original = HOT.retention_authorized
+        checked = []
+        def expire(directory, token):
+            checked.append(token)
+            if len(checked) == 1:
+                return original(directory, token)
+            with patch.object(HOT.time, "time", return_value=time.time() + 11):
+                return original(directory, token)
+        with patch.object(HOT, "retention_authorized", side_effect=expire):
+            result = HOT.retain_backups([], NOW, token=self.token)
+        self.assertTrue(result["stopped"])
+        self.assertEqual(result["removed"], [])
+        self.assertTrue(all((self.directory / name).exists() for name in names))
+
+    def test_repair_inventory_holds_every_leftover_snapshot_with_release_keys(self):
+        name = self.backup(40)
+        (self.directory / (name + ".hot-swap.sqlite")).write_bytes(b"recovery")
+        self.assertEqual(HOT.retention_inventory(), {"snapshot:" + name:str(self.directory / name)})
+
     def test_cancel_terminates_exact_worker_waiting_on_backup_flock(self):
         for age in range(20):
             self.backup(age)
-        HOT.retention_control("prepare", {"token":self.token, "protected":[]})
+        HOT.retention_control("prepare", {"token":self.token, "protected":[], "expires_at":time.time() + 10})
         with (self.directory / ".retention.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             child = subprocess.Popen([sys.executable, str(SPEC.origin), "retain-backups", self.token], stdout=subprocess.PIPE, stderr=subprocess.PIPE)

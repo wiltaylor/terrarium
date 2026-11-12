@@ -264,6 +264,7 @@ impl Updater {
     /// Answer one request. An update or a rollback runs in the background.
     pub async fn handle(self: &Arc<Self>, req: Request) -> Response {
         let (kind, target, actor) = match req {
+            Request::RetentionRepair { confirm } => return self.retention_repair(confirm).await,
             Request::RetentionInit {
                 confirm,
                 no_rollback_reference,
@@ -387,6 +388,33 @@ impl Updater {
         done
     }
 
+    async fn retention_repair(&self, confirm: bool) -> Response {
+        let Ok(_guard) = self.busy.clone().try_lock_owned() else {
+            return Response::Error { message: "update or rollback in progress".into(), busy: true };
+        };
+        let result = async {
+            let cur = self.engine.target().await?;
+            let helpers = self.engine.running_retention_helpers(&cur.id).await?;
+            if !helpers.is_empty() { return Err(format!("retention helper still running: {}", helpers.join(", "))); }
+            let out = self.exec_ok(&cur.id, hot_argv("retention-inventory", &[])).await?;
+            let inventory: std::collections::BTreeMap<String, String> = serde_json::from_str(&out).map_err(|e| format!("bad retention inventory: {e}"))?;
+            let protected = self.store.retention_repair(false, &inventory, Vec::new()).map_err(|e| e.to_string())?;
+            let arg = serde_json::to_string(&protected).map_err(|e| e.to_string())?;
+            let out = self.exec_ok(&cur.id, hot_argv("preview-backups", &[&arg])).await?;
+            let mut detail: serde_json::Value = serde_json::from_str(&out).map_err(|e| format!("bad retention preview: {e}"))?;
+            let names = detail["preview"].as_array().ok_or("retention preview omitted file list")?.iter().map(|entry| entry["name"].as_str().map(str::to_owned).ok_or("retention preview omitted name")).collect::<Result<Vec<_>, _>>()?;
+            if confirm {
+                // Reinspect after the preview, before replacing lost identities.
+                if !self.engine.running_retention_helpers(&cur.id).await?.is_empty() { return Err("retention helper still running".into()); }
+                self.store.retention_repair(true, &inventory, names).map_err(|e| e.to_string())?;
+            }
+            detail["holds"] = serde_json::to_value(inventory).map_err(|e| e.to_string())?;
+            detail["initialized"] = confirm.into();
+            Ok(detail)
+        }.await;
+        match result { Ok(detail) => Response::Retained { detail }, Err(message) => Response::Error { message, busy: false } }
+    }
+
     async fn retention_init(&self, confirm: bool, no_rollback: bool) -> Response {
         let Ok(_guard) = self.busy.clone().try_lock_owned() else {
             return Response::Error {
@@ -407,8 +435,9 @@ impl Updater {
             let mut detail: serde_json::Value =
                 serde_json::from_str(&out).map_err(|e| format!("bad retention preview: {e}"))?;
             if confirm {
+                let names = detail["preview"].as_array().ok_or("retention preview omitted file list")?.iter().map(|entry| entry["name"].as_str().map(str::to_owned).ok_or("retention preview omitted name")).collect::<Result<Vec<_>, _>>()?;
                 self.store
-                    .retention_init(true, no_rollback)
+                    .retention_confirm(no_rollback, names)
                     .map_err(|e| e.to_string())?;
             }
             detail["initialized"] = confirm.into();
@@ -478,7 +507,7 @@ impl Updater {
     async fn retention_execute(
         &self,
         container: &str,
-        protected: Vec<String>,
+        _protected: Vec<String>,
     ) -> Result<serde_json::Value, String> {
         let token = ulid::Ulid::new().to_string();
         let exec_id = self
@@ -500,11 +529,17 @@ impl Updater {
             self.retention_control(
                 container,
                 "prepare",
-                serde_json::json!({"token":token,"protected":protected}),
+                self.store.retention_authorization(&running).map_err(|e| e.to_string())?,
             )
             .await?;
             self.engine.exec_start(&running.exec_id).await?;
+            let mut renewed = tokio::time::Instant::now();
             loop {
+                if renewed.elapsed() >= Duration::from_secs(2) {
+                    let authorization = self.store.retention_authorization(&running).map_err(|e| e.to_string())?;
+                    self.retention_control(container, "renew", authorization).await?;
+                    renewed = tokio::time::Instant::now();
+                }
                 let info = self.engine.exec_inspect(&running.exec_id).await?;
                 if info.pid != 0 {
                     running.pid = Some(info.pid);
@@ -531,9 +566,17 @@ impl Updater {
         let result = tokio::time::timeout(Duration::from_secs(900), execution)
             .await
             .unwrap_or_else(|_| Err("retention helper timed out".into()));
+        if result.is_err() && self.store.retention_running().is_err() {
+            // Safety state itself may have disappeared. Revoke using the exact
+            // identity already held in memory, even if rereading it now fails.
+            self.retention_control(container, "cancel", serde_json::json!({"token":token})).await?;
+        }
         // Even success revokes the token before clearing the durable hold.
         // On any failure to revoke/inspect/stop, the interlock stays on disk.
         self.reconcile_retention_locked().await?;
+        if result.as_ref().is_ok_and(|detail| detail["stopped"] != true) {
+            self.store.retention_pass_finished().map_err(|e| e.to_string())?;
+        }
         result
     }
 

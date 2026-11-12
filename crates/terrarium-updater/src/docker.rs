@@ -896,6 +896,29 @@ impl Engine for Docker {
         })
     }
 
+    fn running_retention_helpers<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<Vec<String>>> {
+        Box::pin(async move {
+            let container = self.inspect(id).await?;
+            let ids = match &container["ExecIDs"] {
+                Value::Null => Vec::new(),
+                Value::Array(ids) => ids.iter().map(|id| id.as_str().ok_or("invalid container ExecID")).collect::<Result<Vec<_>, _>>()?,
+                _ => return Err("invalid container ExecIDs".into()),
+            };
+            let mut running = Vec::new();
+            for id in ids {
+                let info = self.ok(Method::GET, &format!("/exec/{}/json", enc(id)), None).await?;
+                if !info["Running"].as_bool().ok_or("exec inventory omitted running state")? { continue; }
+                let config = &info["ProcessConfig"];
+                let entrypoint = config["entrypoint"].as_str().ok_or("exec inventory omitted entrypoint")?;
+                let args = config["arguments"].as_array().ok_or("exec inventory omitted arguments")?;
+                if entrypoint == "python3" && args.first().and_then(Value::as_str) == Some("/usr/local/lib/terrarium-hot-swap.py") && args.get(1).and_then(Value::as_str) == Some("retain-backups") {
+                    running.push(id.to_owned());
+                }
+            }
+            Ok(running)
+        })
+    }
+
     fn exec_inspect<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<ExecState>> {
         Box::pin(async move {
             let info = self

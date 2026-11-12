@@ -26,21 +26,22 @@ pub fn format_uptime(secs: u64) -> String {
 }
 
 pub async fn admin_backup(ctx: &Ctx, cmd: &crate::cli::AdminBackupCmd) -> anyhow::Result<()> {
-    let crate::cli::AdminBackupCmd::Retention {
-        command:
-            crate::cli::RetentionCmd::Init {
-                confirm,
-                no_rollback_reference,
-            },
-    } = cmd;
+    let crate::cli::AdminBackupCmd::Retention { command } = cmd;
+    let (endpoint, body, confirm) = match command {
+        crate::cli::RetentionCmd::Init { confirm, no_rollback_reference } => ("/api/backups/retention/init", json!({"confirm":confirm, "no_rollback_reference":no_rollback_reference}), confirm),
+        crate::cli::RetentionCmd::Repair { confirm } => ("/api/backups/retention/repair", json!({"confirm":confirm}), confirm),
+    };
     let detail = ctx
         .api
         .post(
-            "/api/backups/retention/init",
-            Some(json!({"confirm":confirm, "no_rollback_reference":no_rollback_reference})),
+            endpoint,
+            Some(body),
         )
         .await?;
     ctx.emit(&detail, |c, r| {
+        if let Some(holds) = r["holds"].as_object() {
+            for (key, path) in holds { c.line(format!("Recovery hold {key}: {path}")); }
+        }
         for item in r["preview"].as_array().into_iter().flatten() {
             c.line(format!(
                 "{}  {}  {} bytes",

@@ -734,7 +734,7 @@ pub async fn request(state: &Shared, req: Request, actor: &str) -> ApiResult<Str
     let (action, target) = match &req {
         Request::Update { target, .. } => ("system.update", target.clone()),
         Request::Rollback { .. } => ("system.rollback", "previous".to_owned()),
-        Request::Status | Request::Retention { .. } | Request::RetentionInit { .. } => {
+        Request::Status | Request::Retention { .. } | Request::RetentionInit { .. } | Request::RetentionRepair { .. } => {
             return Err(ApiError::bad_request("not an update action"));
         }
     };

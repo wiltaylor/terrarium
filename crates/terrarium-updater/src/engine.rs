@@ -102,6 +102,9 @@ pub trait Engine: Send + Sync {
     fn exec_inspect<'a>(&'a self, _id: &'a str) -> BoxFut<'a, Res<ExecState>> {
         Box::pin(async { Err("durable exec inspection unsupported".into()) })
     }
+    fn running_retention_helpers<'a>(&'a self, _id: &'a str) -> BoxFut<'a, Res<Vec<String>>> {
+        Box::pin(async { Err("retention helper inventory unsupported".into()) })
+    }
     /// Stop the container gracefully (its stop timeout).
     fn stop<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>>;
     /// Stop without allowing a daemon to restart on an unverified database.

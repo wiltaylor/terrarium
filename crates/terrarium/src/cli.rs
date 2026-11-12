@@ -3483,6 +3483,11 @@ pub enum AdminBackupCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum RetentionCmd {
+    /// Rebuild lost safety state conservatively. Requires --confirm.
+    Repair {
+        #[arg(long)]
+        confirm: bool,
+    },
     /// Preview the first deletion pass. Requires --confirm to enable retention.
     Init {
         #[arg(long)]

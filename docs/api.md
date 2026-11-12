@@ -12023,7 +12023,25 @@ an empty baseline with `--no-rollback-reference --confirm`. Initialization
 and that flag are durably audited. No fresh installation is inferred from
 missing files. Later missing/unreadable safety files, or a missing initialized
 marker in `retention.json`, always prevent deletion. Missing retention state
-also prevents update admission until repaired or explicitly initialized.
+also prevents update admission until repaired. An independent initialization
+epoch in `history.json` survives run rotation. Ordinary init cannot replace
+lost initialized state. `terrarium admin backup retention repair` previews
+conservative recovery holds and the deletion list. `--confirm` audits and
+writes a new epoch. Its operator-only endpoint is
+`POST /api/backups/retention/repair` with `confirm` (default false).
+Repair inspects every Docker ExecID and refuses while an exact retention
+helper is running. Every leftover `.hot-swap.sqlite` and its ZIP becomes a
+named hold until explicit recovery release. The response prints release keys.
+Repair requires readable history and previous state, not an inferred empty
+rollback baseline. Init and repair atomically store confirmed names in the
+initialized state. The first pass only deletes confirmed names still eligible
+under the directory lock. New backups never expand that first-pass list.
+
+Helper authorization expires after ten seconds. The updater renews only
+after strict rereads of all three safety files, a matching initialization
+epoch and current exec/token interlock. Failure revokes the token and stops
+renewal. A paused helper checks expiry before each unlink, so missing state
+stops deletion within ten seconds, within the 32-file pass cap.
 
 The updater is the only deletion
 owner and serializes retention with updates and rollbacks. API, CLI and
