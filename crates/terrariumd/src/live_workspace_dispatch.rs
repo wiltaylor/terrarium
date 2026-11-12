@@ -23,6 +23,7 @@ use tokio::{
 };
 
 type StateLock = Arc<nix::fcntl::Flock<std::fs::File>>;
+type Fences = Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>;
 type Exchange<'a> = Pin<Box<dyn Future<Output = ApiResult<(Envelope, Reply)>> + Send + 'a>>;
 
 /// A fake exchange returns the processed envelope, not a reconstructed one.
@@ -62,6 +63,7 @@ pub(super) struct Dispatcher {
     lock: StateLock,
     entries: BTreeMap<RegistrationId, Entry>,
     permits: Arc<Semaphore>,
+    fences: Fences,
 }
 
 impl Dispatcher {
@@ -71,6 +73,7 @@ impl Dispatcher {
             lock,
             entries: BTreeMap::new(),
             permits: Arc::new(Semaphore::new(16)),
+            fences: Arc::default(),
         }
     }
 
@@ -99,6 +102,7 @@ impl Dispatcher {
                 registration,
                 poison: poison.clone(),
                 permits: self.permits.clone(),
+                fences: self.fences.clone(),
                 transport,
             };
             let task = tokio::spawn(owner.run(receiver));
@@ -129,6 +133,17 @@ impl Dispatcher {
             entry.task.abort();
         }
     }
+
+    pub(super) async fn stop_and_wait(&mut self) {
+        self.stop();
+        for (_, entry) in std::mem::take(&mut self.entries) {
+            let _ = entry.task.await;
+        }
+        // Workers have ended, so no new fence can be registered. Never carry
+        // the bookkeeping mutex over await or into a database transaction.
+        let fences = std::mem::take(&mut *self.fences.lock().unwrap_or_else(|e| e.into_inner()));
+        for fence in fences { let _ = fence.await; }
+    }
 }
 
 impl Drop for Dispatcher {
@@ -150,6 +165,7 @@ struct Owner {
     registration: RegistrationId,
     poison: Arc<AtomicBool>,
     permits: Arc<Semaphore>,
+    fences: Fences,
     transport: Arc<dyn Transport>,
 }
 
@@ -175,7 +191,7 @@ impl Drop for InFlight<'_> {
         let selected = self.selected;
         // During runtime teardown startup quarantine is the durable fallback.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
+            let task = runtime.spawn(async move {
                 let result = db
                     .write_full("system", move |t| {
                         let _lock = lock;
@@ -186,6 +202,7 @@ impl Drop for InFlight<'_> {
                     tracing::error!(%error, "workspace poison persistence failed; owner retained");
                 }
             });
+            self.owner.fences.lock().unwrap_or_else(|e| e.into_inner()).push(task);
         }
     }
 }

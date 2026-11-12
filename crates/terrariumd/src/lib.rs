@@ -192,7 +192,7 @@ impl Daemon {
     /// an aborted task ends at its next await, but a database call that it
     /// started runs on to its end on the blocking pool (TER-646).
     pub async fn shutdown_and_wait(mut self) {
-        self.workspace_dispatch.stop();
+        self.workspace_dispatch.stop_and_wait().await;
         self.state.executor.hosts.shutdown();
         for task in self.state.job_queue.stop() {
             let _ = task.await;

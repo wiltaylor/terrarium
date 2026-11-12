@@ -623,4 +623,47 @@ async fn actual_daemon_startup_refuses_second_owner_and_worker_fence_outlives_sh
     assert!(wait.await.unwrap().is_err());
     assert!(calls.try_recv().is_err());
     restarted.shutdown_and_wait().await;
+    // The waiting shutdown variant drains both workers and their fence writes
+    // before returning, so immediate ownership transfer needs no retry loop.
+    let mut daemon = crate::start(config(root.path(), "fourth.sock")).await.unwrap();
+    let grant = seed(&daemon.state.db).await;
+    let (transport, mut calls) = fake();
+    let wait = daemon.workspace_dispatch.submit(grant.registration, Command::Grant(Box::new(grant)), transport).unwrap();
+    let _unknown = calls.recv().await.unwrap();
+    daemon.shutdown_and_wait().await;
+    assert!(wait.await.is_err());
+    crate::start(config(root.path(), "fifth.sock")).await.unwrap().shutdown_and_wait().await;
+}
+
+#[tokio::test]
+async fn transport_permit_bound_is_shared_only_by_runnable_owners() {
+    let mut f = Fixture::new().await;
+    f.dispatch.permits = Arc::new(Semaphore::new(2));
+    let (transport, mut calls) = fake();
+    let first = f.submit(transport.clone());
+    let first_call = calls.recv().await.unwrap();
+    let second = seed(&f.dispatch.db).await;
+    let second = f.dispatch.submit(second.registration, Command::Grant(Box::new(second)), transport.clone()).unwrap();
+    let second_call = calls.recv().await.unwrap();
+    let third = seed(&f.dispatch.db).await;
+    let third_id = third.registration.0.to_string();
+    let third = f.dispatch.submit(third.registration, Command::Grant(Box::new(third)), transport).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let id = third_id.clone();
+            let allocated: u64 = f.dispatch.db.read(move |c| Ok(c.query_row("SELECT allocated_revision FROM live_workspace_targets WHERE registration_id = ?1", [id], |r| r.get(0))?)).await.unwrap();
+            if allocated == 1 { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    assert!(calls.try_recv().is_err());
+    assert_eq!(f.dispatch.permits.available_permits(), 0);
+    first_call.respond(Reply::Applied);
+    let third_call = calls.recv().await.unwrap();
+    third_call.respond(Reply::Applied);
+    second_call.respond(Reply::Applied);
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+    third.await.unwrap().unwrap();
+    assert_eq!(f.dispatch.permits.available_permits(), 2);
 }
