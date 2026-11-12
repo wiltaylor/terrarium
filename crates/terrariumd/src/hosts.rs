@@ -369,8 +369,9 @@ pub struct LiveView {
 /// The hosts that are or were connected since the daemon started.
 pub struct HostRegistry {
     entries: Mutex<HashMap<String, Entry>>,
-    /// Serialize metadata intentions across retries, outside entries and DB
-    /// locks. A newer save/delete cannot be overtaken by an older retry.
+    /// Lock order: metadata, then entries, then a nonblocking DB attempt.
+    /// Never acquire metadata while holding entries or the DB. A newer
+    /// save/delete cannot be overtaken by an older retry.
     metadata: Mutex<()>,
     next_conn: std::sync::atomic::AtomicU64,
     pub heartbeat: Duration,
@@ -3100,6 +3101,14 @@ mod tests {
         });
         acquired.recv_timeout(Duration::from_secs(5)).unwrap();
         (release, thread)
+    }
+
+    #[test]
+    fn metadata_lock_is_taken_before_registry_lock() {
+        let reg = registry("lab1", true);
+        let _metadata = reg.metadata.lock().unwrap();
+        let entries = reg.lock();
+        assert!(entries.contains_key("lab1"));
     }
 
     fn metadata_retry_started(reg: &HostRegistry) {
