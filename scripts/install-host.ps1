@@ -50,6 +50,12 @@ function Assert-TrustedTree([string]$Path) {
         foreach ($child in Get-ChildItem -LiteralPath $Path -Force) { Assert-TrustedTree $child.FullName }
     }
 }
+function Set-NewFileOwner([string]$Path) {
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-18')))
+    Set-Acl -LiteralPath $Path -AclObject $acl
+    Assert-TrustedPath $Path $true
+}
 $stateParent = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Terrarium'
 $programParent = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Terrarium'
 $root = Join-Path $stateParent 'host'
@@ -93,6 +99,7 @@ if ($service -and $service.Status -ne 'Stopped') {
 # The stopped service may still be releasing its executable image.
 $staged = Join-Path $versionRoot 'install.new.exe'
 Copy-Item -LiteralPath $BinaryPath -Destination $staged -Force
+Set-NewFileOwner $staged
 if ((Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash -ine $Sha256) { throw 'Staged binary changed.' }
 $deadline = [DateTime]::UtcNow.AddSeconds(15)
 while ($true) {
@@ -102,10 +109,12 @@ while ($true) {
 if ($ConfigPath) {
     if ([IO.Path]::GetFullPath($ConfigPath) -ine [IO.Path]::GetFullPath($config)) {
         Copy-Item -LiteralPath $ConfigPath -Destination $config -Force
+        Set-NewFileOwner $config
     }
 } elseif (!(Test-Path -LiteralPath $config)) {
     if (!$NoStart) { throw 'Provide a config file containing daemon_url, name and token_file.' }
     '# Provision daemon_url, name and token_file before starting.' | Set-Content -LiteralPath $config -Encoding UTF8
+    Set-NewFileOwner $config
 }
 $command = '"' + $binary + '" --config "' + $config + '" service'
 if (!$service) {

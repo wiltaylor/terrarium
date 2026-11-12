@@ -53,6 +53,7 @@ try {
         New-TrustedDirectory $hostRoot
         $file = Join-Path $hostRoot 'config.toml'
         [IO.File]::WriteAllText($file, 'non-secret fixture')
+        Set-NewFileOwner $file
         & icacls.exe $file /grant '*S-1-1-0:R' | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Cannot assign file ACE.' }
         Expect-Refusal { Assert-TrustedTree $hostRoot } 'untrusted ACL'
