@@ -966,6 +966,7 @@ async fn exec(
         Some(PtyArg::Size(s)) => Some(s),
     };
     let cmd = RemoteCmd {
+        prepare_root: None,
         resume_key: None,
         argv: b.cmd,
         cwd: b.cwd,

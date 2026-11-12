@@ -90,7 +90,11 @@ impl Fake {
 
     async fn with(rights: Vec<Right>, agent_uid: u32, gpu: Result<(), String>) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
+        let root = if nix::unistd::geteuid().is_root() {
+            tempfile::tempdir_in("/run").unwrap()
+        } else {
+            tempfile::tempdir().unwrap()
+        };
         let d = dir.path();
         script(
             &d.join("systemd-run"),
@@ -123,7 +127,11 @@ impl Fake {
         );
         script(
             &d.join("nvidia-smi"),
-            &format!("printf '{A}, 0\\n{B}, 1\\n'\n"),
+            &format!(
+                "case \"$*\" in *minor_number*) exit 2 ;; esac\n\
+                 [ \"$*\" = -q ] || exit 2\n\
+                 printf 'GPU 00000000:01:00.0\\n    GPU UUID : {A}\\n    Minor Number : 0\\nGPU 00000000:02:00.0\\n    GPU UUID : {B}\\n    Minor Number : 1\\n'\n"
+            ),
         );
         std::fs::create_dir(d.join("sessions")).unwrap();
         // A fake cgroup v2 tree: `cgroup` names a unit cgroup under it.
@@ -242,6 +250,46 @@ fn code(reply: &Reply) -> Option<ErrorKind> {
         Reply::Error { code, .. } => Some(*code),
         _ => None,
     }
+}
+
+#[tokio::test]
+async fn owned_roots_require_operator_scope_and_cleanup_runs_before_success() {
+    if !nix::unistd::geteuid().is_root() {
+        return;
+    }
+    let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
+    let mut req = f.start("p/a", None, &[], &[], &["true"]);
+    req.prepare_root = Some(Box::new(native::OwnedRoot {
+        cleanup: false,
+        base: f.root.path().to_str().unwrap().into(),
+        project: "p".into(),
+        name: "a".into(),
+        agent: "id-a".into(),
+    }));
+    let (_, r) = send(&f.socket, &Request::Start(req.clone())).await;
+    assert_eq!(code(&r), Some(ErrorKind::Invalid));
+    assert!(!f.root.path().join("p").exists());
+    req.holder = "operator".into();
+    for cleanup in [false, true] {
+        req.prepare_root.as_mut().unwrap().cleanup = cleanup;
+        let (s, r) = send(&f.socket, &Request::Start(req.clone())).await;
+        assert!(matches!(r, Reply::Started { .. }), "{r:?}");
+        let (mut rd, _wr) = s.into_split();
+        let exit = loop {
+            match native::read_frame(&mut rd).await.unwrap() {
+                Some((Kind::Exit, d)) => break serde_json::from_slice::<Exit>(&d).unwrap(),
+                Some(_) => {}
+                None => panic!("no exit"),
+            }
+        };
+        assert_eq!(exit.code, Some(0));
+        assert_eq!(
+            f.root.path().join("p/a/.terrarium-owner").exists(),
+            !cleanup
+        );
+        f.wait_idle().await;
+    }
+    assert!(f.root.path().join("p").is_dir());
 }
 
 #[tokio::test]
@@ -1108,4 +1156,22 @@ async fn the_shim_relays_the_terminal_size_after_sigwinch() {
     assert!(found, "{:?}", String::from_utf8_lossy(&out));
     assert!(f.log("run.log").lines().any(|l| l == "--pty"));
     let _ = tokio::task::spawn_blocking(move || child.wait()).await;
+}
+#[test]
+fn gpu_details_fail_closed() {
+    use terrarium_host::native::parse_gpu_details;
+    let details = format!("GPU bus\n GPU UUID : {A}\n Minor Number : 7\n");
+    assert_eq!(parse_gpu_details(&details).unwrap(), vec![(A.into(), 7)]);
+    for bad in [
+        String::new(),
+        format!("GPU bus\n GPU UUID : {A}\n"),
+        "GPU bus\n Minor Number : 0\n".into(),
+        details.replace(": 7", ": N/A"),
+        details.replace(": 7", ": 255"),
+        format!("{details} Minor Number : 8\n"),
+        format!("{details}{details}"),
+        format!("{details}GPU other\n GPU UUID : {B}\n Minor Number : 7\n"),
+    ] {
+        assert!(parse_gpu_details(&bad).is_err(), "accepted {bad:?}");
+    }
 }
