@@ -6512,6 +6512,16 @@ keep their turns. Checks run after each new session total and on each
 policy tick. Existing cloud-budget holds end at daemon startup with a
 `quota.resumed` event.
 
+**LiteLLM private HTTP.** HTTP names must resolve only to the permitted private
+ranges at save and at every connection. The daemon pins each probe request,
+disables environment proxies, and follows no redirects. At every harness spawn
+and restart it resolves again and passes a checked IP literal in
+`ANTHROPIC_BASE_URL`, preserving the port and path. The session keeps that IP.
+`NO_PROXY` and `no_proxy` contain the checked IP. A proxy that requires the
+original Host name fails closed and needs HTTPS. HTTP keys and prompts are
+unencrypted on that private network. Harness-side redirects are outside the
+daemon's control and are accepted for this operator-chosen private destination.
+
 **LiteLLM fallback budget.** A `litellm` subscription may set
 `selfhosted.budget_usd` to a positive whole USD monthly budget (create or
 patch the subscription, `null` clears it on patch). When no `key-spend`

@@ -683,6 +683,9 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
         }
         AdminTargetCmd::Edit(a) => {
             let mut body = json!({});
+            if a.sync_workspace || a.no_sync_workspace {
+                body["sync_workspace"] = a.sync_workspace.into();
+            }
             set_opt(&mut body, "lab_path", a.lab_path.clone());
             set_opt(&mut body, "lab_ref", a.lab_ref.clone());
             set_opt(&mut body, "machine", a.machine.clone());
@@ -710,7 +713,7 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
                 return Err(crate::api::CliError::usage(
                     "give a change: --lab-path, --lab-ref, --machine, --image, --host, \
                      --ephemeral, --permanent, --keep, --no-keep, --snapshot-before-task, \
-                     --work-root, --clear-work-root, \
+                     --work-root, --clear-work-root, --sync-workspace, --no-sync-workspace, \
                      --cpu, --memory, --swap, --pids, --io-weight, or --no-limits",
                 ));
             }

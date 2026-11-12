@@ -4613,6 +4613,12 @@ pub struct LimitArgs {
 #[derive(Debug, Args)]
 pub struct AdminTargetEditArgs {
     pub name: String,
+    /// Mirror the caller's workspace before and after operations
+    #[arg(long, conflicts_with = "no_sync_workspace")]
+    pub sync_workspace: bool,
+    /// Stop mirroring the caller's workspace
+    #[arg(long)]
+    pub no_sync_workspace: bool,
     /// `vmlab`: the directory that holds `vmlab.wcl` (see `target new`)
     #[arg(long)]
     pub lab_path: Option<String>,
