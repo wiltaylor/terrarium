@@ -11,7 +11,9 @@ use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 async fn windows_exec_and_copy_round_trip() {
     let td = TestDaemon::start().await;
     td.project("p").await;
-    let agent = td.agent("p", "worker", json!({"policy":{"targets":["win"]}})).await;
+    let agent = td
+        .agent("p", "worker", json!({"policy":{"targets":["p-win"]}}))
+        .await;
     let aid = agent["id"].as_str().unwrap();
     let token = td.post("/api/hosts", json!({"name": "windows"})).await.ok()["token"]
         .as_str()
@@ -78,7 +80,7 @@ async fn windows_exec_and_copy_round_trip() {
     .ok();
     let cwd = r"C:\Terrarium\work\project\agent";
     td.post(
-        "/api/targets/win/exec",
+        "/api/targets/p-win/exec",
         json!({"cmd":["cmd.exe", "/c", "echo"], "cwd":cwd}),
     )
     .await
@@ -96,7 +98,7 @@ async fn windows_exec_and_copy_round_trip() {
         ("pull", r"\\server\share\dir\file"),
     ] {
         td.post(
-            "/api/targets/win/cp",
+            "/api/targets/p-win/cp",
             json!({"direction":direction, "path":path}),
         )
         .await
@@ -119,29 +121,66 @@ async fn windows_exec_and_copy_round_trip() {
         "/posix",
     ] {
         td.post(
-            "/api/targets/win/cp",
+            "/api/targets/p-win/cp",
             json!({"direction":"pull", "path":path}),
         )
         .await
         .err(422, "invalid");
         td.post(
-            "/api/targets/win/exec",
+            "/api/targets/p-win/exec",
             json!({"cmd":["cmd.exe"], "cwd":path}),
         )
         .await
         .err(422, "invalid");
     }
-    td.post_as(aid, "/api/targets/win/exec", json!({"cmd":["cmd.exe"]})).await.ok();
-    let frame = tokio::time::timeout(Duration::from_secs(30), received.recv()).await.unwrap().unwrap();
-    let DaemonFrame::Exec(exec) = frame else { panic!("{frame:?}") };
-    assert_eq!(exec.cwd.unwrap().to_str(), Some(r"C:\Terrarium\work\p\worker"));
-    assert_eq!(exec.env["RESULTS_DIR"], r"C:\Terrarium\work\p\worker\results");
-    td.post_as(aid, "/api/targets/win/cp", json!({"direction":"pull", "path":"c:/TERRARIUM/work/P/WORKER/file"})).await.ok();
-    let frame = tokio::time::timeout(Duration::from_secs(30), received.recv()).await.unwrap().unwrap();
+    td.post_as(aid, "/api/targets/p-win/exec", json!({"cmd":["cmd.exe"]}))
+        .await
+        .ok();
+    let frame = tokio::time::timeout(Duration::from_secs(30), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let DaemonFrame::Exec(exec) = frame else {
+        panic!("{frame:?}")
+    };
+    assert_eq!(
+        exec.cwd.unwrap().to_str(),
+        Some(r"C:\Terrarium\work\p\worker")
+    );
+    assert_eq!(
+        exec.env["RESULTS_DIR"],
+        r"C:\Terrarium\work\p\worker\results"
+    );
+    td.post_as(
+        aid,
+        "/api/targets/p-win/cp",
+        json!({"direction":"pull", "path":"c:/TERRARIUM/work/P/WORKER/file"}),
+    )
+    .await
+    .ok();
+    let frame = tokio::time::timeout(Duration::from_secs(30), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(matches!(frame, DaemonFrame::CpPull(_)));
-    for path in ["C:/Terrarium/work/p/worker2/file", "D:/Terrarium/work/p/worker/file"] {
-        td.post_as(aid, "/api/targets/win/cp", json!({"direction":"pull", "path":path})).await.err(422, "invalid");
-        td.post_as(aid, "/api/targets/win/exec", json!({"cmd":["cmd.exe"], "cwd":path})).await.err(422, "invalid");
+    for path in [
+        "C:/Terrarium/work/p/worker2/file",
+        "D:/Terrarium/work/p/worker/file",
+    ] {
+        td.post_as(
+            aid,
+            "/api/targets/p-win/cp",
+            json!({"direction":"pull", "path":path}),
+        )
+        .await
+        .err(422, "invalid");
+        td.post_as(
+            aid,
+            "/api/targets/p-win/exec",
+            json!({"cmd":["cmd.exe"], "cwd":path}),
+        )
+        .await
+        .err(422, "invalid");
     }
     fake.abort();
     listener.abort();
