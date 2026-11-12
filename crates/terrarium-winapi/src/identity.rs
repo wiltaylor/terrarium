@@ -128,6 +128,19 @@ impl PartialEq for Identity {
 impl Eq for Identity {}
 
 struct Password(Vec<u16>);
+impl Password {
+    fn new(password: &str) -> io::Result<Self> {
+        // UTF-8 byte count bounds UTF-16 units. Reserve the terminator too,
+        // avoiding a reallocation that could leave an unwiped old allocation.
+        let mut secret = Self(Vec::with_capacity(password.len() + 1));
+        secret.0.extend(password.encode_utf16());
+        if secret.0.contains(&0) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "embedded NUL"));
+        }
+        secret.0.push(0);
+        Ok(secret)
+    }
+}
 impl Drop for Password {
     fn drop(&mut self) {
         for c in &mut self.0 {
@@ -224,7 +237,7 @@ impl Identity {
             ));
         };
         let mut user = wide(OsStr::new(user))?;
-        let secret = Password(wide(OsStr::new(password))?);
+        let secret = Password::new(password)?;
         let mut token = null_mut();
         // SAFETY: NUL-terminated buffers survive call, writable handle output.
         // Logon errors contain OS codes only, never credentials.

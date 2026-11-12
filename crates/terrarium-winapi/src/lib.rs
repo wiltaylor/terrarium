@@ -570,8 +570,10 @@ pub fn spawn_with_context(
     // SAFETY: all inputs point to initialized buffers alive through this call.
     // JOB_LIST assigns containment before any thread runs. HANDLE_LIST limits
     // inheritance to the three pipe ends; ConPTY children inherit no handles.
-    let created = unsafe {
-        if let Some(identity) = identity {
+    if let Some(identity) = identity {
+        // Windows otherwise opens the image/cwd as the service even though
+        // the new process has a user token. Scope those opens to the user too.
+        identity.with_impersonation(|| checked(unsafe {
             CreateProcessAsUserW(
                 identity.token(),
                 program.as_ptr(),
@@ -585,7 +587,10 @@ pub fn spawn_with_context(
                 &startup.StartupInfo,
                 &mut result,
             )
-        } else {
+        }))?;
+    } else {
+        // SAFETY: same initialized buffers and atomic containment as above.
+        checked(unsafe {
             CreateProcessW(
                 program.as_ptr(),
                 command.as_mut_ptr(),
@@ -598,9 +603,8 @@ pub fn spawn_with_context(
                 &startup.StartupInfo,
                 &mut result,
             )
-        }
-    };
-    checked(created)?;
+        })?;
+    }
     let process = Process {
         handle: owned(result.hProcess)?,
         id: result.dwProcessId,

@@ -2,6 +2,7 @@
 use super::*;
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::*;
+use windows_sys::Win32::System::SystemServices::{SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
 
 #[derive(Debug)]
 pub struct TokenSnapshot {
