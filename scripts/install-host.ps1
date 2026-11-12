@@ -67,8 +67,10 @@ function Assert-TrustedAncestor([string]$Path) {
     $replacement = [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership -bor 0x10000000
     foreach ($ace in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
         $sid = $ace.IdentityReference.Value
-        $creatorOnly = $sid -eq 'S-1-3-0' -and ($ace.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly)
-        if ($ace.AccessControlType -eq 'Allow' -and $sid -notin $trusted -and !$creatorOnly -and ($ace.FileSystemRights -band $replacement)) {
+        # Inherit-only rules grant no rights on this ancestor. Each existing
+        # descendant is audited separately, including its inherited rules.
+        $inheritOnly = $ace.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly
+        if ($ace.AccessControlType -eq 'Allow' -and $sid -notin $trusted -and !$inheritOnly -and ($ace.FileSystemRights -band $replacement)) {
             throw ('Refusing ancestor replacement permission on ' + $Path + ': ' + $sid)
         }
     }
