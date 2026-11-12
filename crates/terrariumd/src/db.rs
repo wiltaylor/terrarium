@@ -3253,6 +3253,9 @@ pub fn open(path: &Path) -> anyhow::Result<Connection> {
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
+    // Defence in depth for permanent history: REPLACE's implicit DELETE must
+    // run delete guards too. Live-workspace insert guards also work without it.
+    conn.pragma_update(None, "recursive_triggers", true)?;
     migrate(&mut conn)?;
     Ok(conn)
 }

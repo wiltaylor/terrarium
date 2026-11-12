@@ -4,6 +4,66 @@ use std::sync::{Arc, Barrier};
 
 const SCHEMA: &str = include_str!("../../migrations/ter-924-live-workspace.sql");
 
+#[test]
+fn daemon_connections_enable_recursive_triggers() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = terrariumd::db::open(&dir.path().join("daemon.sqlite")).unwrap();
+    assert_eq!(c.pragma_query_value(None, "recursive_triggers", |r| r.get::<_, u32>(0)).unwrap(), 1);
+}
+
+fn snapshot(c: &Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    ["live_workspaces", "workspace_reservations", "live_workspace_targets",
+        "live_workspace_attachments", "live_workspace_operations"].iter().map(|table| {
+        let mut statement = c.prepare(&format!("SELECT * FROM {table} ORDER BY 1")).unwrap();
+        let columns = statement.column_count();
+        statement.query_map([], |row| (0..columns).map(|n| row.get(n)).collect())
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    }).collect()
+}
+
+#[test]
+fn replace_and_upsert_cannot_erase_seals_or_history() {
+    for recursive in [false, true] {
+        let c = Connection::open_in_memory().unwrap();
+        c.pragma_update(None, "foreign_keys", true).unwrap();
+        c.pragma_update(None, "recursive_triggers", recursive).unwrap();
+        seed(&c);
+        c.execute_batch("INSERT INTO workspace_reservations VALUES ('w', 'domain', 'r1', 'sandbox');
+            INSERT INTO live_workspace_attachments VALUES ('attachment', 'w', 'r1', 'agent-ulid', 'attached_verified', NULL);
+            INSERT INTO live_workspace_operations VALUES ('op', 'r1', 1, 'grant', X'01', zeroblob(32), 'apply', 'intent', NULL);").unwrap();
+        for revoked in [false, true] {
+            if revoked {
+                c.execute_batch("UPDATE live_workspace_attachments SET state = 'path_revoked_verified', revoke_revision = 2 WHERE attachment_id = 'attachment';
+                    UPDATE workspace_reservations SET current_registration_id = NULL, owning_sandbox_incarnation = NULL WHERE workspace_id = 'w';
+                    UPDATE live_workspace_targets SET state = 'destroyed' WHERE registration_id = 'r1';
+                    UPDATE live_workspace_operations SET phase = 'helper_committed', result = X'02' WHERE operation_id = 'op';
+                    UPDATE live_workspace_operations SET phase = 'daemon_committed' WHERE operation_id = 'op';").unwrap();
+            }
+            let before = snapshot(&c);
+            for sql in [
+                "INSERT OR REPLACE INTO workspace_reservations VALUES ('w', 'foreign', NULL, NULL)",
+                "INSERT INTO workspace_reservations VALUES ('w', 'foreign', NULL, NULL) ON CONFLICT(workspace_id) DO UPDATE SET trust_domain_id = excluded.trust_domain_id",
+                "INSERT OR REPLACE INTO live_workspaces VALUES ('w', 'h', 'different-agent', 'project', 'name', '1', '99', 'fresh')",
+                "INSERT INTO live_workspaces VALUES ('w', 'h', 'different-agent', 'project', 'name', '1', '99', 'fresh') ON CONFLICT(workspace_id) DO UPDATE SET agent_id = excluded.agent_id",
+                // Alternate unique keys must not implicitly delete enrollment.
+                "INSERT OR REPLACE INTO live_workspaces VALUES ('new', 'h', 'agent-ulid', 'project', 'name', '1', '99', 'fresh')",
+                "INSERT OR REPLACE INTO live_workspaces VALUES ('new', 'h', 'different-agent', 'project', 'name', '1', '2', 'fresh')",
+                "INSERT OR REPLACE INTO live_workspace_attachments VALUES ('attachment', 'w', 'r1', 'agent-ulid', 'attached_verified', NULL)",
+                "INSERT INTO live_workspace_attachments VALUES ('attachment', 'w', 'r1', 'agent-ulid', 'attached_verified', NULL) ON CONFLICT(attachment_id) DO UPDATE SET revoke_revision = excluded.revoke_revision",
+                "INSERT OR REPLACE INTO live_workspace_operations VALUES ('op', 'r1', 1, 'grant', X'FF', zeroblob(32), 'apply', 'intent', NULL)",
+                "INSERT INTO live_workspace_operations VALUES ('op', 'r1', 1, 'grant', X'FF', zeroblob(32), 'apply', 'intent', NULL) ON CONFLICT(operation_id) DO UPDATE SET original_request = excluded.original_request",
+                "INSERT OR REPLACE INTO live_workspace_operations VALUES ('different', 'r1', 1, 'grant', X'FF', zeroblob(32), 'apply', 'intent', NULL)",
+                "INSERT INTO live_workspace_operations VALUES ('different', 'r1', 1, 'grant', X'FF', zeroblob(32), 'apply', 'intent', NULL) ON CONFLICT(registration_id, revision) DO UPDATE SET operation_id = excluded.operation_id",
+                "INSERT OR REPLACE INTO live_workspace_targets SELECT registration_id, host_id, target_id, 'foreign', runtime_id, container_id, namespace_dev, namespace_ino, activation, state, last_contiguous_revision, allocated_revision FROM live_workspace_targets WHERE registration_id = 'r1'",
+                "INSERT INTO live_workspace_targets SELECT * FROM live_workspace_targets WHERE registration_id = 'r1' ON CONFLICT(registration_id) DO UPDATE SET trust_domain_id = 'foreign'",
+            ] {
+                assert!(c.execute_batch(sql).is_err(), "recursive={recursive}, revoked={revoked}: {sql}");
+                assert_eq!(snapshot(&c), before, "failed insert changed history: {sql}");
+            }
+        }
+    }
+}
+
 fn open(path: &std::path::Path) -> Connection {
     let c = Connection::open(path).unwrap();
     c.busy_timeout(std::time::Duration::from_secs(5)).unwrap();

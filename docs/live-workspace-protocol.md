@@ -18,6 +18,11 @@ sandbox incarnation. Revoke and target destruction clear references, not the
 domain seal. B4 must check actual history and authority in a FULL-synchronous
 `BEGIN IMMEDIATE` transaction, not trust a supplied `fresh` value.
 
+Insert-conflict guards reject replacement inserts and upserts on existing
+enrollment, reservation, registration, attachment and operation identities,
+including alternate unique keys. They work even with SQLite recursive triggers
+disabled. Daemon connections also enable recursive triggers as defence in depth.
+
 One stream per registration covers all lifecycle operations. Original requests
 are typed structs without maps. The v1 canonical hash is SHA-256 of compact
 `serde_json::to_vec(Request)` output in declared field order. The original body
@@ -63,6 +68,11 @@ saved phase. Missing or divergent committed history quarantines too. B2/B4
 must implement evidence-based recovery of exact operation identities, and
 must never skip a revision, recreate a placeholder on revoke recovery, erase
 a domain seal or silently delete an unknown mount.
+
+Recovery reconstructs the attachment tombstones from revoke history and requires
+an exact match with the saved map. Missing, changed or orphan tombstones are
+divergence, not permission to reuse an attachment. Multiple revoke intents retain
+the highest revision for that attachment.
 
 Frames are at most 64 KiB and deny unknown request fields. Capability matching
 requires protocol/state versions, the separate workspace-mount right and

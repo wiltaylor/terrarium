@@ -122,3 +122,29 @@ BEGIN SELECT RAISE(ABORT, 'invalid daemon commit order'); END;
 CREATE TRIGGER live_workspace_operation_saved_result BEFORE UPDATE OF result ON live_workspace_operations
 WHEN OLD.result IS NOT NULL AND NEW.result IS NOT OLD.result
 BEGIN SELECT RAISE(ABORT, 'committed helper result is immutable'); END;
+
+-- REPLACE does not run implicit DELETE triggers when recursive_triggers is OFF.
+-- Refuse conflicts before SQLite can delete anything, including conflicts on
+-- alternate unique keys. This also refuses UPSERT attempts on existing history.
+CREATE TRIGGER live_workspace_insert_conflict BEFORE INSERT ON live_workspaces
+WHEN EXISTS(SELECT 1 FROM live_workspaces WHERE workspace_id = NEW.workspace_id)
+    OR EXISTS(SELECT 1 FROM live_workspaces WHERE host_id = NEW.host_id AND agent_id = NEW.agent_id)
+    OR EXISTS(SELECT 1 FROM live_workspaces WHERE host_id = NEW.host_id AND source_dev = NEW.source_dev AND source_ino = NEW.source_ino)
+BEGIN SELECT RAISE(ABORT, 'enrollment already exists'); END;
+CREATE TRIGGER live_workspace_target_insert_conflict BEFORE INSERT ON live_workspace_targets
+WHEN EXISTS(SELECT 1 FROM live_workspace_targets WHERE registration_id = NEW.registration_id)
+    OR (NEW.state != 'destroyed' AND EXISTS(SELECT 1 FROM live_workspace_targets
+        WHERE host_id = NEW.host_id AND target_id = NEW.target_id AND state != 'destroyed'))
+BEGIN SELECT RAISE(ABORT, 'registration already exists'); END;
+CREATE TRIGGER live_workspace_target_no_delete BEFORE DELETE ON live_workspace_targets
+BEGIN SELECT RAISE(ABORT, 'registration history is permanent'); END;
+CREATE TRIGGER workspace_reservation_insert_conflict BEFORE INSERT ON workspace_reservations
+WHEN EXISTS(SELECT 1 FROM workspace_reservations WHERE workspace_id = NEW.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'workspace domain is permanently sealed'); END;
+CREATE TRIGGER live_workspace_attachment_insert_conflict BEFORE INSERT ON live_workspace_attachments
+WHEN EXISTS(SELECT 1 FROM live_workspace_attachments WHERE attachment_id = NEW.attachment_id)
+BEGIN SELECT RAISE(ABORT, 'attachment history already exists'); END;
+CREATE TRIGGER live_workspace_operation_insert_conflict BEFORE INSERT ON live_workspace_operations
+WHEN EXISTS(SELECT 1 FROM live_workspace_operations WHERE operation_id = NEW.operation_id)
+    OR EXISTS(SELECT 1 FROM live_workspace_operations WHERE registration_id = NEW.registration_id AND revision = NEW.revision)
+BEGIN SELECT RAISE(ABORT, 'operation history already exists'); END;
