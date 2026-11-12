@@ -286,6 +286,52 @@ fn kernel_publish_revoke_and_refusals() {
             .iter()
             .any(|m| Path::new(&m.mountpoint) == publisher_path.join("reverse"))
     );
+    assert!(Command::new("/usr/bin/nsenter").arg(format!("--mount=/proc/{pid}/ns/mnt")).arg("/usr/bin/umount").arg(receiver_path.join("reverse")).status().unwrap().success());
+    // Exercise the durable service/backend path after the raw primitive proof.
+    let remaining = destinations.pop().unwrap();
+    let remaining_mount = remaining.mounted().unwrap();
+    if mounts::ordinary_unmount(&remaining_mount).unwrap() == mounts::Unmount::Busy { mounts::lazy_detach(&remaining_mount).unwrap(); }
+    remaining.remove().unwrap();
+    let state_path = fixture.path().join("state");
+    std::fs::create_dir(&state_path).unwrap();
+    let store = Store::open(ProtectedRoot::open(&state_path).unwrap()).unwrap();
+    let mut journal = super::tests::journal();
+    journal.runtime = identity.clone();
+    store.save(&journal).unwrap();
+    let kernel = || {
+        let mut docker = Receiver { snapshot: inspector.snapshot.clone() };
+        let pin = runtime::PinnedRuntime::acquire(&mut docker, &identity).unwrap();
+        kernel::Kernel::new(ProtectedRoot::open(&source_path).unwrap(), ProtectedRoot::open(&publisher_path).unwrap(), ProtectedRoot::open(&staging_path).unwrap(), pin, docker, LinuxAttributes).unwrap().fixture_receiver(&receiver_path)
+    };
+    let request = |revision, kind, name: &str| {
+        let mut e = super::tests::envelope(revision, kind);
+        e.original.runtime = identity.clone();
+        let holder = e.original.holder.as_mut().unwrap();
+        holder.enrollment.name = name.into();
+        let source = std::fs::metadata(source_path.join("project").join(name)).unwrap();
+        holder.enrollment.source = SourceIdentity { device: source.dev(), inode: source.ino() };
+        if name == "agent2" {
+            holder.attachment = serde_json::from_str("\"00000000000000000000000009\"").unwrap();
+            holder.enrollment.workspace = serde_json::from_str("\"00000000000000000000000009\"").unwrap();
+        }
+        e.original_hash = e.original.hash().unwrap();
+        serde_json::to_vec(&e).unwrap()
+    };
+    let mut service = Helper::open(store, kernel()).unwrap();
+    assert!(!service.journal().quarantined);
+    let first = request(1, Kind::Grant, "agent");
+    assert_eq!(service.apply(&first), Ok(Reply::Applied));
+    assert_eq!(service.apply(&first), Ok(Reply::Applied));
+    assert_eq!(service.apply(&request(2, Kind::Grant, "agent2")), Ok(Reply::Applied));
+    drop(service);
+    let mut service = Helper::open(Store::open(ProtectedRoot::open(&state_path).unwrap()).unwrap(), kernel()).unwrap();
+    assert!(!service.journal().quarantined, "committed restart must reconcile both views");
+    assert_eq!(service.apply(&request(3, Kind::Revoke, "agent")), Ok(Reply::PathRevokedVerified));
+    assert!(!receiver_lookup.join("project/agent").exists());
+    assert!(receiver_lookup.join("project/agent2/canary").exists());
+    assert_eq!(service.apply(&request(4, Kind::Revoke, "agent2")), Ok(Reply::PathRevokedVerified));
+    assert_eq!(service.store.load().unwrap().last_contiguous_revision, 4);
+    assert!(child.0.try_wait().unwrap().is_none());
     assert_eq!(
         mount_id(&source).unwrap(),
         mount_id(&source_root.fd).unwrap()

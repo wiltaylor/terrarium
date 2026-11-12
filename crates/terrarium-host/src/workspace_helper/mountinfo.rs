@@ -144,7 +144,7 @@ pub fn publisher(
     publisher_at(host, receiver, host_view, "/work")
 }
 
-fn publisher_at(
+pub(super) fn publisher_at(
     host: &MountEvidence,
     receiver: &MountEvidence,
     host_view: &[MountEvidence],

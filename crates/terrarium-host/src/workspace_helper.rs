@@ -6,6 +6,7 @@
 
 pub mod mountinfo;
 pub mod mounts;
+pub mod kernel;
 mod paths;
 pub mod runtime;
 mod store;
@@ -56,6 +57,7 @@ impl<B: Backend> Helper<B> {
         if backend.reconcile(&journal).is_err() {
             journal.quarantined = true;
         }
+        tracing::info!(target = %journal.target, registration = ?journal.runtime.registration, quarantined = journal.quarantined, "workspace helper startup reconcile");
         store.save(&journal)?;
         Ok(Self {
             store,
@@ -87,6 +89,9 @@ impl<B: Backend> Helper<B> {
             return Err(Reply::Quarantined);
         }
         let e = decode_frame(bytes)?;
+        if matches!(e.original.provenance.caller, terrarium_core::live_workspace::Caller::Link(_)) && e.original.kind != Kind::Revoke {
+            return Err(Reply::Unauthorized);
+        }
         // Validate supported operations BEFORE writing any intent. Register and
         // lifecycle support require a separately reviewed Docker registrar.
         if !matches!(
@@ -99,11 +104,13 @@ impl<B: Backend> Helper<B> {
             return Ok(reply);
         }
         self.save()?; // write-ahead intent, including revoke tombstone
+        tracing::info!(operation = ?e.original.operation, revision = e.original.revision, kind = ?e.original.kind, host = %e.original.host, target = %e.original.target, runtime = ?e.original.runtime, provenance = ?e.original.provenance, "workspace helper durable admission");
         let result = self.execute(&e);
         if result.is_err() {
             self.journal.quarantined = true;
             self.save()?;
         }
+        tracing::info!(operation = ?e.original.operation, revision = e.original.revision, result = ?result, quarantined = self.journal.quarantined, "workspace helper operation result");
         result
     }
 
@@ -159,6 +166,7 @@ pub async fn serve_connection<B: Backend>(
 ) -> std::io::Result<()> {
     use std::time::Duration;
     let peer = stream.peer_cred()?;
+    tracing::info!(uid = peer.uid(), allowed = peer.uid() == agent_uid, "workspace helper peer");
     tokio::time::timeout(Duration::from_secs(5), async {
         let result = if peer.uid() != agent_uid {
             Err(Reply::Unauthorized)

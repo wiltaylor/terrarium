@@ -153,6 +153,28 @@ impl ProtectedRoot {
         self.destination_as(enrollment, 0)
     }
 
+    pub(super) fn workspace_mount(&self, e: &Enrollment) -> Result<File, Reply> {
+        if !e.matches(e) { return Err(Reply::Unauthorized); }
+        let parent = directory(&self.fd, Path::new(&e.project), true)?;
+        protected(&parent)?;
+        directory(&parent, Path::new(&e.name), false)
+    }
+
+    /// Recovery after a known, freshly verified attachment was unmounted.
+    /// Administrative mapping parents are trusted root-only writers. Unknown
+    /// mounts are never adopted or removed, and pending operations quarantine.
+    pub(super) fn unmounted_destination(&self, e: &Enrollment) -> Result<Destination, Reply> {
+        if !e.matches(e) { return Err(Reply::Unauthorized); }
+        let parent = directory(&self.fd, Path::new(&e.project), true)?;
+        protected(&parent)?;
+        let slot = directory(&parent, Path::new(&e.name), true)?;
+        protected(&slot)?;
+        empty(&slot)?;
+        let destination = Destination { parent, name: e.name.clone(), slot, owner: 0 };
+        destination.placeholder()?;
+        Ok(destination)
+    }
+
     fn destination_as(&self, enrollment: &Enrollment, owner: u32) -> Result<Destination, Reply> {
         use nix::sys::stat::mkdirat;
         if !enrollment.matches(enrollment) {

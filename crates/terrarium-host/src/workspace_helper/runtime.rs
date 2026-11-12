@@ -72,6 +72,7 @@ fn identity(fd: &File) -> Result<NamespaceIdentity, Reply> {
 }
 
 impl PinnedRuntime {
+    pub fn identity(&self) -> &RuntimeIdentity { &self.snapshot.identity }
     pub fn acquire(
         inspector: &mut impl Inspector,
         expected: &RuntimeIdentity,

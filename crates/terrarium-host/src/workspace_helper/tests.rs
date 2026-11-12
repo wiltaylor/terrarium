@@ -51,7 +51,7 @@ pub(super) fn envelope(revision: u64, kind: Kind) -> Envelope {
     }
 }
 
-fn journal() -> Journal {
+pub(super) fn journal() -> Journal {
     let r = envelope(1, Kind::Grant).original;
     Journal {
         state_version: STATE_VERSION,
@@ -585,7 +585,8 @@ fn unsafe_exception_is_confined_to_sys_crate() {
         .unwrap()
         .parent()
         .unwrap();
-    let root: toml::Value = toml::from_str(&std::fs::read_to_string(repo.join("Cargo.toml")).unwrap()).unwrap();
+    let root: toml::Value =
+        toml::from_str(&std::fs::read_to_string(repo.join("Cargo.toml")).unwrap()).unwrap();
     assert_eq!(
         root["workspace"]["lints"]["rust"]["unsafe_code"].as_str(),
         Some("forbid")
