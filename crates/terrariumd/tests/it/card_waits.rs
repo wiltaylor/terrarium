@@ -675,6 +675,37 @@ async fn pack_action_and_latch_survive_daemon_restart() {
 }
 
 #[tokio::test]
+async fn reopened_dependency_resets_only_unacted_waits() {
+    let td = setup().await;
+    let dep = card(&td).await;
+    let pending = card(&td).await;
+    let acted = card(&td).await;
+    for id in [&pending, &acted] {
+        set(&td, id, wait(&[(&dep, None)], Mode::All, Action::default())).await;
+    }
+    move_to(&td, &dep, "accepted").await;
+    let p = pending.clone();
+    // Model completion queued for the rules action, including a seeded legacy wait.
+    td.daemon.as_ref().unwrap().state.db.write("operator", move |t| {
+        t.execute("UPDATE card_waits SET acted_at=NULL WHERE card=?1", [&p])?;
+        Ok(())
+    }).await.unwrap();
+    move_to(&td, &dep, "done").await;
+    assert!(met(&td, &pending).await);
+    move_to(&td, &dep, "working").await;
+    assert!(!met(&td, &pending).await);
+    assert!(met(&td, &acted).await);
+    for id in [&pending, &acted] {
+        let result = td.get(&format!("/api/cards/{id}")).await;
+        assert!(result.ok()["comments"].as_array().unwrap().iter().any(|c|
+            c["body"].as_str().is_some_and(|s| s.contains("moved back out"))));
+        assert_eq!(result.ok()["blocked_by"], json!([dep]));
+    }
+    move_to(&td, &dep, "accepted").await;
+    assert!(met(&td, &pending).await);
+}
+
+#[tokio::test]
 async fn legacy_dependencies_complete_at_accepted_and_stay_unblocked() {
     let td = setup().await;
     let a = card(&td).await;

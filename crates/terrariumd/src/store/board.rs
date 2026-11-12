@@ -1873,6 +1873,14 @@ fn apply_move(
             notify_done(t, &moved, &closing)?;
         }
     }
+    let was_complete: bool = t.query_row(
+        "SELECT coalesce(role,name) IN ('accepted','done') FROM board_columns WHERE id=?1",
+        [card.column_id],
+        |r| r.get(0),
+    )?;
+    if was_complete && !to.is("accepted") && !to.is(DONE) {
+        card_waits::on_dependency_reopened(t, &card.id)?;
+    }
     card_waits::on_dependency_changed(t, &card.id, false)?;
     Ok(())
 }
