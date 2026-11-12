@@ -2204,8 +2204,19 @@ pub async fn usable(state: &Shared, actor: &Actor, name: &str) -> ApiResult<Targ
     let agent = actor.agent().map(|a| a.id.clone());
     let (row, lease) = state
         .db
-        .read(move |c| {
+        .write_full(actor.label(), move |c| {
             let row = targets::get(c, &n)?;
+            // Until typed dispatch-to-exec serialization is wired, never
+            // route a live registration through the legacy backend. The
+            // disabled production gate also applies to operator exec.
+            let live: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM live_workspace_targets WHERE target_id = ?1 AND state != 'destroyed')",
+                [&n], |r| r.get(0),
+            )?;
+            if live {
+                return Err(ApiError::new(Code::Conflict, "live workspace exec activation is disabled"));
+            }
+            crate::store::live_workspaces::admit_target_exec(c, agent.as_deref(), &n)?;
             let lease = match &agent {
                 Some(a) => {
                     // TER-623: a release target is for the release job
@@ -4422,7 +4433,7 @@ async fn holder_info(state: &Shared, key: &str, context: Option<&str>) -> ApiRes
         .db
         .read(move |c| crate::store::agents::find(c, &k, ctx.as_deref()))
         .await?;
-    let ws = crate::workspace::ensure(&state.state_dir, &state.work_dir, &v.agent, false);
+    let ws = crate::workspace::ensure_generic(state, &v.agent, false).await?;
     Ok(HolderInfo {
         id: v.agent.id.to_string(),
         name: format!("{}/{}", v.agent.project, v.agent.name),
@@ -5366,6 +5377,16 @@ pub async fn on_agent_stop(
     policy_targets: &[String],
 ) -> Vec<(String, ApiError)> {
     let mut errors = Vec::new();
+    let holder = agent.to_owned();
+    if let Err(e) = state
+        .db
+        .write_full("system", move |t| {
+            crate::store::live_workspaces::end_holder_authority(t, &holder, None, true)
+        })
+        .await
+    {
+        errors.push(("live-workspaces".into(), e));
+    }
     for t in held_targets(state, agent, policy_targets).await {
         let row = match per_holder(state, &t).await {
             Ok(r) => r,
