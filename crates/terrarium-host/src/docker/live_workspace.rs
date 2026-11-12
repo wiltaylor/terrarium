@@ -220,11 +220,11 @@ pub fn parse_verified_inspect(
         || h["PidMode"] != ""
         || h["CgroupnsMode"] != "private"
         || h["UsernsMode"] != ""
-        || !empty_list(&h["CapAdd"])
-        || !empty_list(&h["Devices"])
-        || !empty_list(&h["DeviceRequests"])
-        || !empty_list(&h["VolumesFrom"])
-        || !empty_list(&h["Binds"])
+        || !empty_list(h.get("CapAdd"), true)
+        || !empty_list(h.get("Devices"), false)
+        || !empty_list(h.get("DeviceRequests"), true)
+        || !empty_list(h.get("VolumesFrom"), true)
+        || !empty_list(h.get("Binds"), true)
         || h["Runtime"] != "runc"
         || h["CapDrop"] != json!(["ALL"])
         || h["SecurityOpt"] != json!(["no-new-privileges:true"])
@@ -240,8 +240,12 @@ pub fn parse_verified_inspect(
     Ok(json!({"id": registration.runtime.container_id, "scaffold_verified": true}))
 }
 
-fn empty_list(value: &Value) -> bool {
-    value.is_null() || value.as_array().is_some_and(Vec::is_empty)
+fn empty_list(value: Option<&Value>, nullable: bool) -> bool {
+    match value {
+        Some(Value::Null) => nullable,
+        Some(Value::Array(values)) => values.is_empty(),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -446,6 +450,55 @@ mod tests {
             .unwrap()
             .push(json!({"Destination":"/var/run/docker.sock"}));
         assert!(parse(foreign, &r).is_err());
+    }
+
+    fn missing_inspect_key(key: &str) {
+        let (r, _, mut row) = fixture();
+        assert!(row["HostConfig"].as_object_mut().unwrap().remove(key).is_some());
+        assert_eq!(parse(row, &r), Err(Reply::Quarantined));
+    }
+
+    #[test]
+    fn inspect_requires_cap_add() {
+        missing_inspect_key("CapAdd");
+    }
+
+    #[test]
+    fn inspect_requires_devices() {
+        missing_inspect_key("Devices");
+    }
+
+    #[test]
+    fn inspect_requires_device_requests() {
+        missing_inspect_key("DeviceRequests");
+    }
+
+    #[test]
+    fn inspect_requires_volumes_from() {
+        missing_inspect_key("VolumesFrom");
+    }
+
+    #[test]
+    fn inspect_requires_binds() {
+        missing_inspect_key("Binds");
+    }
+
+    #[test]
+    fn inspect_empty_fields_have_explicit_types() {
+        let (r, _, row) = fixture();
+        for key in ["CapAdd", "Devices", "DeviceRequests", "VolumesFrom", "Binds"] {
+            let mut empty = row.clone();
+            empty["HostConfig"][key] = json!([]);
+            assert!(parse(empty, &r).is_ok(), "{key}");
+            let mut null = row.clone();
+            null["HostConfig"][key] = Value::Null;
+            assert_eq!(parse(null, &r).is_ok(), key != "Devices", "{key}");
+            for invalid in [json!(false), json!(""), json!({}), json!(["foreign"])] {
+                let mut malformed = row.clone();
+                malformed["HostConfig"][key] = invalid;
+                assert!(parse(malformed, &r).is_err(), "{key}");
+            }
+        }
     }
 }
 
