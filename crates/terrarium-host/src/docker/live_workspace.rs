@@ -184,6 +184,66 @@ fn verify_empty_scaffold(
     })
 }
 
+/// Separate from the legacy rprivate workspace parser. Missing evidence fails
+/// closed. This result intentionally never contains workspace_mounts/attached.
+pub fn parse_verified_inspect(
+    stdout: &str,
+    registration: &Registration,
+    pinned: &Profile,
+    evidence: Option<&VerifiedScaffold>,
+) -> Result<Value, Reply> {
+    if stdout.len() > 4 * 1024 * 1024 {
+        return Err(Reply::Failed);
+    }
+    registration.profile.check(pinned)?;
+    let evidence = evidence.ok_or(Reply::Quarantined)?;
+    if evidence.runtime != registration.runtime || evidence.publisher != registration.publisher {
+        return Err(Reply::Quarantined);
+    }
+    let rows: Vec<Value> = serde_json::from_str(stdout).map_err(|_| Reply::Failed)?;
+    if rows.len() != 1 {
+        return Err(Reply::Quarantined);
+    }
+    let row = &rows[0];
+    let h = &row["HostConfig"];
+    let mounts = row["Mounts"].as_array().ok_or(Reply::Quarantined)?;
+    if row["Id"] != registration.runtime.container_id
+        || row["Config"]["Labels"]["terrarium.workspace.registration"]
+            != registration.runtime.registration.0.to_string()
+        || row["Config"]["Labels"]["terrarium.workspace.runtime"]
+            != registration.runtime.incarnation.0.to_string()
+        || row["State"]["Running"] != true
+        || h["Privileged"] != false
+        || h["RestartPolicy"]["Name"] != "no"
+        || h["NetworkMode"] != "none"
+        || h["IpcMode"] != "private"
+        || h["PidMode"] != ""
+        || h["CgroupnsMode"] != "private"
+        || h["UsernsMode"] != ""
+        || !empty_list(&h["CapAdd"])
+        || !empty_list(&h["Devices"])
+        || !empty_list(&h["DeviceRequests"])
+        || !empty_list(&h["VolumesFrom"])
+        || !empty_list(&h["Binds"])
+        || h["Runtime"] != "runc"
+        || h["CapDrop"] != json!(["ALL"])
+        || h["SecurityOpt"] != json!(["no-new-privileges:true"])
+        || mounts.len() != 1
+        || mounts[0]["Type"] != "bind"
+        || mounts[0]["Source"] != registration.publisher
+        || mounts[0]["Destination"] != "/work"
+        || mounts[0]["RW"] != false
+        || mounts[0]["Propagation"] != "rslave"
+    {
+        return Err(Reply::Quarantined);
+    }
+    Ok(json!({"id": registration.runtime.container_id, "scaffold_verified": true}))
+}
+
+fn empty_list(value: &Value) -> bool {
+    value.is_null() || value.as_array().is_some_and(Vec::is_empty)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,63 +452,3 @@ mod tests {
 #[cfg(test)]
 #[path = "live_workspace_disposable.rs"]
 mod disposable;
-
-/// Separate from the legacy rprivate workspace parser. Missing evidence fails
-/// closed. This result intentionally never contains workspace_mounts/attached.
-pub fn parse_verified_inspect(
-    stdout: &str,
-    registration: &Registration,
-    pinned: &Profile,
-    evidence: Option<&VerifiedScaffold>,
-) -> Result<Value, Reply> {
-    if stdout.len() > 4 * 1024 * 1024 {
-        return Err(Reply::Failed);
-    }
-    registration.profile.check(pinned)?;
-    let evidence = evidence.ok_or(Reply::Quarantined)?;
-    if evidence.runtime != registration.runtime || evidence.publisher != registration.publisher {
-        return Err(Reply::Quarantined);
-    }
-    let rows: Vec<Value> = serde_json::from_str(stdout).map_err(|_| Reply::Failed)?;
-    if rows.len() != 1 {
-        return Err(Reply::Quarantined);
-    }
-    let row = &rows[0];
-    let h = &row["HostConfig"];
-    let mounts = row["Mounts"].as_array().ok_or(Reply::Quarantined)?;
-    if row["Id"] != registration.runtime.container_id
-        || row["Config"]["Labels"]["terrarium.workspace.registration"]
-            != registration.runtime.registration.0.to_string()
-        || row["Config"]["Labels"]["terrarium.workspace.runtime"]
-            != registration.runtime.incarnation.0.to_string()
-        || row["State"]["Running"] != true
-        || h["Privileged"] != false
-        || h["RestartPolicy"]["Name"] != "no"
-        || h["NetworkMode"] != "none"
-        || h["IpcMode"] != "private"
-        || h["PidMode"] != ""
-        || h["CgroupnsMode"] != "private"
-        || h["UsernsMode"] != ""
-        || !empty_list(&h["CapAdd"])
-        || !empty_list(&h["Devices"])
-        || !empty_list(&h["DeviceRequests"])
-        || !empty_list(&h["VolumesFrom"])
-        || !empty_list(&h["Binds"])
-        || h["Runtime"] != "runc"
-        || h["CapDrop"] != json!(["ALL"])
-        || h["SecurityOpt"] != json!(["no-new-privileges:true"])
-        || mounts.len() != 1
-        || mounts[0]["Type"] != "bind"
-        || mounts[0]["Source"] != registration.publisher
-        || mounts[0]["Destination"] != "/work"
-        || mounts[0]["RW"] != false
-        || mounts[0]["Propagation"] != "rslave"
-    {
-        return Err(Reply::Quarantined);
-    }
-    Ok(json!({"id": registration.runtime.container_id, "scaffold_verified": true}))
-}
-
-fn empty_list(value: &Value) -> bool {
-    value.is_null() || value.as_array().is_some_and(Vec::is_empty)
-}
