@@ -26,24 +26,29 @@ mod bootstrap_tests {
         Journal as Bootstrap, Request, Scaffold, Step,
     };
     use terrarium_core::live_workspace::{
-        Caller, OperationId, PROTOCOL_VERSION, Provenance, RegistrationId, RuntimeId,
-        SourceIdentity, TrustDomainId,
+        Caller, PROTOCOL_VERSION, Provenance, SourceIdentity,
     };
-    use ulid::Ulid;
+
+    fn id<T: serde::de::DeserializeOwned>(n: u64) -> T {
+        serde_json::from_str(&format!("\"{n:026}\"")).unwrap()
+    }
 
     fn initial() -> Bootstrap {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let n = NEXT.fetch_add(10, Ordering::Relaxed);
         Bootstrap::new(Request {
             version: PROTOCOL_VERSION,
-            operation: OperationId(Ulid::new()),
+            operation: id(n),
             provenance: Provenance {
-                daemon_instance: Ulid::new(),
+                daemon_instance: id(n + 1),
                 caller: Caller::LocalOperator,
             },
-            host: Ulid::new(),
+            host: id(n + 2),
             target: "synthetic".into(),
-            registration: RegistrationId(Ulid::new()),
-            incarnation: RuntimeId(Ulid::new()),
-            domain: TrustDomainId(Ulid::new()),
+            registration: id(n + 3),
+            incarnation: id(n + 4),
+            domain: id(n + 5),
         })
         .unwrap()
     }
