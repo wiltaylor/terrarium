@@ -55,6 +55,7 @@ use crate::secrets::{RunDirs, Secret};
 use crate::store::leases;
 use crate::store::targets::{self, TargetRow};
 
+pub(crate) mod durable;
 mod workspace_sync;
 
 /// Live exec sessions an agent may hold at once.
@@ -412,9 +413,13 @@ pub fn pump_process(
 
 /// A command for a target. `Debug` shows the env names, not the values
 /// (a value can be a secret, TER-142).
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteCmd {
+    /// Explicit opt-in: no stdin, PTY, or interactive shell.
+    #[serde(default)]
+    pub durable: bool,
     /// Only daemon-owned root scripts may request helper provisioning.
+    #[serde(default)]
     pub prepare_root: Option<terrarium_host::native::OwnedRoot>,
     /// Durable queue-step identity, bound atomically to a host session.
     pub resume_key: Option<String>,
@@ -876,6 +881,8 @@ pub struct ExecSession {
 
 #[derive(Serialize, Deserialize)]
 struct SavedExec {
+    #[serde(default)]
+    durable: bool,
     id: String,
     target: String,
     owner: Option<String>,
@@ -883,6 +890,8 @@ struct SavedExec {
     project: Option<String>,
     host_session: Option<(String, u32)>,
     secrets: Vec<(String, String)>,
+    #[serde(default)]
+    remote_key: Option<String>,
 }
 
 /// Rebuild output consumers before the wait engine reconciles process waits.
@@ -899,6 +908,7 @@ pub fn restore_sessions(state: &Shared) -> ApiResult<()> {
         Arc::get_mut(&mut session)
             .ok_or_else(|| ApiError::internal("restored session is unexpectedly shared"))?
             .id = saved.id;
+        session.takes_stdin.store(!saved.durable, Ordering::SeqCst);
         if let Some((host, id)) = saved.host_session {
             let hs = state
                 .executor
@@ -920,6 +930,26 @@ pub fn restore_sessions(state: &Shared) -> ApiResult<()> {
                 state.db.redactor().get(),
                 view,
             );
+            tokio::spawn(attach(run, session.clone(), ctl, false, false));
+        } else if let Some(key) = saved.remote_key {
+            let run = match durable::resume(state, &key) {
+                Ok(run) => run,
+                Err(error) => {
+                    session.finish(End::error("interrupted", error.message));
+                    state.executor.insert(session);
+                    continue;
+                }
+            };
+            let secrets: Vec<_> = saved
+                .secrets
+                .into_iter()
+                .map(|(name, value)| (name, zeroize::Zeroizing::new(value)))
+                .collect();
+            let view = saved.project.map_or(
+                terrarium_core::redact::View::All,
+                terrarium_core::redact::View::Scope,
+            );
+            let run = redact_run(run, own_redactor(&secrets), state.db.redactor().get(), view);
             tokio::spawn(attach(run, session.clone(), ctl, false, false));
         } else {
             session.finish(End::error("interrupted", "interrupted (ssh transport)"));
@@ -1919,6 +1949,14 @@ pub(crate) fn start_cmd_locked(
     def: &TargetDef,
     cmd: &RemoteCmd,
 ) -> ApiResult<Running> {
+    if cmd.durable && (cmd.pty.is_some() || cmd.shell) {
+        return Err(ApiError::invalid(
+            "durable execution cannot use a PTY or shell",
+        ));
+    }
+    if state.executor.hosts.is_stopped() {
+        return Err(ApiError::conflict("executor is stopping"));
+    }
     no_exec(def)?;
     // An exedev target runs its commands over ssh on its VM.
     if def.kind == TargetKind::Exedev {
@@ -1961,6 +1999,9 @@ pub(crate) fn start_cmd_locked(
                 &known_hosts(&state.state_dir)?,
                 cmd,
             )?;
+            if cmd.durable {
+                return durable::start(state, def, cmd, plan, guard);
+            }
             let mut c = tokio::process::Command::new(&plan.program);
             c.args(&plan.args);
             Ok(pump_process(
@@ -2251,6 +2292,9 @@ async fn start_exec_secrets(
     check_cap(state, actor)?;
     let def = resolved_def(state, &row, Some(actor), cmd.agent.as_deref()).await?;
     let mut cmd = cmd;
+    if cmd.durable && cmd.resume_key.is_none() {
+        cmd.resume_key = Some(format!("remote/{}", ulid::Ulid::new()));
+    }
     cmd.holder = on.holder.clone().or_else(|| holder_of(actor));
     cmd.operator = actor.is_operator();
     crate::target_roots::prepare_exec(state, actor, &def, &mut cmd).await?;
@@ -2259,7 +2303,14 @@ async fn start_exec_secrets(
         && let Some(a) = actor.agent()
     {
         let p = crate::git_identity::provenance(state, &a.id).await?;
-        p.identity.env(&mut cmd.env);
+        for key in [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ] {
+            cmd.env.remove(key);
+        }
         cmd.env.insert("TERRARIUM_GIT_TRAILERS".into(), p.trailers);
         cmd.env.remove("TERRARIUM_GIT_TRAILERS_FILE");
     }
@@ -2292,7 +2343,14 @@ async fn start_exec_secrets(
         state.executor.buffer_limit,
     );
     sess.set_kill_report(report);
+    sess.takes_stdin.store(!cmd.durable, Ordering::SeqCst);
     let saved = SavedExec {
+        durable: cmd.durable,
+        remote_key: if cmd.durable && matches!(def.kind, TargetKind::Ssh | TargetKind::Exedev) {
+            cmd.resume_key.clone()
+        } else {
+            None
+        },
         id: sess.id.clone(),
         target: sess.target.clone(),
         owner: sess.owner.clone(),
@@ -5443,6 +5501,20 @@ if [ -n "${TERRARIUM_COMMIT_HOOK:-}" ] && [ "$action" != not_updated ]; then
   mv -f "$hook_tmp" "$dest/.git/hooks/prepare-commit-msg"
   G -C "$dest" config user.name "$TERRARIUM_COMMIT_NAME"
   G -C "$dest" config user.email "$TERRARIUM_COMMIT_EMAIL"
+  if [ -n "${TERRARIUM_PUSH_HOOK:-}" ]; then
+    push_hook="$dest/.git/hooks/pre-push"
+    if [ -e "$push_hook" ] && ! grep -q '^# Written by terrariumd' "$push_hook"; then
+      [ ! -e "$push_hook.repo" ] && [ ! -L "$push_hook.repo" ] || exit 2
+      mv "$push_hook" "$push_hook.repo"
+    fi
+    push_tmp=$(mktemp "$dest/.git/hooks/.terrarium-push.XXXXXX")
+    printf '%s' "$TERRARIUM_PUSH_HOOK" > "$push_tmp"
+    chmod 755 "$push_tmp"
+    mv -f "$push_tmp" "$push_hook"
+    G -C "$dest" config terrarium.provenance "$TERRARIUM_PROVENANCE"
+    G -C "$dest" config terrarium.provenanceWarnOnly "$TERRARIUM_PROVENANCE_WARN_ONLY"
+    G -C "$dest" config terrarium.repoId "$TERRARIUM_REPO_ID"
+  fi
 fi
 head=$(G -C "$dest" rev-parse -q --verify HEAD || true)
 cur=$(G -C "$dest" symbolic-ref --short -q HEAD || true)
@@ -5553,6 +5625,7 @@ pub async fn checkout_on_target(
     state: &Shared,
     actor: &Actor,
     row: &TargetRow,
+    repo: &crate::store::repos::Repo,
     url: &str,
     dest: &str,
     branch: Option<&str>,
@@ -5569,7 +5642,20 @@ pub async fn checkout_on_target(
     let _root_guard = crate::target_roots::lock_card(state, actor, &row.def.name).await?;
     crate::target_roots::prepare(state, actor, &row.def, Some(dest)).await?;
     if let Some(a) = actor.agent() {
-        let p = crate::git_identity::provenance(state, &a.id).await?;
+        let p = crate::git_identity::for_repo(state, &a.id, repo).await?;
+        cmd.env.insert("TERRARIUM_REPO_ID".into(), repo.id.clone());
+        cmd.env.insert(
+            "TERRARIUM_PUSH_HOOK".into(),
+            crate::git::push_deny_hook(&repo.push_deny),
+        );
+        cmd.env.insert(
+            "TERRARIUM_PROVENANCE".into(),
+            (!p.trailers.is_empty()).to_string(),
+        );
+        cmd.env.insert(
+            "TERRARIUM_PROVENANCE_WARN_ONLY".into(),
+            p.warn_only.to_string(),
+        );
         cmd.env.insert("TERRARIUM_COMMIT_HOOK".into(), p.hook());
         cmd.env
             .insert("TERRARIUM_COMMIT_NAME".into(), p.identity.name);
@@ -5927,6 +6013,8 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         let p = crate::git_identity::Provenance {
+            repo: None,
+            warn_only: false,
             identity: crate::git_identity::Identity::from_env(),
             trailers: "Terrarium-Agent: test/worker\n".into(),
         };

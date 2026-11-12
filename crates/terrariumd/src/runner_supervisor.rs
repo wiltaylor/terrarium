@@ -1301,6 +1301,7 @@ fn other(e: impl std::fmt::Display) -> SupervisorError {
 /// What the start needs from the store.
 #[derive(Default)]
 struct StoreView {
+    git_identity: Option<crate::git_identity::Identity>,
     peers: Vec<Peer>,
     queued: Vec<MailItem>,
     /// The agent's subscription row: `None` when the agent names none, or
@@ -1584,7 +1585,16 @@ impl RunnerSupervisor {
                     _ => None,
                 };
                 let ephemeral = crate::spawn::prompt_info(c, &id)?;
+                let git = crate::git_identity::settings(c, false, &project)?;
+                let mut git_identity = crate::git_identity::Identity::from_env();
+                if let Some(name) = git.name {
+                    git_identity.name = name;
+                }
+                if let Some(email) = git.email {
+                    git_identity.email = email;
+                }
                 Ok(StoreView {
+                    git_identity: Some(git_identity),
                     peers,
                     queued,
                     subscription,
@@ -2069,7 +2079,34 @@ impl RunnerSupervisor {
         // The instance bot identity deliberately overrides GIT_AUTHOR_* and
         // GIT_COMMITTER_* supplied by the harness or secret environment.
         spec.env.extend(litellm_env);
-        crate::git_identity::Identity::from_env().env(&mut spec.env);
+        crate::git_identity::write_fallback_config(
+            &layout.workspace,
+            &view
+                .git_identity
+                .clone()
+                .unwrap_or_else(crate::git_identity::Identity::from_env),
+        )
+        .map_err(|e| SupervisorError::NotReady(format!("cannot write git fallback config: {e}")))?;
+        spec.env.insert(
+            "GIT_CONFIG_GLOBAL".into(),
+            layout
+                .workspace_mount
+                .as_ref()
+                .unwrap_or(&layout.workspace)
+                .join(crate::git_identity::CONFIG_FILE)
+                .display()
+                .to_string(),
+        );
+        // Local checkout identity must win over the instance fallback.
+        // GIT_AUTHOR_* and GIT_COMMITTER_* would override repo config.
+        for key in [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ] {
+            spec.env.remove(key);
+        }
         spec.env.insert(
             "TERRARIUM_GIT_TRAILERS_FILE".into(),
             layout

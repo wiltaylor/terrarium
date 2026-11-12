@@ -1208,10 +1208,55 @@ output offsets and terminal events before acknowledging them. It keeps up
 to 8 MiB and 4096 stdout/stderr events per session for replay, without
 changing the absolute resume offset. Copy file data is not tail-truncated.
 Closed execs and completed jobs remove their checkpoints. Finished helper
-sessions without a durable owner expire after five minutes. SSH and exe.dev
-run interruptions are reported as `interrupted (ssh transport)` and queue
-jobs on those transports are killed and requeued. Native jobs from an older
-daemon without continuation checkpoints also use kill/requeue.
+sessions without a durable owner expire after five minutes.
+
+SSH and exe.dev noninteractive `run` commands and queue recipes opt into a
+detached supervisor. They retain their real exit code and stdout/stderr if
+the command finishes while the daemon is down. The encrypted journal binds
+the run to a random remote claim directory before launch. Reattachment
+replays that directory, never launches a second command under the same
+identity, and resumes the existing process wait or queue phase.
+
+The remote side needs the usual POSIX shell and coreutils, including
+`setsid`, `nohup`, `flock`, `timeout`, `mkfifo`, `head`, `tail`, `base64`, and
+Python 3. No host
+installation is performed. Bound card agents use their recorded owned root
+and owner marker. Other callers use `<work_root>/.terrarium-runs` with a
+daemon-owned marker (the normal default root is `/src/terrarium`). All root,
+parent and claim opens use no-follow directory FDs. From the owned root
+down, directories must belong to the remote UID without group/other write.
+New directories are created individually mode 0700. Recovery refuses changed
+markers, symlinks, foreign owners and writable directories. Commands, readers,
+cancellation and cleanup remain relative to the pinned directory identities.
+As with owned-root cleanup, a trusted same-UID rename is outside this boundary.
+Each stdout/stderr spool retains the first 64 MiB and drains further output.
+Commands have a maximum seven-day lifetime, with a 24-hour default when no
+timeout is supplied. The deadline is absolute from the original checkpoint:
+a delayed first launch gets only the remaining time, not a new timeout.
+An independent janitor removes the files 24 hours after completion, only
+after acquiring the supervisor's lifetime lock. The empty claim and expiry marker remain
+until the checkpoint's eight-day absolute deadline, then are removed too.
+An expired checkpoint is never relaunched.
+
+Recovery compares the target's definition, creation and lifecycle stamps.
+SSH also records the authenticated host key fingerprints and pins a private
+trust file. exe.dev records the VM ID, not just its SSH address. A changed
+incarnation ends as `interrupted (target changed)` without connecting.
+Remote tool and spool probes precede detachment. Missing tools and spool
+errors are terminal `unsupported` errors. The supervisor must acknowledge
+readiness within 30 seconds or the reader ends with a startup error.
+
+The command has a dedicated process group. Foreground exit or the absolute
+deadline selects its result, then TERM and five seconds later KILL stop the
+group and close background children. Logger teardown is bounded too, so a
+background child inheriting stdout cannot keep the wait or queue slot open.
+
+PTY and shell sessions, ordinary SSH execs without `durable: true`, and
+stdin-fed queue setup/bundle transfers stay on the existing transport. They
+end as `interrupted (ssh transport)` at a restart. Jobs interrupted before
+their durable recipe starts use kill/requeue. A durable execution rejects
+PTY/shell and stdin input. Native jobs from an older daemon without
+continuation checkpoints also use kill/requeue.
 
 ## Self-update
 

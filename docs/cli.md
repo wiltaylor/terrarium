@@ -150,6 +150,7 @@ terrarium project ls
 terrarium project show [name]                 the project, its agents, repos, targets, and target grants
 terrarium project new <name> [-d text] [--prefix TER]      sysadmin
 terrarium project set [name] [-d text] [--prefix P]        project_admin
+terrarium project set [name] [--provenance on|off] [--git-name NAME] [--git-email EMAIL]  operator/sysadmin
 terrarium project set [name] [--github-author login]... [--github-authors-clear]   operator only (the GitHub author gate)
 terrarium project rm <name> --confirm         sysadmin
 terrarium project repos [name]
@@ -159,6 +160,7 @@ terrarium project repo-add <url> [--name n] [--branch b] [--credential key] [--p
                           [--hooks-dir .githooks] [--push-deny 'op/*' ...]
                           [--push-via proxy|direct]
 terrarium repo ls
+terrarium repo set <repo> [--provenance on|off] [--git-name NAME] [--git-email EMAIL] [--warn-only true|false]  operator/sysadmin
 terrarium repo add <url> ...                  the same as project repo-add
 terrarium repo checkout <repo> [--target T] [--branch b] [--path p] [--depth n] [--agent a]
 terrarium repo rm <repo>                      project_admin; no confirm prompt
