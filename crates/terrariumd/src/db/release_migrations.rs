@@ -78,15 +78,10 @@ fn check_database(conn: &Connection) {
 fn seeded_previous_release() -> Connection {
     let mut conn = Connection::open_in_memory().unwrap();
     migrate_with(&mut conn, MIGRATIONS).unwrap();
-    let baseline: Vec<_> = BASELINE
-        .iter()
-        .map(|name| {
-            *NAMED_MIGRATIONS
-                .iter()
-                .find(|(candidate, _)| candidate == name)
-                .unwrap_or_else(|| panic!("shipped migration disappeared: {name}"))
-        })
-        .collect();
+    // Shipped named files have occasionally been edited. Use the actual
+    // previous release SQL, not today's contents for the same filenames.
+    conn.execute_batch(include_str!("baseline_v055.sql")).unwrap();
+    let baseline: Vec<_> = BASELINE.iter().map(|name| (*name, "")).collect();
     migrate_named(&mut conn, &baseline).unwrap();
     // Disable FK enforcement only during the unordered synthetic inserts.
     // Check every FK before enabling production migration behavior.
