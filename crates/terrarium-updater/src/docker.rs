@@ -73,39 +73,67 @@ impl Docker {
         path: &str,
         body: Option<Value>,
     ) -> Res<(StatusCode, Bytes)> {
-        let stream = tokio::net::UnixStream::connect(&self.socket)
-            .await
-            .map_err(|e| format!("cannot reach Docker at {}: {e}", self.socket.display()))?;
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
-            .await
-            .map_err(|e| format!("Docker handshake: {e}"))?;
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
-        let mut b = Request::builder()
-            .method(method.clone())
-            .uri(path)
-            .header(header::HOST, "docker");
-        let bytes = match body {
-            Some(v) => {
-                b = b.header(header::CONTENT_TYPE, "application/json");
-                Bytes::from(serde_json::to_vec(&v).map_err(|e| e.to_string())?)
+        // Pulls and online backups may be long, but no transport operation
+        // may wait forever. Hot-swap recovery has a tighter outer deadline.
+        self.call_until(
+            method,
+            path,
+            body,
+            tokio::time::Instant::now() + Duration::from_secs(900),
+        )
+        .await
+    }
+
+    async fn call_until(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        deadline: tokio::time::Instant,
+    ) -> Res<(StatusCode, Bytes)> {
+        tokio::time::timeout_at(deadline, async {
+            let stream = tokio::net::UnixStream::connect(&self.socket)
+                .await
+                .map_err(|e| format!("cannot reach Docker at {}: {e}", self.socket.display()))?;
+            let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+                .await
+                .map_err(|e| format!("Docker handshake: {e}"))?;
+            struct Connection(tokio::task::JoinHandle<()>);
+            impl Drop for Connection {
+                fn drop(&mut self) {
+                    self.0.abort();
+                }
             }
-            None => Bytes::new(),
-        };
-        let req = b.body(Full::new(bytes)).map_err(|e| e.to_string())?;
-        let resp = sender
-            .send_request(req)
-            .await
-            .map_err(|e| format!("Docker {method} {path}: {e}"))?;
-        let status = resp.status();
-        let body = resp
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| format!("Docker {method} {path}: {e}"))?
-            .to_bytes();
-        Ok((status, body))
+            let _connection = Connection(tokio::spawn(async move {
+                let _ = conn.await;
+            }));
+            let mut b = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .header(header::HOST, "docker");
+            let bytes = match body {
+                Some(v) => {
+                    b = b.header(header::CONTENT_TYPE, "application/json");
+                    Bytes::from(serde_json::to_vec(&v).map_err(|e| e.to_string())?)
+                }
+                None => Bytes::new(),
+            };
+            let req = b.body(Full::new(bytes)).map_err(|e| e.to_string())?;
+            let resp = sender
+                .send_request(req)
+                .await
+                .map_err(|e| format!("Docker {method} {path}: {e}"))?;
+            let status = resp.status();
+            let body = resp
+                .into_body()
+                .collect()
+                .await
+                .map_err(|e| format!("Docker {method} {path}: {e}"))?
+                .to_bytes();
+            Ok((status, body))
+        })
+        .await
+        .map_err(|_| "Docker request deadline exceeded (values hidden)".to_owned())?
     }
 
     /// A call that must succeed; the JSON answer (or `null`).
@@ -861,6 +889,20 @@ impl Engine for Docker {
         })
     }
 
+    fn stop_for_recovery<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
+        Box::pin(async move {
+            // A manual Docker stop suppresses automatic restart. Do not wait
+            // the normal 650-second graceful stop on an unverified database.
+            self.ok(
+                Method::POST,
+                &format!("/containers/{}/stop?t=0", enc(id)),
+                None,
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
     fn remove<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
         Box::pin(async move {
             let (status, bytes) = self
@@ -941,6 +983,67 @@ impl Engine for Docker {
             Ok(health_of(&c))
         })
     }
+
+    fn daemon_failure_since<'a>(
+        &'a self,
+        id: &'a str,
+        since: &'a str,
+    ) -> BoxFut<'a, Res<Option<String>>> {
+        Box::pin(async move {
+            let (status, logs) = self
+                .call(
+                    Method::GET,
+                    &format!(
+                        "/containers/{}/logs?stdout=1&stderr=1&tail=64&since={}",
+                        enc(id),
+                        enc(since)
+                    ),
+                    None,
+                )
+                .await
+                .map_err(|_| "cannot read daemon startup log (values hidden)".to_owned())?;
+            if !status.is_success() {
+                return Err("cannot read daemon startup log (values hidden)".into());
+            }
+            let (stdout, stderr) = demux(&logs);
+            Ok(daemon_exit_reason(&stdout, &stderr))
+        })
+    }
+}
+
+/// Only fixed error categories from the last daemon line may leave the
+/// Docker log. The updater has no secret store with which to redact arbitrary
+/// values, so unknown text must stay hidden rather than using a heuristic.
+fn daemon_exit_reason(stdout: &str, stderr: &str) -> Option<String> {
+    let lines: Vec<_> = stderr.lines().collect();
+    let exit = lines.iter().rposition(|line| {
+        line.starts_with("entrypoint: terrariumd ended (")
+            || line.starts_with("entrypoint: terrariumd exited with status ")
+            || line.starts_with("entrypoint: terrariumd stopped (status ")
+    })?;
+    let last = lines[..exit]
+        .iter()
+        .rev()
+        .copied()
+        .find(|line| !line.trim().is_empty() && !line.starts_with("entrypoint: "))
+        .or_else(|| stdout.lines().rev().find(|line| !line.trim().is_empty()))
+        .unwrap_or("");
+    let category = [
+        "FOREIGN KEY constraint failed",
+        "UNIQUE constraint failed",
+        "NOT NULL constraint failed",
+        "database is locked",
+        "database disk image is malformed",
+        "disk I/O error",
+        "no such table",
+        "no such column",
+    ]
+    .into_iter()
+    .find(|phrase| last.contains(phrase))
+    .unwrap_or("[hidden]");
+    Some(format!(
+        "new daemon exited during startup; last error: {category} (values hidden)"
+    ))
 }
 
 /// The release payload is the final layer, by hot-swap-layout contract. A
@@ -1167,62 +1270,222 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jobs_drain_cli_and_json_survive_the_docker_socket() {
+    async fn jobs_drain_and_online_backup_cli_and_json_survive_the_docker_socket() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("docker.sock");
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let argv = crate::machine::drain_jobs_argv(Duration::from_secs(12));
-        let expected = argv.clone();
-        let server = tokio::spawn(async move {
-            for step in 0..3 {
+        for (argv, answer) in [
+            (
+                crate::machine::drain_jobs_argv(Duration::from_secs(12)),
+                r#"{"jobs":["job-123"],"timed_out":true}"#,
+            ),
+            (
+                crate::machine::backup_argv(),
+                r#"{"path":"/state/backups/pre-pause.zip"}"#,
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("docker.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let expected = argv.clone();
+            let server = tokio::spawn(async move {
+                for step in 0..3 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut header = Vec::new();
+                    while !header.ends_with(b"\r\n\r\n") {
+                        header.push(stream.read_u8().await.unwrap());
+                    }
+                    let header = String::from_utf8(header).unwrap();
+                    let len = header
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    let mut body = vec![0; len];
+                    stream.read_exact(&mut body).await.unwrap();
+                    let response = match step {
+                        0 => {
+                            assert!(header.starts_with("POST /containers/daemon/exec "));
+                            let body: Value = serde_json::from_slice(&body).unwrap();
+                            assert_eq!(body["Cmd"], json!(expected));
+                            r#"{"Id":"exec1"}"#
+                        }
+                        1 => {
+                            assert!(header.starts_with("POST /exec/exec1/start "));
+                            answer
+                        }
+                        _ => {
+                            assert!(header.starts_with("GET /exec/exec1/json "));
+                            r#"{"ExitCode":0}"#
+                        }
+                    };
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+                }
+            });
+            let docker = Docker {
+                socket,
+                target: None,
+            };
+            let out = tokio::time::timeout(Duration::from_secs(5), docker.exec("daemon", argv))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(out.code, 0);
+            let value: Value = serde_json::from_str(&out.stdout).unwrap();
+            assert_eq!(value, serde_json::from_str::<Value>(answer).unwrap());
+            server.await.unwrap();
+        }
+    }
+
+    #[test]
+    fn daemon_exit_reason_keeps_only_fixed_categories_from_the_last_error() {
+        let logs = "entrypoint: started terrariumd (pid 1)\nError: FOREIGN KEY constraint failed: token=do-not-record\nentrypoint: terrariumd ended (status 1) after 0s; starting it again in 1s. The agent runners keep running.\nentrypoint: started terrariumd (pid 2)\n";
+        let reason = daemon_exit_reason("", logs).unwrap();
+        assert!(reason.contains("FOREIGN KEY constraint failed (values hidden)"));
+        assert!(!reason.contains("do-not-record"));
+        let unknown = daemon_exit_reason(
+            "password=do-not-record",
+            "entrypoint: terrariumd ended (status 1)\n",
+        )
+        .unwrap();
+        assert!(unknown.contains("last error: [hidden] (values hidden)"));
+        assert!(daemon_exit_reason("", "entrypoint: started terrariumd (pid 2)\n").is_none());
+        // Do not report an older error category when the last error differs.
+        let changed = daemon_exit_reason("", "FOREIGN KEY constraint failed\npassword=do-not-record\nentrypoint: terrariumd ended (status 1)\n").unwrap();
+        assert!(!changed.contains("FOREIGN KEY"));
+    }
+
+    #[tokio::test]
+    async fn docker_request_deadline_covers_headers_and_the_full_body_and_closes_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for stalled_body in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("docker.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let server = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut header = Vec::new();
                 while !header.ends_with(b"\r\n\r\n") {
                     header.push(stream.read_u8().await.unwrap());
                 }
-                let header = String::from_utf8(header).unwrap();
-                let len = header
-                    .lines()
-                    .find_map(|line| {
-                        let (key, value) = line.split_once(':')?;
-                        key.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap_or(0);
-                let mut body = vec![0; len];
-                stream.read_exact(&mut body).await.unwrap();
-                let response = match step {
-                    0 => {
-                        assert!(header.starts_with("POST /containers/daemon/exec "));
-                        let body: Value = serde_json::from_slice(&body).unwrap();
-                        assert_eq!(body["Cmd"], json!(expected));
-                        r#"{"Id":"exec1"}"#
-                    }
-                    1 => {
-                        assert!(header.starts_with("POST /exec/exec1/start "));
-                        r#"{"jobs":["job-123"],"timed_out":true}"#
-                    }
-                    _ => {
-                        assert!(header.starts_with("GET /exec/exec1/json "));
-                        r#"{"ExitCode":0}"#
-                    }
-                };
-                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+                if stalled_body {
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx")
+                        .await
+                        .unwrap();
+                }
+                // Cancellation must also abort the detached hyper connection,
+                // not leave it reading an incomplete body indefinitely.
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).await.unwrap();
+            });
+            let docker = Docker {
+                socket,
+                target: None,
+            };
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                docker.call_until(
+                    Method::GET,
+                    "/pending",
+                    None,
+                    tokio::time::Instant::now() + Duration::from_millis(50),
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(result.unwrap_err().contains("request deadline exceeded"));
+            tokio::time::timeout(Duration::from_secs(1), server)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn uncertain_recovery_stops_without_normal_grace_or_restart() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("docker.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                header.push(stream.read_u8().await.unwrap());
             }
+            assert!(
+                String::from_utf8(header)
+                    .unwrap()
+                    .starts_with("POST /containers/daemon/stop?t=0 HTTP/1.1")
+            );
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
         });
         let docker = Docker {
             socket,
             target: None,
         };
-        let out = tokio::time::timeout(Duration::from_secs(5), docker.exec("daemon", argv))
+        tokio::time::timeout(Duration::from_secs(1), docker.stop_for_recovery("daemon"))
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(out.code, 0);
-        let value: Value = serde_json::from_str(&out.stdout).unwrap();
-        assert_eq!(value["jobs"], json!(["job-123"]));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_crash_log_is_scoped_and_redacted_through_the_docker_socket() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("docker.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let since = "2026-11-12T02:00:00.123456789+00:00";
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                header.push(stream.read_u8().await.unwrap());
+            }
+            let header = String::from_utf8(header).unwrap();
+            assert!(header.starts_with(&format!(
+                "GET /containers/daemon/logs?stdout=1&stderr=1&tail=64&since={} HTTP/1.1",
+                enc(since)
+            )));
+            let text = b"Error: FOREIGN KEY constraint failed: password=do-not-record\nentrypoint: terrariumd ended (status 1) after 0s; starting it again in 1s. The agent runners keep running.\n";
+            let mut frame = vec![2, 0, 0, 0];
+            frame.extend_from_slice(&(text.len() as u32).to_be_bytes());
+            frame.extend_from_slice(text);
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        frame.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            stream.write_all(&frame).await.unwrap();
+        });
+        let docker = Docker {
+            socket,
+            target: None,
+        };
+        let failure = tokio::time::timeout(
+            Duration::from_secs(3),
+            docker.daemon_failure_since("daemon", since),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert!(failure.contains("FOREIGN KEY constraint failed"));
+        assert!(!failure.contains("do-not-record"));
         server.await.unwrap();
     }
 
