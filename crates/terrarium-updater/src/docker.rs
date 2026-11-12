@@ -23,7 +23,7 @@ use hyper::{Method, Request, StatusCode, header};
 use hyper_util::rt::TokioIo;
 use serde_json::{Map, Value, json};
 
-use crate::engine::{BoxFut, Container, Engine, ExecOut, Health, Res};
+use crate::engine::{BoxFut, Container, Engine, ExecOut, ExecState, Health, Res};
 use crate::protocol::Image;
 
 /// The default Docker socket.
@@ -878,6 +878,96 @@ impl Engine for Docker {
                 code: info["ExitCode"].as_i64().unwrap_or(-1),
                 stdout,
                 stderr,
+            })
+        })
+    }
+
+    fn exec_create<'a>(&'a self, id: &'a str, argv: Vec<String>) -> BoxFut<'a, Res<String>> {
+        Box::pin(async move {
+            let made = self
+                .ok(
+                    Method::POST,
+                    &format!("/containers/{}/exec", enc(id)),
+                    Some(json!({"AttachStdout":false,"AttachStderr":false,"Cmd":argv})),
+                )
+                .await?;
+            made["Id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| "exec create omitted identity".into())
+        })
+    }
+
+    fn exec_start<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
+        Box::pin(async move {
+            let (status, bytes) = self
+                .call(
+                    Method::POST,
+                    &format!("/exec/{}/start", enc(id)),
+                    Some(json!({"Detach":true,"Tty":false})),
+                )
+                .await?;
+            if status.is_success() {
+                Ok(())
+            } else {
+                Err(format!("exec start: {status}: {}", message(&bytes)))
+            }
+        })
+    }
+
+    fn running_retention_helpers<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<Vec<String>>> {
+        Box::pin(async move {
+            let container = self.inspect(id).await?;
+            let ids = match &container["ExecIDs"] {
+                Value::Null => Vec::new(),
+                Value::Array(ids) => ids
+                    .iter()
+                    .map(|id| id.as_str().ok_or("invalid container ExecID"))
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => return Err("invalid container ExecIDs".into()),
+            };
+            let mut running = Vec::new();
+            for id in ids {
+                let info = self
+                    .ok(Method::GET, &format!("/exec/{}/json", enc(id)), None)
+                    .await?;
+                if !info["Running"]
+                    .as_bool()
+                    .ok_or("exec inventory omitted running state")?
+                {
+                    continue;
+                }
+                let config = &info["ProcessConfig"];
+                let entrypoint = config["entrypoint"]
+                    .as_str()
+                    .ok_or("exec inventory omitted entrypoint")?;
+                let args = config["arguments"]
+                    .as_array()
+                    .ok_or("exec inventory omitted arguments")?;
+                if entrypoint == "python3"
+                    && args.first().and_then(Value::as_str)
+                        == Some("/usr/local/lib/terrarium-hot-swap.py")
+                    && args.get(1).and_then(Value::as_str) == Some("retain-backups")
+                {
+                    running.push(id.to_owned());
+                }
+            }
+            Ok(running)
+        })
+    }
+
+    fn exec_inspect<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<ExecState>> {
+        Box::pin(async move {
+            let info = self
+                .ok(Method::GET, &format!("/exec/{}/json", enc(id)), None)
+                .await?;
+            Ok(ExecState {
+                running: info["Running"]
+                    .as_bool()
+                    .ok_or("exec inspect omitted running state")?,
+                pid: info["Pid"].as_u64().ok_or("exec inspect omitted PID")?,
+                code: info["ExitCode"].as_i64().unwrap_or(-1),
             })
         })
     }

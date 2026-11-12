@@ -11331,7 +11331,7 @@ layout) and `crates/terrariumd/src/store/monitors.rs` (the rows).
 ### 30.0 Project pages
 
 Project pages use the rights in §30.1. `GET /api/projects/{name}/pages`
-returns `{"items": [page, ...], "can_edit": true}` ordered by position, then slug (at most 10).
+returns `{"items": [page, ...], "can_edit": true, "dashboard_slug": "dashboard"}` ordered by position, then slug (at most 10, or 11 immediately after dashboard migration).
 `can_edit` reports the caller's project-page write right. Clients hide edit controls when false.
 `GET /api/projects/{name}/pages/{slug}` returns one page. `PUT` at that
 path creates or completely replaces it. `DELETE` removes it (204).
@@ -11348,7 +11348,7 @@ Unknown projects or pages return 404. A PUT body is:
 A returned page adds `project`, `slug`, `updated_at`, and `updated_by`.
 Slugs are 1–64 lowercase ASCII letters, digits, hyphens or underscores,
 starting with a letter or digit. Titles are nonempty, at most 120 characters.
-Position is a nonnegative integer. Widgets (at most 100) have unique IDs
+Position is a nonnegative integer. Widgets (at most 104, allowing 100 legacy blocks plus four system panels) have unique IDs
 (1–40 ASCII letters, digits, hyphens or underscores). Optional `title` is
 at most 120 characters. Grid coordinates are integers: x 0–11, y 0–9999,
 w 1–12 with x+w <= 12, h 1–10000 with y+h <= 10000. Rectangles cannot
@@ -11357,7 +11357,9 @@ monitors) lets markdown/wiki content
 grow beyond its minimum h. Otherwise h is the scrolling height limit.
 The daemon stores cells, not pixel heights.
 
-Kinds are `markdown`, `wiki`, `stat`, `status`, `chart`, `text`, `table`.
+Kinds are `markdown`, `wiki`, `stat`, `status`, `chart`, `text`, `table`,
+`actions`, `monitor_summary`, `job_queue`, `eta_accuracy`. The last four
+are system widgets with no source fields.
 Markdown requires `text` (at most 16384 UTF-8 bytes). Wiki requires `wiki`,
 a wiki path in this project (the wiki's path rules: up to 200 bytes,
 lowercase letters, digits, hyphens, underscores, dots and slashes, no empty,
@@ -11369,6 +11371,19 @@ with the block kind, and accept dashboard `options` (§30.4). Other source
 fields are rejected. Unknown fields are rejected. Invalid input returns 422.
 Writes produce `page.set` or `page.remove` audit rows and a `page.updated`
 event with `{project, slug, deleted}`. Reading never drops stale references.
+
+The former Dashboard is migrated to a custom page, with actions, monitor
+summary, job queue and ETA accuracy widgets first, followed by saved blocks
+in order. S/M/L widths become 3/6/12 grid columns. New projects receive the
+same four system widgets. If `dashboard` is taken, the migrated page uses
+`dashboard-legacy`, then `dashboard-legacy-2`, and so on, without changing
+user pages. `dashboard_slug` records this choice. Migration may add one
+page beyond the limit, but creates remain refused until below 10.
+The old Dashboard route redirects to that page. `?tab=monitors` redirects
+to project Settings, Monitors. GET/PUT `/api/projects/{name}/dashboard`
+and the dashboard CLI remain compatibility aliases for at least one release.
+The alias reads an empty layout if the mapped page was deleted. Saving it
+replaces monitor/Markdown widgets and preserves system and wiki widgets.
 
 ### 30.1 Rights
 
@@ -12111,7 +12126,7 @@ The settings are daemon env vars:
 |---|---|---|
 | `TERRARIUM_BACKUP_SCHEDULE` | `off` | `daily`, `weekly`, or a duration of `1h` or more. |
 | `TERRARIUM_BACKUP_FULL_EVERY` | `7d` | The longest time between two full backups. |
-| `TERRARIUM_BACKUP_KEEP` | `4` | The full backups to keep, each with its diffs. |
+| `TERRARIUM_BACKUP_KEEP` | `5` | Legacy setting, accepted but ignored. Retention uses the operator-approved rule below. |
 | `TERRARIUM_BACKUP_WORK` | `off` | `on`: add the workspaces. |
 | `TERRARIUM_BACKUP_KEY_SECRET` | `backup-key` | The global secret with the passphrase. |
 | `TERRARIUM_BACKUP_PASSPHRASE_FILE` | none | A file whose first line is the passphrase. It wins over the secret. The daemon user must own it, and only the owner may read it (mode `0600` or `0400`); else each run fails. |
@@ -12139,8 +12154,7 @@ secret with it.
 
 **Rotation.** Set a new value on the secret. The next run is a full backup
 with the new key. The older backups keep the old key: keep the old
-passphrase until the retention deletes the last of them (after
-`TERRARIUM_BACKUP_KEEP` newer full backups). Restore or verify an old
+passphrase until retention deletes the last of them. Restore or verify an old
 backup with the old passphrase (`--passphrase-file`).
 
 **Verify and record.** Each run reads the new backup back and checks each
@@ -12155,10 +12169,81 @@ writes a global event of the kind `backup` with `change`: `verified`,
 backup. When the move fails the run deletes the file; when that fails
 too, the error mail says to delete it by hand.
 
-**Retention.** Only a full backup that verified prunes the dir: it keeps
-the newest `TERRARIUM_BACKUP_KEEP` full backups and their diffs, and
-deletes the rest. Nothing is deleted before a newer full backup is
-verified, and nothing is deleted while the runs fail.
+**Retention.** The operator's rule is to keep the newest **5**
+daemon-written full ZIPs plus the latest backup on each of the last **14
+UTC calendar days**, including today. Deletion stays off until explicit
+operator initialization: `terrarium admin backup retention init` shows the
+first bounded pass's exact names, dates, byte sizes and total. Re-run with
+`--confirm` to initialize and enable passes. The operator-only API is
+`POST /api/backups/retention/init` with `confirm` and
+`no_rollback_reference` booleans (both default false). Missing or unreadable
+`history.json` or `previous.json` refuses initialization and names the file
+needing repair. Only a never-updated installation may explicitly establish
+an empty baseline with `--no-rollback-reference --confirm`. Initialization
+and that flag are durably audited. No fresh installation is inferred from
+missing files. Later missing/unreadable safety files, or a missing initialized
+marker in `retention.json`, always prevent deletion. Missing retention state
+also prevents update admission until repaired. An independent initialization
+epoch in `history.json` survives run rotation. Ordinary init cannot replace
+lost initialized state. `terrarium admin backup retention repair` previews
+conservative recovery holds and the deletion list. `--confirm` audits and
+writes a new epoch. Its operator-only endpoint is
+`POST /api/backups/retention/repair` with `confirm` (default false).
+Repair inspects every Docker ExecID and refuses while an exact retention
+helper is running. Every leftover `.hot-swap.sqlite` and its ZIP becomes a
+named hold until explicit recovery release. The response prints release keys.
+Repair requires readable history and previous state, not an inferred empty
+rollback baseline. Init and repair atomically store confirmed names in the
+initialized state. The first pass only deletes confirmed names still eligible
+under the directory lock. New backups never expand that first-pass list.
+
+Helper authorization expires after ten seconds. The updater renews only
+after strict rereads of all three safety files, a matching initialization
+epoch and current exec/token interlock. Failure revokes the token and stops
+renewal. A paused helper checks expiry before each unlink, so missing state
+stops deletion within ten seconds, within the 32-file pass cap.
+
+The updater is the only deletion
+owner and serializes retention with updates and rollbacks. API, CLI and
+scheduled creates request a pass after backup creation. The daemon also
+requests a pass at startup and every minute, including when scheduling
+is off. With no reachable updater, or while an update is running, no
+retention occurs and a warning reports the deferral.
+
+An active update (even before its backup path is recorded), the rollback
+backup in `previous.json`, and failed-recovery ZIPs and snapshots are
+protected. An interrupted updater leaves a durable hold in
+`<updater-state>/retention.json`, blocking deletion and new updates until
+the operator has recovered the run and releases it. Recovery holds survive
+history rotation. Full backups referenced by retained diffs are also kept.
+Unknown names, invalid headers, and future-dated backups are not deleted.
+
+Before helper launch the updater persists a `retention_running` interlock
+with the Docker exec ID and a unique token, then records the observed host
+PID and helper PID/start time. Updates refuse while that interlock remains.
+Startup and uncertain execution revoke the token, terminate the exact helper
+using its container PID/start time and pidfd, then inspect the exact Docker
+exec to prove it stopped before clearing the interlock. An inspection or
+cancellation failure keeps admission blocked. A delayed start cannot reuse
+a revoked token. The helper re-reads the mirrored token and protections
+under the directory lock immediately before each unlink. Private control,
+identity, receipt and permanent revocation files live in the backup directory.
+
+A paused `<ZIP>.hot-swap.sqlite` belongs to its ZIP and is deleted with
+it, unless already removed by hot-swap commit. Each pass deletes at most
+32 files, by exact names inside the backup directory. A cross-process
+directory lock serializes creation and deletion. The durable
+`<backup-dir>/.retention-audit.jsonl` records each deletion's intent and
+completion, exact name and byte size. No deletion proceeds if journaling
+fails. These journals are not included in backups.
+
+After manual recovery, the operator can run
+`terrarium daemon backup release-recovery <run-id>`
+(`POST /api/backups/recovery-release`, body `{"run":"<run-id>"}`). Agents,
+including sysadmins, cannot release a hold. Release is irreversible and
+audited in `<updater-state>/retention-audit.jsonl` before it takes effect.
+It permits retention, not necessarily immediate deletion: the five/daily
+rule and the previous rollback target still apply.
 
 **Alerts.** The first failed run of a streak mails the operator from
 `system` (subject `Scheduled backup failed`, with the error). The next

@@ -189,6 +189,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
 async fn admin(ctx: &Ctx, cmd: &AdminCmd) -> anyhow::Result<()> {
     match cmd {
         AdminCmd::Agent { command } => agents::agent(ctx, command).await,
+        AdminCmd::Backup { command } => system::admin_backup(ctx, command).await,
         AdminCmd::Job { command } => jobs::admin_job(ctx, command).await,
         AdminCmd::Project { command } => projects::project(ctx, command).await,
         AdminCmd::Role { command } => agents::role(ctx, command).await,

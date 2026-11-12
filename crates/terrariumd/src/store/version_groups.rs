@@ -24,7 +24,7 @@ pub const STEPS: &[&str] = &[
 pub fn pick(conn: &Connection, project: &str) -> ApiResult<BatchPick> {
     let accepted = board::role_name(conn, project, "accepted", "accepted")?;
     let mut pick = BatchPick::default();
-    for c in board::get_board(conn, project)?.cards {
+    for c in board::selection_cards(conn, project, &accepted)? {
         if c.column != accepted
             || c.kind == "group"
             || !c.labels.iter().any(|l| l == "version:vnext")

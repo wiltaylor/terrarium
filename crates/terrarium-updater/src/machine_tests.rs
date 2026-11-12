@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::*;
-use crate::engine::{BoxFut, ExecOut};
+use crate::engine::{BoxFut, ExecOut, ExecState};
 
 const OLD: &str = "terrarium:dev";
 const REPO: &str = "ghcr.io/example/terrarium";
@@ -16,6 +16,8 @@ const BACKUP: &str = "/state/backups/terrarium-backup-1.zip";
 
 #[derive(Default)]
 struct State {
+    retention_running: bool,
+    retention_protected: serde_json::Value,
     resume_status: Option<String>,
     resume_hang: bool,
     jobs_output: Option<String>,
@@ -180,6 +182,37 @@ impl Engine for Fake {
         Box::pin(async move {
             if argv[0] == "python3" {
                 let cmd = &argv[2];
+                if cmd == "retention-inventory" {
+                    return Ok(ExecOut {
+                        code: 0,
+                        stdout: "{}".into(),
+                        stderr: String::new(),
+                    });
+                }
+                if cmd == "retention-control" {
+                    let action = &argv[3];
+                    let failed = self.call(format!("control-{action}"));
+                    let mut s = self.0.lock().unwrap();
+                    let value = serde_json::from_str::<serde_json::Value>(&argv[4]).unwrap();
+                    if action == "prepare" {
+                        s.retention_protected = value["protected"].clone();
+                    }
+                    if action == "cancel" && !failed {
+                        s.retention_running = false;
+                    }
+                    let answer = if action == "receipt" {
+                        serde_json::json!({"removed":[],"protected":s.retention_protected})
+                    } else if action == "status" {
+                        serde_json::json!({"pid":42,"start":"123"})
+                    } else {
+                        serde_json::json!({})
+                    };
+                    return Ok(ExecOut {
+                        code: i64::from(failed),
+                        stdout: answer.to_string(),
+                        stderr: "control failed".into(),
+                    });
+                }
                 let failed = self.call(format!("hot:{cmd}"));
                 let pending = {
                     let s = self.0.lock().unwrap();
@@ -204,6 +237,10 @@ impl Engine for Fake {
                     code: i64::from(failed),
                     stdout: if cmd == "probe" {
                         "a".repeat(64)
+                    } else if cmd == "preview-backups" {
+                        serde_json::json!({"preview":[{"name":"eligible.zip","created_at":"2026-10-01T00:00:00Z","size":123}],"total_files":1,"total_bytes":123}).to_string()
+                    } else if cmd == "retain-backups" {
+                        serde_json::json!({"removed": [], "protected": serde_json::from_str::<serde_json::Value>(&argv[3]).unwrap()}).to_string()
                     } else {
                         String::new()
                     },
@@ -267,6 +304,51 @@ impl Engine for Fake {
                 } else {
                     String::new()
                 },
+            })
+        })
+    }
+
+    fn exec_create<'a>(&'a self, _id: &'a str, _argv: Vec<String>) -> BoxFut<'a, Res<String>> {
+        Box::pin(async move {
+            self.call("exec-create".into());
+            Ok("exact-exec".into())
+        })
+    }
+
+    fn exec_start<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
+        Box::pin(async move {
+            assert_eq!(id, "exact-exec");
+            let failed = self.call("exec-start".into());
+            // Lost response does not imply the Docker process stopped.
+            self.0.lock().unwrap().retention_running = failed;
+            if failed {
+                Err("exec transport lost while helper runs".into())
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn exec_inspect<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<ExecState>> {
+        Box::pin(async move {
+            assert_eq!(id, "exact-exec");
+            if self.call("exec-inspect".into()) {
+                return Err("inspection unavailable".into());
+            }
+            Ok(ExecState {
+                running: self.0.lock().unwrap().retention_running,
+                pid: 4242,
+                code: 0,
+            })
+        })
+    }
+
+    fn running_retention_helpers<'a>(&'a self, _id: &'a str) -> BoxFut<'a, Res<Vec<String>>> {
+        Box::pin(async move {
+            Ok(if self.0.lock().unwrap().retention_running {
+                vec!["exact-exec".into()]
+            } else {
+                Vec::new()
             })
         })
     }
@@ -557,6 +639,7 @@ fn rig_with(mode: &'static str, ok: bool) -> Rig {
     });
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path(), 10);
+    store.retention_init(true, true).unwrap();
     let cfg = Config {
         repository: REPO.into(),
         drain_wait: Duration::from_secs(30),
@@ -797,6 +880,342 @@ async fn resume_accepts_verified_open_drains_after_a_failed_or_slow_wake() {
 }
 
 #[tokio::test]
+async fn retention_pass_forwards_previous_backup_to_the_private_worker() {
+    let r = rig();
+    r.store
+        .set_previous(&Previous {
+            image: old_image(),
+            spec: None,
+            backup: Some(BACKUP.into()),
+        })
+        .unwrap();
+    let Response::Retained { detail } =
+        r.updater.handle(Request::Retention { release: None }).await
+    else {
+        panic!("retention did not complete");
+    };
+    assert_eq!(detail["protected"], serde_json::json!([BACKUP]));
+    assert_eq!(
+        r.fake.calls(),
+        vec![
+            "hot:preview-backups",
+            "exec-create",
+            "control-prepare",
+            "exec-start",
+            "exec-inspect",
+            "control-status",
+            "control-receipt",
+            "control-cancel",
+            "exec-inspect"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn retention_missing_safety_files_never_launches_helper() {
+    for missing in ["history.json", "previous.json", "retention.json"] {
+        let r = rig();
+        // Include both a pending update and a hold already rotated out of history.
+        let (mut run, guard) = r
+            .updater
+            .begin(RunKind::Update, "latest", "operator")
+            .unwrap();
+        run.outcome = Outcome::RecoveryFailed;
+        run.backup = Some(BACKUP.into());
+        r.store.retention_finish(&run).unwrap();
+        drop(guard);
+        std::fs::remove_file(r.store.dir().join(missing)).unwrap();
+        assert!(
+            matches!(
+                r.updater.handle(Request::Retention { release: None }).await,
+                Response::Error { .. }
+            ),
+            "{missing}"
+        );
+        assert!(r.fake.calls().is_empty());
+    }
+    let r = rig();
+    let (_, guard) = r
+        .updater
+        .begin(RunKind::Update, "latest", "operator")
+        .unwrap();
+    drop(guard);
+    std::fs::remove_file(r.store.dir().join("retention.json")).unwrap();
+    assert!(matches!(
+        r.updater.handle(Request::Retention { release: None }).await,
+        Response::Error { .. }
+    ));
+    assert!(r.fake.calls().is_empty());
+}
+
+#[test]
+fn retention_init_is_explicit_and_does_not_infer_a_fresh_install() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path(), 10);
+    assert!(
+        store
+            .retention_init(false, false)
+            .unwrap_err()
+            .to_string()
+            .contains("history.json")
+    );
+    store.retention_init(false, true).unwrap();
+    assert!(!dir.path().join("retention.json").exists());
+    store.retention_init(true, true).unwrap();
+    assert!(store.retention_protected(None).unwrap().is_empty());
+    for missing in ["history.json", "previous.json"] {
+        let bytes = std::fs::read(dir.path().join(missing)).unwrap();
+        std::fs::remove_file(dir.path().join(missing)).unwrap();
+        assert!(
+            store
+                .retention_init(true, false)
+                .unwrap_err()
+                .to_string()
+                .contains(missing)
+        );
+        std::fs::write(dir.path().join(missing), bytes).unwrap();
+    }
+    assert!(
+        std::fs::read_to_string(dir.path().join("retention-audit.jsonl"))
+            .unwrap()
+            .contains("no_rollback_reference")
+    );
+}
+
+#[tokio::test]
+async fn retention_transport_error_revokes_and_verifies_the_exact_helper_before_updates() {
+    let r = rig();
+    r.fake.fail("exec-start");
+    assert!(matches!(
+        r.updater.handle(Request::Retention { release: None }).await,
+        Response::Error { .. }
+    ));
+    assert!(!r.fake.0.lock().unwrap().retention_running);
+    assert!(r.store.retention_running().unwrap().is_none());
+    let calls = r.fake.calls();
+    assert!(
+        calls.iter().position(|s| s == "control-cancel").unwrap()
+            < calls.iter().position(|s| s == "exec-inspect").unwrap()
+    );
+    let (_, guard) = r
+        .updater
+        .begin(RunKind::Update, "latest", "operator")
+        .unwrap();
+    drop(guard);
+}
+
+#[tokio::test]
+async fn lost_state_init_and_repair_refuse_a_live_old_helper_after_restart() {
+    let r = rig();
+    r.fake.0.lock().unwrap().retention_running = true;
+    std::fs::remove_file(r.store.dir().join("retention.json")).unwrap();
+    assert!(matches!(
+        r.updater
+            .handle(Request::RetentionInit {
+                confirm: true,
+                no_rollback_reference: false
+            })
+            .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        r.updater
+            .handle(Request::RetentionRepair { confirm: true })
+            .await,
+        Response::Error { .. }
+    ));
+    assert!(!r.store.dir().join("retention.json").exists());
+    assert!(r.fake.0.lock().unwrap().retention_running);
+}
+
+#[tokio::test]
+async fn retention_init_previews_without_enabling_until_operator_confirms() {
+    let r = rig();
+    let path = r.store.dir().join("retention.json");
+    std::fs::remove_file(path).unwrap();
+    std::fs::write(r.store.dir().join("history.json"), "[]").unwrap();
+    for confirm in [false, true] {
+        let Response::Retained { detail } = r
+            .updater
+            .handle(Request::RetentionInit {
+                confirm,
+                no_rollback_reference: false,
+            })
+            .await
+        else {
+            panic!("initialization failed");
+        };
+        assert_eq!(detail["initialized"], confirm);
+        assert_eq!(detail["preview"][0]["size"], 123);
+        assert_eq!(detail["total_files"], 1);
+        assert_eq!(detail["total_bytes"], 123);
+        assert_eq!(r.store.retention_protected(None).is_ok(), confirm);
+    }
+    assert_eq!(
+        r.fake.calls(),
+        vec!["hot:preview-backups", "hot:preview-backups"]
+    );
+}
+
+#[tokio::test]
+async fn retention_observed_pids_remain_durable_until_cancellation_is_verified() {
+    let r = rig();
+    r.fake.fail("control-cancel");
+    assert!(matches!(
+        r.updater.handle(Request::Retention { release: None }).await,
+        Response::Error { .. }
+    ));
+    let persisted = r.store.retention_running().unwrap().unwrap();
+    assert_eq!(persisted.pid, Some(4242));
+    assert_eq!(persisted.worker_pid, Some(42));
+    assert_eq!(persisted.worker_start.as_deref(), Some("123"));
+    assert!(
+        r.updater
+            .begin(RunKind::Update, "latest", "operator")
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn retention_failed_cancellation_survives_restart_and_blocks_update_admission() {
+    let r = rig();
+    r.fake.fail("exec-start");
+    r.fake.fail("control-cancel");
+    assert!(matches!(
+        r.updater.handle(Request::Retention { release: None }).await,
+        Response::Error { .. }
+    ));
+    assert!(r.fake.0.lock().unwrap().retention_running);
+    let persisted = r.store.retention_running().unwrap().unwrap();
+    assert_eq!(persisted.exec_id, "exact-exec");
+    assert!(persisted.pid.is_none()); // Start's response was lost before observation.
+    assert!(
+        r.updater
+            .begin(RunKind::Update, "latest", "operator")
+            .is_err()
+    );
+    let restarted = Arc::new(Updater::new(
+        Arc::new(r.fake.clone()),
+        Arc::new(FakeRegistry),
+        r.verify.clone(),
+        r.store.clone(),
+        r.updater.cfg.clone(),
+    ));
+    assert!(matches!(
+        restarted
+            .handle(Request::Update {
+                target: "latest".into(),
+                actor: "operator".into()
+            })
+            .await,
+        Response::Error { .. }
+    ));
+    assert!(r.store.retention_running().unwrap().is_some());
+    r.fake.0.lock().unwrap().fail.remove("control-cancel");
+    restarted.reconcile_retention().await.unwrap();
+    assert!(r.store.retention_running().unwrap().is_none());
+    assert!(!r.fake.0.lock().unwrap().retention_running);
+    let (_, guard) = restarted
+        .begin(RunKind::Update, "latest", "operator")
+        .unwrap();
+    drop(guard);
+}
+
+#[tokio::test]
+async fn retention_inspection_failure_preserves_interlock_even_after_cancellation() {
+    let r = rig();
+    r.fake.fail("exec-inspect");
+    assert!(matches!(
+        r.updater.handle(Request::Retention { release: None }).await,
+        Response::Error { .. }
+    ));
+    assert!(r.store.retention_running().unwrap().is_some());
+    assert!(
+        r.updater
+            .begin(RunKind::Update, "latest", "operator")
+            .is_err()
+    );
+    r.fake.0.lock().unwrap().fail.remove("exec-inspect");
+    r.updater.reconcile_retention().await.unwrap();
+    assert!(r.store.retention_running().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn retention_lock_rejects_update_requests_while_helper_is_authorized() {
+    let r = rig();
+    let guard = r.updater.busy.clone().lock_owned().await;
+    assert!(matches!(
+        r.updater
+            .handle(Request::Update {
+                target: "latest".into(),
+                actor: "operator".into()
+            })
+            .await,
+        Response::Error { busy: true, .. }
+    ));
+    assert!(r.fake.calls().is_empty());
+    drop(guard);
+}
+
+#[tokio::test]
+async fn retention_refuses_active_update_even_before_backup_is_recorded() {
+    let r = rig();
+    let (_run, guard) = r
+        .updater
+        .begin(RunKind::Update, "latest", "operator")
+        .unwrap();
+    for backup in [None, Some(BACKUP.to_owned())] {
+        r.updater.with_run(|run| run.backup = backup);
+        assert!(matches!(
+            r.updater.handle(Request::Retention { release: None }).await,
+            Response::Error { busy: true, .. }
+        ));
+    }
+    drop(guard);
+    // A crashed updater loses its mutex, but not its durable pending hold.
+    assert!(
+        r.store
+            .retention_protected(None)
+            .unwrap_err()
+            .to_string()
+            .contains("unfinished update")
+    );
+    assert!(r.fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn retention_protects_previous_and_recovery_after_history_rotation_until_release() {
+    let r = rig();
+    let (mut run, guard) = r
+        .updater
+        .begin(RunKind::Update, "latest", "operator")
+        .unwrap();
+    run.outcome = Outcome::RecoveryFailed;
+    run.backup = Some(BACKUP.into());
+    r.store.retention_finish(&run).unwrap();
+    drop(guard);
+    // No history entry: protection is independent of history truncation.
+    assert_eq!(r.store.retention_protected(None).unwrap(), vec![BACKUP]);
+    r.store
+        .set_previous(&Previous {
+            image: old_image(),
+            spec: None,
+            backup: Some("previous.zip".into()),
+        })
+        .unwrap();
+    let protected = r.store.retention_protected(Some(&run.id)).unwrap();
+    assert_eq!(protected, vec!["previous.zip"]);
+    assert!(
+        std::fs::read_to_string(r.store.dir().join("retention-audit.jsonl"))
+            .unwrap()
+            .contains(&run.id)
+    );
+    assert!(r.store.retention_protected(Some("unknown")).is_err());
+    std::fs::write(r.store.dir().join("previous.json"), b"broken").unwrap();
+    assert!(r.store.retention_protected(None).is_err());
+}
+
+#[tokio::test]
 async fn missing_jobs_endpoint_warns_without_exposing_values_and_continues() {
     let r = rig();
     r.fake.fail("drain-jobs");
@@ -992,7 +1411,7 @@ async fn hot_swap_daemon_exit_rolls_back_without_waiting_for_health_timeout() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn every_pending_hot_recovery_stage_ends_inside_the_original_hold_budget() {
     let mut cases = tokio::task::JoinSet::new();
     for case in [
@@ -1011,8 +1430,9 @@ async fn every_pending_hot_recovery_stage_ends_inside_the_original_hold_budget()
         cases.spawn(async move {
             let mut r = rig();
             let updater = Arc::get_mut(&mut r.updater).unwrap();
-            // Keep >5 s for the real helper kill grace, but make all cases
-            // concurrent and short. Production uses 900/60/5 seconds.
+            // Exercise the budget in virtual time, independent of host load.
+            // Keep >5 s for the helper kill grace encoded in commands.
+            // Production uses 900/60/5 seconds.
             updater.hot_budget = (
                 Duration::from_secs(12),
                 Duration::from_secs(6),

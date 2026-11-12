@@ -25,7 +25,8 @@ const WikiPage = lazy(() => import("../features/wiki/WikiPage"));
 const ArtifactsPage = lazy(() => import("../features/artifacts/ArtifactsPage"));
 const TestRunsPage = lazy(() => import("../features/tests/TestRunsPage"));
 const TestRunPage = lazy(() => import("../features/tests/TestRunPage"));
-const DashboardPage = lazy(() => import("../features/dashboard/DashboardPage"));
+const DashboardRedirect = lazy(() => import("../features/dashboard/DashboardRedirect"));
+const MonitorsSettings = lazy(() => import("../features/dashboard/MonitorsSettings"));
 const CustomPage = lazy(() => import("../features/pages/CustomPage"));
 const PipelinesPage = lazy(() => import("../features/pipelines/PipelinesPage"));
 const CalendarPage = lazy(() => import("../features/calendar/CalendarPage"));
@@ -141,7 +142,7 @@ function instanceRoutes() {
         {/* Every project page keeps its URL under one shell with route tabs (nav.ts PROJECT_TABS). */}
         <Route path="/p/:project" component={ProjectScreen}>
           <Route path="/" component={ProjectIndex} />
-          <Route path="/dashboard" component={DashboardPage} />
+          <Route path="/dashboard" component={DashboardRedirect} />
           <Route path="/pages/:slug" component={CustomPage} />
           <Route path="/pipelines" component={PipelinesPage} />
           <Route path="/calendar" component={CalendarPage} />
@@ -169,6 +170,7 @@ function instanceRoutes() {
             <Route path="/general" component={ProjectSettings} />
             <Route path="/secrets" component={SecretsPage} />
             <Route path="/templates" component={TemplatesPage} />
+            <Route path="/monitors" component={MonitorsSettings} />
           </Route>
           {/* The knowledge screen: the tabs Wiki, Memory, and DB (nav.ts KNOWLEDGE_TABS). /p/:project/knowledge redirects to the Wiki tab. */}
           <Route path="/knowledge" component={KnowledgePage}>
