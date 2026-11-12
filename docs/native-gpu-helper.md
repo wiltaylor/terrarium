@@ -377,17 +377,23 @@ not run it on a shared target or a DGX Spark without that decision.
 3. **The binary**: download it from the GitHub release of the daemon's
    version and verify it; do not build it. Each release has
    `terrarium-host-helper-<version>-linux-x86_64` (static musl, built
-   with `--locked` in the release CI, next to `terrarium-host`) and its
-   line in `SHA256SUMS` ([release.md](release.md)). Then install it
-   root-owned:
+   with `--locked` in the local release build, next to `terrarium-host`),
+   its line in `SHA256SUMS`, and cosign signature bundles for both files
+   ([release.md](release.md)). You need cosign 3 and the release public
+   key from `docker/release/cosign.pub` in a trusted checkout, saved as
+   `cosign.pub`. Then verify and install it root-owned:
 
    ```sh
    v=<version>   # the version of the daemon and the host agent, without the v
    gh release download "v$v" --repo wiltaylor/terrarium \
-     --pattern "terrarium-host-helper-$v-linux-x86_64" --pattern SHA256SUMS &&
+     --pattern "terrarium-host-helper-$v-linux-x86_64" \
+     --pattern "terrarium-host-helper-$v-linux-x86_64.sigstore.json" \
+     --pattern SHA256SUMS --pattern SHA256SUMS.sigstore.json &&
+   cosign verify-blob --key cosign.pub \
+     --bundle "terrarium-host-helper-$v-linux-x86_64.sigstore.json" \
+     "terrarium-host-helper-$v-linux-x86_64" &&
+   cosign verify-blob --key cosign.pub --bundle SHA256SUMS.sigstore.json SHA256SUMS &&
    sha256sum -c --ignore-missing SHA256SUMS &&
-   gh attestation verify "terrarium-host-helper-$v-linux-x86_64" --repo wiltaylor/terrarium \
-     --signer-workflow wiltaylor/terrarium/.github/workflows/ci.yml &&
    install -o root -g root -m 0755 "terrarium-host-helper-$v-linux-x86_64" /usr/local/libexec/terrarium-host-helper &&
    /usr/local/libexec/terrarium-host-helper --version
    ```
@@ -395,13 +401,17 @@ not run it on a shared target or a DGX Spark without that decision.
    The commands are joined with `&&`: when the download or a check fails,
    the install does not run.
 
-   Without `gh`, take both files from the release page with `curl -fLO`
-   and run the `sha256sum` check. `SHA256SUMS` comes from the same release
-   as the binary, so a matching hash proves only that the download is
-   whole, not where the binary comes from. Run the `gh attestation verify`
-   check before the install, on another machine with `gh` if this host has
-   none. A release up to v0.35.0-alpha has no
-   such file: build it from the tag with `cargo build
+   Without `gh`, take the binary, `SHA256SUMS`, and both `.sigstore.json`
+   bundles from the release page with `curl -fLO`, then run the same cosign
+   and checksum checks before installing. A matching checksum alone does
+   not prove where the binary comes from.
+
+   Alternatively, verify the release image by digest with the release
+   public key as described in [release.md](release.md), then copy
+   `/opt/terrarium/dist/terrarium-host-helper-x86_64-linux` out of that
+   verified image and install it root-owned at the same destination. The
+   image also carries the public key at `/opt/terrarium/release/cosign.pub`.
+   A release up to v0.35.0-alpha has no helper asset: build it from the tag with `cargo build
    --release --locked -p terrarium-host --bin terrarium-host-helper`.
 
 4. **The workspace**: a shared group for agent-root contents, but protected
