@@ -3203,7 +3203,10 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
         format!("{jid}\n"),
         "initial launch"
     );
-    let journal = terrariumd::hosts::resume::Journal::new(&lab.td.state);
+    let journal = terrariumd::hosts::resume::Journal::with_db(
+        &lab.td.state,
+        lab.td.daemon.as_ref().unwrap().state.db.clone(),
+    );
     let prefix = format!("ssh/recipe/{jid}/");
     let bindings = journal.scan::<Value>(&prefix).unwrap();
     assert_eq!(

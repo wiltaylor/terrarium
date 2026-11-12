@@ -326,7 +326,10 @@ async fn durable_expired_checkpoint_does_not_relaunch_or_prevent_boot() {
     reboot(&mut td, &url, &ssh).await;
     let (_, end) = output(&td, "expired-ex", &sid).await;
     assert_eq!(end["code"], "durable_expired");
-    let journal = terrariumd::hosts::resume::Journal::new(&td.state);
+    let journal = terrariumd::hosts::resume::Journal::with_db(
+        &td.state,
+        td.daemon.as_ref().unwrap().state.db.clone(),
+    );
     let mut checkpoints = journal.scan::<Value>("ssh/").unwrap();
     assert_eq!(checkpoints.len(), 1);
     let (key, checkpoint) = checkpoints.first_mut().unwrap();
