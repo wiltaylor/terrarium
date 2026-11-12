@@ -170,13 +170,25 @@ mod tests {
     fn canonical_v1_binds_effective_policy_and_rejects_old_digest() {
         let spec = specification();
         let bytes = spec.canonical_bytes().unwrap();
-        assert!(bytes.starts_with(b"{\"format\":\"terrarium.workspace.receiver/v1\",\"specification\":"));
+        assert!(
+            bytes
+                .starts_with(b"{\"format\":\"terrarium.workspace.receiver/v1\",\"specification\":")
+        );
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["security_options"], serde_json::json!(live_workspace::RECEIVER_SECURITY_OPTIONS));
-        assert_eq!(body["receiver_bind_policy"], live_workspace::RECEIVER_BIND_POLICY);
+        assert_eq!(
+            body["security_options"],
+            serde_json::json!(live_workspace::RECEIVER_SECURITY_OPTIONS)
+        );
+        assert_eq!(
+            body["receiver_bind_policy"],
+            live_workspace::RECEIVER_BIND_POLICY
+        );
         assert_eq!(body["administrative_parents"].as_array().unwrap().len(), 4);
         let reordered = serde_json::to_vec(&serde_json::to_value(&spec).unwrap()).unwrap();
-        assert_eq!(Specification::from_config(&reordered).unwrap().digest(), spec.digest());
+        assert_eq!(
+            Specification::from_config(&reordered).unwrap().digest(),
+            spec.digest()
+        );
         let mut r = request(&spec);
         r.configuration = Sha256::digest(serde_json::to_vec(&spec).unwrap()).into();
         assert_eq!(spec.verify(&r, &spec.profile), Err(Reply::Conflict));

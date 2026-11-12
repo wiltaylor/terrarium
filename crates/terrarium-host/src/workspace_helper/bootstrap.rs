@@ -46,7 +46,11 @@ mod tests {
 
     impl Fake {
         fn fresh(fail: usize) -> Self {
-            Self { calls: 0, fail, configuration_changed: false }
+            Self {
+                calls: 0,
+                fail,
+                configuration_changed: false,
+            }
         }
         fn action(&mut self) -> Result<(), Reply> {
             self.calls += 1;
@@ -136,7 +140,9 @@ mod tests {
             if complete {
                 b.create(r.clone()).unwrap();
             } else {
-                b.store.begin_bootstrap(&Journal::new(r.clone()).unwrap()).unwrap();
+                b.store
+                    .begin_bootstrap(&Journal::new(r.clone()).unwrap())
+                    .unwrap();
             }
             let calls = b.backend.calls;
             b.backend.configuration_changed = true;
@@ -159,7 +165,12 @@ mod tests {
         let mut changed = Fake::fresh(0);
         changed.configuration_changed = true;
         assert!(Bootstrap::allocate(&roots, r.clone(), changed).is_err());
-        assert_eq!(std::fs::read_dir(dir.path().join("bootstrap")).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("bootstrap"))
+                .unwrap()
+                .count(),
+            0
+        );
         let mut b = Bootstrap::allocate(&roots, r, Fake::fresh(0)).unwrap();
         b.backend.configuration_changed = true;
         assert_eq!(b.create_prepared(), Err(Reply::Quarantined));
@@ -311,10 +322,16 @@ impl<B: Backend> Bootstrap<B> {
     }
 
     fn check_configuration(&mut self, journal: &mut Journal) -> Result<(), Reply> {
-        if self.backend.check_configuration(journal.original()).is_err() {
+        if self
+            .backend
+            .check_configuration(journal.original())
+            .is_err()
+        {
             self.fenced = true;
             journal.quarantine();
-            self.store.save_bootstrap(journal).map_err(|_| Reply::Quarantined)?;
+            self.store
+                .save_bootstrap(journal)
+                .map_err(|_| Reply::Quarantined)?;
             return Err(Reply::Quarantined);
         }
         Ok(())

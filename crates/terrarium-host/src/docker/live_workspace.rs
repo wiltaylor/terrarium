@@ -70,9 +70,13 @@ pub struct Create {
 
 // Included verbatim in the versioned protected receiver configuration digest.
 pub(crate) const RECEIVER_SECURITY_OPTIONS: &[&str] = &[
-    "--restart=no", "--pull=never", "--cap-drop=ALL",
-    "--security-opt=no-new-privileges:true", "--network=none",
-    "--ipc=private", "--cgroupns=private",
+    "--restart=no",
+    "--pull=never",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges:true",
+    "--network=none",
+    "--ipc=private",
+    "--cgroupns=private",
 ];
 pub(crate) const RECEIVER_BIND_POLICY: &str = "dst=/work,readonly,bind-propagation=rslave";
 
@@ -110,9 +114,9 @@ fn fixed_create_flags(
         return Err(Reply::Unauthorized);
     }
     let mut args: Vec<String> = ["create", "--name", &req.name]
-    .into_iter()
-    .map(str::to_owned)
-    .collect();
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     args.extend(RECEIVER_SECURITY_OPTIONS.iter().map(|s| (*s).to_owned()));
     args.push("--mount".into());
     // Admission must reject userns-remap engines. The pinned default seccomp
