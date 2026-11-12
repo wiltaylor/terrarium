@@ -172,6 +172,22 @@ pub fn ensure(
     }
 }
 
+/// Legacy/generic consumers must record durable use before creation or
+/// migration. Owner-sandbox startup needs a separate incarnation-bound path.
+pub async fn ensure_generic(
+    state: &crate::api::Shared,
+    agent: &terrarium_core::Agent,
+    move_old: bool,
+) -> crate::error::ApiResult<Option<PathBuf>> {
+    let agent = agent.clone();
+    let state_dir = state.state_dir.clone();
+    let work_dir = state.work_dir.clone();
+    state.db.write_full("workspace:generic", move |t| {
+        crate::store::live_workspaces::admit_generic_agent(t, &agent.id.to_string())?;
+        Ok(ensure(&state_dir, &work_dir, &agent, move_old))
+    }).await
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

@@ -4412,7 +4412,7 @@ async fn holder_info(state: &Shared, key: &str, context: Option<&str>) -> ApiRes
         .db
         .read(move |c| crate::store::agents::find(c, &k, ctx.as_deref()))
         .await?;
-    let ws = crate::workspace::ensure(&state.state_dir, &state.work_dir, &v.agent, false);
+    let ws = crate::workspace::ensure_generic(state, &v.agent, false).await?;
     Ok(HolderInfo {
         id: v.agent.id.to_string(),
         name: format!("{}/{}", v.agent.project, v.agent.name),

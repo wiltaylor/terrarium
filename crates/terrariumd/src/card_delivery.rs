@@ -388,7 +388,9 @@ fn card_link(state: &Shared, c: &DeliveredCard) -> Option<String> {
 pub async fn deliver(state: &Shared, agent: &Agent) -> Result<Report, DeliveryError> {
     let lock = lock_of(agent.id);
     let _held = lock.lock().await;
-    let Some(workspace) = crate::workspace::ensure(&state.state_dir, &state.work_dir, agent, false)
+    let Some(workspace) = crate::workspace::ensure_generic(state, agent, false)
+        .await
+        .map_err(|e| DeliveryError::Io(e.message))?
     else {
         return Err(DeliveryError::Io(format!(
             "cannot make the workspace {}",

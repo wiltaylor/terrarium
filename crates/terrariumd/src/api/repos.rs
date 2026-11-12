@@ -339,7 +339,8 @@ async fn checkout_inner(
         .await
         .is_some_and(terrarium_core::AgentStatus::is_live);
     let workspace =
-        crate::workspace::ensure(&state.state_dir, &state.work_dir, &agent.agent, !live)
+        crate::workspace::ensure_generic(state, &agent.agent, !live)
+            .await?
             .ok_or_else(|| {
                 ApiError::internal(format!("cannot create {}", agent.agent.workspace.display()))
             })?;

@@ -203,7 +203,8 @@ async fn upload(
         )
     })?;
 
-    let workspace = crate::workspace::ensure(&state.state_dir, &state.work_dir, &a.agent, false)
+    let workspace = crate::workspace::ensure_generic(&state, &a.agent, false)
+        .await?
         .ok_or_else(|| {
             ApiError::internal(format!("cannot create {}", a.agent.workspace.display()))
         })?;

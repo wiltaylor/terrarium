@@ -41,6 +41,30 @@ fn durable(t: &Tx<'_>) -> ApiResult<()> {
     Ok(())
 }
 
+/// Conservative admission for legacy consumers which cannot prove a pinned
+/// live attachment or the exact owning sandbox. Record before returning a
+/// path, so a later reservation cannot race a retained generic reference.
+pub fn admit_generic_agent(t: &Tx<'_>, agent: &str) -> ApiResult<()> {
+    durable(t)?;
+    let sealed: bool = t.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_workspace_reservations r
+         JOIN live_workspaces w ON w.workspace_id = r.workspace_id
+         WHERE w.agent_id = ?1)",
+        [agent],
+        |r| r.get(0),
+    )?;
+    if sealed {
+        return Err(ApiError::new(Code::Conflict, "generic use of a sealed workspace is forbidden"));
+    }
+    t.execute(
+        "INSERT INTO live_workspace_prior_use(agent_id, first_used_at)
+         SELECT ?1, ?2 WHERE NOT EXISTS
+         (SELECT 1 FROM live_workspace_prior_use WHERE agent_id = ?1)",
+        params![agent, chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 fn identity(t: &Tx<'_>, e: &Enrollment) -> ApiResult<String> {
     let row = t
         .query_row(
@@ -130,6 +154,14 @@ pub fn reserve(
             Code::Conflict,
             "unknown workspace history or sandbox incarnation",
         ));
+    }
+    let prior_generic_use: bool = t.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_workspace_prior_use WHERE agent_id = ?1)",
+        [e.agent.to_string()],
+        |r| r.get(0),
+    )?;
+    if prior_generic_use {
+        return Err(ApiError::new(Code::Conflict, "workspace has pre-enrollment generic-use history"));
     }
     let incompatible_history: bool = t.query_row(
         "SELECT EXISTS(SELECT 1 FROM live_workspace_use_history WHERE workspace_id = ?1
@@ -434,6 +466,49 @@ mod tests {
             Ok(())
         }).await.unwrap();
         (dir, db, e)
+    }
+
+    #[tokio::test]
+    async fn pre_enrollment_generic_history_is_permanent_and_blocks_fresh_claims() {
+        let (_dir, db, e) = fixture().await;
+        let agent = e.agent.to_string();
+        db.write_full("system", move |t| {
+            admit_generic_agent(t, &agent)?;
+            admit_generic_agent(t, &agent)?;
+            assert!(t.execute("DELETE FROM live_workspace_prior_use", []).is_err());
+            assert!(t.execute("UPDATE live_workspace_prior_use SET first_used_at = 'later'", []).is_err());
+            assert!(t.execute("INSERT OR REPLACE INTO live_workspace_prior_use VALUES (?1, 'later')", [&agent]).is_err());
+            Ok(())
+        }).await.unwrap();
+        assert!(db.write_full("system", move |t| reserve(t, &e, "r1", "d1", "sandbox")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn sealed_generic_admission_never_records_an_allowed_use() {
+        let (_dir, db, e) = fixture().await;
+        db.write_full("system", move |t| {
+            reserve(t, &e, "r1", "d1", "sandbox")?;
+            assert!(admit_generic_agent(t, &e.agent.to_string()).is_err());
+            let count: usize = t.query_row("SELECT COUNT(*) FROM live_workspace_prior_use", [], |r| r.get(0))?;
+            assert_eq!(count, 0);
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn generic_use_before_enrollment_is_not_reclassified_by_new_identity() {
+        let (_dir, db, e) = fixture().await;
+        db.write_full("system", move |t| {
+            let unknown = terrarium_core::AgentId::new().to_string();
+            // A pre-enrollment use does not need any live-workspace row.
+            admit_generic_agent(t, &unknown)?;
+            let count: usize = t.query_row("SELECT COUNT(*) FROM live_workspace_prior_use WHERE agent_id = ?1", [&unknown], |r| r.get(0))?;
+            assert_eq!(count, 1);
+            // Existing immutable enrollment cannot be relabeled to erase it.
+            admit_generic_agent(t, &e.agent.to_string())?;
+            assert!(reserve(t, &e, "r1", "d1", "sandbox").is_err());
+            Ok(())
+        }).await.unwrap();
     }
 
     #[tokio::test]
