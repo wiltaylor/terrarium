@@ -578,6 +578,9 @@ fn admin_after_write_as(
 /// rule of PLAN §16b.6a: `403 forbidden` when it names a global secret,
 /// the project has no grant of it, and `admin` is false.
 pub fn check_global_credential(conn: &Connection, def: &TargetDef, admin: bool) -> ApiResult<()> {
+    if let (Some(p), Some(run_as)) = (&def.project, &def.windows_run_as) {
+        secrets::check_global_use(conn, p, &run_as.password_secret, admin)?;
+    }
     match (&def.project, &def.credential) {
         (Some(p), Some(name)) => secrets::check_global_use(conn, p, name, admin),
         _ => Ok(()),

@@ -302,6 +302,28 @@ pub struct WindowsRunAs {
     pub password: String,
 }
 
+#[cfg(test)]
+mod windows_run_as_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_exec_omits_credentials_and_session_debug_redacts_them() {
+        let legacy = r#"{"type":"exec","session":1,"cmd":"whoami"}"#;
+        let mut frame: DaemonFrame = decode_control(legacy).expect("legacy exec");
+        assert!(!encode_control(&frame).expect("encoded").contains("windows_run_as"));
+        let DaemonFrame::Exec(req) = &mut frame else { panic!("exec") };
+        req.windows_run_as = Some(WindowsRunAs {
+            account: "DOMAIN\\worker".into(),
+            password: "unique-test-password-Q7m3V9r2".into(),
+        });
+        let wire = encode_control(&frame).expect("encoded");
+        assert!(wire.contains("unique-test-password-Q7m3V9r2"));
+        assert!(!format!("{frame:?}").contains("unique-test-password-Q7m3V9r2"));
+        let decoded: DaemonFrame = decode_control(&wire).expect("round trip");
+        assert_eq!(decoded, frame);
+    }
+}
+
 impl std::fmt::Debug for WindowsRunAs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WindowsRunAs")
@@ -1377,6 +1399,7 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
             capabilities: HostCapabilities {
+                windows_run_as: false,
                 gpus: vec![],
                 gpu_reservations: false,
                 capacity: None,
