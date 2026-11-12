@@ -691,35 +691,71 @@ with (directory / '.retention.lock').open('a') as lock:
                 let dir = tempfile::tempdir().unwrap();
                 let s = Store::new(dir.path().join("updater"), 1);
                 s.retention_init(true, true).unwrap();
-                let running = RetentionRunning { container: "daemon".into(), exec_id: "exact".into(), token: ulid::Ulid::new().to_string(), pid: None, worker_pid: None, worker_start: None };
+                let running = RetentionRunning {
+                    container: "daemon".into(),
+                    exec_id: "exact".into(),
+                    token: ulid::Ulid::new().to_string(),
+                    pid: None,
+                    worker_pid: None,
+                    worker_start: None,
+                };
                 s.set_retention_running(Some(running.clone())).unwrap();
                 let authorization = s.retention_authorization(&running).unwrap();
                 latest_expiry = latest_expiry.max(authorization["expires_at"].as_f64().unwrap());
-                let mut child = Command::new("python3").arg("-u").arg("-c").arg(script)
+                let mut child = Command::new("python3")
+                    .arg("-u")
+                    .arg("-c")
+                    .arg(script)
                     .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docker/hot-swap.py"))
-                    .arg(dir.path().join("backups")).arg(authorization.to_string())
-                    .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+                    .arg(dir.path().join("backups"))
+                    .arg(authorization.to_string())
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
                 let mut ready = String::new();
-                BufReader::new(child.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+                BufReader::new(child.stdout.take().unwrap())
+                    .read_line(&mut ready)
+                    .unwrap();
                 assert_eq!(ready.trim(), "authorized");
-                let path = s.dir().join(if file == "initialized" { "retention.json" } else { file });
+                let path = s.dir().join(if file == "initialized" {
+                    "retention.json"
+                } else {
+                    file
+                });
                 if file == "initialized" {
                     let mut value: serde_json::Value = strict_json(&path).unwrap();
-                    if corrupt { value["initialized"] = false.into(); }
-                    else { value.as_object_mut().unwrap().remove("initialized"); }
+                    if corrupt {
+                        value["initialized"] = false.into();
+                    } else {
+                        value.as_object_mut().unwrap().remove("initialized");
+                    }
                     write_json(&path, &value).unwrap();
-                } else if corrupt { std::fs::write(path, "{").unwrap(); }
-                else { std::fs::remove_file(path).unwrap(); }
-                assert!(s.retention_authorization(&running).is_err(), "{file}, corrupt={corrupt}");
+                } else if corrupt {
+                    std::fs::write(path, "{").unwrap();
+                } else {
+                    std::fs::remove_file(path).unwrap();
+                }
+                assert!(
+                    s.retention_authorization(&running).is_err(),
+                    "{file}, corrupt={corrupt}"
+                );
                 children.push((child, dir));
             }
         }
         let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
-        std::thread::sleep(std::time::Duration::from_secs_f64((latest_expiry - now + 0.1).max(0.0)));
+        std::thread::sleep(std::time::Duration::from_secs_f64(
+            (latest_expiry - now + 0.1).max(0.0),
+        ));
         for (mut child, _dir) in children {
             child.stdin.take().unwrap().write_all(b"resume\n").unwrap();
             let output = child.wait_with_output().unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 

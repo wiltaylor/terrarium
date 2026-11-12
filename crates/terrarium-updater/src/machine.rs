@@ -442,7 +442,8 @@ impl Updater {
                 }
                 // Revoke a created-but-not-started helper too. A delayed start
                 // must not race repaired update admission.
-                self.exec_ok(&cur.id, hot_argv("retention-repair-revoke", &[])).await?;
+                self.exec_ok(&cur.id, hot_argv("retention-repair-revoke", &[]))
+                    .await?;
                 self.store
                     .retention_repair(true, &inventory, names)
                     .map_err(|e| e.to_string())?;
