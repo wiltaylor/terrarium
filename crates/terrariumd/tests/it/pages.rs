@@ -11,6 +11,35 @@ fn body() -> Value {
 }
 
 #[tokio::test]
+async fn dashboard_alias_reads_writes_and_missing_page() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let path = "/api/projects/p/pages/dashboard";
+    let page = td.get(path).await;
+    assert_eq!(page.ok()["widgets"].as_array().unwrap().len(), 4);
+    let layout = json!({"blocks":[{"id":"note","kind":"note","size":"m","text":"old client"}]});
+    td.put("/api/projects/p/dashboard", layout).await.ok();
+    let page = td.get(path).await;
+    assert_eq!(page.ok()["widgets"][4]["kind"], "markdown");
+    assert_eq!(page.body["widgets"][4]["w"], 6);
+    let mut input = page.body.clone();
+    for field in ["project", "slug", "updated_at", "updated_by"] {
+        input.as_object_mut().unwrap().remove(field);
+    }
+    input["widgets"][4]["text"] = json!("new editor");
+    td.put(path, input).await.ok();
+    assert_eq!(
+        td.get("/api/projects/p/dashboard").await.ok()["blocks"][0]["text"],
+        "new editor"
+    );
+    td.delete(path).await;
+    assert_eq!(
+        td.get("/api/projects/p/dashboard").await.ok()["blocks"],
+        json!([])
+    );
+}
+
+#[tokio::test]
 async fn crud_rights_order_limits_and_audit() {
     let td = TestDaemon::start().await;
     td.project("p").await;
@@ -27,8 +56,8 @@ async fn crud_rights_order_limits_and_audit() {
     let sys = sys["id"].as_str().unwrap();
     let path = "/api/projects/p/pages/overview";
     assert_eq!(
-        td.get("/api/projects/p/pages").await.ok()["items"],
-        json!([])
+        td.get("/api/projects/p/pages").await.ok()["items"][0]["slug"],
+        json!("dashboard")
     );
     td.get(path).await.err(404, "not_found");
     td.get("/api/projects/missing/pages")
@@ -60,7 +89,7 @@ async fn crud_rights_order_limits_and_audit() {
     );
     td.get_as(outsider, path).await.err(403, "forbidden");
     td.put_as(sys, path, body()).await.ok();
-    for n in 1..10 {
+    for n in 1..9 {
         let mut b = body();
         b["position"] = json!(n);
         td.put(&format!("/api/projects/p/pages/page{n}"), b)
@@ -90,13 +119,13 @@ async fn crud_rights_order_limits_and_audit() {
                 [],
                 |r| r.get(0),
             )?;
-            assert_eq!(audits, 14);
+            assert_eq!(audits, 13);
             let events: i64 = c.query_row(
                 "SELECT count(*) FROM events WHERE kind='page.updated'",
                 [],
                 |r| r.get(0),
             )?;
-            assert_eq!(events, 14);
+            assert_eq!(events, 13);
             Ok(())
         })
         .await
@@ -206,6 +235,16 @@ async fn monitor_sources_are_local_compatible_and_preserved_when_deleted() {
     b["widgets"] = json!([{"id":"metric","kind":"stat","x":0,"y":0,"w":12,"h":2,"monitor":ids[0]}]);
     let saved = td.put(path, b.clone()).await;
     saved.ok();
+    let dashboard = "/api/projects/p/pages/dashboard";
+    let dashboard_body = json!({"title":"Dashboard","position":0,"widgets":[
+        {"id":"wiki","kind":"wiki","x":7,"y":20,"w":5,"h":8,"wiki":"guide","options":{}},
+        {"id":"metric","kind":"stat","x":1,"y":5,"w":3,"h":2,"monitor":ids[0]}
+    ]});
+    td.put(dashboard, dashboard_body.clone()).await.ok();
     td.delete(&format!("/api/monitors/{}", ids[0])).await.ok();
     assert_eq!(td.get(path).await.ok()["widgets"], saved.body["widgets"]);
+    assert_eq!(
+        td.get(dashboard).await.ok()["widgets"],
+        json!([dashboard_body["widgets"][0]])
+    );
 }

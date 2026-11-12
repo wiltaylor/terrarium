@@ -13,11 +13,12 @@ const state = vi.hoisted(() => ({
   counts: { blocked_cards: 0, questions: { open: 0, urgent: 0, critical: 0 } } as ProjectCounts,
   listeners: [] as ((e: AgentEvent) => void)[],
   reads: [] as string[],
+  dashboard: false,
 }));
 vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   agents: { inProject: (p: string) => state.agents.filter((a) => a.project === p) },
   api: {
-    pages: { list: async () => ({ items: [], can_edit: false }) },
+    pages: { list: async () => ({ items: state.dashboard ? [{ slug: "dashboard", title: "Dashboard", position: 0, widgets: [] }] : [], can_edit: false, dashboard_slug: "dashboard" }) },
     projects: {
       counts: async (p: string) => {
         state.reads.push(p);
@@ -37,6 +38,7 @@ const { default: ProjectScreen } = await import("./ProjectScreen");
 
 let dispose: (() => void) | undefined;
 afterEach(() => {
+  state.dashboard = false;
   state.agents = [];
   state.counts = { blocked_cards: 0, questions: { open: 0, urgent: 0, critical: 0 } };
   state.reads = [];
@@ -98,7 +100,9 @@ describe("ProjectScreen", () => {
   });
 
   it("moves between tabs with browser back and forward", async () => {
+    state.dashboard = true;
     const { root, history } = mount("/p/demo/tests/1");
+    await waitFor(() => expect(links(root).some(a => a.textContent === "Dashboard")).toBe(true));
     links(root).find((a) => a.textContent === "Dashboard")!.click();
     await waitFor(() => expect(active(root).map((a) => a.textContent)).toEqual(["Dashboard"]));
     links(root).find((a) => a.textContent === "Knowledge")!.click();
@@ -124,6 +128,7 @@ describe("ProjectScreen", () => {
     vi.restoreAllMocks();
   });
   it("shows the blocked agents, blocked cards, and open questions on their tabs, in the accessible name", async () => {
+    state.dashboard = true;
     state.agents = [
       { project: "demo", status: "blocked" },
       { project: "demo", status: "error" },
@@ -146,6 +151,7 @@ describe("ProjectScreen", () => {
   });
 
   it("reads the counts again after a card event of the project, and not for another project", async () => {
+    state.dashboard = true;
     vi.useFakeTimers();
     try {
       const { root } = mount("/p/demo/board");

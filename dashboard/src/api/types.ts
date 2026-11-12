@@ -5,7 +5,7 @@ export type Harness = "claude" | "codex" | "copilot" | "pi";
 
 export interface PageWidget {
   id: string;
-  kind: "markdown" | "wiki" | "stat" | "status" | "chart" | "text" | "table";
+  kind: "markdown" | "wiki" | "stat" | "status" | "chart" | "text" | "table" | "actions" | "monitor_summary" | "job_queue" | "eta_accuracy";
   x: number; y: number; w: number; h: number;
   auto_height?: boolean;
   title?: string;
