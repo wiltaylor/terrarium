@@ -3285,6 +3285,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn journal_websocket_pauses_reads_but_keeps_outgoing_frames_live() {
+        journal_websocket_replay(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn journal_websocket_no_progress_closes_while_reads_are_paused() {
+        journal_websocket_replay(true).await;
+    }
+
+    async fn journal_websocket_replay(expire: bool) {
         use tokio_tungstenite::tungstenite::Message;
 
         let dir = tempfile::tempdir().unwrap();
@@ -3311,6 +3320,12 @@ mod tests {
                 reason: ExitReason::Exited,
             },
         );
+        reg.lock().get_mut("lab1").unwrap().resume_token = Some("websocket-replay".into());
+        for offset in 0..8u32 {
+            reg.on_data("lab1", DataFrame::new(session_id, StreamTag::Stdout, offset.to_le_bytes().to_vec()));
+            session.recv().await.unwrap();
+        }
+        reg.detach("lab1", 1).unwrap();
         let route_reg = reg.clone();
         let app = axum::Router::new().route(
             "/",
@@ -3318,11 +3333,13 @@ mod tests {
                 let registry = route_reg.clone();
                 async move {
                     let (tx, rx) = mpsc::unbounded_channel();
-                    registry.lock().get_mut("lab1").unwrap().conn = Some(Conn {
-                        id: 77,
-                        tx: tx.clone(),
-                    });
-                    upgrade.on_upgrade(move |socket| async move {
+                    let mut hello = lost_test_hello("websocket-replay", &[session_id]);
+                    hello.resume.as_mut().unwrap().sessions[0].sent = 512;
+                    let (welcome, _, resumed, _) = registry.attach(&host_row(), &hello, Conn { id: 77, tx: tx.clone() }).unwrap();
+                    assert_eq!(resumed, 1);
+                    assert_eq!(welcome.resume[0].received, 32);
+                    upgrade.on_upgrade(move |mut socket| async move {
+                        socket.send(WsMessage::Text(encode_control(&DaemonFrame::Welcome(welcome)).unwrap().into())).await.unwrap();
                         drive_link(socket, &registry, "lab1", 77, tx, rx).await;
                     })
                 }
@@ -3334,6 +3351,8 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
             .unwrap();
+        let welcome = ws.next().await.unwrap().unwrap();
+        assert!(matches!(welcome, Message::Text(text) if matches!(decode_control::<DaemonFrame>(&text).unwrap(), DaemonFrame::Welcome(_))));
         let writer_db = db.clone();
         let (acquired, ready) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
@@ -3347,7 +3366,7 @@ mod tests {
                 .unwrap()
         });
         ready.await.unwrap();
-        for offset in 0..128u32 {
+        for offset in 8..128u32 {
             ws.send(Message::Binary(
                 DataFrame::new(
                     session.id(),
@@ -3431,12 +3450,42 @@ mod tests {
                 .len(),
             JOURNAL_RETRY_EVENTS
         );
-        assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 0);
+        assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 32);
         assert!(session.rx.try_recv().is_err());
+        if expire {
+            // Simulate expiration of the 60 s no-progress bound while the
+            // writer remains held and the receive gate remains closed.
+            reg.lock().get_mut("lab1").unwrap().pending_journal.get_mut(&session_id).unwrap().deadline = Instant::now();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match ws.next().await.unwrap().unwrap() {
+                        Message::Text(text) => assert!(matches!(decode_control::<DaemonFrame>(&text).unwrap(), DaemonFrame::Ping { .. })),
+                        Message::Close(_) => break,
+                        other => panic!("unexpected frame at deadline: {other:?}"),
+                    }
+                }
+            }).await.unwrap();
+            assert!(reg.lock()["lab1"].pending_journal[&session_id].exhausted);
+            let mut closes = 0;
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            reg.lock().get_mut("lab1").unwrap().conn = Some(Conn { id: 77, tx });
+            for _ in 0..3 {
+                reg.retry_journal("lab1", 77);
+                while let Ok(frame) = rx.try_recv() {
+                    if matches!(frame, Outgoing::Close(_)) { closes += 1; }
+                }
+            }
+            assert_eq!(closes, 0, "expired queue emits only the first close");
+            assert!(session.rx.try_recv().is_err());
+            release.send(()).unwrap();
+            writer.await.unwrap();
+            server.abort();
+            return;
+        }
         release.send(()).unwrap();
         writer.await.unwrap();
         let consumer = tokio::spawn(async move {
-            for offset in 0..128u32 {
+            for offset in 8..128u32 {
                 assert_eq!(
                     session.recv().await.unwrap(),
                     SessionEvent::Data {
@@ -3497,6 +3546,55 @@ mod tests {
         assert_eq!(reg.lock()["lab1"].conn.as_ref().unwrap().id, 77);
         ws.close(None).await.unwrap();
         server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn journal_batch_partial_write_failure_rolls_back_all_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore_with_db(dir.path(), db.clone()).unwrap();
+        let mut sessions: Vec<_> = (0..3).map(|_| reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap()).collect();
+        let (tx, mut outgoing) = mpsc::unbounded_channel();
+        {
+            let mut g = reg.lock();
+            let entry = g.get_mut("lab1").unwrap();
+            entry.conn = Some(Conn { id: 77, tx });
+            for session in &sessions {
+                let mut pending = PendingJournal::new();
+                pending.next = Instant::now();
+                pending.push(SessionEvent::Data { stream: StreamTag::Stdout, bytes: b"first".to_vec() });
+                pending.push(SessionEvent::Data { stream: StreamTag::Stderr, bytes: b"second".to_vec() });
+                pending.push(SessionEvent::Exit { code: Some(0), signal: None, reason: ExitReason::Exited });
+                entry.pending_journal.insert(session.id(), pending);
+            }
+        }
+        // AFTER the second event insert of whichever session the HashMap
+        // visits first, so this fails after writes, not at lock acquisition.
+        db.read_now(|conn| {
+            conn.execute_batch("CREATE TRIGGER fail_journal_batch AFTER INSERT ON host_resume WHEN NEW.id LIKE 'event/lab1/%/00000000000000000002' BEGIN SELECT RAISE(ABORT, 'injected partial batch failure'); END")?;
+            Ok(())
+        }).unwrap();
+        reg.retry_journal("lab1", 77);
+        assert!(matches!(outgoing.try_recv().unwrap(), Outgoing::Close(None)));
+        assert!(outgoing.try_recv().is_err(), "no ACK or Release after failed commit");
+        let journal = resume::Journal::with_db(dir.path(), db);
+        assert!(journal.scan::<SessionEvent>("event/lab1/").unwrap().is_empty());
+        let saved = journal.load::<SavedHost>("host/lab1").unwrap().unwrap();
+        for session in &mut sessions {
+            assert!(session.rx.try_recv().is_err(), "failed batch is not delivered");
+            let g = reg.lock();
+            let entry = &g["lab1"];
+            let slot = &entry.sessions[&session.id()];
+            assert_eq!((slot.received, slot.events, slot.terminal), (0, 0, false));
+            let pending = &entry.pending_journal[&session.id()];
+            assert_eq!(pending.events.len(), 3);
+            assert!(matches!(pending.events.back(), Some(SessionEvent::Exit { .. })));
+            let slot = &saved.sessions[&session.id()];
+            assert_eq!((slot.received, slot.events, slot.terminal), (0, 0, false));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
