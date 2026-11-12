@@ -1652,6 +1652,23 @@ impl Executor {
         self.sessions.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// In-memory control/report channels only. Never starts a process.
+    #[cfg(test)]
+    pub(crate) fn fake_cleanup_session(
+        &self,
+        owner: String,
+        report: Option<crate::run_kill::Report>,
+        done: bool,
+    ) -> (Arc<ExecSession>, mpsc::UnboundedReceiver<Control>) {
+        let (session, controls) = ExecSession::new("fake-target", Some(owner), "exec", 1);
+        session.set_kill_report(report);
+        if done {
+            session.finish(End::error("fake_done", "fake session already ended"));
+        }
+        self.table().insert(session.id.clone(), session.clone());
+        (session, controls)
+    }
+
     /// The exec sessions of agent `agent` (a ULID) that have not ended:
     /// its shells and its `terrarium run` jobs. They keep the agent from
     /// an idle stop (`crate::lifecycle`).

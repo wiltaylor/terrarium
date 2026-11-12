@@ -1303,7 +1303,7 @@ mod tests {
     use terrarium_core::{Agent, HarnessId};
     use tower::ServiceExt;
 
-    fn state() -> Shared {
+    pub(super) fn state() -> Shared {
         state_with_web(crate::settings::WebConfig::default())
     }
 

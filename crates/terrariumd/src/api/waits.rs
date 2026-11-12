@@ -891,3 +891,102 @@ pub async fn open_waits(state: &Shared, agent: String) -> ApiResult<Vec<Value>> 
         .filter_map(|w| serde_json::to_value(w).ok())
         .collect())
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod cleanup_tests {
+    use super::*;
+    use crate::executor::Control;
+    use tokio::sync::{mpsc, watch};
+
+    async fn fixture(
+        wrapped: bool,
+        done: bool,
+    ) -> (Shared, Wait, watch::Sender<Option<Value>>, mpsc::UnboundedReceiver<Control>) {
+        let state = crate::api::tests::state();
+        let owner = ulid::Ulid::new().to_string();
+        let (report, rx) = watch::channel(None);
+        let (session, controls) = state.executor.fake_cleanup_session(owner.clone(), wrapped.then_some(rx), done);
+        let w = state.db.write("operator", move |t| {
+            t.execute("INSERT INTO projects (name,created_at,updated_at) VALUES ('p','t','t')", [])?;
+            t.execute("INSERT INTO agents (id,name,project,harness,workspace,created_at,updated_at) VALUES (?1,'owner','p','codex','/fake','t','t')", [&owner])?;
+            waits::create(t, NewWait {
+                agent: owner, kind: WaitKind::Process,
+                spec: json!({"session":session.id,"target":"fake-target"}),
+                summary:"fake run".into(), target_agent:None, reason:None,
+                timeout_at:None, due_at:None,
+            })
+        }).await.unwrap();
+        (state, w, report, controls)
+    }
+
+    async fn request(state: Shared, id: String) -> ApiResult<Json<Value>> {
+        cancel(State(state), Actor::Operator, Path(id), ApiQuery(CancelQuery { kill:Some(true) })).await
+    }
+
+    async fn view(state: &Shared, id: &str) -> Value {
+        show(State(state.clone()), Actor::Operator, Path(id.to_owned())).await.unwrap().0
+    }
+
+    #[tokio::test]
+    async fn aborting_http_handler_does_not_abort_collector_or_lose_terminal_receipt() {
+        let (state,w,report,mut controls) = fixture(true,false).await;
+        let handler = tokio::spawn(request(state.clone(),w.id.clone()));
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(2),controls.recv()).await.unwrap(),Some(Control::Kill)));
+        let dispatched = view(&state,&w.id).await;
+        assert_eq!(dispatched["state"],"cancelled");
+        assert_eq!(dispatched["cleanup"]["status"],"unknown");
+        assert_eq!(dispatched["cleanup"]["reason"],"dispatch_started_effect_unknown");
+        let operation = dispatched["cleanup"]["operation_id"].clone();
+        handler.abort();
+        assert!(handler.await.unwrap_err().is_cancelled());
+        let duplicate = request(state.clone(),w.id.clone()).await.unwrap().0;
+        assert_eq!(duplicate["cleanup"]["operation_id"],operation);
+        assert!(controls.try_recv().is_err());
+        report.send(Some(json!({"pid":1,"term":[],"kill":[],"left":[]}))).unwrap();
+        tokio::time::timeout(Duration::from_secs(2),async {
+            loop {
+                let stored = view(&state,&w.id).await;
+                if stored["cleanup"]["reason"] == "legacy_report_not_identity_bound" {
+                    assert_eq!(stored["state"],"cancelled");
+                    assert_eq!(stored["cleanup"]["status"],"unknown");
+                    assert_eq!(stored["cleanup"]["operation_id"],operation);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert!(controls.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn unavailable_routes_send_nothing_and_failed_send_stays_unknown() {
+        for (wrapped,done) in [(false,false),(true,true)] {
+            let (state,w,_report,mut controls) = fixture(wrapped,done).await;
+            let response = request(state,w.id).await.unwrap().0;
+            assert_eq!(response["cleanup"]["status"],"unavailable");
+            assert!(controls.try_recv().is_err());
+        }
+        let (state,w,_report,controls) = fixture(true,false).await;
+        drop(controls);
+        let response = request(state.clone(),w.id.clone()).await.unwrap().0;
+        assert_eq!(response["cleanup"]["status"],"unknown");
+        assert_eq!(response["cleanup"]["reason"],"control_delivery_unknown");
+        assert_eq!(request(state,w.id).await.unwrap().0["cleanup"],response["cleanup"]);
+    }
+
+    #[tokio::test]
+    async fn restart_after_send_never_replays_and_late_completion_cannot_overwrite() {
+        let (state,w,report,mut controls) = fixture(true,false).await;
+        let handler = tokio::spawn(request(state.clone(),w.id.clone()));
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(2),controls.recv()).await.unwrap(),Some(Control::Kill)));
+        state.db.write_full("system",crate::store::run_cleanup::recover).await.unwrap();
+        let recovered = view(&state,&w.id).await;
+        assert_eq!(recovered["cleanup"]["reason"],"daemon_restart_no_replay");
+        report.send(Some(json!({"left":[123]}))).unwrap();
+        let completed = handler.await.unwrap().unwrap().0;
+        assert_eq!(completed["cleanup"],recovered["cleanup"]);
+        assert_eq!(request(state,w.id).await.unwrap().0["cleanup"],recovered["cleanup"]);
+        assert!(controls.try_recv().is_err());
+    }
+}
