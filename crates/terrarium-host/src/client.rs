@@ -90,6 +90,7 @@ pub struct ClientOptions {
     /// Native GPU enforcement through the root helper (`[native_gpu]`,
     /// TER-345). `None`: off.
     pub native: Option<crate::native::NativeOptions>,
+    pub windows_run_as: crate::windows_run_as::Policy,
 }
 
 impl ClientOptions {
@@ -121,6 +122,7 @@ impl ClientOptions {
             version: terrarium_version::FULL.to_owned(),
             self_update: None,
             native: None,
+            windows_run_as: Default::default(),
         }
     }
 }
@@ -978,10 +980,27 @@ impl Client {
                 }
             }
             F::CpPush(req) => self.start_push(req, tx).await,
-            F::CpPull(req) => self.start_pull(req, tx),
+            F::CpPull(req) => self.start_pull(req, tx).await,
             F::Exec(req) => {
                 let id = req.session;
+                #[cfg(windows)]
+                let mut req = req;
+                #[cfg(windows)]
+                let identity = match crate::windows_run_as::logon(req.windows_run_as.take(), &o.windows_run_as).await {
+                    Ok(identity) => identity,
+                    Err(error) => return send_error(tx, id, error.code, error.message),
+                };
+                #[cfg(not(windows))]
                 let plan = crate::verb::plan_exec(&req, p);
+                #[cfg(windows)]
+                let plan = match identity.as_deref() {
+                    Some(identity) => identity.with_impersonation(|| Ok(crate::verb::plan_exec(&req, p)))
+                        .map_err(|_| BuildError::bad("Windows path check impersonation failed"))
+                        .and_then(|plan| plan),
+                    None => crate::verb::plan_exec(&req, p),
+                };
+                #[cfg(windows)]
+                let plan = plan.map(|mut plan| { plan.exec.windows_identity = identity; plan });
                 let plan = match (plan, &req.limits) {
                     (Ok(plan), Some(l)) if l.native_gpu.is_some() => self.native(plan, l, id),
                     (Ok(plan), Some(l)) => self.limited(plan, l, id).await,
@@ -1632,6 +1651,7 @@ impl Client {
     }
 
     async fn start_push(&self, req: CpPush, tx: &Link) {
+        #[cfg(not(windows))]
         if req.windows_run_as.is_some() {
             send_error(
                 tx,
@@ -1641,15 +1661,30 @@ impl Client {
             );
             return;
         }
+        #[cfg(windows)]
+        let mut req = req;
+        #[cfg(windows)]
+        let identity = match crate::windows_run_as::logon(req.windows_run_as.take(), &self.opts.windows_run_as).await {
+            Ok(identity) => identity,
+            Err(error) => return send_error(tx, req.session, error.code, error.message),
+        };
         let session = req.session;
         if !self.admit(session, tx) {
             return;
         }
-        let path = match self.opts.policy.check(&req.path) {
+        #[cfg(windows)]
+        let checked_path = crate::windows_run_as::check_path(identity.as_deref(), &self.opts.policy, &req.path);
+        #[cfg(not(windows))]
+        let checked_path = self.opts.policy.check(&req.path);
+        let path = match checked_path {
             Ok(p) => p,
             Err(m) => return send_error(tx, session, ErrorCode::PathDenied, m),
         };
-        let file = match PushFile::open(&path, req.mode, req.mkdirs, session).await {
+        #[cfg(windows)]
+        let opened = PushFile::open_as(&path, req.mode, req.mkdirs, session, identity).await;
+        #[cfg(not(windows))]
+        let opened = PushFile::open(&path, req.mode, req.mkdirs, session).await;
+        let file = match opened {
             Ok(f) => f,
             Err(e) => return send_error(tx, session, e.code(), e.to_string()),
         };
@@ -1715,7 +1750,8 @@ impl Client {
         });
     }
 
-    fn start_pull(&self, req: CpPull, tx: &Link) {
+    async fn start_pull(&self, req: CpPull, tx: &Link) {
+        #[cfg(not(windows))]
         if req.windows_run_as.is_some() {
             send_error(
                 tx,
@@ -1725,11 +1761,22 @@ impl Client {
             );
             return;
         }
+        #[cfg(windows)]
+        let mut req = req;
+        #[cfg(windows)]
+        let identity = match crate::windows_run_as::logon(req.windows_run_as.take(), &self.opts.windows_run_as).await {
+            Ok(identity) => identity,
+            Err(error) => return send_error(tx, req.session, error.code, error.message),
+        };
         let session = req.session;
         if !self.admit(session, tx) {
             return;
         }
-        let path = match self.opts.policy.check(&req.path) {
+        #[cfg(windows)]
+        let checked_path = crate::windows_run_as::check_path(identity.as_deref(), &self.opts.policy, &req.path);
+        #[cfg(not(windows))]
+        let checked_path = self.opts.policy.check(&req.path);
+        let path = match checked_path {
             Ok(p) => p,
             Err(m) => return send_error(tx, session, ErrorCode::PathDenied, m),
         };
@@ -1745,7 +1792,11 @@ impl Client {
             },
         );
         tokio::spawn(async move {
-            let frame = match transfer::pull(&path, &outbox).await {
+            #[cfg(windows)]
+            let pulled = transfer::pull_as(&path, &outbox, identity).await;
+            #[cfg(not(windows))]
+            let pulled = transfer::pull(&path, &outbox).await;
+            let frame = match pulled {
                 Ok((bytes, sha256)) => HostFrame::CpDone {
                     session,
                     bytes,

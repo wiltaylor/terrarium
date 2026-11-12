@@ -101,6 +101,9 @@ pub struct Config {
     /// (TER-345, docs/native-gpu-helper.md). Off by default.
     #[serde(default)]
     pub native_gpu: NativeGpuConfig,
+    /// Windows password logon and elevation selection, configured only here.
+    #[serde(default)]
+    pub windows_run_as: crate::windows_run_as::Policy,
 }
 
 /// `[native_gpu]` in the config. When it is on, every native `exec` that
@@ -336,6 +339,7 @@ impl Default for Config {
             auto_update_drain_secs: default_auto_update_drain_secs(),
             display: DisplayConfig::default(),
             native_gpu: NativeGpuConfig::default(),
+            windows_run_as: Default::default(),
         }
     }
 }
@@ -371,7 +375,17 @@ impl Config {
             path: path.to_owned(),
             source,
         })?;
-        Self::parse(&text, path)
+        let config = Self::parse(&text, path)?;
+        #[cfg(windows)]
+        if config.windows_run_as.enabled {
+            // Re-read from the verified, locked native handle, not the pathname
+            // we read above. Untrusted config can never enable full-token logon.
+            let protected = terrarium_winapi::read_host_policy_file(path).map_err(|source| ConfigError::Io {
+                path: path.to_owned(), source,
+            })?;
+            return Self::parse(&protected, path);
+        }
+        Ok(config)
     }
 
     /// The token: `token_file` first, then `token`.

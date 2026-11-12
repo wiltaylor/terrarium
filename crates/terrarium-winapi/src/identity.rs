@@ -12,8 +12,65 @@ use windows_sys::Win32::UI::Shell::{LoadUserProfileW, UnloadUserProfile, PROFILE
 /// Debug deliberately omits account, environment and handles.
 pub struct Identity {
     token: OwnedHandle,
+    profile_service: OwnedHandle,
     profile: HANDLE,
     environment: BTreeMap<String, String>,
+}
+
+fn impersonate<T>(token: &OwnedHandle, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    let mut prior = null_mut();
+    // SAFETY: pseudo current-thread handle is valid, output is writable.
+    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut prior) } != 0 {
+        drop(owned(prior)?);
+        return Err(io::Error::other("nested Windows impersonation is forbidden"));
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() != Some(ERROR_NO_TOKEN as i32) { return Err(error); }
+    struct Revert;
+    impl Drop for Revert {
+        fn drop(&mut self) {
+            // SAFETY: same synchronous thread that installed impersonation.
+            if unsafe { RevertToSelf() } == 0 {
+                // Never return a poisoned thread to a pool with user authority.
+                std::process::abort();
+            }
+        }
+    }
+    // SAFETY: live primary or impersonation token. Guard never crosses await.
+    checked(unsafe { ImpersonateLoggedOnUser(token.as_raw_handle()) })?;
+    let _guard = Revert;
+    operation()
+}
+
+fn profile_service() -> io::Result<OwnedHandle> {
+    let mut process = null_mut();
+    // SAFETY: pseudo process handle is valid; output is writable.
+    checked(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &mut process) })?;
+    let process = owned(process)?;
+    let mut duplicate = null_mut();
+    // SAFETY: live process token, writable output. Only this duplicate's
+    // existing privileges are enabled, never the shared process token.
+    checked(unsafe { DuplicateTokenEx(process.as_raw_handle(), TOKEN_QUERY | TOKEN_IMPERSONATE | TOKEN_ADJUST_PRIVILEGES,
+        null(), SecurityImpersonation, TokenImpersonation, &mut duplicate) })?;
+    let duplicate = owned(duplicate)?;
+    for name in ["SeBackupPrivilege", "SeRestorePrivilege"] {
+        let name = wide(OsStr::new(name))?;
+        let mut luid = LUID { LowPart: 0, HighPart: 0 };
+        // SAFETY: local privilege lookup and writable LUID output.
+        checked(unsafe { LookupPrivilegeValueW(null(), name.as_ptr(), &mut luid) })?;
+        let privileges = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }],
+        };
+        // SAFETY: live duplicate token and a single-entry correctly sized POD.
+        unsafe { SetLastError(ERROR_SUCCESS) };
+        checked(unsafe { AdjustTokenPrivileges(duplicate.as_raw_handle(), 0, &privileges, 0, null_mut(), null_mut()) })?;
+        // AdjustTokenPrivileges may succeed while reporting unavailable rights.
+        // SAFETY: reads this thread's last-error value immediately after call.
+        let error = unsafe { GetLastError() };
+        if error != ERROR_SUCCESS { return Err(io::Error::from_raw_os_error(error as i32)); }
+    }
+    Ok(duplicate)
 }
 
 // SAFETY: token/profile handles have no thread affinity. The environment is
@@ -121,14 +178,25 @@ impl Identity {
         })?;
         drop(secret);
         let token = select_token(owned(token)?, full)?;
+        let mut primary = null_mut();
+        // SAFETY: selected logon/linked token is live. Request only the rights
+        // needed for process creation, profile load and scoped impersonation.
+        checked(unsafe { DuplicateTokenEx(token.as_raw_handle(), TOKEN_QUERY | TOKEN_DUPLICATE
+            | TOKEN_ASSIGN_PRIMARY | TOKEN_IMPERSONATE, null(), SecurityImpersonation,
+            TokenPrimary, &mut primary) })?;
+        let token = owned(primary)?;
+        let profile_service = profile_service()?;
         // SAFETY: zero initialization is valid for PROFILEINFOW, then required fields set.
         let mut info: PROFILEINFOW = unsafe { zeroed() };
         info.dwSize = size_of::<PROFILEINFOW>() as u32;
         info.dwFlags = PI_NOUI;
         info.lpUserName = user.as_mut_ptr();
         // SAFETY: live primary token and valid profile-info buffers.
-        checked(unsafe { LoadUserProfileW(token.as_raw_handle(), &mut info) })?;
-        let mut identity = Self { token, profile: info.hProfile, environment: BTreeMap::new() };
+        impersonate(&profile_service, || {
+            // SAFETY: live user token and valid profile-info buffers.
+            checked(unsafe { LoadUserProfileW(token.as_raw_handle(), &mut info) })
+        })?;
+        let mut identity = Self { token, profile_service, profile: info.hProfile, environment: BTreeMap::new() };
         identity.environment = identity.read_environment()?;
         Ok(identity)
     }
@@ -175,20 +243,7 @@ impl Identity {
     /// Never call async filesystem APIs here: their workers would use service authority.
     /// The closure returns only after impersonation has been reverted, including on panic.
     pub fn with_impersonation<T>(&self, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
-        struct Revert;
-        impl Drop for Revert {
-            fn drop(&mut self) {
-                // SAFETY: runs on the same thread that installed impersonation.
-                if unsafe { RevertToSelf() } == 0 {
-                    // Returning a poisoned thread to any pool could leak authority.
-                    std::process::abort();
-                }
-            }
-        }
-        // SAFETY: live logon token. Guard cannot cross an await or leave this stack.
-        checked(unsafe { ImpersonateLoggedOnUser(self.token.as_raw_handle()) })?;
-        let _guard = Revert;
-        operation()
+        impersonate(&self.token, operation)
     }
 
     pub(crate) fn base_environment(&self) -> Vec<(OsString, OsString)> {
@@ -201,6 +256,9 @@ impl Drop for Identity {
         // SAFETY: profile belongs to this logon and the token is still alive.
         // Callers must retain Identity through job drain. Failure does not retry
         // under another identity and never logs sensitive state.
-        unsafe { UnloadUserProfile(self.token.as_raw_handle(), self.profile) };
+        let _ = impersonate(&self.profile_service, || {
+            // SAFETY: profile and matching logon token are owned and still live.
+            checked(unsafe { UnloadUserProfile(self.token.as_raw_handle(), self.profile) })
+        });
     }
 }

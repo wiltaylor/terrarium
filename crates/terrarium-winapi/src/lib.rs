@@ -4,6 +4,8 @@
 
 mod identity;
 pub use identity::Identity;
+mod policy_file;
+pub use policy_file::read_host_policy_file;
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;

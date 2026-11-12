@@ -61,6 +61,7 @@ pub mod update_journal;
 pub mod update_signature;
 pub mod verb;
 pub mod vmlab;
+pub mod windows_run_as;
 #[cfg(windows)]
 pub mod windows_update;
 pub mod workspace;
