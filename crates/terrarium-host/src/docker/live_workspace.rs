@@ -109,7 +109,13 @@ fn create_flags(
             registration.runtime.registration.0
         ),
     ]);
-    args.extend(["--label".into(), format!("terrarium.workspace.runtime={}", registration.runtime.incarnation.0)]);
+    args.extend([
+        "--label".into(),
+        format!(
+            "terrarium.workspace.runtime={}",
+            registration.runtime.incarnation.0
+        ),
+    ]);
     args.push(req.image.clone());
     args.extend(req.command.clone());
     Ok(args)
