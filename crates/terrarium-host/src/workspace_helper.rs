@@ -191,6 +191,6 @@ pub async fn serve_connection<B: Backend>(
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod disposable;
+#[cfg(test)]
+mod tests;

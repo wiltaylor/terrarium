@@ -144,7 +144,12 @@ pub fn publisher(
     publisher_at(host, receiver, host_view, "/work")
 }
 
-fn publisher_at(host: &MountEvidence, receiver: &MountEvidence, host_view: &[MountEvidence], receiver_path: &str) -> Result<u64, Reply> {
+fn publisher_at(
+    host: &MountEvidence,
+    receiver: &MountEvidence,
+    host_view: &[MountEvidence],
+    receiver_path: &str,
+) -> Result<u64, Reply> {
     let shared = group(host, "shared:").ok_or(Reply::Quarantined)?;
     if host.namespace == receiver.namespace
         || host.root != receiver.root
@@ -168,7 +173,12 @@ fn publisher_at(host: &MountEvidence, receiver: &MountEvidence, host_view: &[Mou
 }
 
 #[cfg(test)]
-pub(super) fn publisher_fixture(host: &MountEvidence, receiver: &MountEvidence, host_view: &[MountEvidence], path: &str) -> Result<u64, Reply> {
+pub(super) fn publisher_fixture(
+    host: &MountEvidence,
+    receiver: &MountEvidence,
+    host_view: &[MountEvidence],
+    path: &str,
+) -> Result<u64, Reply> {
     publisher_at(host, receiver, host_view, path)
 }
 

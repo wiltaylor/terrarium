@@ -561,31 +561,63 @@ fn destination_substitution_and_nonempty_scaffold_are_refused() {
 
 #[test]
 fn unsafe_exception_is_confined_to_sys_crate() {
-    fn walk(path: &std::path::Path, manifests: &mut Vec<std::path::PathBuf>, sources: &mut Vec<std::path::PathBuf>) {
+    fn walk(
+        path: &std::path::Path,
+        manifests: &mut Vec<std::path::PathBuf>,
+        sources: &mut Vec<std::path::PathBuf>,
+    ) {
         for entry in std::fs::read_dir(path).unwrap() {
             let path = entry.unwrap().path();
-            if path.file_name().unwrap() == "terrarium-sys" { continue; }
-            if path.is_dir() { walk(&path, manifests, sources); }
-            else if path.file_name().unwrap() == "Cargo.toml" { manifests.push(path); }
-            else if path.extension().is_some_and(|e| e == "rs") { sources.push(path); }
+            if path.file_name().unwrap() == "terrarium-sys" {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, manifests, sources);
+            } else if path.file_name().unwrap() == "Cargo.toml" {
+                manifests.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                sources.push(path);
+            }
         }
     }
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
-    let root: toml::Value = std::fs::read_to_string(repo.join("Cargo.toml")).unwrap().parse().unwrap();
-    assert_eq!(root["workspace"]["lints"]["rust"]["unsafe_code"].as_str(), Some("forbid"));
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let root: toml::Value = toml::from_str(&std::fs::read_to_string(repo.join("Cargo.toml")).unwrap()).unwrap();
+    assert_eq!(
+        root["workspace"]["lints"]["rust"]["unsafe_code"].as_str(),
+        Some("forbid")
+    );
     let mut manifests = vec![];
     let mut sources = vec![];
     walk(&repo.join("crates"), &mut manifests, &mut sources);
     assert!(!manifests.is_empty());
     for path in manifests {
-        let m: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
-        assert_eq!(m["lints"]["workspace"].as_bool(), Some(true), "{}", path.display());
+        let m: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            m["lints"]["workspace"].as_bool(),
+            Some(true),
+            "{}",
+            path.display()
+        );
     }
     // Cargo's inherited forbid is authoritative. Also reject explicit source
     // allowances rather than relying on rustc to reject the override later.
-    let disallowed = [concat!("allow(", "unsafe_code"), concat!("warn(", "unsafe_code"), concat!("deny(", "unsafe_code")];
+    let disallowed = [
+        concat!("allow(", "unsafe_code"),
+        concat!("warn(", "unsafe_code"),
+        concat!("deny(", "unsafe_code"),
+    ];
     for path in sources {
-        let s: String = std::fs::read_to_string(&path).unwrap().chars().filter(|c| !c.is_whitespace()).collect();
-        for pattern in disallowed { assert!(!s.contains(pattern), "{}", path.display()); }
+        let s: String = std::fs::read_to_string(&path)
+            .unwrap()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        for pattern in disallowed {
+            assert!(!s.contains(pattern), "{}", path.display());
+        }
     }
 }

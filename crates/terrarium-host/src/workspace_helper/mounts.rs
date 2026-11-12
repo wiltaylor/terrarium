@@ -23,14 +23,20 @@ impl Attributes for LinuxAttributes {
         use std::os::fd::AsFd;
         use terrarium_sys::{MountAttributes as A, mount_setattr};
         root()?;
-        mount_setattr(mount.as_fd(), A::NO_SUID | A::NO_DEV, A::READ_ONLY | A::NO_EXEC).map_err(|_| Reply::Failed)
+        mount_setattr(
+            mount.as_fd(),
+            A::NO_SUID | A::NO_DEV,
+            A::READ_ONLY | A::NO_EXEC,
+        )
+        .map_err(|_| Reply::Failed)
     }
 
     fn scaffold(&mut self, mount: &File) -> Result<(), Reply> {
         use std::os::fd::AsFd;
         use terrarium_sys::{MountAttributes as A, mount_setattr};
         root()?;
-        mount_setattr(mount.as_fd(), A::NO_SUID | A::NO_DEV, A::READ_ONLY).map_err(|_| Reply::Failed)
+        mount_setattr(mount.as_fd(), A::NO_SUID | A::NO_DEV, A::READ_ONLY)
+            .map_err(|_| Reply::Failed)
     }
 }
 
