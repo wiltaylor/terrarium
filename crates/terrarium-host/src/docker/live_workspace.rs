@@ -201,7 +201,11 @@ pub fn acquire_empty_scaffold(
 ) -> Result<VerifiedScaffold, Reply> {
     if runtime.identity() != &registration.runtime
         || mounted.registration() != registration.runtime.registration
-        || registration.publisher != format!("/var/lib/terrarium-workspace-helper/publishers/{}", registration.runtime.registration.0)
+        || registration.publisher
+            != format!(
+                "/var/lib/terrarium-workspace-helper/publishers/{}",
+                registration.runtime.registration.0
+            )
     {
         return Err(Reply::Quarantined);
     }

@@ -39,13 +39,26 @@ impl Mounted {
     /// cannot conceal a detached mount or substituted ancestor/path.
     pub fn recheck_empty(&self) -> Result<Vec<MountEvidence>, Reply> {
         let roots = [
-            (&self.directories.publisher, "publishers", &self.evidence.publisher),
+            (
+                &self.directories.publisher,
+                "publishers",
+                &self.evidence.publisher,
+            ),
             (&self.directories.staging, "staging", &self.evidence.staging),
-            (&self.directories.registration, "registrations", &self.evidence.state),
+            (
+                &self.directories.registration,
+                "registrations",
+                &self.evidence.state,
+            ),
         ];
         for ((root, parent, expected), mount) in roots.into_iter().zip(self.mount_ids) {
-            let path = Path::new("/var/lib/terrarium-workspace-helper").join(parent).join(self.registration.0.to_string());
-            if kernel::path(&root.fd)? != path || source(root)? != *expected || mount_id(&root.fd)? != mount {
+            let path = Path::new("/var/lib/terrarium-workspace-helper")
+                .join(parent)
+                .join(self.registration.0.to_string());
+            if kernel::path(&root.fd)? != path
+                || source(root)? != *expected
+                || mount_id(&root.fd)? != mount
+            {
                 return Err(Reply::Quarantined);
             }
             let current = ProtectedRoot::open(&path)?;
@@ -58,14 +71,29 @@ impl Mounted {
             }
         }
         let view = kernel::host_view()?;
-        for (index, root) in [&self.directories.publisher, &self.directories.staging].into_iter().enumerate() {
-            let record = view.iter().find(|m| m.mount_id == self.mount_ids[index]).ok_or(Reply::Quarantined)?;
+        for (index, root) in [&self.directories.publisher, &self.directories.staging]
+            .into_iter()
+            .enumerate()
+        {
+            let record = view
+                .iter()
+                .find(|m| m.mount_id == self.mount_ids[index])
+                .ok_or(Reply::Quarantined)?;
             let (expected_root, device) = kernel::root_of(&root.fd, &view)?;
             let mut restrictions = record.clone();
             if index == 0 {
-                let [group] = record.optional_fields.as_slice() else { return Err(Reply::Quarantined) };
-                if !group.strip_prefix("shared:").is_some_and(|n| n.parse::<u64>().is_ok_and(|n| n > 0))
-                    || view.iter().filter(|m| m.optional_fields.contains(group)).count() != 1 {
+                let [group] = record.optional_fields.as_slice() else {
+                    return Err(Reply::Quarantined);
+                };
+                if !group
+                    .strip_prefix("shared:")
+                    .is_some_and(|n| n.parse::<u64>().is_ok_and(|n| n > 0))
+                    || view
+                        .iter()
+                        .filter(|m| m.optional_fields.contains(group))
+                        .count()
+                        != 1
+                {
                     return Err(Reply::Quarantined);
                 }
                 restrictions.optional_fields.clear();
@@ -189,7 +217,11 @@ pub fn build(store: &Store, mut directories: Directories) -> Result<Mounted, Rep
             staging: source(&directories.staging)?,
             state: source(&directories.registration)?,
         };
-        let mount_ids = [mount_id(&directories.publisher.fd)?, mount_id(&directories.staging.fd)?, mount_id(&directories.registration.fd)?];
+        let mount_ids = [
+            mount_id(&directories.publisher.fd)?,
+            mount_id(&directories.staging.fd)?,
+            mount_id(&directories.registration.fd)?,
+        ];
         Ok(Mounted {
             directories,
             evidence,
@@ -230,13 +262,24 @@ mod tests {
         let before = mount_id(&pinned).unwrap();
         let identity = |root: &ProtectedRoot| {
             let m = root.fd.metadata().unwrap();
-            SourceIdentity { device: m.dev(), inode: m.ino() }
+            SourceIdentity {
+                device: m.dev(),
+                inode: m.ino(),
+            }
         };
         // White-box forged scaffold: even matching retained inode/mount IDs
         // cannot turn arbitrary temporary paths into administrative evidence.
         let forged = Mounted {
-            evidence: Scaffold { publisher: identity(&directories.publisher), staging: identity(&directories.staging), state: identity(&directories.registration) },
-            mount_ids: [mount_id(&directories.publisher.fd).unwrap(), mount_id(&directories.staging.fd).unwrap(), mount_id(&directories.registration.fd).unwrap()],
+            evidence: Scaffold {
+                publisher: identity(&directories.publisher),
+                staging: identity(&directories.staging),
+                state: identity(&directories.registration),
+            },
+            mount_ids: [
+                mount_id(&directories.publisher.fd).unwrap(),
+                mount_id(&directories.staging.fd).unwrap(),
+                mount_id(&directories.registration.fd).unwrap(),
+            ],
             registration: store.load_bootstrap().unwrap().original().registration,
             directories,
         };
