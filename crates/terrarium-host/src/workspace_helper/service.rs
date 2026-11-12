@@ -62,10 +62,12 @@ fn parse_config(bytes: &[u8]) -> Result<Config, Reply> {
     if config.host_agent_uid == 0
         || config.registrations.len() > 128
         || !config.work_root.is_absolute()
+        || ["/etc/terrarium-workspace-helper", "/run/terrarium-workspace-helper"].iter().any(|p| std::path::Path::new(p).starts_with(&config.work_root) || config.work_root.starts_with(p))
         || config.registrations.iter().any(|r| {
             !r.publisher_root.is_absolute()
                 || !r.staging_root.is_absolute()
                 || !r.state_root.is_absolute()
+                || [&r.publisher_root, &r.staging_root, &r.state_root].iter().any(|p| p.starts_with(&config.work_root) || config.work_root.starts_with(p))
         })
     {
         return Err(Reply::Unauthorized);
@@ -208,5 +210,14 @@ mod tests {
         assert!(parse_config(br#"{"host_agent_uid":1000,"host_agent_gid":1000,"work_root":"relative","registrations":[]}"#).is_err());
         assert!(parse_config(br#"{"host_agent_uid":1000,"host_agent_gid":1000,"work_root":"/work","registrations":[],"flags":1}"#).is_err());
         assert!(parse_config(&vec![b' '; MAX_FRAME_BYTES + 1]).is_err());
+        for root in ["/", "/run", "/etc/terrarium-workspace-helper/work"] {
+            let value = serde_json::json!({"host_agent_uid":1000,"host_agent_gid":1000,"work_root":root,"registrations":[]});
+            assert!(parse_config(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+        for role in ["publisher_root", "staging_root", "state_root"] {
+            let mut value = serde_json::json!({"host_agent_uid":1000,"host_agent_gid":1000,"work_root":"/work","registrations":[{"publisher_root":"/admin/publisher","staging_root":"/admin/staging","state_root":"/admin/state"}]});
+            value["registrations"][0][role] = "/work/project/agent".into();
+            assert!(parse_config(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
     }
 }

@@ -1,5 +1,6 @@
 [package]
 name = "terrarium-host"
+default-run = "terrarium-host"
 description = "The Terrarium host agent: runs commands, Docker, and vmlab for the daemon"
 version.workspace = true
 edition.workspace = true

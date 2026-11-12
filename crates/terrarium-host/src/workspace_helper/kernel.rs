@@ -146,6 +146,11 @@ impl<I: Inspector, A: Attributes> Kernel<I, A> {
         if source_id == publisher_id || source_id == staging_id || publisher_id == staging_id {
             return Err(Reply::Quarantined);
         }
+        let mut identities = std::collections::BTreeSet::new();
+        for root in [&source, &publisher, &staging] {
+            let metadata = root.fd.metadata().map_err(|_| Reply::Failed)?;
+            if !identities.insert((metadata.dev(), metadata.ino())) { return Err(Reply::Quarantined); }
+        }
         let roots = [path(&source.fd)?, path(&publisher.fd)?, path(&staging.fd)?];
         for (n, a) in roots.iter().enumerate() {
             for b in &roots[n + 1..] {
@@ -320,7 +325,11 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
                             return Err(Reply::Quarantined);
                         }
                     }
-                    Kind::Revoke if self.live.remove(&holder.attachment).as_ref() != Some(holder) => return Err(Reply::Quarantined),
+                    Kind::Revoke
+                        if self.live.remove(&holder.attachment).as_ref() != Some(holder) =>
+                    {
+                        return Err(Reply::Quarantined);
+                    }
                     _ => {}
                 }
             }
