@@ -51,9 +51,16 @@ impl Drop for Mounts {
 fn host() -> Vec<MountEvidence> {
     let ns = std::fs::metadata("/proc/self/ns/mnt").unwrap();
     let bytes = std::fs::read("/proc/self/mountinfo").unwrap();
-    let identity = NamespaceIdentity { device: ns.dev(), inode: ns.ino() };
+    let identity = NamespaceIdentity {
+        device: ns.dev(),
+        inode: ns.ino(),
+    };
     for line in bytes.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
-        assert!(mountinfo::parse(line, identity.clone()).is_ok(), "unsupported mountinfo record: {}", String::from_utf8_lossy(line));
+        assert!(
+            mountinfo::parse(line, identity.clone()).is_ok(),
+            "unsupported mountinfo record: {}",
+            String::from_utf8_lossy(line)
+        );
     }
     mountinfo::parse(
         &bytes,
