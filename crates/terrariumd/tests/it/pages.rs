@@ -237,7 +237,7 @@ async fn monitor_sources_are_local_compatible_and_preserved_when_deleted() {
     saved.ok();
     let dashboard = "/api/projects/p/pages/dashboard";
     let dashboard_body = json!({"title":"Dashboard","position":0,"widgets":[
-        {"id":"wiki","kind":"wiki","x":7,"y":20,"w":5,"h":8,"wiki":"guide"},
+        {"id":"wiki","kind":"wiki","x":7,"y":20,"w":5,"h":8,"wiki":"guide","options":{}},
         {"id":"metric","kind":"stat","x":1,"y":5,"w":3,"h":2,"monitor":ids[0]}
     ]});
     td.put(dashboard, dashboard_body.clone()).await.ok();
