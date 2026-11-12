@@ -54,6 +54,10 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Internal Windows per-session containment process.
+    #[cfg(windows)]
+    #[command(hide = true)]
+    SessionRunner,
     /// Connect to the daemon and serve sessions (the default).
     Run,
     /// Print the detected capabilities and the resolved settings, then exit.
@@ -505,6 +509,10 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    #[cfg(windows)]
+    if matches!(args.command, Some(Cmd::SessionRunner)) {
+        return terrarium_host::session_runner::windows::run();
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -536,6 +544,8 @@ fn main() -> anyhow::Result<()> {
     }
     let rt = tokio::runtime::Runtime::new().context("start the runtime")?;
     match args.command {
+        #[cfg(windows)]
+        Some(Cmd::SessionRunner) => unreachable!("handled before the runtime"),
         Some(Cmd::Check { json, probe }) => rt.block_on(check(&cfg, json, probe)),
         Some(Cmd::Run) | None => rt.block_on(run(cfg)),
         Some(

@@ -268,6 +268,13 @@ fn check_cwd(plan: &ExecPlan) -> Result<(), SpawnError> {
 /// Start the plan. Output goes to `outbox`.
 pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError> {
     check_cwd(&plan)?;
+    #[cfg(windows)]
+    return crate::session_runner::windows::spawn(plan, outbox);
+    #[cfg(unix)]
+    spawn_direct(plan, outbox)
+}
+
+pub(crate) fn spawn_direct(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError> {
     if plan.pty.is_some() {
         spawn_pty(plan, outbox)
     } else {
@@ -719,6 +726,7 @@ fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
 
 /// portable-pty reports a signal by its `strsignal` text. Map the common ones
 /// back to numbers (glibc and musl agree on these).
+#[cfg(unix)]
 pub fn signal_number(text: &str) -> Option<i32> {
     use Signal as S;
     let sig = match text {
@@ -744,6 +752,11 @@ pub fn signal_number(text: &str) -> Option<i32> {
         }
     };
     Some(sig as i32)
+}
+
+#[cfg(windows)]
+pub fn signal_number(_text: &str) -> Option<i32> {
+    None
 }
 
 #[cfg(test)]

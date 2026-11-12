@@ -52,6 +52,7 @@ pub mod prepare;
 pub mod protocol;
 pub mod selfupdate;
 pub mod session;
+pub mod session_runner;
 pub mod tls;
 pub mod transfer;
 pub mod verb;
