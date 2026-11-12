@@ -575,7 +575,10 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<AgentView> {
 
 /// The event pump needs identity and status, not the API view's queue,
 /// card, spawn, role and wait summaries. Keep its writer lookup to one row.
-pub(crate) fn event_context(conn: &Connection, id: &str) -> ApiResult<(String, String, AgentStatus)> {
+pub(crate) fn event_context(
+    conn: &Connection,
+    id: &str,
+) -> ApiResult<(String, String, AgentStatus)> {
     conn.query_row(
         "SELECT name, project, status FROM agents WHERE id = ?1",
         [id],

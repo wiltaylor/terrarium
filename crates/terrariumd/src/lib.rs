@@ -1070,14 +1070,10 @@ pub fn apply_status_at(
         data["waiting_on"] = json!(on);
     }
     t.emit(
-        EventDraft::new(
-            "status",
-            format!("{name}: {from} -> {status}"),
-            data,
-        )
-        .agent(id, name)
-        .project(project)
-        .session(session),
+        EventDraft::new("status", format!("{name}: {from} -> {status}"), data)
+            .agent(id, name)
+            .project(project)
+            .session(session),
     )?;
     store::waits::after_status(t, id, depth)?;
     Ok(())
