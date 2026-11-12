@@ -147,10 +147,12 @@ impl Lab {
     async fn secret(&mut self, value: &str) {
         let r = self
             .td
-            .post(
-                "/api/secrets",
-                json!({"name": "win-login", "kind": "login",
-            "fields": {"username": "ignored", "password": value}}),
+            .req(
+                if value == ROTATED { hyper::Method::PUT } else { hyper::Method::POST },
+                if value == ROTATED { "/api/secrets/global/win-login" } else { "/api/secrets" },
+                Some(json!({"name": "win-login", "kind": "login",
+            "fields": {"username": "ignored", "password": value}})),
+                None,
             )
             .await;
         r.ok();
