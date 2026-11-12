@@ -732,6 +732,21 @@ class Release(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("the image has no file /opt/terrarium/dist/terrarium-host-helper-x86_64-linux", proc.stderr)
 
+    def test_an_image_without_the_windows_host_fails(self):
+        shutil.rmtree(self.layout)
+        make_layout(self.layout, self.VERSION, windows=False)
+        proc = self.run_release("dry-run", secrets=False)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("terrarium-host-x86_64-windows.exe", proc.stderr)
+
+    def test_windows_checksum_mismatch_signs_nothing(self):
+        shutil.rmtree(self.layout)
+        make_layout(self.layout, self.VERSION, bad_sha="windows")
+        proc = self.run_release("publish")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("image's Windows host", proc.stderr)
+        self.assertNotIn("cosign", [t for t, _ in self.tools()])
+
     def test_a_binary_of_another_version_fails(self):
         shutil.rmtree(self.layout)
         make_layout(self.layout, self.VERSION, report="0.4.0")
