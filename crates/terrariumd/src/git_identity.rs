@@ -161,8 +161,8 @@ pub fn effective(
 
 fn operator_owned(url: &str) -> bool {
     url.strip_prefix("git@github.com:")
-        .or_else(|| repo.url.strip_prefix("https://github.com/"))
-        .or_else(|| repo.url.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| url.strip_prefix("https://github.com/"))
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
         .and_then(|s| s.split('/').next())
         .is_some_and(|owner| owner.eq_ignore_ascii_case("wiltaylor"))
 }
