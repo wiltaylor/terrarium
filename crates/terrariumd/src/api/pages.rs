@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     actor::Actor,
-    error::ApiResult,
+    error::{ApiError, ApiResult},
     policy,
     store::pages::{self, PageInput, ProjectPage},
 };
@@ -60,9 +60,11 @@ async fn set(
     State(s): State<Shared>,
     actor: Actor,
     Path((project, slug)): Path<(String, String)>,
-    ApiJson(input): ApiJson<PageInput>,
+    ApiJson(input): ApiJson<Value>,
 ) -> ApiResult<Json<ProjectPage>> {
     policy::admin_project(&actor, &project, "editing project pages")?;
+    let input: PageInput = serde_json::from_value(input)
+        .map_err(|e| ApiError::invalid(format!("invalid page: {e}")))?;
     let label = actor.label();
     let author = label.clone();
     Ok(Json(
