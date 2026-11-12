@@ -10,6 +10,7 @@ import { ApiError } from "../../api/http";
 
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const listeners = new Set<(e: AgentEvent) => void>();
+const pageEvent = (): AgentEvent => ({ seq: 1, id: "page-event", at: new Date().toISOString(), summary: "Page updated", kind: "page.updated", project: "terrarium", data: { slug: "overview" } });
 vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores({ api, events: {
   on: (fn: (e: AgentEvent) => void) => { listeners.add(fn); return () => listeners.delete(fn); },
 } }); });
@@ -36,7 +37,7 @@ it("keeps an edit draft when another editor emits page.updated", async () => {
     click(host, "Edit page");
     const input = host.querySelector("input")!; input.value = "My draft"; input.dispatchEvent(new Event("input", { bubbles: true }));
     await api.pages.save("terrarium", "overview", { title: "Other editor", position: 0, widgets: [] });
-    listeners.forEach(fn => fn({ kind: "page.updated", project: "terrarium", data: { slug: "overview" } } as AgentEvent));
+    listeners.forEach(fn => fn(pageEvent()));
     await waitFor(() => expect(host.querySelector("input")?.value).toBe("My draft"));
     click(host, "Save page");
     await waitFor(() => expect(host.textContent).toContain("My draft"));
@@ -69,7 +70,7 @@ it("keeps the loaded page visible while a live refresh is pending", async () => 
     let resolve!: (value: Awaited<ReturnType<typeof api.pages.get>>) => void;
     const previous = await api.pages.get("terrarium", "overview");
     get.mockImplementation(() => new Promise(r => { resolve = r; }));
-    listeners.forEach(fn => fn({ kind: "page.updated", project: "terrarium", data: { slug: "overview" } } as AgentEvent));
+    listeners.forEach(fn => fn(pageEvent()));
     expect(host.textContent).toContain("Overview");
     expect(host.textContent).toContain("This page has no widgets");
     resolve(previous);

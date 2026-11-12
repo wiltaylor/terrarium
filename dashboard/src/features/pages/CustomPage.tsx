@@ -76,7 +76,9 @@ export default function CustomPage() {
       <button disabled={widgets().length >= 100} onClick={addWidget}>Add widget</button></div>
       <p>Drag Move or Resize to snap to cells. Arrow keys move, Shift+arrows resize. Save to keep changes.</p>
     </div>}</Show>
-    <SnapGrid widgets={widgets()} editing={!!draft() && !!rights.latest?.can_edit} onChange={widgets => setDraft(d => d && { ...d, widgets })} renderWidget={w => <>
+    <SnapGrid widgets={widgets()} editing={!!draft() && !!rights.latest?.can_edit} onChange={widgets => setDraft(d => d && { ...d, widgets })} renderWidget={() => null} renderLiveWidget={current => {
+      const w = new Proxy({} as PageWidget, { get: (_target, key) => Reflect.get(current(), key) });
+      return <>
       <Show when={draft() && rights.latest?.can_edit}><div class="row">
         <button onClick={() => setEditingWidget(editingWidget() === w.id ? undefined : w.id)}>Edit widget</button>
         <button onClick={() => setDraft(d => d && { ...d, widgets: d.widgets.filter(item => item.id !== w.id) })}>Remove widget</button>
@@ -95,7 +97,7 @@ export default function CustomPage() {
       <Show when={w.kind === "markdown"}><Markdown html={renderMarkdown(w.text ?? "", params.project)} project={params.project} /></Show>
       <Show when={w.kind === "wiki"}><WikiWidget project={params.project} path={w.wiki ?? ""} /></Show>
       <Show when={w.kind !== "wiki" && w.kind !== "markdown"}><BlockView block={{ ...w, kind: w.kind as "stat", size: "l", options: w.options ?? {} }} monitor={monitors.latest?.find(m => m.id === w.monitor)} project={params.project} now={now()} version={Date.parse(monitors.latest?.find(m => m.id === w.monitor)?.last?.at ?? "") || 0} /></Show>
-    </>} />
+    </>; }} />
     <Show when={page.latest && !widgets().length && !draft()}><p>This page has no widgets.</p></Show>
     <A href={`/p/${encodeURIComponent(params.project)}/board`}>Board</A>
   </>;
