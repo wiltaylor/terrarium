@@ -3636,7 +3636,10 @@ async fn finish_recipe(
             )));
         }
         if !output.end.as_ref().is_some_and(End::success) {
-            return Err(ApiError::conflict(format!("cannot collect declared release outputs ({})", end_text(output.end.as_ref()))));
+            return Err(ApiError::conflict(format!(
+                "cannot collect declared release outputs ({})",
+                end_text(output.end.as_ref())
+            )));
         }
         crate::release_handoff::publish(&x.state.state_dir, &job.id, &output.stdout[..], limit)?;
     }
