@@ -1520,6 +1520,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_helper_delete_or_inspect_does_not_prevent_reserved_daemon_stop() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for phase in ["delete", "inspect"] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("docker.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let server = tokio::spawn(async move {
+                // Keep the pending HTTP answer open, including while accepting
+                // the independent final stop request after cancellation.
+                let mut pending = Vec::new();
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut header = Vec::new();
+                    while !header.ends_with(b"\r\n\r\n") { header.push(stream.read_u8().await.unwrap()); }
+                    let header = String::from_utf8(header).unwrap();
+                    let stopping = header.starts_with("POST /containers/daemon/stop?t=0 HTTP/1.1");
+                    if stopping || (phase == "inspect" && header.starts_with("DELETE /containers/owned-helper?force=1 HTTP/1.1")) {
+                        stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                        if stopping { break; }
+                    } else {
+                        let expected = if phase == "delete" { "DELETE /containers/owned-helper?force=1 HTTP/1.1" }
+                            else { "GET /containers/owned-helper/json HTTP/1.1" };
+                        assert!(header.starts_with(expected), "{header}");
+                        pending.push(stream);
+                    }
+                }
+            });
+            let docker = Docker { socket, target: None };
+            let end = tokio::time::Instant::now() + Duration::from_secs(3);
+            assert!(tokio::time::timeout_at(end - Duration::from_secs(2), docker.remove_once("owned-helper")).await.is_err());
+            tokio::time::timeout_at(end, docker.stop_for_recovery("daemon")).await.unwrap().unwrap();
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn uncertain_recovery_stops_without_normal_grace_or_restart() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let dir = tempfile::tempdir().unwrap();

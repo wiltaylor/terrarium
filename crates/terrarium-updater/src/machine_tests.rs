@@ -444,8 +444,8 @@ impl Engine for Fake {
     fn remove_once<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
         Box::pin(async move {
             let pending = self.0.lock().unwrap().pending_helper_termination;
-            if id == "helper2" && let Some(phase) = pending {
-                self.call(format!("helper-{phase}-pending {id}"));
+            if id == "helper2" && pending == Some("delete") {
+                self.call(format!("helper-delete-pending {id}"));
                 std::future::pending::<()>().await;
             }
             if self.call(format!("helper-remove {id}"))
@@ -454,6 +454,10 @@ impl Engine for Fake {
                 return Err("helper termination unverified".into());
             }
             self.0.lock().unwrap().helpers.remove(id);
+            if id == "helper2" && pending == Some("inspect") {
+                self.call(format!("helper-inspect-pending {id}"));
+                std::future::pending::<()>().await;
+            }
             self.call(format!("helper-gone {id}"));
             Ok(())
         })
@@ -1605,7 +1609,10 @@ async fn pending_helper_delete_or_inspect_leaves_final_stop_reserve_on_both_path
             cases.spawn(async move {
                 let mut r = rig();
                 Arc::get_mut(&mut r.updater).unwrap().hot_budget = (
-                    Duration::from_secs(20), Duration::from_secs(8), Duration::from_secs(2));
+                    Duration::from_secs(20),
+                    Duration::from_secs(8),
+                    Duration::from_secs(2),
+                );
                 {
                     let mut s = r.fake.0.lock().unwrap();
                     s.hot = hot;
@@ -1616,20 +1623,41 @@ async fn pending_helper_delete_or_inspect_leaves_final_stop_reserve_on_both_path
                     s.recovery_stop_delay = Duration::from_millis(250);
                 }
                 r.fake.fail(&format!("health:{}", new_ref()));
-                let run = tokio::time::timeout(Duration::from_secs(21),
-                    r.updater.run_now(RunKind::Update, "latest", "operator")).await.unwrap();
-                assert_eq!(run.outcome, Outcome::RecoveryFailed, "hot={hot} phase={phase}: {run:#?}");
+                let run = tokio::time::timeout(
+                    Duration::from_secs(21),
+                    r.updater.run_now(RunKind::Update, "latest", "operator"),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    run.outcome,
+                    Outcome::RecoveryFailed,
+                    "hot={hot} phase={phase}: {run:#?}"
+                );
                 let calls = r.fake.calls();
-                assert!(calls.iter().any(|c| c == &format!("helper-{phase}-pending helper2")), "{calls:?}");
-                assert!(calls.last().unwrap().starts_with("stop-confirmed "), "{calls:?}");
+                assert!(
+                    calls
+                        .iter()
+                        .any(|c| c == &format!("helper-{phase}-pending helper2")),
+                    "{calls:?}"
+                );
+                assert!(
+                    calls.last().unwrap().starts_with("stop-confirmed "),
+                    "{calls:?}"
+                );
                 assert!(!calls.iter().any(|c| c == "hot:commit"));
-                assert_eq!(calls.iter().filter(|c| *c == "hot:start").count(), usize::from(hot));
+                assert_eq!(
+                    calls.iter().filter(|c| *c == "hot:start").count(),
+                    usize::from(hot)
+                );
                 assert!(!calls.iter().any(|c| c == &format!("create:{OLD} new")));
                 assert!(run.error.unwrap().contains("termination deadline elapsed"));
             });
         }
     }
-    while let Some(result) = cases.join_next().await { result.unwrap(); }
+    while let Some(result) = cases.join_next().await {
+        result.unwrap();
+    }
 }
 
 #[tokio::test]
