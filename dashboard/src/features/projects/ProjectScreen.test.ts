@@ -17,6 +17,7 @@ const state = vi.hoisted(() => ({
 vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   agents: { inProject: (p: string) => state.agents.filter((a) => a.project === p) },
   api: {
+    pages: { list: async () => ({ items: [], can_edit: false }) },
     projects: {
       counts: async (p: string) => {
         state.reads.push(p);
@@ -108,18 +109,19 @@ describe("ProjectScreen", () => {
     await waitFor(() => expect(active(root).map((a) => a.textContent)).toEqual(["Knowledge"]));
   });
 
-  it("scrolls the active tab into view on a phone, including after navigation", async () => {
-    const scrolled: Element[] = [];
-    const scrollIntoView = vi.fn(function (this: Element) {
-      scrolled.push(this);
+  it("reveals the active tab horizontally, including after navigation, without scrolling the document", async () => {
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+      if (this.tagName === "NAV") return { left: 0, right: 300 } as DOMRect;
+      const scroll = this.closest("nav")?.scrollLeft ?? 0;
+      const left = (this.textContent === "Settings" ? 400 : 0) - scroll;
+      return { left, right: left + 100 } as DOMRect;
     });
-    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
-    Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
     const { root } = mount("/p/demo/settings/secrets");
-    expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
-    expect(scrolled.at(-1)?.textContent).toBe("Settings");
+    const nav = root.querySelector("nav")!;
+    expect(nav.scrollLeft).toBe(200);
     links(root).find((a) => a.textContent === "Board")!.click();
-    await waitFor(() => expect(scrolled.at(-1)?.textContent).toBe("Board"));
+    await waitFor(() => expect(nav.scrollLeft).toBe(0));
+    vi.restoreAllMocks();
   });
   it("shows the blocked agents, blocked cards, and open questions on their tabs, in the accessible name", async () => {
     state.agents = [

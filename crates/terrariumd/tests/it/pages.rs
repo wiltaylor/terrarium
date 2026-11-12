@@ -35,6 +35,14 @@ async fn crud_rights_order_limits_and_audit() {
         .await
         .err(404, "not_found");
     td.put_as(member, path, body()).await.err(403, "forbidden");
+    assert_eq!(
+        td.get_as(member, "/api/projects/p/pages").await.ok()["can_edit"],
+        false
+    );
+    assert_eq!(
+        td.get_as(lead, "/api/projects/p/pages").await.ok()["can_edit"],
+        true
+    );
     td.put_as(outsider, path, body())
         .await
         .err(403, "forbidden");

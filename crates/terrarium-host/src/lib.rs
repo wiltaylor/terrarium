@@ -54,6 +54,8 @@ pub mod transfer;
 pub mod verb;
 pub mod vmlab;
 pub mod workspace;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub mod workspace_helper;
 
 pub use client::{Client, ClientOptions, SelfUpdateOptions};
 pub use config::{Config, HostPaths};

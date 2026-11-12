@@ -3,6 +3,20 @@
 
 export type Harness = "claude" | "codex" | "copilot" | "pi";
 
+export interface PageWidget {
+  id: string;
+  kind: "markdown" | "wiki" | "stat" | "status" | "chart" | "text" | "table";
+  x: number; y: number; w: number; h: number;
+  auto_height?: boolean;
+  title?: string;
+  text?: string;
+  wiki?: string;
+  monitor?: string;
+  options?: DashboardBlock["options"];
+}
+export interface ProjectPageInput { title: string; position: number; widgets: PageWidget[] }
+export interface ProjectPage extends ProjectPageInput { project: string; slug: string; updated_at: string; updated_by: string }
+
 export const AGENT_STATUSES = [
   "starting",
   "idle",
@@ -1219,6 +1233,7 @@ export const EVENT_KINDS = [
   // A webhook attempt ended (docs/api.md §19.5): `{trigger, name, delivery, status, http_status, attempt, test, event_seq}`.
   "webhook.delivery",
   "dashboard.updated",
+  "page.updated",
   "target.grant",
   "artifact.created",
   "artifact.linked",

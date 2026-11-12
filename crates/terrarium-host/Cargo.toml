@@ -1,5 +1,6 @@
 [package]
 name = "terrarium-host"
+default-run = "terrarium-host"
 description = "The Terrarium host agent: runs commands, Docker, and vmlab for the daemon"
 version.workspace = true
 edition.workspace = true
@@ -16,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 terrarium-core.workspace = true
+terrarium-sys = { path = "../terrarium-sys" }
 terrarium-version.workspace = true
 clap.workspace = true
 anyhow.workspace = true
@@ -35,6 +37,7 @@ tracing-subscriber.workspace = true
 portable-pty.workspace = true
 sha2.workspace = true
 nix.workspace = true
+rustix = { version = "=1.1.5", features = ["mount", "fs"] }
 tempfile.workspace = true
 png.workspace = true
 base64.workspace = true

@@ -6,6 +6,7 @@ members = [
     "crates/terrariumd",
     "crates/terrarium",
     "crates/terrarium-host",
+    "crates/terrarium-sys",
     "crates/terrarium-runner",
     "crates/terrarium-compat",
     "crates/terrarium-version",

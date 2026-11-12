@@ -7,6 +7,8 @@ export interface SnapGridProps<T extends GridWidget> {
   editing?: boolean;
   onChange?: (widgets: T[]) => void;
   renderWidget: (widget: T) => JSX.Element;
+  /** Reactive content kept mounted when only a widget's cells or source change. */
+  renderLiveWidget?: (widget: () => T) => JSX.Element;
 }
 
 /** Controlled layout: live data can change without copying or resetting a draft. */
@@ -72,7 +74,7 @@ export function SnapGrid<T extends GridWidget>(props: SnapGridProps<T>) {
         <button type="button" aria-label={`Move ${id}`} onKeyDown={(event) => key(event, widget())} onPointerDown={(event) => start(event, id, false)} onPointerUp={finish} onPointerCancel={() => { gesture = undefined; }}>Move</button>
         <button type="button" aria-label={`Resize ${id}`} onKeyDown={(event) => key(event, widget())} onPointerDown={(event) => start(event, id, true)} onPointerUp={finish} onPointerCancel={() => { gesture = undefined; }}>Resize</button>
       </div></Show>
-      <div class="snap-grid-content"><div ref={(element) => measure(element, widget())}>{props.renderWidget(widget())}</div></div>
+      <div class="snap-grid-content"><div ref={(element) => measure(element, widget())}>{props.renderLiveWidget ? props.renderLiveWidget(widget) : props.renderWidget(widget())}</div></div>
     </section>;
     }}</For>
   </div>;
