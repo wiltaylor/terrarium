@@ -261,9 +261,18 @@ class HotSwapTests(unittest.TestCase):
         copy_started = time.monotonic()
         HOT.main(["snapshot", backup])
         copy_seconds = time.monotonic() - copy_started
+        (self.run / "upgrade-pause").unlink()
+        wait(lambda: len(log.read_text().splitlines()) == 2)
+        pause_seconds = time.monotonic() - started
+        self.assertLess(pause_seconds, 30, "paused snapshot and restart exceeded 30 seconds")
+        # Failed-new-release rollback is a separate pause, not part of the
+        # successful swap latency. Still verify the exact paused state and
+        # report recovery time without conflating these two paths.
         with sqlite3.connect(db) as conn:
             conn.execute("DELETE FROM journal")
             conn.execute("INSERT INTO journal VALUES ('new-release-write')")
+        recovery_started = time.monotonic()
+        HOT.main(["pause", "5"])
         restore_started = time.monotonic()
         HOT.main(["restore-database", backup])
         restore_seconds = time.monotonic() - restore_started
@@ -271,13 +280,13 @@ class HotSwapTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT value FROM journal ORDER BY value").fetchall(),
                              [("after-backup-before-pause",), ("before-backup",)])
         (self.run / "upgrade-pause").unlink()
-        wait(lambda: len(log.read_text().splitlines()) == 2)
-        pause_seconds = time.monotonic() - started
+        wait(lambda: len(log.read_text().splitlines()) == 3)
+        recovery_seconds = time.monotonic() - recovery_started
         print(f"hot-swap seed_bytes={db.stat().st_size} state_file_bytes={state_mib * 1048576} "
               f"snapshot_seconds={copy_seconds:.3f} "
-              f"restore_seconds={restore_seconds:.3f} pause_including_rollback_seconds={pause_seconds:.3f}")
-        self.assertLess(pause_seconds, 30, "paused snapshot and rollback exceeded 30 seconds")
-        self.assertNotEqual(*log.read_text().splitlines())
+              f"pause_seconds={pause_seconds:.3f} restore_seconds={restore_seconds:.3f} "
+              f"rollback_pause_seconds={recovery_seconds:.3f}")
+        self.assertEqual(len(set(log.read_text().splitlines())), 3)
         HOT.main(["commit", backup])
 
         # Force a timeout after SIGUSR1. Cleanup must request a restart rather
@@ -286,7 +295,7 @@ class HotSwapTests(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 HOT.main(["pause"])
         HOT.main(["cancel-pause", "5"])
-        wait(lambda: len(log.read_text().splitlines()) == 3)
+        wait(lambda: len(log.read_text().splitlines()) == 4)
         self.assertIsNone(process.poll())
         self.assertFalse((self.run / "upgrade-pause").exists())
 
