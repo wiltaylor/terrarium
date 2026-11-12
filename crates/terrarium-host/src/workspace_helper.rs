@@ -4,18 +4,19 @@
 //! B4 must admit and serialize daemon operations before forwarding them here.
 //! No kernel backend is selected by this module and hello never enables B4.
 
+pub mod mountinfo;
+pub mod runtime;
 mod paths;
 mod store;
-pub mod mountinfo;
 
-pub use paths::ProtectedRoot;
+pub use paths::{ProtectedRoot, mount_id, scan_source};
 pub use store::Store;
 
+use terrarium_core::live_workspace::{
+    Delivery, Envelope, Journal, Kind, MAX_FRAME_BYTES, MountEvidence, Phase, Reply, decode_frame,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use terrarium_core::live_workspace::{
-    Delivery, Envelope, Journal, Kind, MountEvidence, Phase, Reply, decode_frame, MAX_FRAME_BYTES,
-};
 
 /// All methods must act on pinned identities, not request-provided paths/PIDs.
 /// A successful transition means its postcondition was independently observed.
@@ -31,7 +32,10 @@ pub trait Backend {
     fn unmount(&mut self, envelope: &Envelope) -> Result<bool, Reply>;
     fn detach(&mut self, envelope: &Envelope) -> Result<(), Reply>;
     fn remove_placeholder(&mut self, envelope: &Envelope) -> Result<(), Reply>;
-    fn verify(&mut self, envelope: &Envelope) -> Result<(Vec<MountEvidence>, Vec<MountEvidence>), Reply>;
+    fn verify(
+        &mut self,
+        envelope: &Envelope,
+    ) -> Result<(Vec<MountEvidence>, Vec<MountEvidence>), Reply>;
 }
 
 /// One instance owns an exclusive journal lock and serializes one registration.
@@ -52,10 +56,17 @@ impl<B: Backend> Helper<B> {
             journal.quarantined = true;
         }
         store.save(&journal)?;
-        Ok(Self { store, journal, backend, fenced: false })
+        Ok(Self {
+            store,
+            journal,
+            backend,
+            fenced: false,
+        })
     }
 
-    pub fn journal(&self) -> &Journal { &self.journal }
+    pub fn journal(&self) -> &Journal {
+        &self.journal
+    }
 
     fn save(&mut self) -> Result<(), Reply> {
         if self.store.save(&self.journal).is_err() {
@@ -71,14 +82,21 @@ impl<B: Backend> Helper<B> {
     }
 
     pub fn apply(&mut self, bytes: &[u8]) -> Result<Reply, Reply> {
-        if self.fenced || self.journal.quarantined { return Err(Reply::Quarantined); }
+        if self.fenced || self.journal.quarantined {
+            return Err(Reply::Quarantined);
+        }
         let e = decode_frame(bytes)?;
         // Validate supported operations BEFORE writing any intent. Register and
         // lifecycle support require a separately reviewed Docker registrar.
-        if !matches!(e.original.kind, Kind::Grant | Kind::Revoke | Kind::Reconcile) {
+        if !matches!(
+            e.original.kind,
+            Kind::Grant | Kind::Revoke | Kind::Reconcile
+        ) {
             return Err(Reply::Unsupported);
         }
-        if let Some(reply) = self.journal.prepare(e.clone())? { return Ok(reply); }
+        if let Some(reply) = self.journal.prepare(e.clone())? {
+            return Ok(reply);
+        }
         self.save()?; // write-ahead intent, including revoke tombstone
         let result = self.execute(&e);
         if result.is_err() {
@@ -116,7 +134,11 @@ impl<B: Backend> Helper<B> {
                 _ => return Err(Reply::Unsupported),
             }
             let (host, receiver) = self.backend.verify(e)?;
-            let intent = self.journal.operations.get_mut(&e.original.operation).ok_or(Reply::Failed)?;
+            let intent = self
+                .journal
+                .operations
+                .get_mut(&e.original.operation)
+                .ok_or(Reply::Failed)?;
             intent.host_evidence = host;
             intent.receiver_evidence = receiver;
             self.advance(e, Phase::Verified)?;
@@ -129,29 +151,42 @@ impl<B: Backend> Helper<B> {
 
 /// One bounded request/reply per connection, with receive and send deadlines.
 /// Listener creation/ownership is deliberately not part of host-agent startup.
-pub async fn serve_connection<B: Backend>(helper: &mut Helper<B>, mut stream: UnixStream, agent_uid: u32) -> std::io::Result<()> {
+pub async fn serve_connection<B: Backend>(
+    helper: &mut Helper<B>,
+    mut stream: UnixStream,
+    agent_uid: u32,
+) -> std::io::Result<()> {
     use std::time::Duration;
     let peer = stream.peer_cred()?;
     tokio::time::timeout(Duration::from_secs(5), async {
-    let result = if peer.uid() != agent_uid {
-        Err(Reply::Unauthorized)
-    } else {
-        let mut header = [0; 4];
-        stream.read_exact(&mut header).await?;
-        let size = u32::from_be_bytes(header) as usize;
-        if size == 0 || size > MAX_FRAME_BYTES {
-            Err(Reply::Failed)
+        let result = if peer.uid() != agent_uid {
+            Err(Reply::Unauthorized)
         } else {
-            let mut bytes = vec![0; size];
-            stream.read_exact(&mut bytes).await?;
-            helper.apply(&bytes)
-        }
-    };
-    let reply = result.unwrap_or_else(|r| r);
-    let bytes = serde_json::to_vec(&reply).map_err(std::io::Error::other)?;
-    stream.write_all(&(bytes.len() as u32).to_be_bytes()).await?;
-    stream.write_all(&bytes).await
-    }).await.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "workspace helper frame deadline"))?
+            let mut header = [0; 4];
+            stream.read_exact(&mut header).await?;
+            let size = u32::from_be_bytes(header) as usize;
+            if size == 0 || size > MAX_FRAME_BYTES {
+                Err(Reply::Failed)
+            } else {
+                let mut bytes = vec![0; size];
+                stream.read_exact(&mut bytes).await?;
+                helper.apply(&bytes)
+            }
+        };
+        let reply = result.unwrap_or_else(|r| r);
+        let bytes = serde_json::to_vec(&reply).map_err(std::io::Error::other)?;
+        stream
+            .write_all(&(bytes.len() as u32).to_be_bytes())
+            .await?;
+        stream.write_all(&bytes).await
+    })
+    .await
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "workspace helper frame deadline",
+        )
+    })?
 }
 
 #[cfg(test)]

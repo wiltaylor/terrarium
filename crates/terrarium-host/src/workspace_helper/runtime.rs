@@ -1,0 +1,90 @@
+//! Runtime identity acquired from Docker and rechecked around proc FD pinning.
+//! Numeric PIDs are never accepted from the wire. Namespace ownership is tied
+//! to the same full container ID, start timestamp and process start ticks.
+use nix::fcntl::{OFlag, openat};
+use nix::sys::stat::Mode;
+use std::fs::File;
+use std::io::Read;
+use std::os::unix::fs::MetadataExt;
+use terrarium_core::live_workspace::{MountEvidence, NamespaceIdentity, Reply, RuntimeIdentity};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub identity: RuntimeIdentity,
+    pub pid: u32,
+    pub started_at: String,
+    pub running: bool,
+}
+
+/// An inspector queries the local Docker daemon using the full immutable ID.
+/// Its values are not client-supplied registration evidence. Configuration
+/// admission belongs to B3 in addition to these identity checks.
+pub trait Inspector {
+    fn inspect(&mut self, container_id: &str) -> Result<Snapshot, Reply>;
+}
+
+pub struct PinnedRuntime {
+    pub namespace: File,
+    pub root: File,
+    proc: File,
+    snapshot: Snapshot,
+    start_ticks: u64,
+}
+
+fn read_at(parent: &File, name: &str, limit: u64) -> Result<Vec<u8>, Reply> {
+    let file = File::from(openat(parent, name, OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK, Mode::empty()).map_err(|_| Reply::Quarantined)?);
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes).map_err(|_| Reply::Quarantined)?;
+    if bytes.len() as u64 > limit { return Err(Reply::Quarantined); }
+    Ok(bytes)
+}
+
+fn ticks(proc: &File) -> Result<u64, Reply> {
+    let bytes = read_at(proc, "stat", 4096)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| Reply::Quarantined)?;
+    let (_, tail) = text.rsplit_once(')').ok_or(Reply::Quarantined)?;
+    // tail begins at field 3 (state). starttime is field 22.
+    tail.split_whitespace().nth(19).ok_or(Reply::Quarantined)?.parse().map_err(|_| Reply::Quarantined)
+}
+
+fn identity(fd: &File) -> Result<NamespaceIdentity, Reply> {
+    let m = fd.metadata().map_err(|_| Reply::Quarantined)?;
+    Ok(NamespaceIdentity { device: m.dev(), inode: m.ino() })
+}
+
+impl PinnedRuntime {
+    pub fn acquire(inspector: &mut impl Inspector, expected: &RuntimeIdentity) -> Result<Self, Reply> {
+        let first = inspector.inspect(&expected.container_id)?;
+        if first.identity != *expected || !first.running || first.pid == 0 || first.started_at.is_empty() || first.started_at.len() > 128 { return Err(Reply::Quarantined); }
+        let proc_root = File::open("/proc").map_err(|_| Reply::Failed)?;
+        if nix::sys::statfs::fstatfs(&proc_root).map_err(|_| Reply::Failed)?.filesystem_type() != nix::sys::statfs::PROC_SUPER_MAGIC { return Err(Reply::Quarantined); }
+        let proc = File::from(openat(&proc_root, first.pid.to_string().as_str(), OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW, Mode::empty()).map_err(|_| Reply::Quarantined)?);
+        let start_ticks = ticks(&proc)?;
+        // These two magic links are kernel-provided inside the pinned procfs
+        // directory, never workspace paths. No user-selected namespace path.
+        let namespace = File::from(openat(&proc, "ns/mnt", OFlag::O_RDONLY | OFlag::O_CLOEXEC, Mode::empty()).map_err(|_| Reply::Quarantined)?);
+        let root = File::from(openat(&proc, "root", OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC, Mode::empty()).map_err(|_| Reply::Quarantined)?);
+        let pin = Self { namespace, root, proc, snapshot: first, start_ticks };
+        pin.recheck(inspector, expected)?;
+        Ok(pin)
+    }
+
+    pub fn recheck(&self, inspector: &mut impl Inspector, expected: &RuntimeIdentity) -> Result<(), Reply> {
+        let current = inspector.inspect(&expected.container_id)?;
+        let live_ns = File::from(openat(&self.proc, "ns/mnt", OFlag::O_RDONLY | OFlag::O_CLOEXEC, Mode::empty()).map_err(|_| Reply::Quarantined)?);
+        if current != self.snapshot || current.identity != *expected || !current.running
+            || ticks(&self.proc)? != self.start_ticks || identity(&self.namespace)? != expected.namespace
+            || identity(&live_ns)? != expected.namespace { return Err(Reply::Quarantined); }
+        Ok(())
+    }
+
+    /// Read only from the pinned process directory and recheck runtime on both
+    /// sides. Mount evidence is local to this pinned namespace.
+    pub fn mountinfo(&self, inspector: &mut impl Inspector) -> Result<Vec<MountEvidence>, Reply> {
+        self.recheck(inspector, &self.snapshot.identity)?;
+        let bytes = read_at(&self.proc, "mountinfo", 4 * 1024 * 1024)?;
+        let records = super::mountinfo::parse(&bytes, self.snapshot.identity.namespace.clone())?;
+        self.recheck(inspector, &self.snapshot.identity)?;
+        Ok(records)
+    }
+}
