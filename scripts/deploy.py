@@ -67,7 +67,7 @@ DATA_DIRS = [
     "config/claude", "config/codex", "config/copilot", "config/pi",
     "config/terrarium", "config/tls", "state", "tools", "work", "repos",
     "projects", "agents", "targets", "subscriptions", "fleets",
-    "updater/run", "updater/state",
+    "updater/run", "updater/state", "updater/state/front", "state/front",
 ]
 
 # The image file of the updater (docs/api.md §34): the release image of

@@ -64,10 +64,10 @@ COPY --from=dashboard /src/dashboard/dist ./dashboard/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/src/target,id=terrarium-target \
-    cargo build --release --locked -p terrariumd -p terrarium -p terrarium-runner -p terrarium-updater \
+    cargo build --release --locked -p terrariumd -p terrarium -p terrarium-runner -p terrarium-updater -p terrarium-front \
     && mkdir -p /out \
     && cp target/release/terrariumd target/release/terrarium target/release/terrarium-runner \
-        target/release/terrarium-updater /out/
+        target/release/terrarium-updater target/release/terrarium-front /out/
 
 # ---------------------------------------------------------------------------
 FROM ${RUST_IMAGE} AS host-build

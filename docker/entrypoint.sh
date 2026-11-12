@@ -21,7 +21,7 @@ TERRARIUM_USER="${TERRARIUM_USER:-terrarium}"
 AUTH_DIRS=(/auth/claude /auth/codex /auth/copilot /auth/pi)
 TOOLS_DIR="${TERRARIUM_TOOLS_DIR:-/opt/terrarium/tools}"
 CONFIG_REPO="${TERRARIUM_CONFIG_REPO:-/config/terrarium}"
-STATE_DIRS=(/state /state/agents /state/artifacts /state/credentials /work /run/terrarium "$TOOLS_DIR" "$CONFIG_REPO")
+STATE_DIRS=(/state /state/agents /state/artifacts /state/credentials /state/front /work /run/terrarium "$TOOLS_DIR" "$CONFIG_REPO")
 
 log() { echo "entrypoint: $*" >&2; }
 
