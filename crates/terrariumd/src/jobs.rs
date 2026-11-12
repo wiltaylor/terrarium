@@ -3579,58 +3579,18 @@ async fn finish_recipe(
             ));
         }
         let limit = crate::release_handoff::output_limit()?;
-        script.push_str(&format!("cd \"$p\"; total=$(find . -mindepth 1 -maxdepth 1 -printf '%s\\n' | awk '{{s+=$1}} END {{printf \"%.0f\",s}}'); [ \"$total\" -le {limit} ] || exit 79; find . -mindepth 1 -maxdepth 1 -printf '%f\\0' | tar --null --no-recursion -T - -cf -"));
+        let archive = format!("{}/.terrarium-release-outputs.tar", x.dir);
+        let archive_arg = crate::executor::sh_quote(&archive);
+        script.push_str(&format!("cd \"$p\"; find . -mindepth 1 -maxdepth 1 -printf '%s\\n' | awk '{{s+=$1; n++}} END {{if(s>{limit} || n>1024) exit 79}}'; umask 077; set -C; find . -mindepth 1 -maxdepth 1 -printf '%f\\0' | tar --null --no-recursion -T - -cf - > {archive_arg}; wc -c < {archive_arg}"));
         let cmd = RemoteCmd {
             argv: vec!["sh".into(), "-c".into(), script],
             holder: x.holder.clone(),
             timeout_secs: Some(120),
             ..RemoteCmd::default()
         };
-        // File bytes must not pass through the textual log redactor. This is
-        // daemon-only execution, not an agent exec session or a retained log.
-        if killed(&job.id) {
-            return Err(ApiError::conflict("the job was cancelled"));
-        }
-        let cmd = RemoteCmd {
-            argv: low_priority(cmd.argv.clone(), x.ionice),
-            ..cmd
-        };
-        let admission = x.state.executor.target_admission(x.def).await?;
-        let (running, report) = crate::run_kill::start_named_locked(
-            x.state,
-            x.def,
-            &cmd,
-            crate::run_kill::job_pidfile(&job.id),
-            &admission,
-        )?;
-        let mut running =
-            crate::executor::track_resource_run(x.state, x.def, &cmd, running, report.clone())?;
-        set_control(&job.id, Some(running.ctl.clone()));
-        drop(admission);
-        if killed(&job.id) {
-            let _ = running.ctl.send(Control::Kill);
-        }
+        let output = x.run(&cmd, STEP_MAX, None).await?;
         let cap = limit as usize + 2 * 1024 * 1024;
-        let mut output = Collected::default();
-        let mut oversized = false;
-        while let Some(event) = running.events.recv().await {
-            match event {
-                crate::executor::Ev::Data(crate::executor::Stream::Stdout, bytes) => {
-                    if !oversized && bytes.len() <= cap.saturating_sub(output.stdout.len()) {
-                        output.stdout.extend_from_slice(&bytes);
-                    } else if !oversized {
-                        oversized = true;
-                        let _ = running.ctl.send(Control::Kill);
-                    }
-                }
-                crate::executor::Ev::End(end) => output.end = Some(end),
-                _ => {}
-            }
-        }
-        if let Some(report) = report {
-            let _ = crate::run_kill::report(report).await;
-        }
-        if oversized || exit_code(output.end.as_ref()) == Some(79) {
+        if exit_code(output.end.as_ref()) == Some(79) {
             return Err(ApiError::invalid(format!(
                 "release artifacts exceed the per-job limit of {limit} bytes"
             )));
@@ -3641,7 +3601,39 @@ async fn finish_recipe(
                 end_text(output.end.as_ref())
             )));
         }
-        crate::release_handoff::publish(&x.state.state_dir, &job.id, &output.stdout[..], limit)?;
+        let size = String::from_utf8_lossy(&output.stdout).trim().parse::<usize>()
+            .map_err(|_| ApiError::invalid("cannot read release archive size"))?;
+        if size > cap {
+            return Err(ApiError::invalid(format!("release artifacts exceed the per-job limit of {limit} bytes")));
+        }
+        let mut archive_bytes = Vec::with_capacity(size);
+        // Bounded sessions avoid overflowing the host's replay buffer. File
+        // bytes bypass textual redaction and never enter a public exec session.
+        for index in 0..size.div_ceil(crate::release_handoff::CHUNK_SIZE) {
+            if killed(&job.id) { return Err(ApiError::conflict("the job was cancelled")); }
+            let cmd = RemoteCmd {
+                argv: low_priority(vec!["dd".into(), format!("if={archive}"), format!("bs={}", crate::release_handoff::CHUNK_SIZE), format!("skip={index}"), "count=1".into(), "status=none".into()], x.ionice),
+                holder: x.holder.clone(),
+                timeout_secs: Some(30),
+                ..RemoteCmd::default()
+            };
+            let admission = x.state.executor.target_admission(x.def).await?;
+            let (running, report) = crate::run_kill::start_named_locked(x.state, x.def, &cmd, crate::run_kill::job_pidfile(&job.id), &admission)?;
+            let running = crate::executor::track_resource_run(x.state, x.def, &cmd, running, report.clone())?;
+            set_control(&job.id, Some(running.ctl.clone()));
+            drop(admission);
+            if killed(&job.id) { let _ = running.ctl.send(Control::Kill); }
+            let chunk = running.collect(crate::release_handoff::CHUNK_SIZE + 1).await;
+            if let Some(report) = report { let _ = crate::run_kill::report(report).await; }
+            let expected = crate::release_handoff::CHUNK_SIZE.min(size - archive_bytes.len());
+            if !chunk.end.as_ref().is_some_and(End::success) || chunk.stdout.len() != expected {
+                return Err(ApiError::conflict(format!("cannot read release archive chunk ({})", end_text(chunk.end.as_ref()))));
+            }
+            archive_bytes.extend_from_slice(&chunk.stdout);
+        }
+        let cleanup = RemoteCmd { argv: vec!["rm".into(), "-f".into(), "--".into(), archive], holder: x.holder.clone(), timeout_secs: Some(30), ..RemoteCmd::default() };
+        let _ = x.run(&cleanup, STEP_MAX, None).await;
+        crate::release_handoff::publish(&x.state.state_dir, &job.id, &archive_bytes[..], limit)?;
     }
     // TER-196: a run that the infrastructure lost is no red; [`run`]
     // puts the job back in the queue. A cancel is never lost.
