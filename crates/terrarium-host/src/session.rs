@@ -6,7 +6,9 @@
 //! [`ExitInfo`] when the process has exited and its output is drained.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,15 +18,21 @@ use nix::sys::signal::killpg;
 #[cfg(unix)]
 use nix::unistd::Pid;
 use crate::protocol::SessionSignal as Signal;
+#[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+#[cfg(unix)]
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::outbox::Outbox;
-use crate::protocol::{CHUNK_SIZE, ExitReason, PtySize, StreamTag};
+#[cfg(unix)]
+use crate::protocol::{CHUNK_SIZE, StreamTag};
+use crate::protocol::{ExitReason, PtySize};
 
 /// How long to wait for the output pipes to close after the process exits.
 /// A background grandchild can hold them open.
+#[cfg(unix)]
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// The largest stdout a session keeps for a result parser.
@@ -275,6 +283,7 @@ pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
     spawn_direct(plan, outbox)
 }
 
+#[cfg(unix)]
 pub(crate) fn spawn_direct(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError> {
     if plan.pty.is_some() {
         spawn_pty(plan, outbox)
@@ -285,8 +294,10 @@ pub(crate) fn spawn_direct(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Runnin
 
 /// Shared stdout capture for result parsers.
 #[derive(Clone, Default)]
+#[cfg(unix)]
 struct Capture(Option<Arc<std::sync::Mutex<Vec<u8>>>>);
 
+#[cfg(unix)]
 impl Capture {
     fn new(on: bool) -> Self {
         Self(on.then(Default::default))
@@ -318,19 +329,9 @@ fn signal_group(pid: Option<u32>, sig: Signal) {
     }
 }
 
-#[cfg(windows)]
-fn signal_group(pid: Option<u32>, _sig: Signal) {
-    if let Some(pid) = pid {
-        let _ = std::process::Command::new("taskkill.exe")
-            .args(["/F", "/PID", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-}
-
 /// Kill the process group, and the scope when the session has one: a
 /// process that left the group ends too.
+#[cfg(unix)]
 fn kill_all(pid: Option<u32>, scope: Option<&str>) {
     signal_group(pid, Signal::SIGKILL);
     if let Some(scope) = scope {
@@ -344,8 +345,10 @@ fn kill_all(pid: Option<u32>, scope: Option<&str>) {
 /// the session. `kill_on_drop` alone kills only the group leader, and the
 /// children of a recipe kept running with its open fds. The guard sends no
 /// scope kill: that needs a runtime, and a drop can run without one.
+#[cfg(unix)]
 struct GroupGuard(Option<u32>);
 
+#[cfg(unix)]
 impl GroupGuard {
     /// The process exited: its group id may be reused, so do not kill it.
     fn disarm(&mut self) {
@@ -353,6 +356,7 @@ impl GroupGuard {
     }
 }
 
+#[cfg(unix)]
 impl Drop for GroupGuard {
     fn drop(&mut self) {
         signal_group(self.0, Signal::SIGKILL);
@@ -360,6 +364,7 @@ impl Drop for GroupGuard {
 }
 
 /// Sleep until the deadline, or forever without one.
+#[cfg(unix)]
 async fn deadline(timeout: Option<Duration>) {
     match timeout {
         Some(t) => tokio::time::sleep(t).await,
@@ -369,6 +374,7 @@ async fn deadline(timeout: Option<Duration>) {
 
 // ------------------------------------------------------------------ pipes
 
+#[cfg(unix)]
 fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError> {
     let mut cmd = tokio::process::Command::new(&plan.program);
     cmd.args(&plan.args)
@@ -510,6 +516,7 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
     })
 }
 
+#[cfg(unix)]
 fn reason_for(forced: Option<ExitReason>, signal: Option<i32>) -> ExitReason {
     match (forced, signal) {
         (Some(r), _) => r,
@@ -518,6 +525,7 @@ fn reason_for(forced: Option<ExitReason>, signal: Option<i32>) -> ExitReason {
     }
 }
 
+#[cfg(unix)]
 async fn drain(pumps: Vec<JoinHandle<()>>) {
     for mut p in pumps {
         if tokio::time::timeout(DRAIN_GRACE, &mut p).await.is_err() {
@@ -526,6 +534,7 @@ async fn drain(pumps: Vec<JoinHandle<()>>) {
     }
 }
 
+#[cfg(unix)]
 async fn pump<R: tokio::io::AsyncRead + Unpin>(
     mut r: R,
     stream: StreamTag,
@@ -550,6 +559,7 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
 
 // ------------------------------------------------------------------ pty
 
+#[cfg(unix)]
 fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError> {
     use portable_pty::{CommandBuilder, PtySize as PortableSize, native_pty_system};
 

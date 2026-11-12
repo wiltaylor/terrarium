@@ -68,9 +68,49 @@ fn atomic_job_assignment_kills_immediate_detached_grandchild() {
         // process handle to signal, rather than interpreting that as success.
         wait(&child.process);
         let status = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &format!("$p=Get-Process -Id {pid} -ErrorAction SilentlyContinue; if ($p) {{ exit 1 }}")])
+            .args(["-NoProfile", "-NonInteractive", "-Command", &format!("$end=[DateTime]::UtcNow.AddSeconds(5); do {{ $p=Get-Process -Id {pid} -ErrorAction SilentlyContinue; if (!$p -or $p.HasExited) {{ exit 0 }}; Start-Sleep -Milliseconds 20 }} while ([DateTime]::UtcNow -lt $end); exit 1")])
             .status().unwrap();
         assert!(status.success(), "grandchild {pid} survived job close");
+    }
+}
+
+#[test]
+#[ignore = "launched only inside a test-owned job"]
+fn immediate_child_helper() {
+    use std::os::windows::process::CommandExt;
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "grandchild_helper"])
+        .creation_flags(0x00000008 | 0x00000200) // detached, new process group, not breakaway
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null()).spawn().unwrap();
+    println!("OWNED={}", child.id());
+    std::io::stdout().flush().unwrap();
+    std::thread::sleep(Duration::from_secs(120));
+}
+
+#[test]
+#[ignore = "launched only as the test-owned grandchild"]
+fn grandchild_helper() { std::thread::sleep(Duration::from_secs(120)); }
+
+#[test]
+fn atomic_job_assignment_direct_creation_race() {
+    for _ in 0..20 {
+        let child = spawn(&std::env::current_exe().unwrap(),
+            &["--ignored".into(), "--exact".into(), "immediate_child_helper".into(), "--nocapture".into()],
+            None, &BTreeMap::new(), None, Limits::default()).unwrap();
+        let mut reader = BufReader::new(child.stdout);
+        let mut line = String::new();
+        let pid = loop {
+            line.clear();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0, "helper exited without grandchild");
+            if let Some(pid) = line.trim().strip_prefix("OWNED=") { break pid.parse::<u32>().unwrap(); }
+        };
+        drop(child.job);
+        wait(&child.process);
+        let status = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &format!("$end=[DateTime]::UtcNow.AddSeconds(5); do {{ $p=Get-Process -Id {pid} -ErrorAction SilentlyContinue; if (!$p -or $p.HasExited) {{ exit 0 }}; Start-Sleep -Milliseconds 20 }} while ([DateTime]::UtcNow -lt $end); exit 1")])
+            .status().unwrap();
+        assert!(status.success(), "direct grandchild {pid} survived job close");
     }
 }
 

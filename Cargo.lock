@@ -4001,6 +4001,7 @@ dependencies = [
  "tempfile",
  "terrarium-core",
  "terrarium-version",
+ "terrarium-winapi",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
@@ -4008,7 +4009,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "terrarium-winapi",
  "windows-service",
 ]
 
