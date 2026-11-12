@@ -371,7 +371,7 @@ async fn a_session_takes_multi_line_environment_values() {
     assert_eq!(exit.code, Some(0));
     assert_eq!(
         f.log("env.copy"),
-        "TERRARIUM_COMMIT_HOOK=\"#!/bin/sh\nexec \\\"\\$1\\\" \\`x\\`\r\n\"\n\
+        "CUDA_VISIBLE_DEVICES=\"\"\nTERRARIUM_COMMIT_HOOK=\"#!/bin/sh\nexec \\\"\\$1\\\" \\`x\\`\r\n\"\n\
          TERRARIUM_GIT_TRAILERS=\"Card: TER-566\nAgent: p/a\n\"\n"
     );
     assert_eq!(f.log("env.copy.mode").trim(), "600");
@@ -434,7 +434,7 @@ async fn a_session_starts_in_its_device_policy_and_relays_stdio() {
         assert!(args.contains(&want), "{want} not in {args:?}");
     }
     assert!(!run.contains("nvidia1"), "{run}");
-    assert_eq!(f.log("env.copy"), "TOKEN=\"t\\$1\"\n");
+    assert_eq!(f.log("env.copy"), format!("CUDA_VISIBLE_DEVICES=\"{A}\"\nTOKEN=\"t\\$1\"\n"));
     f.wait_idle().await;
     // The unit is killed at the end, so no descendant keeps a GPU handle,
     // and its environment file is gone.
@@ -466,12 +466,19 @@ async fn reserved_gpu_uses_its_minor_number_not_its_index() {
              esac\n"
         ),
     );
-    for (uuid, minor, index) in [(first, 1, 0), (second, 0, 1)] {
+    for (gpus, minors) in [
+        (vec![first], vec![1]),
+        (vec![second], vec![0]),
+        (vec![second, first], vec![0, 1]),
+        (vec![], vec![]),
+    ] {
+        for caller in [None, Some("0"), Some(A)] {
         f.write("run.log", "");
-        let mut req = f.start("p/a", Some("L1"), &[uuid], &[uuid], &["true"]);
-        // The daemon supplies CUDA visibility by UUID. The helper must carry
-        // it unchanged, independently of the device node's minor number.
-        req.env = BTreeMap::from([("CUDA_VISIBLE_DEVICES".into(), uuid.into())]);
+        let mut req = f.start("p/a", Some("L1"), &gpus, &gpus, &["true"]);
+        req.env.clear();
+        if let Some(value) = caller {
+            req.env.insert("CUDA_VISIBLE_DEVICES".into(), value.into());
+        }
         let (s, r) = send(&f.socket, &Request::Start(req)).await;
         assert!(matches!(r, Reply::Started { .. }), "{r:?}");
         let (mut rd, _wr) = s.into_split();
@@ -490,18 +497,21 @@ async fn reserved_gpu_uses_its_minor_number_not_its_index() {
             .lines()
             .filter(|line| line.starts_with("DeviceAllow=/dev/nvidia"))
             .collect();
-        assert!(
-            devices.contains(&format!("DeviceAllow=/dev/nvidia{minor} rw").as_str()),
-            "{uuid}: {devices:?}"
-        );
-        assert!(devices.contains(&"DeviceAllow=/dev/nvidiactl rw"));
-        assert_eq!(devices.len(), 2, "{uuid}: {devices:?}");
-        assert!(!run.contains(&format!("DeviceAllow=/dev/nvidia{index} rw")));
+        for minor in 0..=1 {
+            assert_eq!(
+                devices.contains(&format!("DeviceAllow=/dev/nvidia{minor} rw").as_str()),
+                minors.contains(&minor),
+                "{gpus:?}: {devices:?}"
+            );
+        }
+        assert_eq!(devices.contains(&"DeviceAllow=/dev/nvidiactl rw"), !gpus.is_empty());
+        assert_eq!(devices.len(), minors.len() + usize::from(!gpus.is_empty()));
         assert_eq!(
             f.log("env.copy"),
-            format!("CUDA_VISIBLE_DEVICES=\"{uuid}\"\n")
+            format!("CUDA_VISIBLE_DEVICES=\"{}\"\n", gpus.join(","))
         );
         f.wait_idle().await;
+        }
     }
 }
 
