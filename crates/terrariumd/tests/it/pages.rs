@@ -157,24 +157,46 @@ async fn monitor_sources_are_local_compatible_and_preserved_when_deleted() {
     td.project("q").await;
     let host = td.post("/api/hosts", json!({"name":"lab"})).await;
     host.ok();
-    td.post("/api/targets",json!({"name":"box","kind":"host","host":"lab"})).await.ok();
+    td.post(
+        "/api/targets",
+        json!({"name":"box","kind":"host","host":"lab"}),
+    )
+    .await
+    .ok();
     let mut ids = Vec::new();
-    for (project,kind) in [("p","number"),("p","json"),("p","text"),("q","number")] {
+    for (project, kind) in [
+        ("p", "number"),
+        ("p", "json"),
+        ("p", "text"),
+        ("q", "number"),
+    ] {
         let r=td.post(&format!("/api/projects/{project}/monitors"),json!({"name":kind,"target":"box","script":"echo 1","kind":kind,"schedule":{"kind":"interval","every":"1m"}})).await;
         ids.push(r.ok()["id"].as_str().unwrap().to_owned());
     }
-    let path="/api/projects/p/pages/overview";
-    let mut b=body();
-    for (kind,id) in [("stat",&ids[0]),("chart",&ids[0]),("status",&ids[2]),("text",&ids[2]),("table",&ids[1])] {
-        b["widgets"]=json!([{"id":"metric","kind":kind,"x":0,"y":0,"w":12,"h":2,"monitor":id}]);
-        td.put(path,b.clone()).await.ok();
+    let path = "/api/projects/p/pages/overview";
+    let mut b = body();
+    for (kind, id) in [
+        ("stat", &ids[0]),
+        ("chart", &ids[0]),
+        ("status", &ids[2]),
+        ("text", &ids[2]),
+        ("table", &ids[1]),
+    ] {
+        b["widgets"] = json!([{"id":"metric","kind":kind,"x":0,"y":0,"w":12,"h":2,"monitor":id}]);
+        td.put(path, b.clone()).await.ok();
     }
-    for (kind,id) in [("stat",&ids[2]),("chart",&ids[2]),("table",&ids[0]),("stat",&ids[3]),("stat",&"missing".to_owned())] {
-        b["widgets"]=json!([{"id":"metric","kind":kind,"x":0,"y":0,"w":12,"h":2,"monitor":id}]);
-        td.put(path,b.clone()).await.err(422,"invalid");
+    for (kind, id) in [
+        ("stat", &ids[2]),
+        ("chart", &ids[2]),
+        ("table", &ids[0]),
+        ("stat", &ids[3]),
+        ("stat", &"missing".to_owned()),
+    ] {
+        b["widgets"] = json!([{"id":"metric","kind":kind,"x":0,"y":0,"w":12,"h":2,"monitor":id}]);
+        td.put(path, b.clone()).await.err(422, "invalid");
     }
-    b["widgets"]=json!([{"id":"metric","kind":"stat","x":0,"y":0,"w":12,"h":2,"monitor":ids[0]}]);
-    td.put(path,b.clone()).await.ok();
-    td.delete(&format!("/api/monitors/{}",ids[0])).await.ok();
+    b["widgets"] = json!([{"id":"metric","kind":"stat","x":0,"y":0,"w":12,"h":2,"monitor":ids[0]}]);
+    td.put(path, b.clone()).await.ok();
+    td.delete(&format!("/api/monitors/{}", ids[0])).await.ok();
     assert_eq!(td.get(path).await.ok()["widgets"], b["widgets"]);
 }

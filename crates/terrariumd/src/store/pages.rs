@@ -169,9 +169,9 @@ fn check(c: &Connection, project: &str, slug: &str, input: &PageInput) -> ApiRes
             WidgetKind::Wiki => {
                 if w.monitor.is_some()
                     || w.text.is_some()
-                    || w.wiki.as_ref().is_none_or(|s| {
-                        super::wiki::check_path(s).is_err()
-                    })
+                    || w.wiki
+                        .as_ref()
+                        .is_none_or(|s| super::wiki::check_path(s).is_err())
                 {
                     return Err(bad(
                         "wiki requires a project-local wiki path and no other source",
