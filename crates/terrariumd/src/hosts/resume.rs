@@ -96,7 +96,9 @@ impl Journal {
         ids: &[String],
         prefixes: &[String],
     ) -> ApiResult<()> {
-        self.db.journal_now(self.wait, |conn| self.replace_on(conn, values, ids, prefixes))
+        self.db.journal_now(self.wait, |conn| {
+            self.replace_on(conn, values, ids, prefixes)
+        })
     }
 
     /// The caller owns the writer before taking the registry lock. Never
