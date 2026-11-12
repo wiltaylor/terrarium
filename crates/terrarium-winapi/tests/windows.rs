@@ -64,7 +64,9 @@ fn atomic_job_assignment_kills_immediate_detached_grandchild() {
         BufReader::new(child.stdout).read_line(&mut line).unwrap();
         let pid: u32 = line.trim().parse().unwrap();
         drop(child.job); // No PID-based kill. The sole job handle kills the tree.
-        assert_ne!(wait(&child.process), 0);
+        // Windows uses exit code zero for kill-on-job-close. Wait for the
+        // process handle to signal, rather than interpreting that as success.
+        wait(&child.process);
         let status = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &format!("$p=Get-Process -Id {pid} -ErrorAction SilentlyContinue; if ($p) {{ exit 1 }}")])
             .status().unwrap();

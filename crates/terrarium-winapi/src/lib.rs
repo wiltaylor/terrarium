@@ -273,8 +273,13 @@ pub fn spawn(program: &Path, args: &[String], cwd: Option<&Path>, env: &BTreeMap
     let (mut startup, mut result): (STARTUPINFOEXW, PROCESS_INFORMATION) = unsafe { (zeroed(), zeroed()) };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     startup.lpAttributeList = attributes.ptr();
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    // Explicit invalid handles prevent Windows from copying the service's
+    // redirected standard handles instead of connecting the pseudoconsole.
+    startup.StartupInfo.hStdInput = INVALID_HANDLE_VALUE;
+    startup.StartupInfo.hStdOutput = INVALID_HANDLE_VALUE;
+    startup.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
     if console.is_none() {
-        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         startup.StartupInfo.hStdInput = handles[0];
         startup.StartupInfo.hStdOutput = handles[1];
         startup.StartupInfo.hStdError = handles[2];
