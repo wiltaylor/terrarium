@@ -711,8 +711,14 @@ async fn reopened_dependency_resets_only_unacted_waits() {
                 .is_some_and(|s| s.contains("moved back out"))
         }));
     }
-    assert_eq!(td.get(&format!("/api/cards/{pending}")).await.ok()["blocked_by"], json!([dep]));
-    assert_eq!(td.get(&format!("/api/cards/{acted}")).await.ok()["blocked_by"], json!([]));
+    assert_eq!(
+        td.get(&format!("/api/cards/{pending}")).await.ok()["blocked_by"],
+        json!([dep])
+    );
+    assert_eq!(
+        td.get(&format!("/api/cards/{acted}")).await.ok()["blocked_by"],
+        json!([])
+    );
     move_to(&td, &dep, "accepted").await;
     assert!(met(&td, &pending).await);
 }
