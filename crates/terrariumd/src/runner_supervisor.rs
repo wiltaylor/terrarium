@@ -5654,10 +5654,24 @@ impl Supervisor for RunnerSupervisor {
             // not an empty account. Compare the account the next launch
             // would actually select, rather than restarting every default
             // account runner whenever the daemon recovers it.
-            let desired_account = agent
-                .subscription
-                .clone()
-                .or(self.store_view(&agent).await.default_account);
+            let desired_account = match (&agent.subscription, self.state()) {
+                (Some(account), _) => Some(account.clone()),
+                (None, Some(state)) if agent.harness != HarnessId::Pi => {
+                    let harness = agent.harness;
+                    match state
+                        .db
+                        .read(move |c| crate::store::subscriptions::default_for(c, harness))
+                        .await
+                    {
+                        Ok(account) => account,
+                        Err(e) => {
+                            warn!(agent = %id, "cannot read the recovery account; keeping the running account: {e}");
+                            launched.account.clone()
+                        }
+                    }
+                }
+                _ => None,
+            };
             let settled = if let Some(slot) = lock(&self.inner.slots).get_mut(&id) {
                 slot.harness_version = version;
                 // A swap that the stored agent names and that the harness
