@@ -7,6 +7,134 @@ use terrarium_core::live_workspace::{
 };
 use ulid::Ulid;
 
+/// Covers the entire test, including Tokio runtime destruction. A Tokio timer
+/// cannot interrupt a synchronous mutex wait or a stuck blocking-pool shutdown.
+/// Expiry aborts this owned test process, never turns a timeout into a pass.
+struct TestDeadline {
+    done: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TestDeadline {
+    fn start(name: &'static str) -> Self {
+        let (done, wait) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            if wait.recv_timeout(Duration::from_secs(120)).is_err() {
+                eprintln!("dispatcher test watchdog expired: {name}");
+                std::process::abort();
+            }
+        });
+        Self {
+            done: Some(done),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for TestDeadline {
+    fn drop(&mut self) {
+        if let Some(done) = self.done.take() {
+            let _ = done.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+macro_rules! bounded_test {
+    ($name:ident, $body:block) => {
+        #[test]
+        fn $name() {
+            let _deadline = TestDeadline::start(stringify!($name));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move { $body });
+            drop(runtime);
+        }
+    };
+}
+
+/// The SQLite hook owns no async timer. Its finite wait releases the DB even
+/// when the test thread cannot run. The acknowledgement distinguishes release
+/// from expiry, and all F7 assertions require the hook still to be holding.
+struct BlockingGate {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    done: std::sync::mpsc::Receiver<bool>,
+    held: Arc<AtomicBool>,
+}
+
+struct BlockingGateWait {
+    receive: std::sync::mpsc::Receiver<()>,
+    done: std::sync::mpsc::Sender<bool>,
+    held: Arc<AtomicBool>,
+    timeout: Duration,
+}
+
+impl BlockingGate {
+    fn new(timeout: Duration) -> (Self, BlockingGateWait) {
+        let (release, receive) = std::sync::mpsc::channel();
+        let (done, completion) = std::sync::mpsc::channel();
+        let held = Arc::new(AtomicBool::new(false));
+        (
+            Self {
+                release: Some(release),
+                done: completion,
+                held: held.clone(),
+            },
+            BlockingGateWait { receive, done, held, timeout },
+        )
+    }
+
+    fn assert_held(&self) {
+        assert!(
+            self.held.load(Ordering::SeqCst),
+            "SQLite gate not held or expired"
+        );
+    }
+
+    fn release_checked(&mut self) {
+        self.assert_held();
+        self.release.take().unwrap().send(()).expect("SQLite gate already expired");
+        assert!(
+            self.done.recv_timeout(Duration::from_secs(5))
+                .expect("SQLite gate release acknowledgement deadline"),
+            "SQLite gate timed out instead of receiving release"
+        );
+    }
+}
+
+impl Drop for BlockingGate {
+    fn drop(&mut self) {
+        // Nonblocking and panic-free, including test assertion failure/unwind.
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+impl BlockingGateWait {
+    fn hold(&self, arrived: oneshot::Sender<()>) -> bool {
+        self.held.store(true, Ordering::SeqCst);
+        let _ = arrived.send(());
+        let released = self.receive.recv_timeout(self.timeout).is_ok();
+        self.held.store(false, Ordering::SeqCst);
+        let _ = self.done.send(released);
+        released
+    }
+}
+
+async fn receive<T>(wait: oneshot::Receiver<T>) -> Result<T, oneshot::error::RecvError> {
+    tokio::time::timeout(Duration::from_secs(20), wait).await.expect("fake receipt deadline")
+}
+
+async fn next_call(calls: &mut mpsc::UnboundedReceiver<Call>) -> Call {
+    tokio::time::timeout(Duration::from_secs(20), calls.recv()).await
+        .expect("fake exchange deadline").expect("fake exchange channel closed")
+}
+
 struct Call {
     bytes: Arc<[u8]>,
     reply: oneshot::Sender<ApiResult<(Envelope, Reply)>>,
@@ -26,7 +154,7 @@ impl Transport for Fake {
         Box::pin(async move {
             let (reply, wait) = oneshot::channel();
             self.0.send(Call { bytes, reply }).unwrap();
-            wait.await.map_err(|_| fenced())?
+            receive(wait).await.map_err(|_| fenced())?
         })
     }
 }
@@ -137,12 +265,11 @@ async fn seed(db: &Db) -> operations::Grant {
     }).await.unwrap()
 }
 
-#[tokio::test]
-async fn same_owner_serializes_allocation_through_runtime_and_caller_drop_is_not_cancellation() {
+bounded_test!(same_owner_serializes_allocation_through_runtime_and_caller_drop_is_not_cancellation, {
     let mut f = Fixture::new().await;
     let (transport, mut calls) = fake();
     let wait = f.submit(transport.clone());
-    let call = calls.recv().await.unwrap();
+    let call = next_call(&mut calls).await;
     let original = call.envelope();
     drop(wait); // Allocated work belongs to the worker, not its HTTP waiter.
     let revoke = f
@@ -160,14 +287,14 @@ async fn same_owner_serializes_allocation_through_runtime_and_caller_drop_is_not
     assert_eq!(f.state().await, ("verified".into(), 1, 0, 0));
     assert!(calls.try_recv().is_err());
     call.respond(Reply::Applied);
-    let cleanup = calls.recv().await.unwrap();
+    let cleanup = next_call(&mut calls).await;
     assert_eq!(cleanup.envelope().original.revision, 2);
     assert_eq!(
         cleanup.envelope().original.kind,
         terrarium_core::live_workspace::Kind::Revoke
     );
     cleanup.respond(Reply::PathRevokedVerified);
-    revoke.await.unwrap().unwrap();
+    receive(revoke).await.unwrap().unwrap();
     assert_eq!(f.state().await, ("verified".into(), 2, 2, 0));
     let operation = original.original.operation;
     f.dispatch.db.write_full("system", move |t| {
@@ -180,34 +307,32 @@ async fn same_owner_serializes_allocation_through_runtime_and_caller_drop_is_not
         assert_eq!(delivery, "apply");
         Ok(())
     }).await.unwrap();
-}
+});
 
-#[tokio::test]
-async fn authority_ends_during_io_without_owner_or_permit_and_truthful_apply_precedes_revoke() {
+bounded_test!(authority_ends_during_io_without_owner_or_permit_and_truthful_apply_precedes_revoke, {
     let mut f = Fixture::new().await;
     let (transport, mut calls) = fake();
     let wait = f.submit(transport);
-    let call = calls.recv().await.unwrap();
+    let call = next_call(&mut calls).await;
     let frozen = call.bytes.clone();
     f.ended().await;
     assert_eq!(f.state().await.1, 1); // No concurrent allocate_revoke/delivery mutation.
     assert_eq!(call.bytes, frozen);
     call.respond(Reply::Applied);
-    let cleanup = calls.recv().await.unwrap();
+    let cleanup = next_call(&mut calls).await;
     assert_eq!(f.state().await.3, 0); // Renewed authority prevents publication.
     assert_eq!(cleanup.envelope().original.revision, 2);
     cleanup.respond(Reply::PathRevokedVerified);
-    wait.await.unwrap().unwrap();
+    receive(wait).await.unwrap().unwrap();
     assert_eq!(f.state().await, ("verified".into(), 2, 2, 0));
-}
+});
 
-#[tokio::test]
-async fn saturated_same_owner_queue_does_not_take_unrelated_transport_permits() {
+bounded_test!(saturated_same_owner_queue_does_not_take_unrelated_transport_permits, {
     let mut f = Fixture::new().await;
     f.dispatch.permits = Arc::new(Semaphore::new(2));
     let (transport, mut calls) = fake();
     let wait = f.submit(transport.clone());
-    let call = calls.recv().await.unwrap();
+    let call = next_call(&mut calls).await;
     let mut queued = Vec::new();
     for _ in 0..32 {
         queued.push(
@@ -230,25 +355,24 @@ async fn saturated_same_owner_queue_does_not_take_unrelated_transport_permits() 
             transport,
         )
         .unwrap();
-    let other_call = calls.recv().await.unwrap();
+    let other_call = next_call(&mut calls).await;
     assert_ne!(
         other_call.envelope().original.runtime.registration,
         f.grant.registration
     );
     other_call.respond(Reply::Applied);
-    unrelated.await.unwrap().unwrap();
+    receive(unrelated).await.unwrap().unwrap();
     drop(queued); // Queued dropped callers allocate nothing and release queue space.
     call.respond(Reply::Applied);
-    wait.await.unwrap().unwrap();
+    receive(wait).await.unwrap().unwrap();
     assert_eq!(f.state().await.1, 1);
-}
+});
 
-#[tokio::test]
-async fn dropped_queued_revoke_never_allocates() {
+bounded_test!(dropped_queued_revoke_never_allocates, {
     let mut f = Fixture::new().await;
     let (transport, mut calls) = fake();
     let wait = f.submit(transport.clone());
-    let call = calls.recv().await.unwrap();
+    let call = next_call(&mut calls).await;
     let queued = f
         .dispatch
         .submit(
@@ -263,7 +387,7 @@ async fn dropped_queued_revoke_never_allocates() {
         .unwrap();
     drop(queued);
     call.respond(Reply::Applied);
-    wait.await.unwrap().unwrap();
+    receive(wait).await.unwrap().unwrap();
     f.dispatch
         .submit(f.grant.registration, Command::Drain, transport)
         .unwrap()
@@ -271,22 +395,21 @@ async fn dropped_queued_revoke_never_allocates() {
         .unwrap()
         .unwrap();
     assert_eq!(f.state().await, ("verified".into(), 1, 1, 1));
-}
+});
 
-#[tokio::test]
-async fn wrong_receipt_fences_expected_owner_not_attacker_and_retains_originals() {
+bounded_test!(wrong_receipt_fences_expected_owner_not_attacker_and_retains_originals, {
     let mut f = Fixture::new().await;
     let other = seed(&f.dispatch.db).await;
     let other_id = other.registration;
     let (transport, mut calls) = fake();
     let wait = f.submit(transport.clone());
-    let call = calls.recv().await.unwrap();
+    let call = next_call(&mut calls).await;
     let original = call.envelope();
     let mut wrong = original.clone();
     wrong.original.operation = other.operation;
     wrong.original.runtime.registration = other_id;
     call.reply.send(Ok((wrong, Reply::Applied))).unwrap();
-    assert!(wait.await.unwrap().is_err());
+    assert!(receive(wait).await.unwrap().is_err());
     f.fenced().await;
     assert!(
         f.dispatch
@@ -312,20 +435,19 @@ async fn wrong_receipt_fences_expected_owner_not_attacker_and_retains_originals(
         })
         .await
         .unwrap();
-}
+});
 
-#[tokio::test]
-async fn unknown_send_and_failed_fence_write_keep_memory_poison_and_slot() {
+bounded_test!(unknown_send_and_failed_fence_write_keep_memory_poison_and_slot, {
     let mut f = Fixture::new().await;
     let (transport, mut calls) = fake();
     let wait = f.submit(transport.clone());
-    let call = calls.recv().await.unwrap(); // Fake partial-send/remote commit, then lost receipt.
+    let call = next_call(&mut calls).await; // Fake partial-send/remote commit, then lost receipt.
     f.dispatch.db.write_full("system", |t| {
         t.execute_batch("CREATE TRIGGER injected_fence_failure BEFORE UPDATE OF state ON live_workspace_targets WHEN NEW.state = 'quarantined' BEGIN SELECT RAISE(ABORT,'injected fence persistence failure'); END;")?;
         Ok(())
     }).await.unwrap();
     drop(call);
-    assert!(wait.await.unwrap().is_err());
+    assert!(receive(wait).await.unwrap().is_err());
     let entry = &f.dispatch.entries[&f.grant.registration];
     // Wait for the worker's synchronous poison, not the best-effort DB fence.
     while !entry.task.is_finished() {
@@ -339,7 +461,7 @@ async fn unknown_send_and_failed_fence_write_keep_memory_poison_and_slot() {
     );
     assert_eq!(f.dispatch.entries.len(), 1);
     assert_eq!(f.state().await.2, 0);
-}
+});
 
 struct PanicTransport;
 impl Transport for PanicTransport {
@@ -348,35 +470,33 @@ impl Transport for PanicTransport {
     }
 }
 
-#[tokio::test]
-async fn panic_and_worker_abort_fence_without_replacement() {
+bounded_test!(panic_and_worker_abort_fence_without_replacement, {
     let mut f = Fixture::new().await;
     let wait = f.submit(Arc::new(PanicTransport));
-    assert!(wait.await.unwrap().is_err());
+    assert!(receive(wait).await.unwrap().is_err());
     f.fenced().await;
     let mut g = Fixture::new().await;
     let (transport, mut calls) = fake();
     let wait = g.submit(transport.clone());
-    let _call = calls.recv().await.unwrap();
+    let _call = next_call(&mut calls).await;
     g.dispatch.entries[&g.grant.registration].task.abort();
-    assert!(wait.await.is_err());
+    assert!(receive(wait).await.is_err());
     g.fenced().await;
     assert!(
         g.dispatch
             .submit(g.grant.registration, Command::Drain, transport)
             .is_err()
     );
-}
+});
 
-#[tokio::test]
-async fn timeout_is_unknown_not_permission_for_newer_revision() {
+bounded_test!(timeout_is_unknown_not_permission_for_newer_revision, {
     let mut f = Fixture::new().await;
     let (transport, mut calls) = fake();
     let wait = f.submit(transport.clone());
-    let _call = calls.recv().await.unwrap();
+    let _call = next_call(&mut calls).await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(11)).await;
-    assert!(wait.await.unwrap().is_err());
+    assert!(receive(wait).await.unwrap().is_err());
     tokio::time::resume();
     f.fenced().await;
     assert!(
@@ -385,10 +505,9 @@ async fn timeout_is_unknown_not_permission_for_newer_revision() {
             .is_err()
     );
     assert_eq!(f.state().await.2, 0);
-}
+});
 
-#[tokio::test]
-async fn saved_helper_receipt_skips_transport_but_startup_quarantine_refuses_it() {
+bounded_test!(saved_helper_receipt_skips_transport_but_startup_quarantine_refuses_it, {
     let mut f = Fixture::new().await;
     let Command::Grant(grant) = f.command() else {
         unreachable!()
@@ -436,10 +555,9 @@ async fn saved_helper_receipt_skips_transport_but_startup_quarantine_refuses_it(
     );
     assert!(calls.try_recv().is_err());
     assert_eq!(g.state().await.3, 0);
-}
+});
 
-#[tokio::test]
-async fn authority_loss_before_selection_sends_original_superseded_barrier_then_revoke() {
+bounded_test!(authority_loss_before_selection_sends_original_superseded_barrier_then_revoke, {
     let mut f = Fixture::new().await;
     let Command::Grant(grant) = f.command() else {
         unreachable!()
@@ -456,7 +574,7 @@ async fn authority_loss_before_selection_sends_original_superseded_barrier_then_
         .dispatch
         .submit(f.grant.registration, Command::Drain, transport)
         .unwrap();
-    let barrier = calls.recv().await.unwrap();
+    let barrier = next_call(&mut calls).await;
     assert_eq!(barrier.envelope().original, original.original);
     assert_eq!(barrier.envelope().original_hash, original.original_hash);
     assert_eq!(
@@ -464,20 +582,19 @@ async fn authority_loss_before_selection_sends_original_superseded_barrier_then_
         terrarium_core::live_workspace::Delivery::Superseded
     );
     barrier.respond(Reply::Superseded);
-    let revoke = calls.recv().await.unwrap();
+    let revoke = next_call(&mut calls).await;
     assert_eq!(revoke.envelope().original.revision, 2);
     revoke.respond(Reply::PathRevokedVerified);
-    wait.await.unwrap().unwrap();
+    receive(wait).await.unwrap().unwrap();
     assert_eq!(f.state().await.3, 0);
-}
+});
 
-#[tokio::test]
-async fn receipt_and_runtime_persistence_failures_fence_and_preserve_truth() {
+bounded_test!(receipt_and_runtime_persistence_failures_fence_and_preserve_truth, {
     for boundary in ["helper_committed", "daemon_committed"] {
         let mut f = Fixture::new().await;
         let (transport, mut calls) = fake();
         let wait = f.submit(transport);
-        let call = calls.recv().await.unwrap();
+        let call = next_call(&mut calls).await;
         let sql = format!(
             "CREATE TRIGGER injected_failure BEFORE UPDATE OF phase ON live_workspace_operations WHEN NEW.phase = '{boundary}' BEGIN SELECT RAISE(ABORT,'injected commit failure'); END;"
         );
@@ -490,7 +607,7 @@ async fn receipt_and_runtime_persistence_failures_fence_and_preserve_truth() {
             .await
             .unwrap();
         call.respond(Reply::Applied);
-        assert!(wait.await.unwrap().is_err());
+        assert!(receive(wait).await.unwrap().is_err());
         f.fenced().await;
         let expected = boundary == "daemon_committed";
         f.dispatch
@@ -508,14 +625,13 @@ async fn receipt_and_runtime_persistence_failures_fence_and_preserve_truth() {
             .unwrap();
         assert_eq!(f.state().await.2, 0);
     }
-}
+});
 
-#[tokio::test]
-async fn authority_loss_after_receipt_before_runtime_never_attaches() {
+bounded_test!(authority_loss_after_receipt_before_runtime_never_attaches, {
     let mut f = Fixture::new().await;
     let (transport, mut calls) = fake();
     let wait = f.submit(transport);
-    let call = calls.recv().await.unwrap();
+    let call = next_call(&mut calls).await;
     // End the independently stored policy fact at the precise durable receipt
     // boundary. This does not change the selected operation's delivery.
     f.dispatch.db.write_full("system", |t| {
@@ -523,19 +639,18 @@ async fn authority_loss_after_receipt_before_runtime_never_attaches() {
         Ok(())
     }).await.unwrap();
     call.respond(Reply::Applied);
-    let cleanup = calls.recv().await.unwrap();
+    let cleanup = next_call(&mut calls).await;
     assert_eq!(f.state().await.3, 0);
     cleanup.respond(Reply::PathRevokedVerified);
-    wait.await.unwrap().unwrap();
+    receive(wait).await.unwrap().unwrap();
     assert_eq!(f.state().await.3, 0);
-}
+});
 
-#[tokio::test]
-async fn queue_deadline_precedes_allocation_and_expired_work_does_not_poison_owner() {
+bounded_test!(queue_deadline_precedes_allocation_and_expired_work_does_not_poison_owner, {
     let mut f = Fixture::new().await;
     let (transport, mut calls) = fake();
     let wait = f.submit(transport.clone());
-    let call = calls.recv().await.unwrap();
+    let call = next_call(&mut calls).await;
     let expired = f
         .dispatch
         .submit(
@@ -552,8 +667,8 @@ async fn queue_deadline_precedes_allocation_and_expired_work_does_not_poison_own
     tokio::time::advance(Duration::from_secs(6)).await;
     call.respond(Reply::Applied);
     tokio::time::resume();
-    wait.await.unwrap().unwrap();
-    assert!(expired.await.unwrap().is_err());
+    receive(wait).await.unwrap().unwrap();
+    assert!(receive(expired).await.unwrap().is_err());
     f.dispatch
         .submit(f.grant.registration, Command::Drain, transport)
         .unwrap()
@@ -561,7 +676,7 @@ async fn queue_deadline_precedes_allocation_and_expired_work_does_not_poison_own
         .unwrap()
         .unwrap();
     assert_eq!(f.state().await, ("verified".into(), 1, 1, 1));
-}
+});
 
 fn config(root: &std::path::Path, socket: &str) -> crate::DaemonConfig {
     crate::DaemonConfig {
@@ -582,8 +697,7 @@ fn config(root: &std::path::Path, socket: &str) -> crate::DaemonConfig {
     }
 }
 
-#[tokio::test]
-async fn actual_daemon_startup_refuses_second_owner_and_worker_fence_outlives_shutdown() {
+bounded_test!(actual_daemon_startup_refuses_second_owner_and_worker_fence_outlives_shutdown, {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("config")).unwrap();
     let mut daemon = crate::start(config(root.path(), "first.sock"))
@@ -599,12 +713,12 @@ async fn actual_daemon_startup_refuses_second_owner_and_worker_fence_outlives_sh
         .workspace_dispatch
         .submit(registration, Command::Grant(Box::new(grant)), transport)
         .unwrap();
-    let _unknown = calls.recv().await.unwrap();
+    let _unknown = next_call(&mut calls).await;
     let lock = Arc::downgrade(&daemon._state_lock);
     daemon.shutdown(); // Aborts but cannot synchronously destroy an async worker.
     let second = crate::start(config(root.path(), "second.sock")).await;
     assert!(second.err().unwrap().to_string().contains("another daemon"));
-    assert!(wait.await.is_err());
+    assert!(receive(wait).await.is_err());
     tokio::time::timeout(Duration::from_secs(10), async {
         while lock.upgrade().is_some() {
             tokio::task::yield_now().await;
@@ -620,7 +734,7 @@ async fn actual_daemon_startup_refuses_second_owner_and_worker_fence_outlives_sh
         .workspace_dispatch
         .submit(registration, Command::Drain, transport)
         .unwrap();
-    assert!(wait.await.unwrap().is_err());
+    assert!(receive(wait).await.unwrap().is_err());
     assert!(calls.try_recv().is_err());
     restarted.shutdown_and_wait().await;
     // The waiting shutdown variant drains both workers and their fence writes
@@ -638,23 +752,22 @@ async fn actual_daemon_startup_refuses_second_owner_and_worker_fence_outlives_sh
             transport,
         )
         .unwrap();
-    let _unknown = calls.recv().await.unwrap();
+    let _unknown = next_call(&mut calls).await;
     daemon.shutdown_and_wait().await;
-    assert!(wait.await.is_err());
+    assert!(receive(wait).await.is_err());
     crate::start(config(root.path(), "fifth.sock"))
         .await
         .unwrap()
         .shutdown_and_wait()
         .await;
-}
+});
 
-#[tokio::test]
-async fn transport_permit_bound_is_shared_only_by_runnable_owners() {
+bounded_test!(transport_permit_bound_is_shared_only_by_runnable_owners, {
     let mut f = Fixture::new().await;
     f.dispatch.permits = Arc::new(Semaphore::new(2));
     let (transport, mut calls) = fake();
     let first = f.submit(transport.clone());
-    let first_call = calls.recv().await.unwrap();
+    let first_call = next_call(&mut calls).await;
     let second = seed(&f.dispatch.db).await;
     let second = f
         .dispatch
@@ -664,7 +777,7 @@ async fn transport_permit_bound_is_shared_only_by_runnable_owners() {
             transport.clone(),
         )
         .unwrap();
-    let second_call = calls.recv().await.unwrap();
+    let second_call = next_call(&mut calls).await;
     let third = seed(&f.dispatch.db).await;
     let third_id = third.registration.0.to_string();
     let third = f
@@ -686,17 +799,16 @@ async fn transport_permit_bound_is_shared_only_by_runnable_owners() {
     assert!(calls.try_recv().is_err());
     assert_eq!(f.dispatch.permits.available_permits(), 0);
     first_call.respond(Reply::Applied);
-    let third_call = calls.recv().await.unwrap();
+    let third_call = next_call(&mut calls).await;
     third_call.respond(Reply::Applied);
     second_call.respond(Reply::Applied);
-    first.await.unwrap().unwrap();
-    second.await.unwrap().unwrap();
-    third.await.unwrap().unwrap();
+    receive(first).await.unwrap().unwrap();
+    receive(second).await.unwrap().unwrap();
+    receive(third).await.unwrap().unwrap();
     assert_eq!(f.dispatch.permits.available_permits(), 2);
-}
+});
 
-#[tokio::test]
-async fn retained_transaction_owns_flock_after_callback_through_commit_and_rollback() {
+bounded_test!(retained_transaction_owns_flock_after_callback_through_commit_and_rollback, {
     for boundary in ["commit", "commit_error", "callback_error", "callback_panic"] {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("config")).unwrap();
@@ -709,7 +821,7 @@ async fn retained_transaction_owns_flock_after_callback_through_commit_and_rollb
         let marked = Arc::new(AtomicBool::new(false));
         let hook_marked = marked.clone();
         let (arrived, arrival) = oneshot::channel();
-        let (release, gate) = std::sync::mpsc::channel();
+        let (mut gate, blocker) = BlockingGate::new(Duration::from_secs(20));
         let mut arrived = Some(arrived);
         db.read_now(move |c| {
             if boundary.starts_with("callback") {
@@ -717,8 +829,7 @@ async fn retained_transaction_owns_flock_after_callback_through_commit_and_rollb
                     if hook_marked.load(Ordering::SeqCst)
                         && let Some(arrived) = arrived.take()
                     {
-                        let _ = arrived.send(());
-                        let _ = gate.recv();
+                        blocker.hold(arrived);
                     }
                 }));
             } else {
@@ -726,8 +837,7 @@ async fn retained_transaction_owns_flock_after_callback_through_commit_and_rollb
                     if hook_marked.load(Ordering::SeqCst)
                         && let Some(arrived) = arrived.take()
                     {
-                        let _ = arrived.send(());
-                        let _ = gate.recv();
+                        blocker.hold(arrived);
                     }
                     hook_marked.load(Ordering::SeqCst) && boundary == "commit_error"
                 }));
@@ -752,6 +862,7 @@ async fn retained_transaction_owns_flock_after_callback_through_commit_and_rollb
             .await
             .unwrap()
             .unwrap();
+        gate.assert_held();
         job.abort();
         assert!(job.await.unwrap_err().is_cancelled());
         daemon.shutdown();
@@ -766,7 +877,8 @@ async fn retained_transaction_owns_flock_after_callback_through_commit_and_rollb
             "{boundary}"
         );
         assert!(!root.path().join("second.sock").exists());
-        release.send(()).unwrap();
+        gate.assert_held();
+        gate.release_checked();
         tokio::time::timeout(Duration::from_secs(20), async {
             while weak.upgrade().is_some() {
                 tokio::task::yield_now().await;
@@ -780,10 +892,9 @@ async fn retained_transaction_owns_flock_after_callback_through_commit_and_rollb
             .shutdown_and_wait()
             .await;
     }
-}
+});
 
-#[tokio::test]
-async fn final_dispatch_poison_transaction_retains_flock_after_fence_waiter_is_aborted() {
+bounded_test!(final_dispatch_poison_transaction_retains_flock_after_fence_waiter_is_aborted, {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("config")).unwrap();
     let mut daemon = crate::start(config(root.path(), "first.sock"))
@@ -799,11 +910,11 @@ async fn final_dispatch_poison_transaction_retains_flock_after_fence_waiter_is_a
             transport,
         )
         .unwrap();
-    let _unknown = calls.recv().await.unwrap();
+    let _unknown = next_call(&mut calls).await;
     let marked = Arc::new(AtomicBool::new(false));
     let commit_marked = marked.clone();
     let (arrived, arrival) = oneshot::channel();
-    let (release, gate) = std::sync::mpsc::channel();
+    let (mut gate, blocker) = BlockingGate::new(Duration::from_secs(20));
     let mut arrived = Some(arrived);
     daemon
         .state
@@ -828,8 +939,7 @@ async fn final_dispatch_poison_transaction_retains_flock_after_fence_waiter_is_a
                 if commit_marked.load(Ordering::SeqCst)
                     && let Some(arrived) = arrived.take()
                 {
-                    let _ = arrived.send(());
-                    let _ = gate.recv();
+                    blocker.hold(arrived);
                 }
                 false
             }));
@@ -839,11 +949,12 @@ async fn final_dispatch_poison_transaction_retains_flock_after_fence_waiter_is_a
     let fences = daemon.workspace_dispatch.fences.clone();
     let weak = Arc::downgrade(&daemon._state_lock);
     daemon.shutdown();
-    assert!(wait.await.is_err());
+    assert!(receive(wait).await.is_err());
     tokio::time::timeout(Duration::from_secs(20), arrival)
         .await
         .unwrap()
         .unwrap();
+    gate.assert_held();
     let tasks = std::mem::take(&mut *fences.lock().unwrap());
     assert_eq!(tasks.len(), 1);
     for task in tasks {
@@ -853,7 +964,8 @@ async fn final_dispatch_poison_transaction_retains_flock_after_fence_waiter_is_a
     assert_eq!(weak.strong_count(), 1); // Not held by any cancelable waiter.
     let second = crate::start(config(root.path(), "second.sock")).await;
     assert!(second.err().unwrap().to_string().contains("another daemon"));
-    release.send(()).unwrap();
+    gate.assert_held();
+    gate.release_checked();
     tokio::time::timeout(Duration::from_secs(20), async {
         while weak.upgrade().is_some() {
             tokio::task::yield_now().await;
@@ -866,4 +978,34 @@ async fn final_dispatch_poison_transaction_retains_flock_after_fence_waiter_is_a
         .unwrap()
         .shutdown_and_wait()
         .await;
+});
+
+#[test]
+fn expired_blocking_gate_is_rejected_without_tokio_progress() {
+    let _deadline = TestDeadline::start("expired_blocking_gate_is_rejected_without_tokio_progress");
+    let (mut gate, blocker) = BlockingGate::new(Duration::from_millis(10));
+    let (arrived, arrival) = oneshot::channel();
+    let worker = std::thread::spawn(move || blocker.hold(arrived));
+    arrival.blocking_recv().unwrap();
+    assert!(!worker.join().unwrap(), "expiry must report failure");
+    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        gate.release_checked();
+    }));
+    assert!(rejected.is_err(), "timeout must not pass the F7 release check");
+}
+
+#[test]
+fn assertion_unwind_releases_blocking_gate_without_tokio_progress() {
+    let _deadline = TestDeadline::start("assertion_unwind_releases_blocking_gate_without_tokio_progress");
+    let (gate, blocker) = BlockingGate::new(Duration::from_secs(20));
+    let (arrived, arrival) = oneshot::channel();
+    let worker = std::thread::spawn(move || blocker.hold(arrived));
+    arrival.blocking_recv().unwrap();
+    gate.assert_held();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _gate = gate;
+        panic!("injected test assertion unwind");
+    }));
+    assert!(failed.is_err());
+    assert!(worker.join().unwrap(), "unwind must release rather than expire");
 }
