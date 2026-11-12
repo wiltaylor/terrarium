@@ -4096,6 +4096,108 @@ async fn release_handoff_oversized_publish_fails_without_partial_files() {
     );
 }
 
+#[tokio::test]
+async fn release_handoff_input_symlinks_cannot_mutate_external_paths() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use base64::Engine;
+    for (leaf, dangling) in [(false, false), (false, true), (true, true)] {
+        let lab = lab(1).await;
+        release_client(&lab, "rel-client").await;
+        let external = lab._dirs.path().join("external");
+        if !dangling {
+            std::fs::create_dir(&external).unwrap();
+            std::fs::set_permissions(&external, std::fs::Permissions::from_mode(0o750)).unwrap();
+        }
+        let link = if leaf {
+            std::fs::create_dir(lab.work.join(".terrarium")).unwrap();
+            lab.work.join(".terrarium/release-input")
+        } else { lab.work.join(".terrarium") };
+        symlink(&external, link).unwrap();
+        git(&lab.work, &["add", "-A"]);
+        git(&lab.work, &["commit", "-qm", "symlink input parent"]);
+        git(&lab.work, &["push", "-q", "origin", "main"]);
+        lab.td.put("/api/projects/p/delivery", json!({
+            "target":"p-box", "recipe":"true", "next_repos":["app"],
+            "work_dir":lab._dirs.path().join("jobs"), "release_target":"rel-client",
+            "release_recipe":"mkdir handoff && printf apk > handoff/signed.apk",
+            "release_outputs":"handoff"
+        })).await.ok();
+        let card = lab.card("symlink handoff", "main").await;
+        let endpoint = format!("/api/cards/{card}/release");
+        let first = lab.td.post_as(&lab.lead, &endpoint, json!({})).await.ok()["job"]["id"].as_str().unwrap().to_owned();
+        let jobs = lab.until_idle().await;
+        assert_eq!(jobs.iter().find(|j| j["id"] == first).unwrap()["state"], "passed", "{jobs:?}");
+        lab.td.post_as(&lab.lead, &format!("/api/jobs/{first}/attachment"), json!({"data":base64::engine::general_purpose::STANDARD.encode(b"smoke")})).await.ok();
+        let second = lab.td.post_as(&lab.lead, &endpoint, json!({"after":first})).await.ok()["job"]["id"].as_str().unwrap().to_owned();
+        let jobs = lab.until_idle().await;
+        let failed = jobs.iter().find(|j| j["id"] == second).unwrap();
+        assert_eq!(failed["state"], "failed", "{failed:?}");
+        assert!(failed["tail"].as_str().unwrap().contains("cannot deliver release phase-2 inputs"));
+        if dangling { assert!(!external.exists()); }
+        else {
+            assert_eq!(std::fs::read_dir(&external).unwrap().count(), 0);
+            assert_eq!(std::fs::metadata(&external).unwrap().permissions().mode() & 0o777, 0o750);
+        }
+    }
+}
+
+#[tokio::test]
+async fn release_handoff_retry_ignores_stale_checkout_archive() {
+    let lab = lab(1).await;
+    release_client(&lab, "rel-client").await;
+    lab.td.put("/api/projects/p/delivery", json!({
+        "target":"p-box", "recipe":"true", "next_repos":["app"],
+        "work_dir":lab._dirs.path().join("jobs"), "release_target":"rel-client",
+        "release_recipe":"printf interrupted > .terrarium-release-outputs.tar; mkdir handoff; printf apk > handoff/signed.apk",
+        "release_outputs":"handoff"
+    })).await.ok();
+    let card = lab.card("retry collection", "main").await;
+    for _ in 0..2 {
+        let id = lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/release"), json!({})).await.ok()["job"]["id"].as_str().unwrap().to_owned();
+        let jobs = lab.until_idle().await;
+        assert_eq!(jobs.iter().find(|j| j["id"] == id).unwrap()["state"], "passed", "{jobs:?}");
+        assert_eq!(std::fs::read(lab._dirs.path().join("jobs/p/slot--1/.terrarium-release-outputs.tar")).unwrap(), b"interrupted");
+    }
+}
+
+#[tokio::test]
+async fn release_handoff_cancelled_collection_leaves_no_staging_and_can_retry() {
+    let lab = lab(1).await;
+    release_client(&lab, "rel-client").await;
+    lab.td.put("/api/projects/p/delivery", json!({
+        "target":"p-box", "recipe":"true", "next_repos":["app"],
+        "work_dir":lab._dirs.path().join("jobs"), "release_target":"rel-client",
+        "release_recipe":"mkdir handoff; truncate -s 52428800 handoff/signed.apk; touch -a -t 200001010000 handoff/signed.apk",
+        "release_outputs":"handoff"
+    })).await.ok();
+    let card = lab.card("cancel collection", "main").await;
+    let endpoint = format!("/api/cards/{card}/release");
+    let id = lab.td.post_as(&lab.lead, &endpoint, json!({})).await.ok()["job"]["id"].as_str().unwrap().to_owned();
+    let tree = lab._dirs.path().join("jobs/p/slot--1");
+    let start = Instant::now();
+    // stat does not change atime. The first chunk read does, proving this
+    // cancellation is during collection, not during the recipe.
+    loop {
+        if std::fs::metadata(tree.join("handoff/signed.apk")).ok()
+            .and_then(|m| m.accessed().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_some_and(|t| t.as_secs() > 1_000_000_000) { break; }
+        assert!(start.elapsed() < DEADLINE, "collection did not start");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    lab.td.delete(&format!("/api/jobs/{id}")).await.ok();
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.iter().find(|j| j["id"] == id).unwrap()["state"], "cancelled", "{jobs:?}");
+    assert!(!tree.join(".terrarium-release-outputs.tar").exists());
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let stored = state.state_dir.join("release-handoffs").join(&id);
+    assert!(!stored.exists() || std::fs::read_dir(stored).unwrap().next().is_none());
+    let retry = lab.td.post_as(&lab.lead, &endpoint, json!({})).await.ok()["job"]["id"].as_str().unwrap().to_owned();
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.iter().find(|j| j["id"] == retry).unwrap()["state"], "passed", "{jobs:?}");
+    assert!(!tree.join(".terrarium-release-outputs.tar").exists());
+}
+
 /// TER-623: a release job runs the release recipe on the release target,
 /// with the release secrets in its env and the release VM relay as
 /// TERRARIUM_DOCKER_HOST. The VM key never reaches the recipe, a merge job

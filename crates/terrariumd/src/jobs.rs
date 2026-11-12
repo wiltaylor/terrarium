@@ -3409,8 +3409,8 @@ async fn steps(
                     "sh".into(),
                     "-c".into(),
                     format!(
-                        "set -eu; test ! -e {0}; mkdir -p {0}/artifacts; tar -xf - -C {0}; chmod -R a-w {0}",
-                        crate::executor::sh_quote(&input_dir)
+                        "set -eu; cd {}; test ! -L .terrarium; if test -e .terrarium; then test -d .terrarium; else mkdir -- .terrarium; fi; test ! -L .terrarium/release-input; mkdir -- .terrarium/release-input; mkdir -- .terrarium/release-input/artifacts; tar -xf - -C .terrarium/release-input; chmod -R a-w .terrarium/release-input",
+                        crate::executor::sh_quote(x.dir)
                     ),
                 ],
                 holder: x.holder.clone(),
@@ -3579,40 +3579,27 @@ async fn finish_recipe(
             ));
         }
         let limit = crate::release_handoff::output_limit()?;
-        let archive = format!("{}/.terrarium-release-outputs.tar", x.dir);
-        let archive_arg = crate::executor::sh_quote(&archive);
-        script.push_str(&format!("cd \"$p\"; find . -mindepth 1 -maxdepth 1 -printf '%s\\n' | awk '{{s+=$1; n++}} END {{if(s>{limit} || n>1024) exit 79}}'; umask 077; set -C; find . -mindepth 1 -maxdepth 1 -printf '%f\\0' | tar --null --no-recursion -T - -cf - > {archive_arg}; wc -c < {archive_arg}"));
+        script.push_str("cd \"$p\"; find . -mindepth 1 -maxdepth 1 -printf '%f\\0%y\\0%s\\0%n\\0' | head -c 262145");
         let cmd = RemoteCmd {
             argv: vec!["sh".into(), "-c".into(), script],
             holder: x.holder.clone(),
             timeout_secs: Some(120),
             ..RemoteCmd::default()
         };
-        let output = x.run(&cmd, STEP_MAX, None).await?;
-        let cap = limit as usize + 2 * 1024 * 1024;
-        if exit_code(output.end.as_ref()) == Some(79) {
-            return Err(ApiError::invalid(format!(
-                "release artifacts exceed the per-job limit of {limit} bytes"
-            )));
-        }
+        let output = x.run(&cmd, 262145, None).await?;
         if !output.end.as_ref().is_some_and(End::success) {
             return Err(ApiError::conflict(format!(
                 "cannot collect declared release outputs ({})",
                 end_text(output.end.as_ref())
             )));
         }
-        let size = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse::<usize>()
-            .map_err(|_| ApiError::invalid("cannot read release archive size"))?;
-        if size > cap {
-            return Err(ApiError::invalid(format!(
-                "release artifacts exceed the per-job limit of {limit} bytes"
-            )));
-        }
-        let mut archive_bytes = Vec::with_capacity(size);
+        let sources = crate::release_handoff::sources(&output.stdout, limit)?;
+        let mut archive = tar::Builder::new(Vec::new());
         // Bounded sessions avoid overflowing the host's replay buffer. File
         // bytes bypass textual redaction and never enter a public exec session.
+        for (name, size) in sources {
+        let path = format!("{}/{directory}/{name}", x.dir);
+        let mut bytes = Vec::with_capacity(size);
         for index in 0..size.div_ceil(crate::release_handoff::CHUNK_SIZE) {
             if killed(&job.id) {
                 return Err(ApiError::conflict("the job was cancelled"));
@@ -3621,7 +3608,8 @@ async fn finish_recipe(
                 argv: low_priority(
                     vec![
                         "dd".into(),
-                        format!("if={archive}"),
+                        format!("if={path}"),
+                        "iflag=nofollow".into(),
                         format!("bs={}", crate::release_handoff::CHUNK_SIZE),
                         format!("skip={index}"),
                         "count=1".into(),
@@ -3654,22 +3642,22 @@ async fn finish_recipe(
             if let Some(report) = report {
                 let _ = crate::run_kill::report(report).await;
             }
-            let expected = crate::release_handoff::CHUNK_SIZE.min(size - archive_bytes.len());
+            let expected = crate::release_handoff::CHUNK_SIZE.min(size - bytes.len());
             if !chunk.end.as_ref().is_some_and(End::success) || chunk.stdout.len() != expected {
                 return Err(ApiError::conflict(format!(
-                    "cannot read release archive chunk ({})",
+                    "cannot read release output chunk ({})",
                     end_text(chunk.end.as_ref())
                 )));
             }
-            archive_bytes.extend_from_slice(&chunk.stdout);
+            bytes.extend_from_slice(&chunk.stdout);
         }
-        let cleanup = RemoteCmd {
-            argv: vec!["rm".into(), "-f".into(), "--".into(), archive],
-            holder: x.holder.clone(),
-            timeout_secs: Some(30),
-            ..RemoteCmd::default()
-        };
-        let _ = x.run(&cleanup, STEP_MAX, None).await;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(size as u64);
+        header.set_mode(0o600);
+        header.set_cksum();
+        archive.append_data(&mut header, &name, &bytes[..]).map_err(|e| ApiError::internal(format!("cannot stage release output: {e}")))?;
+        }
+        let archive_bytes = archive.into_inner().map_err(|e| ApiError::internal(format!("cannot finish release output staging: {e}")))?;
         crate::release_handoff::publish(&x.state.state_dir, &job.id, &archive_bytes[..], limit)?;
     }
     // TER-196: a run that the infrastructure lost is no red; [`run`]
