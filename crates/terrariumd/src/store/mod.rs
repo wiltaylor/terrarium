@@ -21,6 +21,7 @@ pub mod inbox;
 pub mod jobs;
 pub mod leases;
 pub mod links;
+pub mod live_workspaces;
 pub mod mail;
 pub mod memory;
 pub mod monitors;

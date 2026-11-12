@@ -2718,6 +2718,35 @@ impl Db {
         T: Send + 'static,
         F: for<'c> FnOnce(&mut Tx<'c>) -> ApiResult<T> + Send + 'static,
     {
+        self.write_with_durability(actor, f, false)
+    }
+
+    /// Security intents must survive power loss before a helper may act.
+    /// FULL is set under the connection lock, before BEGIN IMMEDIATE.
+    #[track_caller]
+    pub fn write_full<T, F>(
+        &self,
+        actor: impl Into<String>,
+        f: F,
+    ) -> impl std::future::Future<Output = ApiResult<T>> + '_
+    where
+        T: Send + 'static,
+        F: for<'c> FnOnce(&mut Tx<'c>) -> ApiResult<T> + Send + 'static,
+    {
+        self.write_with_durability(actor, f, true)
+    }
+
+    #[track_caller]
+    fn write_with_durability<T, F>(
+        &self,
+        actor: impl Into<String>,
+        f: F,
+        full: bool,
+    ) -> impl std::future::Future<Output = ApiResult<T>> + '_
+    where
+        T: Send + 'static,
+        F: for<'c> FnOnce(&mut Tx<'c>) -> ApiResult<T> + Send + 'static,
+    {
         let conn = self.conn.clone();
         let actor = actor.into();
         // The link of the request (TER-61 review round 5, F9): the
@@ -2748,6 +2777,9 @@ impl Db {
                 // The snapshot comes after the lock: a write that changed a
                 // secret swapped its matcher in before it let the lock go.
                 let result = (|| {
+                    if full {
+                        guard.pragma_update(None, "synchronous", "FULL")?;
+                    }
                     let redactor = handle.get();
                     // IMMEDIATE: the write lock comes at the start, so a write of
                     // another connection to the same file (a second daemon on the
