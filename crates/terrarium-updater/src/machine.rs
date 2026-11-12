@@ -486,7 +486,11 @@ impl Updater {
         let _ = self.resume_checked(cur, false).await;
     }
 
-    async fn resume_checked(&self, cur: &Container, require_confirmation: bool) -> Result<(), Fail> {
+    async fn resume_checked(
+        &self,
+        cur: &Container,
+        require_confirmation: bool,
+    ) -> Result<(), Fail> {
         let idx = self.begin_step("resume");
         match tokio::time::timeout(Duration::from_secs(30), async {
             loop {
@@ -520,11 +524,14 @@ impl Updater {
         })
         .await
         {
-            Ok(()) => { self.end_step(
-                idx,
-                StepState::Ok,
-                "the daemon takes new turns and jobs again",
-            ); Ok(()) },
+            Ok(()) => {
+                self.end_step(
+                    idx,
+                    StepState::Ok,
+                    "the daemon takes new turns and jobs again",
+                );
+                Ok(())
+            }
             _ => {
                 let warning = "cannot resume turns and jobs (values hidden)";
                 tracing::warn!("{warning}");
@@ -803,12 +810,7 @@ impl Updater {
             deadline: deadlines.map(|(_, switch, _)| switch),
             ..Default::default()
         };
-        let replace = self.replace(
-            &prepared,
-            &to,
-            restore.as_deref(),
-            &mut replacement,
-        );
+        let replace = self.replace(&prepared, &to, restore.as_deref(), &mut replacement);
         let replaced = if let Some((_, switch, _)) = deadlines {
             tokio::time::timeout_at(switch, replace)
                 .await
@@ -820,10 +822,9 @@ impl Updater {
         } else {
             replace.await
         };
-        if let Some((end, _, recovery)) = deadlines {
-            if let Err(e) = self.end_helper(&mut replacement.helper, recovery).await {
+        if let Some((end, _, recovery)) = deadlines
+            && let Err(e) = self.end_helper(&mut replacement.helper, recovery).await {
                 return Err(self.stop_recreate(&cur, &backup, end, e).await);
-            }
         }
         match replaced {
             Ok(()) => {
@@ -844,7 +845,9 @@ impl Updater {
                 Ok(Outcome::Succeeded)
             }
             Err(f) => {
-                if replacement.admission_attempted && let Some((end, _, _)) = deadlines {
+                if replacement.admission_attempted
+                    && let Some((end, _, _)) = deadlines
+                {
                     // Resume may have admitted writes. Never rewind that journal.
                     return Err(self.stop_recreate(&cur, &backup, end, f.0).await);
                 }
@@ -887,18 +890,35 @@ impl Updater {
         ).await
     }
 
-    async fn tracked_once(&self, cur: &Container, image: &Image, argv: Vec<String>, deadline: tokio::time::Instant, helper: &mut Option<String>) -> Res<crate::engine::ExecOut> {
+    async fn tracked_once(
+        &self,
+        cur: &Container,
+        image: &Image,
+        argv: Vec<String>,
+        deadline: tokio::time::Instant,
+        helper: &mut Option<String>,
+    ) -> Res<crate::engine::ExecOut> {
         budget_left(deadline, Duration::ZERO)?;
-        let id = self.engine.prepare_once(cur, image, bounded_command(argv, deadline)?).await?;
+        let id = self
+            .engine
+            .prepare_once(cur, image, bounded_command(argv, deadline)?)
+            .await?;
         // This assignment precedes start. Cancellation cannot lose a running
         // helper's ID, and callers must verify its termination before restart.
         *helper = Some(id.clone());
+        let idx = self.begin_step("offline-helper");
+        self.end_step(idx, StepState::Ok, format!("recorded helper {id} before start; termination must be verified"));
         self.engine.run_prepared_once(&id).await
     }
 
-    async fn end_helper(&self, helper: &mut Option<String>, deadline: tokio::time::Instant) -> Res<()> {
+    async fn end_helper(
+        &self,
+        helper: &mut Option<String>,
+        deadline: tokio::time::Instant,
+    ) -> Res<()> {
         if let Some(id) = helper.as_deref() {
-            tokio::time::timeout_at(deadline, self.engine.remove_once(id)).await
+            tokio::time::timeout_at(deadline, self.engine.remove_once(id))
+                .await
                 .map_err(|_| "restore helper termination deadline elapsed".to_owned())??;
             *helper = None;
         }
@@ -957,7 +977,9 @@ impl Updater {
                             .tracked_once(
                                 cur,
                                 &cur.image,
-                                hot_argv("snapshot", &[backup]), switch_deadline, &mut helper,
+                                hot_argv("snapshot", &[backup]),
+                                switch_deadline,
+                                &mut helper,
                             )
                             .await?;
                         self.end_helper(&mut helper, switch_deadline).await?;
@@ -1009,7 +1031,7 @@ impl Updater {
             }
             self.wait_hot_healthy_until(&cur.id, recovery_deadline, None)
                 .await?;
-                self.resume_checked(cur, true).await.map_err(|f| f.0)?;
+            self.resume_checked(cur, true).await.map_err(|f| f.0)?;
             Ok(())
         })
         .await;
@@ -1125,7 +1147,9 @@ impl Updater {
                         self.tracked_once(
                             cur,
                             &cur.image,
-                            hot_argv("snapshot", &[&backup]), switch_deadline, &mut helper,
+                            hot_argv("snapshot", &[&backup]),
+                            switch_deadline,
+                            &mut helper,
                         ),
                     )
                     .await
@@ -1143,7 +1167,9 @@ impl Updater {
             )
             .await;
         if let Err(e) = self.end_helper(&mut helper, recovery_deadline).await {
-            return Err(self.failed_hot_recovery(cur, &backup, hold_deadline, e).await);
+            return Err(self
+                .failed_hot_recovery(cur, &backup, hold_deadline, e)
+                .await);
         }
         match snapshot {
             Ok(_) => (),
@@ -1266,7 +1292,9 @@ impl Updater {
                         .tracked_once(
                             cur,
                             &cur.image,
-                            hot_argv("restore-database", &[&backup]), recovery_deadline, &mut helper,
+                            hot_argv("restore-database", &[&backup]),
+                            recovery_deadline,
+                            &mut helper,
                         )
                         .await?;
                     self.end_helper(&mut helper, recovery_deadline).await?;
@@ -1288,7 +1316,9 @@ impl Updater {
                 })
                 .await;
                 if let Err(e) = self.end_helper(&mut helper, hold_deadline).await {
-                    return Err(self.failed_hot_recovery(cur, &backup, hold_deadline, e).await);
+                    return Err(self
+                        .failed_hot_recovery(cur, &backup, hold_deadline, e)
+                        .await);
                 }
                 match recovery {
                     Ok(()) => Err((Outcome::RolledBack, f)),
@@ -1445,8 +1475,17 @@ impl Updater {
                 "restore",
                 async {
                     let out = if let Some(deadline) = replacement.deadline {
-                        self.tracked_once(cur, to, restore_argv(path), deadline, &mut replacement.helper).await?
-                    } else { self.engine.run_once(cur, to, restore_argv(path)).await? };
+                        self.tracked_once(
+                            cur,
+                            to,
+                            restore_argv(path),
+                            deadline,
+                            &mut replacement.helper,
+                        )
+                        .await?
+                    } else {
+                        self.engine.run_once(cur, to, restore_argv(path)).await?
+                    };
                     if let Some(deadline) = replacement.deadline {
                         self.end_helper(&mut replacement.helper, deadline).await?;
                     }
@@ -1474,7 +1513,9 @@ impl Updater {
         replacement.admission_attempted = true;
         if replacement.deadline.is_some() {
             self.resume_checked(&new, true).await?;
-        } else { self.resume(&new).await; }
+        } else {
+            self.resume(&new).await;
+        }
         Ok(())
     }
 
@@ -1600,10 +1641,22 @@ impl Updater {
             "restore",
             async {
                 let out = if let Some(deadline) = snapshot_deadline {
-                    let out = self.tracked_once(cur, &cur.image, hot_argv("restore-database", &[backup]), deadline, helper).await?;
+                    let out = self
+                        .tracked_once(
+                            cur,
+                            &cur.image,
+                            hot_argv("restore-database", &[backup]),
+                            deadline,
+                            helper,
+                        )
+                        .await?;
                     self.end_helper(helper, deadline).await?;
                     out
-                } else { self.engine.run_once(cur, &cur.image, restore_argv(backup)).await? };
+                } else {
+                    self.engine
+                        .run_once(cur, &cur.image, restore_argv(backup))
+                        .await?
+                };
                 if out.code == 0 {
                     Ok(())
                 } else {
@@ -1622,7 +1675,9 @@ impl Updater {
             .await?;
         if snapshot_deadline.is_some() {
             self.resume_checked(&old, true).await?;
-        } else { self.resume(&old).await; }
+        } else {
+            self.resume(&old).await;
+        }
         Ok(())
     }
 }

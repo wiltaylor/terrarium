@@ -350,24 +350,24 @@ impl Docker {
     }
 
     async fn run_created(&self, id: &str) -> Res<ExecOut> {
-            self.ok(Method::POST, &format!("/containers/{id}/start"), None)
-                .await?;
-            let w = self
-                .ok(Method::POST, &format!("/containers/{id}/wait"), None)
-                .await?;
-            let (_, logs) = self
-                .call(
-                    Method::GET,
-                    &format!("/containers/{id}/logs?stdout=1&stderr=1"),
-                    None,
-                )
-                .await?;
-            let (stdout, stderr) = demux(&logs);
-            Ok(ExecOut {
-                code: w["StatusCode"].as_i64().unwrap_or(-1),
-                stdout,
-                stderr,
-            })
+        self.ok(Method::POST, &format!("/containers/{id}/start"), None)
+            .await?;
+        let w = self
+            .ok(Method::POST, &format!("/containers/{id}/wait"), None)
+            .await?;
+        let (_, logs) = self
+            .call(
+                Method::GET,
+                &format!("/containers/{id}/logs?stdout=1&stderr=1"),
+                None,
+            )
+            .await?;
+        let (stdout, stderr) = demux(&logs);
+        Ok(ExecOut {
+            code: w["StatusCode"].as_i64().unwrap_or(-1),
+            stdout,
+            stderr,
+        })
     }
 }
 
@@ -992,16 +992,35 @@ impl Engine for Docker {
         })
     }
 
-    fn prepare_once<'a>(&'a self, spec: &'a Container, image: &'a Image, mut argv: Vec<String>) -> BoxFut<'a, Res<String>> {
+    fn prepare_once<'a>(
+        &'a self,
+        spec: &'a Container,
+        image: &'a Image,
+        mut argv: Vec<String>,
+    ) -> BoxFut<'a, Res<String>> {
         Box::pin(async move {
-            let executable = if argv.first().is_some_and(|s| s == "timeout") { 3 } else { 0 };
+            let executable = if argv.first().is_some_and(|s| s == "timeout") {
+                3
+            } else {
+                0
+            };
             if argv.get(executable).is_some_and(|s| s == "terrariumd")
                 && let Some(img) = self.inspect_image(&image.id).await?
-                && img["Config"]["Labels"]["io.terrarium.hot-swap-layout"] == "1" {
+                && img["Config"]["Labels"]["io.terrarium.hot-swap-layout"] == "1"
+            {
                 argv[executable] = "/opt/terrarium/bundled/bin/terrariumd".into();
             }
-            let made = self.ok(Method::POST, "/containers/create", Some(once_body(&spec.spec, &image.reference, &argv))).await?;
-            made["Id"].as_str().filter(|s| !s.is_empty()).map(str::to_owned)
+            let made = self
+                .ok(
+                    Method::POST,
+                    "/containers/create",
+                    Some(once_body(&spec.spec, &image.reference, &argv)),
+                )
+                .await?;
+            made["Id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
                 .ok_or_else(|| "Docker helper create returned no ID".into())
         })
     }
@@ -1015,10 +1034,17 @@ impl Engine for Docker {
             let id = enc(id);
             // Inspect even if delete's answer was lost. Only absence proves
             // this helper cannot still be writing the database.
-            let _ = self.call(Method::DELETE, &format!("/containers/{id}?force=1"), None).await;
-            let (status, _) = self.call(Method::GET, &format!("/containers/{id}/json"), None).await?;
-            if status == StatusCode::NOT_FOUND { Ok(()) }
-            else { Err("restore helper termination unverified".into()) }
+            let _ = self
+                .call(Method::DELETE, &format!("/containers/{id}?force=1"), None)
+                .await;
+            let (status, _) = self
+                .call(Method::GET, &format!("/containers/{id}/json"), None)
+                .await?;
+            if status == StatusCode::NOT_FOUND {
+                Ok(())
+            } else {
+                Err("restore helper termination unverified".into())
+            }
         })
     }
 
@@ -1451,6 +1477,30 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn helper_termination_removes_exact_id_and_requires_inspect_not_found() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for inspect_status in [404, 200, 500] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("docker.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let server = tokio::spawn(async move {
+                for expected in ["DELETE /containers/owned-helper?force=1 HTTP/1.1", "GET /containers/owned-helper/json HTTP/1.1"] {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut header = Vec::new();
+                    while !header.ends_with(b"\r\n\r\n") { header.push(stream.read_u8().await.unwrap()); }
+                    assert!(String::from_utf8(header).unwrap().starts_with(expected));
+                    let status = if expected.starts_with("DELETE") { 204 } else { inspect_status };
+                    stream.write_all(format!("HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                }
+            });
+            let docker = Docker { socket, target: None };
+            let result = tokio::time::timeout(Duration::from_secs(5), docker.remove_once("owned-helper")).await.unwrap();
+            assert_eq!(result.is_ok(), inspect_status == 404);
+            server.await.unwrap();
         }
     }
 
