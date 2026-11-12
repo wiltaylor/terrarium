@@ -780,6 +780,68 @@ pub fn get_card(conn: &Connection, id: &str) -> ApiResult<Card> {
     )
 }
 
+/// Rule selection needs card identity and routing, not the board read model.
+/// Read only the requested column through `cards_column`. In particular, never
+/// render comments, job logs, test results or ETA history under a timer's lock.
+/// The returned cards contain only identity, title, labels, repo, branch and
+/// creation time. They must not be used as the API's rendered card response.
+pub(crate) const SELECTION_SQL: &str = "SELECT c.id, c.project, k.name, c.position,
+    c.title, c.labels, c.repo, c.branch, c.created_at
+    FROM board_columns k JOIN cards c INDEXED BY cards_column ON c.column_id = k.id
+    WHERE k.project = ?1 AND k.name = ?2 AND c.archived = 0 AND c.kind != 'group'
+    ORDER BY c.position";
+
+pub(crate) fn selection_cards(
+    conn: &Connection,
+    project: &str,
+    column: &str,
+) -> ApiResult<Vec<Card>> {
+    let mut q = conn.prepare(SELECTION_SQL)?;
+    Ok(q.query_map(params![project, column], |r| {
+        Ok(Card {
+            id: r.get(0)?,
+            project: r.get(1)?,
+            column: r.get(2)?,
+            position: r.get(3)?,
+            title: r.get(4)?,
+            labels: json_col(&r.get::<_, String>(5)?),
+            repo: r.get(6)?,
+            branch: r.get(7)?,
+            created_at: r.get(8)?,
+            kind: "card".into(),
+            trouble: Vec::new(),
+            group: None,
+            column_role: None,
+            body: String::new(),
+            assignee: None,
+            assignee_name: None,
+            agent: None,
+            agent_name: None,
+            depends_on: Vec::new(),
+            blocked_by: Vec::new(),
+            comments: Vec::new(),
+            review_round: 0,
+            links: Vec::new(),
+            created_by: String::new(),
+            created_by_name: String::new(),
+            updated_at: String::new(),
+            archived: false,
+            eta_at: None,
+            eta_set_at: None,
+            eta_set_by: None,
+            eta_set_by_name: None,
+            eta_calibrated: None,
+            eta_history: None,
+            done_at: None,
+            tests: None,
+            idle_since: None,
+            job: None,
+            assignee_status: None,
+        })
+    })?
+    .collect::<Result<Vec<_>, _>>()?)
+}
+
 pub fn get_board(conn: &Connection, project: &str) -> ApiResult<Board> {
     let prefix = crate::store::projects::get(conn, project)?.card_prefix;
     let mut columns = Vec::new();
