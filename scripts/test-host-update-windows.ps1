@@ -40,8 +40,8 @@ try {
     if (Test-Path $journal) { throw 'Existing update transaction. Refusing test.' }
     $good=Version $GoodAsset; $bad=Version $BadAsset
     if ($good -eq $bad -or $good -eq (Version $BinaryPath)) { throw 'Distinct build versions required.' }
-    New-Item -ItemType Directory -Path $root | Out-Null
     & $Installer -BinaryPath $BinaryPath -Sha256 (Get-FileHash $BinaryPath -Algorithm SHA256).Hash -NoStart
+    New-Item -ItemType Directory -Path $root | Out-Null
     $baseline=((Service).PathName -split '"')[1]
     $versions=Split-Path (Split-Path $baseline -Parent) -Parent
     $goodImage=Join-Path (Join-Path $versions $good) 'terrarium-host.exe'
@@ -75,6 +75,7 @@ try {
     Stop-Service TerrariumHost -ErrorAction SilentlyContinue
     Set-Image $original
     Start-Service TerrariumHost
+    if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
     [IO.File]::WriteAllText([IO.Path]::GetFullPath($OutputPath),('<testsuite name="windows-production-update" tests="'+$cases.Count+'" failures="'+$failed+'">'+($cases -join '')+'</testsuite>'))
     Write-Output ('Restored service state: '+(Service).State)
 }
