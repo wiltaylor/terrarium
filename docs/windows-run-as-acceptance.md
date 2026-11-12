@@ -37,6 +37,15 @@ elevated = true
 ```
 
 The test host has a separate protected config/token and `auto_update = false`.
+That does **not** isolate all existing Windows service state. `main.rs` still
+opens `C:\ProgramData\Terrarium\host\service.log` and protects its parent before
+SCM dispatch. `windows_update.rs` reads the fixed `host\update.json` before
+config loading. Run startup also protects/prunes the fixed default env directory.
+Before the proposed ImagePath switch, Meta must prove no update journal exists
+and no shared env files exist, inventory those exact paths/SDDL, and explicitly
+authorize fixed log append and any startup ACL effects. A nonempty journal/env
+directory stops the proposal without changes. Restore any approved changed SDDL.
+No test-only service-state override or LocalSystem launcher is introduced.
 No development artifact enters the production signature/update flow. The binary
 refuses updates without a compiled release key. No signing access is assumed.
 

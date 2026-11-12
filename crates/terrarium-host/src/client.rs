@@ -984,6 +984,10 @@ impl Client {
             F::Exec(req) => {
                 let id = req.session;
                 #[cfg(windows)]
+                if req.windows_run_as.is_some() && !self.admit(id, tx) {
+                    return Ok(());
+                }
+                #[cfg(windows)]
                 let mut req = req;
                 #[cfg(windows)]
                 let identity = match crate::windows_run_as::logon(
@@ -1663,6 +1667,9 @@ impl Client {
     }
 
     async fn start_push(&self, req: CpPush, tx: &Link) {
+        if !self.admit(req.session, tx) {
+            return;
+        }
         #[cfg(not(windows))]
         if req.windows_run_as.is_some() {
             send_error(
@@ -1769,6 +1776,9 @@ impl Client {
     }
 
     async fn start_pull(&self, req: CpPull, tx: &Link) {
+        if !self.admit(req.session, tx) {
+            return;
+        }
         #[cfg(not(windows))]
         if req.windows_run_as.is_some() {
             send_error(
@@ -2074,6 +2084,25 @@ pub(crate) mod tests {
             .draining
             .store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(client.admit(3, &tx));
+    }
+
+    #[tokio::test]
+    async fn windows_run_as_checks_capacity_before_logon_or_profile_creation() {
+        let mut options = ClientOptions::new("ws://localhost", "fixture", "fixture");
+        options.max_sessions = 0;
+        options.windows_run_as.enabled = true;
+        let client = Client::new(options);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for verb in ["exec", "cp_push", "cp_pull"] {
+            let request = serde_json::json!({
+                "type": verb, "session": 1, "cmd": "unused", "path": "C:\\unused",
+                "windows_run_as": { "account": "unqualified", "password": "non-secret-fixture" }
+            });
+            client.on_text(&request.to_string(), &tx).await.unwrap();
+            assert!(matches!(rx.recv().await,
+                Some(Outgoing::Control(HostFrame::Error { code: ErrorCode::Busy, .. }))));
+        }
+        assert_eq!(client.session_count(), 0);
     }
 
     /// Write the 0700 fake `nvidia-smi` script that the product execs.
