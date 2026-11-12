@@ -464,6 +464,14 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
     // old kill/requeue path for them instead of replaying prepare beneath
     // an untracked recipe. Read outside the shared DB writer transaction.
     let journal = crate::hosts::resume::Journal::with_db(&state.state_dir, state.db.clone());
+    // Collection has no durable byte offset. Never attach to an old recipe
+    // checkpoint and accidentally replay it after a partially read handoff.
+    let collection_checkpoints = journal.scan::<RecipeResume>("recipe/");
+    let collection_scan_failed = collection_checkpoints.is_err();
+    if let Err(error) = &collection_checkpoints { warn!(%error, "cannot verify release collection checkpoints; releases will not resume"); }
+    let interrupted_collections: HashSet<String> = collection_checkpoints
+        .unwrap_or_default().into_iter().filter(|(_, saved)| saved.collecting)
+        .filter_map(|(key, _)| key.strip_prefix("recipe/").and_then(|rest| rest.split('/').next()).map(str::to_owned)).collect();
     let remote_checkpoints: HashSet<String> = journal
         .scan::<serde_json::Value>("ssh/recipe/")
         .unwrap_or_default()
@@ -561,7 +569,8 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                 // a running one that gets a cancel meanwhile keeps its
                 // slot as a draining job (TER-123 review 2, major 1).
                 let live = LiveRun::new(&job.id);
-                if running && !other_host
+                if running && !other_host && !interrupted_collections.contains(&job.id)
+                    && !(job.kind == JobKind::Release && collection_scan_failed)
                     && def.as_ref().is_some_and(|d|
                         (matches!(d.kind, TargetKind::Host | TargetKind::Docker | TargetKind::Vmlab) && checkpoints.contains(&job.id))
                         || (matches!(d.kind, TargetKind::Ssh | TargetKind::Exedev) && remote_checkpoints.contains(&job.id)))
@@ -570,9 +579,11 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                     continue;
                 }
                 let dir = job.slot.map(|s| slot_dir(&delivery, &job.project, s));
-                let why = def.as_ref().filter(|d|
+                let why = if interrupted_collections.contains(&job.id) {
+                    Some("interrupted during release output collection".to_owned())
+                } else { def.as_ref().filter(|d|
                     matches!(d.kind, TargetKind::Ssh | TargetKind::Exedev))
-                    .map(|_| "interrupted (ssh transport)".to_owned());
+                    .map(|_| "interrupted (ssh transport)".to_owned()) };
                 out.push(Lost {
                     job,
                     running,
@@ -3118,6 +3129,8 @@ fn bundle_ready(
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RecipeResume {
+    #[serde(default)]
+    collecting: bool,
     head: String,
     batch: Option<Vec<BatchCard>>,
     log: String,
@@ -3520,6 +3533,7 @@ async fn steps(
         ..recipe_cmd
     };
     let saved = RecipeResume {
+        collecting: false,
         log_target: log_target.clone(),
         head,
         batch,
@@ -3550,6 +3564,7 @@ async fn finish_recipe(
 ) -> ApiResult<JobEnd> {
     let job = x.job;
     let RecipeResume {
+        collecting: _,
         head,
         batch,
         log,
@@ -3569,6 +3584,12 @@ async fn finish_recipe(
         && let Some(directory) = &delivery.release_outputs
     {
         crate::release_handoff::relative_directory(directory)?;
+        let journal = crate::hosts::resume::Journal::with_db(&x.state.state_dir, x.state.db.clone());
+        let key = recipe_resume_key(job);
+        let mut checkpoint = journal.load::<RecipeResume>(&key)?
+            .ok_or_else(|| ApiError::internal("missing release recipe checkpoint"))?;
+        checkpoint.collecting = true;
+        journal.save(&key, &checkpoint)?;
         // Check every directory component. A recipe may not declare an output
         // directory through a symlink to another tree.
         let mut script = format!("set -eu; cd {}; p=.; ", crate::executor::sh_quote(x.dir));

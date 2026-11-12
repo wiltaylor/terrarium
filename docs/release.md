@@ -401,6 +401,14 @@ build, signing, or publishing side effect. Phase 1 receives
 | `TERRARIUM_RELEASE_ATTACHMENT_SHA256` | recorded attachment SHA-256 |
 
 The daemon verifies stored inputs before copying them to the fresh checkout.
+Input-path symlinks, including dangling parent links, are refused before any
+extraction or permission change. Output collection reads bounded file chunks
+directly from the declared directory and creates no temporary target archive.
+Cancellation discards the daemon's in-memory collection. If the daemon loses a
+release during collection, normal release recovery ends it as an error without
+rerunning its recipe or signing steps. The lead may then queue a fresh job after
+checking external side effects. There is no fixed target staging file to recover
+or overwrite.
 Input files are read-only. Phase 2 can consume the signed APK without rebuilding
 or re-signing it. No target, host slot or running job is held while the lead
 tests phase 1. Existing release recipes without declared outputs are unchanged.

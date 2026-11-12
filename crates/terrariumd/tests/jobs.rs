@@ -4107,6 +4107,8 @@ async fn release_handoff_input_symlinks_cannot_mutate_external_paths() {
         if !dangling {
             std::fs::create_dir(&external).unwrap();
             std::fs::set_permissions(&external, std::fs::Permissions::from_mode(0o750)).unwrap();
+            std::fs::write(external.join("sentinel"), b"unchanged").unwrap();
+            std::fs::set_permissions(external.join("sentinel"), std::fs::Permissions::from_mode(0o640)).unwrap();
         }
         let link = if leaf {
             std::fs::create_dir(lab.work.join(".terrarium")).unwrap();
@@ -4170,7 +4172,9 @@ async fn release_handoff_input_symlinks_cannot_mutate_external_paths() {
         if dangling {
             assert!(!external.exists());
         } else {
-            assert_eq!(std::fs::read_dir(&external).unwrap().count(), 0);
+            assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+            assert_eq!(std::fs::read(external.join("sentinel")).unwrap(), b"unchanged");
+            assert_eq!(std::fs::metadata(external.join("sentinel")).unwrap().permissions().mode() & 0o777, 0o640);
             assert_eq!(
                 std::fs::metadata(&external).unwrap().permissions().mode() & 0o777,
                 0o750
@@ -4221,10 +4225,12 @@ async fn release_handoff_retry_ignores_stale_checkout_archive() {
 async fn release_handoff_cancelled_collection_leaves_no_staging_and_can_retry() {
     let lab = lab(1).await;
     release_client(&lab, "rel-client").await;
+    let counter = lab._dirs.path().join("recipe-starts");
+    let counter_arg = terrariumd::executor::sh_quote(counter.to_str().unwrap());
     lab.td.put("/api/projects/p/delivery", json!({
         "target":"p-box", "recipe":"true", "next_repos":["app"],
         "work_dir":lab._dirs.path().join("jobs"), "release_target":"rel-client",
-        "release_recipe":"mkdir handoff; truncate -s 52428800 handoff/signed.apk; touch -a -t 200001010000 handoff/signed.apk",
+        "release_recipe":format!("printf start >> {counter_arg}; mkdir handoff; truncate -s 52428800 pending-apk; touch -a -t 200001010000 pending-apk; mv pending-apk handoff/signed.apk"),
         "release_outputs":"handoff"
     })).await.ok();
     let card = lab.card("cancel collection", "main").await;
@@ -4249,6 +4255,13 @@ async fn release_handoff_cancelled_collection_leaves_no_staging_and_can_retry() 
         assert!(start.elapsed() < DEADLINE, "collection did not start");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let journal = terrariumd::hosts::resume::Journal::with_db(&state.state_dir, state.db.clone());
+    let recipe_key = format!("recipe/{id}/1");
+    let prepare_key = format!("prepare/{id}/1");
+    let recipe_checkpoint = journal.load::<Value>(&recipe_key).unwrap().unwrap();
+    let prepare_checkpoint = journal.load::<Value>(&prepare_key).unwrap().unwrap();
+    assert_eq!(recipe_checkpoint["collecting"], true);
     lab.td.delete(&format!("/api/jobs/{id}")).await.ok();
     let jobs = lab.until_idle().await;
     assert_eq!(
@@ -4257,9 +4270,38 @@ async fn release_handoff_cancelled_collection_leaves_no_staging_and_can_retry() 
         "{jobs:?}"
     );
     assert!(!tree.join(".terrarium-release-outputs.tar").exists());
-    let state = lab.td.daemon.as_ref().unwrap().state.clone();
     let stored = state.state_dir.join("release-handoffs").join(&id);
     assert!(!stored.exists() || std::fs::read_dir(stored).unwrap().next().is_none());
+    // Reconstruct the persisted running row that daemon startup would see if
+    // it died during this transfer, after discarding the in-memory collector.
+    let start = Instant::now();
+    while !terrariumd::jobs::busy_jobs(&state).await.is_empty() {
+        assert!(start.elapsed() < DEADLINE, "cancelled collector did not end");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    journal.save(&recipe_key, &recipe_checkpoint).unwrap();
+    journal.save(&prepare_key, &prepare_checkpoint).unwrap();
+    let lost = id.clone();
+    state.db.write("operator", move |t| {
+        t.execute("UPDATE jobs SET state='running', ended_at=NULL, outcome=NULL, tail=NULL WHERE id=?1", [&lost])?;
+        Ok(())
+    }).await.unwrap();
+    terrariumd::jobs::recover_lost(&state).await.await.unwrap();
+    let recovered = lab.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+    assert_eq!(recovered["state"], "failed", "{recovered:?}");
+    assert!(recovered["tail"].as_str().unwrap().contains("does not run again by itself"), "{recovered:?}");
+    assert!(!tree.join(".terrarium-release-outputs.tar").exists());
+    assert_eq!(std::fs::read(&counter).unwrap(), b"start", "recovery must not replay the recipe");
+    let unpublished = lab.td.get_as(&lab.lead, &format!("/api/jobs/{id}/artifacts")).await.ok().clone();
+    assert!(unpublished["artifacts"].as_array().unwrap().is_empty());
+    // A fresh lead-approved attempt has different bytes. Nothing from the
+    // interrupted collector may be prepended or reused.
+    lab.td.put("/api/projects/p/delivery", json!({
+        "target":"p-box", "recipe":"true", "next_repos":["app"],
+        "work_dir":lab._dirs.path().join("jobs"), "release_target":"rel-client",
+        "release_recipe":format!("printf start >> {counter_arg}; mkdir handoff; printf new-attempt > handoff/signed.apk"),
+        "release_outputs":"handoff"
+    })).await.ok();
     let retry = lab.td.post_as(&lab.lead, &endpoint, json!({})).await.ok()["job"]["id"]
         .as_str()
         .unwrap()
@@ -4271,6 +4313,10 @@ async fn release_handoff_cancelled_collection_leaves_no_staging_and_can_retry() 
         "{jobs:?}"
     );
     assert!(!tree.join(".terrarium-release-outputs.tar").exists());
+    assert_eq!(std::fs::read(&counter).unwrap(), b"startstart");
+    let download = lab.td.get_as(&lab.lead, &format!("/api/jobs/{retry}/artifacts/signed.apk")).await.ok().clone();
+    use base64::Engine;
+    assert_eq!(base64::engine::general_purpose::STANDARD.decode(download["data"].as_str().unwrap()).unwrap(), b"new-attempt");
 }
 
 /// TER-623: a release job runs the release recipe on the release target,
