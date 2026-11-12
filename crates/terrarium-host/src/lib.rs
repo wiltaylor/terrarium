@@ -42,6 +42,10 @@ pub mod docker;
 pub mod labcheck;
 pub mod limits;
 pub mod metrics;
+#[cfg(unix)]
+pub mod native;
+#[cfg(windows)]
+#[path = "native_windows.rs"]
 pub mod native;
 pub mod outbox;
 pub mod prepare;

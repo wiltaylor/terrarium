@@ -1390,6 +1390,7 @@ impl Client {
         &self,
         r: &crate::protocol::ResourceApply,
     ) -> Result<VerbPlan, BuildError> {
+        #[cfg(unix)]
         if let Some(native) = self.native_live() {
             r.limits.validate().map_err(BuildError::bad)?;
             return crate::native::verb_plan(
@@ -1419,6 +1420,13 @@ impl Client {
         &self,
         r: &crate::protocol::ResourceStop,
     ) -> Result<VerbPlan, BuildError> {
+        #[cfg(windows)]
+        if self.opts.native.is_some() {
+            return Err(BuildError::bad("native GPU isolation is unavailable on Windows"));
+        }
+        #[cfg(windows)]
+        return crate::limits::reservation_stop_plan(&r.target, &r.holder);
+        #[cfg(unix)]
         match self.opts.native.as_ref() {
             Some(native) => crate::native::stop_plan(
                 native,
@@ -1435,6 +1443,7 @@ impl Client {
     /// marked it with `native_gpu`. A host agent without `[native_gpu]`, or
     /// whose helper did not answer with enforcement at the last `hello`,
     /// refuses it: the session never runs without its device policy.
+    #[cfg(unix)]
     pub(crate) fn native(
         &self,
         mut plan: VerbPlan,
@@ -1462,6 +1471,19 @@ impl Client {
             crate::native::shim_plan(native, &crate::native::Request::Start(req), plan.exec)
                 .map_err(BuildError::bad)?;
         Ok(plan)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn native(
+        &self,
+        _plan: VerbPlan,
+        _limits: &crate::protocol::ExecLimits,
+        _session: SessionId,
+    ) -> Result<VerbPlan, BuildError> {
+        Err(BuildError {
+            code: ErrorCode::Unsupported,
+            message: "native GPU isolation is unavailable on Windows".into(),
+        })
     }
 
     fn prepare_ctx(&self) -> crate::prepare::Ctx {
