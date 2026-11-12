@@ -752,9 +752,8 @@ async fn request_reads_only_own_linked_cards_across_projects() {
     assert_eq!(shown.body["cards"].as_array().unwrap().len(), 1);
     assert_eq!(shown.body["cards"][0]["card"], cards[0]);
     for card in [cards[0].clone(), format!("p:{}", cards[0])] {
-        let denied = l
-            .td
-            .post_as(
+        let denied =
+            l.td.post_as(
                 agent,
                 &format!("/api/threads/{tid}/cards"),
                 json!({"card": card}),
@@ -769,14 +768,13 @@ async fn request_reads_only_own_linked_cards_across_projects() {
             )
         );
     }
-    l.td
-        .post_as(
-            &l.p_lead,
-            &format!("/api/threads/{}/cards", id(&second)),
-            json!({"card": cards[0]}),
-        )
-        .await
-        .ok();
+    l.td.post_as(
+        &l.p_lead,
+        &format!("/api/threads/{}/cards", id(&second)),
+        json!({"card": cards[0]}),
+    )
+    .await
+    .ok();
     assert_eq!(
         l.td.post_as(
             agent,
