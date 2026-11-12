@@ -90,6 +90,8 @@ services:
       TERRARIUM_MAX_TARGETS_PER_PROJECT: ${TERRARIUM_MAX_TARGETS_PER_PROJECT:-8}
       TERRARIUM_CARD_FILE_MAX_BYTES: ${TERRARIUM_CARD_FILE_MAX_BYTES:-}
       TERRARIUM_CARD_FILES_MAX_BYTES: ${TERRARIUM_CARD_FILES_MAX_BYTES:-}
+      # Aggregate named output limit for each private release handoff (200 MiB).
+      TERRARIUM_RELEASE_ARTIFACT_LIMIT_BYTES: ${TERRARIUM_RELEASE_ARTIFACT_LIMIT_BYTES:-209715200}
       # The most bytes in a system prompt (an agent's own, or a persona file).
       TERRARIUM_SYSTEM_PROMPT_MAX: ${TERRARIUM_SYSTEM_PROMPT_MAX:-}
       # The idle stop of an agent that sets none (PLAN §18): a duration, or off.

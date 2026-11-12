@@ -3578,8 +3578,8 @@ async fn finish_recipe(
                 crate::executor::sh_quote(component)
             ));
         }
-        script.push_str("cd \"$p\"; find . -mindepth 1 -maxdepth 1 -printf '%f\\0' | tar --null --no-recursion -T - -cf -");
         let limit = crate::release_handoff::output_limit()?;
+        script.push_str(&format!("cd \"$p\"; total=$(find . -mindepth 1 -maxdepth 1 -printf '%s\\n' | awk '{{s+=$1}} END {{printf \"%.0f\",s}}'); [ \"$total\" -le {limit} ] || exit 79; find . -mindepth 1 -maxdepth 1 -printf '%f\\0' | tar --null --no-recursion -T - -cf -"));
         let cmd = RemoteCmd {
             argv: vec!["sh".into(), "-c".into(), script],
             holder: x.holder.clone(),
@@ -3630,15 +3630,13 @@ async fn finish_recipe(
         if let Some(report) = report {
             let _ = crate::run_kill::report(report).await;
         }
-        if oversized {
+        if oversized || exit_code(output.end.as_ref()) == Some(79) {
             return Err(ApiError::invalid(format!(
                 "release artifacts exceed the per-job limit of {limit} bytes"
             )));
         }
         if !output.end.as_ref().is_some_and(End::success) {
-            return Err(ApiError::conflict(
-                "cannot collect declared release outputs",
-            ));
+            return Err(ApiError::conflict(format!("cannot collect declared release outputs ({})", end_text(output.end.as_ref()))));
         }
         crate::release_handoff::publish(&x.state.state_dir, &job.id, &output.stdout[..], limit)?;
     }

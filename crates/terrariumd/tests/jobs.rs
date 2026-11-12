@@ -3995,6 +3995,29 @@ fi"#;
 }
 
 #[tokio::test]
+async fn release_handoff_supports_apk_sized_outputs() {
+    use base64::Engine;
+    let lab = lab(1).await;
+    release_client(&lab, "rel-client").await;
+    lab.td.put("/api/projects/p/delivery", json!({
+        "target":"p-box", "recipe":"true", "next_repos":["app"],
+        "work_dir":lab._dirs.path().join("jobs"), "release_target":"rel-client",
+        "release_recipe":"mkdir handoff && truncate -s 52428800 handoff/signed.apk",
+        "release_outputs":"handoff"
+    })).await.ok();
+    let card = lab.card("large handoff", "main").await;
+    let queued = lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/release"), json!({})).await.ok().clone();
+    let id = queued["job"]["id"].as_str().unwrap();
+    let jobs = lab.until_idle().await;
+    let job = jobs.iter().find(|j| j["id"] == id).unwrap();
+    assert_eq!(job["state"], "passed", "{job:?}");
+    let outputs = lab.td.get_as(&lab.lead, &format!("/api/jobs/{id}/artifacts")).await.ok().clone();
+    assert_eq!(outputs["artifacts"][0]["size"], 52428800);
+    let chunk = lab.td.get_as(&lab.lead, &format!("/api/jobs/{id}/artifacts/signed.apk?offset=52428799")).await.ok().clone();
+    assert_eq!(base64::engine::general_purpose::STANDARD.decode(chunk["data"].as_str().unwrap()).unwrap(), [0]);
+}
+
+#[tokio::test]
 async fn release_handoff_oversized_publish_fails_without_partial_files() {
     let lab = lab(1).await;
     release_client(&lab, "rel-client").await;
