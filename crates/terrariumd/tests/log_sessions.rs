@@ -97,6 +97,21 @@ async fn thread_messages_link_to_the_authors_session() {
     )
     .await
     .ok();
+    let thread_id = thread["id"].as_str().unwrap().to_owned();
+    let stored = td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(move |c| terrariumd::store::threads::get(c, &thread_id))
+        .await
+        .unwrap();
+    let messages = stored.messages.unwrap();
+    assert_eq!(messages[1].author, aid);
+    for message in messages {
+        assert_eq!(message.session, Default::default());
+    }
     for response in [td.get(&path).await, td.get_as(&aid, &path).await] {
         let rows = &response.ok()["messages"];
         assert_no_link(&rows[0]);

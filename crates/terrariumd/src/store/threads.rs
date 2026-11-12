@@ -885,7 +885,7 @@ fn messages(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadMessage>> {
         "SELECT id, author, kind, text, at FROM thread_messages WHERE thread = ?1
          ORDER BY rowid",
     )?;
-    let mut rows = st
+    let rows = st
         .query_map([thread], |r| {
             let author: String = r.get(1)?;
             Ok(ThreadMessage {
@@ -899,7 +899,13 @@ fn messages(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadMessage>> {
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let keys: Vec<_> = rows
+    Ok(rows)
+}
+
+/// Resolve message sessions only for the read API. Ordinary `get` calls,
+/// including those inside write transactions, do not need this lookup.
+pub fn message_sessions(conn: &Connection, messages: &mut [ThreadMessage]) -> ApiResult<()> {
+    let keys: Vec<_> = messages
         .iter()
         .map(|m| crate::store::session_refs::LinkKey {
             session: None,
@@ -908,10 +914,10 @@ fn messages(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadMessage>> {
         })
         .collect();
     let links = crate::store::session_refs::links(conn, &keys)?;
-    for (message, link) in rows.iter_mut().zip(links) {
+    for (message, link) in messages.iter_mut().zip(links) {
         message.session = crate::store::session_refs::SessionField::of(link);
     }
-    Ok(rows)
+    Ok(())
 }
 
 fn questions_of(conn: &Connection, thread: &str) -> ApiResult<Vec<Question>> {
