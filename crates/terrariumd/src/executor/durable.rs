@@ -137,7 +137,7 @@ struct Checkpoint {
 }
 
 fn journal(state: &Shared) -> crate::hosts::resume::Journal {
-    crate::hosts::resume::Journal::new(&state.state_dir)
+    crate::hosts::resume::Journal::with_db(&state.state_dir, state.db.clone())
 }
 
 fn host_trust(state: &Shared, def: &TargetDef) -> ApiResult<String> {

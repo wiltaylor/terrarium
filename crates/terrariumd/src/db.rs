@@ -2637,6 +2637,25 @@ impl Db {
         f(&guard)
     }
 
+    /// Journal calls may hold the host registry lock. Never wait for the
+    /// writer here: a write can itself need registry state. Callers retain
+    /// uncommitted events and retry ResourceBusy outside both locks.
+    pub(crate) fn journal_now<T>(
+        &self,
+        f: impl FnOnce(&mut Connection) -> ApiResult<T>,
+    ) -> ApiResult<T> {
+        let mut guard = match self.conn.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(ApiError::new(crate::error::Code::ResourceBusy, "host journal writer is busy"));
+            }
+        };
+        // Journal ACKs promise durable output, including across power loss.
+        guard.pragma_update(None, "synchronous", "FULL")?;
+        f(&mut guard)
+    }
+
     /// Run a write in one transaction. `actor` labels the events and audit
     /// rows that the write makes. The transaction commits when `f` returns
     /// `Ok`; then the new events and audit rows go to the subscribers.

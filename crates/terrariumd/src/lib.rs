@@ -480,7 +480,7 @@ async fn activate(
     state
         .executor
         .hosts
-        .restore(&state.state_dir)
+        .restore_with_db(&state.state_dir, state.db.clone())
         .map_err(|e| anyhow::anyhow!("host reconnect journal: {e}"))?;
     // The redaction matcher (PLAN §16b.6), from the store as it is now.
     secrets::redact::rebuild(&state).await;

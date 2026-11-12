@@ -379,8 +379,16 @@ impl HostRegistry {
     }
 
     /// Restore before the HTTP/host listeners and process-wait reconciliation.
-    pub fn restore(&self, state_dir: &std::path::Path) -> crate::error::ApiResult<()> {
-        let journal = resume::Journal::new(state_dir);
+    #[cfg(test)]
+    fn restore(&self, state_dir: &std::path::Path) -> crate::error::ApiResult<()> {
+        self.restore_journal(resume::Journal::new(state_dir))
+    }
+
+    pub fn restore_with_db(&self, state_dir: &std::path::Path, db: crate::db::Db) -> crate::error::ApiResult<()> {
+        self.restore_journal(resume::Journal::with_db(state_dir, db))
+    }
+
+    fn restore_journal(&self, journal: resume::Journal) -> crate::error::ApiResult<()> {
         let saved = journal.scan::<SavedHost>("host/")?;
         let mut entries = HashMap::new();
         for (key, saved) in saved {
@@ -2891,6 +2899,51 @@ mod tests {
             stream: StreamTag::Stdout,
             bytes: vec![0; JOURNAL_RETRY_BYTES]
         }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn main_writer_contention_queues_without_blocking_or_closing() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore_with_db(dir.path(), db.clone()).unwrap();
+        let mut session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let (tx, mut outgoing) = mpsc::unbounded_channel();
+        reg.lock().get_mut("lab1").unwrap().conn = Some(Conn { id: 1, tx });
+        for byte in 0..16u8 {
+            let (acquired, ready) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let writer_db = db.clone();
+            let writer = tokio::spawn(async move {
+                writer_db.write("system", move |t| {
+                    t.execute("UPDATE host_resume SET sealed=sealed WHERE id='unused'", [])?;
+                    acquired.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(())
+                }).await.unwrap();
+            });
+            ready.await.unwrap();
+            // The writer cannot release its mutex until this returns. A
+            // blocking journal would deadlock until the writer test times out.
+            reg.on_data("lab1", DataFrame::new(session.id(), StreamTag::Stdout, vec![byte]));
+            reg.on_data("lab1", DataFrame::new(session.id(), StreamTag::Stdout, vec![byte + 16]));
+            assert!(session.rx.try_recv().is_err());
+            assert!(outgoing.try_recv().is_err());
+            assert_eq!(reg.lock()["lab1"].pending_journal[&session.id()].events.len(), 2);
+            release.send(()).unwrap();
+            writer.await.unwrap();
+            for expected in [byte, byte + 16] {
+                reg.lock().get_mut("lab1").unwrap().pending_journal.get_mut(&session.id()).unwrap().next = Instant::now();
+                reg.retry_journal("lab1", 1);
+                assert_eq!(session.rx.try_recv().unwrap(), SessionEvent::Data { stream: StreamTag::Stdout, bytes: vec![expected] });
+            }
+            assert!(outgoing.try_recv().is_err());
+        }
+        assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 32);
+        let journal = resume::Journal::with_db(dir.path(), db);
+        assert_eq!(journal.scan::<SessionEvent>(&format!("event/lab1/{}/", session.id())).unwrap().len(), 32);
     }
 
     #[test]
