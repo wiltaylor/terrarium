@@ -3100,7 +3100,7 @@ mod tests {
         let before = std::time::Instant::now();
         for _ in 0..20 {
             assert_eq!(queued(&conn).unwrap().len(), 1);
-            assert_eq!(running(&conn).unwrap().len(), 1);
+            assert_eq!(super::running(&conn).unwrap().len(), 1);
         }
         let before = before.elapsed();
         conn.execute_batch(
