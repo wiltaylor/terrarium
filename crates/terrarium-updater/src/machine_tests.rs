@@ -35,6 +35,8 @@ struct State {
     helpers: HashMap<String, (Container, Image, Vec<String>)>,
     helper_next: u32,
     helper_remove_fail: Option<String>,
+    pending_helper_termination: Option<&'static str>,
+    recovery_stop_delay: Duration,
     staged: Option<Image>,
     /// The containers by name.
     containers: HashMap<String, Container>,
@@ -298,6 +300,11 @@ impl Engine for Fake {
                 self.call("pending-stop".into());
                 std::future::pending::<()>().await;
             }
+            let delay = self.0.lock().unwrap().recovery_stop_delay;
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+                self.call(format!("stop-confirmed {id}"));
+            }
             Ok(())
         })
     }
@@ -436,6 +443,11 @@ impl Engine for Fake {
 
     fn remove_once<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
         Box::pin(async move {
+            let pending = self.0.lock().unwrap().pending_helper_termination;
+            if id == "helper2" && let Some(phase) = pending {
+                self.call(format!("helper-{phase}-pending {id}"));
+                std::future::pending::<()>().await;
+            }
             if self.call(format!("helper-remove {id}"))
                 || self.0.lock().unwrap().helper_remove_fail.as_deref() == Some(id)
             {
@@ -1491,8 +1503,8 @@ async fn supervised_explicit_rollback_verifies_pending_restore_helper_before_rec
         cases.spawn(async move {
             let mut r = rig();
             Arc::get_mut(&mut r.updater).unwrap().hot_budget = (
-                Duration::from_secs(30),
-                Duration::from_secs(12),
+                Duration::from_secs(35),
+                Duration::from_secs(17),
                 Duration::from_secs(2),
             );
             r.store
@@ -1509,7 +1521,7 @@ async fn supervised_explicit_rollback_verifies_pending_restore_helper_before_rec
                 s.helper_remove_fail = (!verified).then(|| "helper2".into());
             }
             let run = tokio::time::timeout(
-                Duration::from_secs(31),
+                Duration::from_secs(36),
                 r.updater.run_now(RunKind::Rollback, "previous", "operator"),
             )
             .await
@@ -1583,6 +1595,41 @@ async fn hot_rollback_unverified_restore_helper_never_restarts_old_release() {
     assert_eq!(calls.iter().filter(|c| *c == "hot:start").count(), 1);
     assert!(!calls.iter().any(|c| c == "hot:commit"));
     assert_eq!(calls.last().unwrap(), "stop-for-recovery c0");
+}
+
+#[tokio::test]
+async fn pending_helper_delete_or_inspect_leaves_final_stop_reserve_on_both_paths() {
+    let mut cases = tokio::task::JoinSet::new();
+    for hot in [false, true] {
+        for phase in ["delete", "inspect"] {
+            cases.spawn(async move {
+                let mut r = rig();
+                Arc::get_mut(&mut r.updater).unwrap().hot_budget = (
+                    Duration::from_secs(20), Duration::from_secs(8), Duration::from_secs(2));
+                {
+                    let mut s = r.fake.0.lock().unwrap();
+                    s.hot = hot;
+                    s.supervised = !hot;
+                    s.pending_helper_termination = Some(phase);
+                    // A stop must actually finish, not merely be polled at an
+                    // expired deadline after helper termination used its time.
+                    s.recovery_stop_delay = Duration::from_millis(250);
+                }
+                r.fake.fail(&format!("health:{}", new_ref()));
+                let run = tokio::time::timeout(Duration::from_secs(21),
+                    r.updater.run_now(RunKind::Update, "latest", "operator")).await.unwrap();
+                assert_eq!(run.outcome, Outcome::RecoveryFailed, "hot={hot} phase={phase}: {run:#?}");
+                let calls = r.fake.calls();
+                assert!(calls.iter().any(|c| c == &format!("helper-{phase}-pending helper2")), "{calls:?}");
+                assert!(calls.last().unwrap().starts_with("stop-confirmed "), "{calls:?}");
+                assert!(!calls.iter().any(|c| c == "hot:commit"));
+                assert_eq!(calls.iter().filter(|c| *c == "hot:start").count(), usize::from(hot));
+                assert!(!calls.iter().any(|c| c == &format!("create:{OLD} new")));
+                assert!(run.error.unwrap().contains("termination deadline elapsed"));
+            });
+        }
+    }
+    while let Some(result) = cases.join_next().await { result.unwrap(); }
 }
 
 #[tokio::test]

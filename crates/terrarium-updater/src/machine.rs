@@ -62,6 +62,8 @@ pub const DEFAULT_REPOSITORY: &str = "ghcr.io/wiltaylor/terrarium";
 const HOT_SWAP_HOLD_LIMIT: Duration = Duration::from_secs(900);
 const HOT_SWAP_RECOVERY_RESERVE: Duration = Duration::from_secs(60);
 const HOT_SWAP_STOP_RESERVE: Duration = Duration::from_secs(5);
+// Helper termination belongs to recovery, never to the final daemon stop.
+const HELPER_TERMINATION_RESERVE: Duration = Duration::from_secs(5);
 
 async fn recovery_before_deadline<T>(
     deadline: tokio::time::Instant,
@@ -1287,8 +1289,9 @@ impl Updater {
                         }
                     }
                 });
-                let recovery = recovery_before_deadline(recovery_deadline, async {
-                    let left = budget_left(recovery_deadline, Duration::ZERO)?
+                let work_deadline = recovery_deadline - HELPER_TERMINATION_RESERVE;
+                let recovery = recovery_before_deadline(work_deadline, async {
+                    let left = budget_left(work_deadline, Duration::ZERO)?
                         .as_secs_f64()
                         .to_string();
                     self.exec_ok(&cur.id, hot_argv("pause", &[&left])).await?;
@@ -1298,20 +1301,20 @@ impl Updater {
                             cur,
                             &cur.image,
                             hot_argv("restore-database", &[&backup]),
-                            recovery_deadline,
+                            work_deadline,
                             &mut helper,
                         )
                         .await?;
-                    self.end_helper(&mut helper, recovery_deadline).await?;
+                    self.end_helper(&mut helper, work_deadline).await?;
                     if out.code != 0 {
                         return Err(out.reason());
                     }
-                    let left = budget_left(recovery_deadline, Duration::ZERO)?
+                    let left = budget_left(work_deadline, Duration::ZERO)?
                         .as_secs_f64()
                         .to_string();
                     self.exec_ok(&cur.id, hot_argv("start", &[old.trim(), &left]))
                         .await?;
-                    self.wait_hot_healthy_until(&cur.id, recovery_deadline, None)
+                    self.wait_hot_healthy_until(&cur.id, work_deadline, None)
                         .await?;
                     self.store
                         .set_image(&cur.image.reference)
@@ -1320,7 +1323,7 @@ impl Updater {
                     Ok::<_, String>(())
                 })
                 .await;
-                if let Err(e) = self.end_helper(&mut helper, hold_deadline).await {
+                if let Err(e) = self.end_helper(&mut helper, recovery_deadline).await {
                     return Err(self
                         .failed_hot_recovery(cur, &backup, hold_deadline, e)
                         .await);
@@ -1577,12 +1580,13 @@ impl Updater {
             return self.recover_inner(cur, backup, None, &mut None).await;
         };
         let mut helper = None;
+        let work_deadline = recovery_deadline - HELPER_TERMINATION_RESERVE;
         let recovered = tokio::time::timeout_at(
-            recovery_deadline,
-            self.recover_inner(cur, backup, Some(recovery_deadline), &mut helper),
+            work_deadline,
+            self.recover_inner(cur, backup, Some(work_deadline), &mut helper),
         )
         .await;
-        if let Err(e) = self.end_helper(&mut helper, deadline).await {
+        if let Err(e) = self.end_helper(&mut helper, recovery_deadline).await {
             return Err(self.stop_recreate(cur, backup, deadline, e).await.1);
         }
         match recovered {
