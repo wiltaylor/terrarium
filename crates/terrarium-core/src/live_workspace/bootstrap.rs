@@ -136,6 +136,24 @@ impl Journal {
         !self.quarantined && self.steps.last() == Some(&Step::Committed) && self.valid()
     }
 
+    /// A normal operation journal alone cannot establish bootstrap ownership.
+    /// The caller must hold both durable stores locked and compare these source
+    /// identities against protected pinned directories before serving operations.
+    pub fn runtime_ownership(&self, journal: &super::Journal) -> Result<&Scaffold, Reply> {
+        if !self.committed()
+            || journal.host != self.original.host
+            || journal.target != self.original.target
+            || journal.state_version != super::STATE_VERSION
+        {
+            return Err(Reply::Quarantined);
+        }
+        match (self.steps.get(1), self.steps.get(4)) {
+            (Some(Step::ScaffoldVerified(scaffold)), Some(Step::ReceiverVerified(runtime)))
+                if runtime == &journal.runtime => Ok(scaffold),
+            _ => Err(Reply::Quarantined),
+        }
+    }
+
     fn valid(&self) -> bool {
         if !self.original.valid()
             || self.original.hash().ok() != Some(self.original_hash)

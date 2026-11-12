@@ -38,6 +38,13 @@ not an inherited image entrypoint. Nonempty entrypoints are refused rather than
 silently executing a different program. Configuration parsing alone does not
 verify mount propagation, process identity or continued runtime ownership.
 
+Service loading requires a committed, nonquarantined bootstrap journal locked
+for the entire registration lifetime. The normal journal must match its host,
+target and exact runtime identity. All operational paths must be fixed ID-derived
+children, and pinned directory device/inode identities must match the bootstrap
+scaffold record. An administrator-provisioned normal journal alone is refused.
+This ownership check does not replace fresh configuration or runtime verification.
+
 The daemon first commits a FULL-synchronous immediate transaction recording its
 intent and reservation. The helper then syncs its immutable bootstrap intent
 and containing directory before creating anything. Every externally observed

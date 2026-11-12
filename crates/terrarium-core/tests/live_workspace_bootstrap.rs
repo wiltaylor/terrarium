@@ -23,6 +23,38 @@ fn request() -> Request {
     }
 }
 
+#[test]
+fn normal_journal_requires_exact_committed_bootstrap_ownership() {
+    let r = request();
+    let all = steps(&r);
+    let Step::ReceiverVerified(runtime) = &all[4] else { panic!("fixture") };
+    let normal = terrarium_core::live_workspace::Journal {
+        state_version: terrarium_core::live_workspace::STATE_VERSION,
+        host: r.host, target: r.target.clone(), runtime: runtime.clone(),
+        last_contiguous_revision: 0, quarantined: false,
+        operations: Default::default(), tombstones: Default::default(),
+    };
+    let mut bootstrap = Journal::new(r).unwrap();
+    for step in &all[1..] {
+        assert!(bootstrap.runtime_ownership(&normal).is_err());
+        bootstrap.advance(step.clone()).unwrap();
+    }
+    assert!(bootstrap.runtime_ownership(&normal).is_ok());
+    for field in 0..5 {
+        let mut changed = normal.clone();
+        match field {
+            0 => changed.host = Ulid::new(),
+            1 => changed.target.push_str("foreign"),
+            2 => changed.runtime.container_id = "b".repeat(64),
+            3 => changed.runtime.namespace.inode += 1,
+            _ => changed.state_version += 1,
+        }
+        assert!(bootstrap.runtime_ownership(&changed).is_err());
+    }
+    bootstrap.quarantine();
+    assert!(bootstrap.runtime_ownership(&normal).is_err());
+}
+
 fn steps(r: &Request) -> Vec<Step> {
     vec![
         Step::Intent,
