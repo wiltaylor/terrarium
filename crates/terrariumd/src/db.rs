@@ -3717,7 +3717,9 @@ mod tests {
             .prepare("SELECT card, generation, mode, action, setter FROM card_waits ORDER BY card")
             .unwrap();
         let rows: Vec<(String, String, String, String, String)> = query
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
@@ -3725,10 +3727,21 @@ mod tests {
         for (i, (card, generation, mode, action, setter)) in rows.iter().enumerate() {
             assert_eq!(card, &format!("P-{}", i + 1));
             assert_eq!(generation.len(), 32);
-            assert!(generation.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
-            assert_eq!((mode.as_str(), action.as_str(), setter.as_str()), ("all", "{}", "operator"));
+            assert!(
+                generation
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            );
+            assert_eq!(
+                (mode.as_str(), action.as_str(), setter.as_str()),
+                ("all", "{}", "operator")
+            );
         }
-        assert_eq!(conn.query_row("SELECT count(*) FROM card_deps", [], |r| r.get::<_, i64>(0)).unwrap(), 5);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM card_deps", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
     }
 
     #[test]
@@ -3737,9 +3750,16 @@ mod tests {
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         migrate_with(&mut conn, MIGRATIONS).unwrap();
         // These are the only named migrations added after 0.55.0.
-        let before: Vec<_> = NAMED_MIGRATIONS.iter().copied().filter(|(name, _)| {
-            !matches!(*name, "ter-712-card-waits.sql" | "ter-893-legacy-listing-expiry.sql")
-        }).collect();
+        let before: Vec<_> = NAMED_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|(name, _)| {
+                !matches!(
+                    *name,
+                    "ter-712-card-waits.sql" | "ter-893-legacy-listing-expiry.sql"
+                )
+            })
+            .collect();
         migrate_named(&mut conn, &before).unwrap();
         seed_migration_dependencies(&conn);
         assert_eq!(migrate(&mut conn).unwrap(), 2);
@@ -3754,7 +3774,10 @@ mod tests {
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         migrate_with(&mut conn, MIGRATIONS).unwrap();
         seed_migration_dependencies(&conn);
-        assert_eq!(migrate_named(&mut conn, NAMED_MIGRATIONS).unwrap(), NAMED_MIGRATIONS.len());
+        assert_eq!(
+            migrate_named(&mut conn, NAMED_MIGRATIONS).unwrap(),
+            NAMED_MIGRATIONS.len()
+        );
         assert_migrated_dependencies(&conn);
         assert_eq!(migrate(&mut conn).unwrap(), 0);
     }
