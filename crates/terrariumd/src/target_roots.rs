@@ -684,7 +684,9 @@ pub async fn prepare_exec(
     let stored = stored_base(state, &a.id, &def.name).await?;
     let r = root(stored.as_deref().unwrap_or(base(def)), &a.project, &a.name)?;
     let paths = [
-        cmd.cwd.as_deref(),
+        // The root itself is a valid cwd. `inside` is deliberately strict
+        // for build/results directories, but must not skip preparation here.
+        cmd.cwd.as_deref().filter(|p| *p != r),
         cmd.env.get("CARGO_TARGET_DIR").map(String::as_str),
         cmd.env.get("RESULTS_DIR").map(String::as_str),
     ];
