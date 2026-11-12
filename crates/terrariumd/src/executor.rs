@@ -855,7 +855,7 @@ struct SavedExec {
 
 /// Rebuild output consumers before the wait engine reconciles process waits.
 pub fn restore_sessions(state: &Shared) -> ApiResult<()> {
-    let journal = crate::hosts::resume::Journal::new(&state.state_dir);
+    let journal = crate::hosts::resume::Journal::with_db(&state.state_dir, state.db.clone());
     for (_, saved) in journal.scan::<SavedExec>("exec/")? {
         let kind = if saved.shell { "shell" } else { "exec" };
         let (mut session, ctl) = ExecSession::new(
