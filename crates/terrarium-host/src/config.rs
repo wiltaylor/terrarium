@@ -243,6 +243,7 @@ pub fn data_dir() -> PathBuf {
 /// nor `HOME`, [`data_dir`] is `/var/lib`, which a user agent cannot write:
 /// then `<temp_dir>/terrarium-host-<euid>/env`. The host agent checks the
 /// dir and deletes the leftover files in it at the start.
+#[cfg(unix)]
 pub fn default_env_dir() -> PathBuf {
     let has_home = ["XDG_DATA_HOME", "HOME"]
         .iter()
@@ -257,6 +258,11 @@ pub fn default_env_dir() -> PathBuf {
         std::env::temp_dir().join(format!("terrarium-host-{suffix}"))
     };
     absolute(base.join("env"))
+}
+
+#[cfg(windows)]
+pub fn default_env_dir() -> PathBuf {
+    data_dir().join("host").join("env")
 }
 
 fn absolute(p: PathBuf) -> PathBuf {

@@ -461,6 +461,7 @@ async fn run_version(path: &Path) -> std::io::Result<std::process::Output> {
 
 /// Put `<binary>.new` in place: keep the running binary as `.prev`, write
 /// `.pending` with the new version, and rename `.new` over the binary.
+#[cfg(unix)]
 pub fn swap(bin: &Path, version: &str) -> Result<(), UpdateError> {
     let new = sidecar(bin, NEW);
     let prev = sidecar(bin, PREV);
@@ -492,6 +493,21 @@ pub fn swap(bin: &Path, version: &str) -> Result<(), UpdateError> {
     {
         let _ = d.sync_all();
     }
+    Ok(())
+}
+
+/// A separate copy performs the replacement only after SCM reports the
+/// service stopped. Neither the service nor the updater overwrites itself.
+#[cfg(windows)]
+pub fn swap(bin: &Path, version: &str) -> Result<(), UpdateError> {
+    let helper = sidecar(bin, "update-helper.exe");
+    std::fs::copy(sidecar(bin, NEW), &helper).map_err(io_err(&helper))?;
+    std::process::Command::new(&helper)
+        .arg("apply-service-update").arg(bin).arg(version)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn().map_err(io_err(&helper))?;
     Ok(())
 }
 

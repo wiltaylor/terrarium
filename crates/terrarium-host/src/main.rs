@@ -57,6 +57,10 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Internal service-safe update worker, executed from a separate copy.
+    #[cfg(windows)]
+    #[command(hide = true)]
+    ApplyServiceUpdate { binary: PathBuf, version: String },
     /// Run under the Windows Service Control Manager as LocalSystem.
     #[cfg(windows)]
     Service,
@@ -521,6 +525,10 @@ fn main() -> anyhow::Result<()> {
     if matches!(args.command, Some(Cmd::SessionRunner)) {
         return terrarium_host::session_runner::windows::run();
     }
+    #[cfg(windows)]
+    if let Some(Cmd::ApplyServiceUpdate { binary, version }) = &args.command {
+        return windows_service_host::apply_update(binary, version);
+    }
     let writer = tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stderr);
     #[cfg(windows)]
     let writer = if matches!(args.command, Some(Cmd::Service)) {
@@ -564,6 +572,8 @@ fn main() -> anyhow::Result<()> {
     }
     let rt = tokio::runtime::Runtime::new().context("start the runtime")?;
     match args.command {
+        #[cfg(windows)]
+        Some(Cmd::ApplyServiceUpdate { .. }) => unreachable!("handled before the runtime"),
         #[cfg(windows)]
         Some(Cmd::Service) => unreachable!("handled by the service dispatcher"),
         #[cfg(windows)]

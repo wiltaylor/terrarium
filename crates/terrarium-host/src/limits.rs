@@ -175,7 +175,10 @@ pub fn wrap(plan: &mut ExecPlan, slice: &str, scope: &str) {
 /// find the user manager. A host agent in a system unit (`User=`) does not
 /// have it. Then it is `/run/user/<uid>`, when that exists.
 pub fn user_bus_env() -> BTreeMap<String, String> {
+    #[cfg(unix)]
     let mut env = BTreeMap::new();
+    #[cfg(windows)]
+    let env = BTreeMap::new();
     #[cfg(unix)]
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
         let dir = format!("/run/user/{}", nix::unistd::getuid());

@@ -227,7 +227,10 @@ pub fn plan_run(
         a.push("--gpus".into());
         a.push(format!("\"device={}\"", devices.join(",")));
     }
+    #[cfg(unix)]
     let mut user = req.user.clone();
+    #[cfg(windows)]
+    let user = req.user.clone();
     #[cfg(unix)]
     if user.is_none()
         && let Some(first) = sources.first()

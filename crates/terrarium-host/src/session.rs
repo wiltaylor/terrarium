@@ -143,6 +143,7 @@ pub fn private_dir(dir: &Path) -> std::io::Result<()> {
     let script = r#"$ErrorActionPreference = 'Stop';
         $acl = New-Object System.Security.AccessControl.DirectorySecurity;
         $acl.SetAccessRuleProtection($true, $false);
+        $acl.SetOwner((New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')));
         foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
             $id = New-Object System.Security.Principal.SecurityIdentifier($sid);
             $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow');

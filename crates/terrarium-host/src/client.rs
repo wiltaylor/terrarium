@@ -1375,6 +1375,7 @@ impl Client {
 
     /// The helper, when `[native_gpu]` is on and the helper answered with
     /// enforcement at the last `hello`.
+    #[cfg(unix)]
     fn native_live(&self) -> Option<&crate::native::NativeOptions> {
         self.opts.native.as_ref().filter(|_| {
             self.shared

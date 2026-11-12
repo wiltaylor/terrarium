@@ -69,3 +69,63 @@ fn serve() -> anyhow::Result<()> {
     handle.set_service_status(status(ServiceState::Stopped, if result.is_ok() { 0 } else { 1 }))?;
     result
 }
+
+/// Stop, replace, restart, and roll back unless the new build receives a
+/// daemon welcome. Runs outside the service from a separate verified copy.
+pub fn apply_update(binary: &std::path::Path, version: &str) -> anyhow::Result<()> {
+    use windows_service::service::{ServiceAccess, ServiceState};
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+    use terrarium_host::selfupdate::{self, sidecar};
+
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(NAME, ServiceAccess::STOP | ServiceAccess::START | ServiceAccess::QUERY_STATUS)?;
+    let wait_stopped = || -> anyhow::Result<()> {
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        while service.query_status()?.current_state != ServiceState::Stopped {
+            anyhow::ensure!(std::time::Instant::now() < until, "service did not stop for update");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        Ok(())
+    };
+    // Validate the staged executable again before stopping a working service.
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(selfupdate::smoke_test(&sidecar(binary, selfupdate::NEW), version, Duration::from_secs(10)))?;
+    rt.shutdown_background();
+    if service.query_status()?.current_state != ServiceState::Stopped {
+        service.stop()?;
+    }
+    wait_stopped()?;
+    let previous = sidecar(binary, selfupdate::PREV);
+    if previous.exists() { std::fs::remove_file(&previous)?; }
+    // SCM stopped can precede process teardown. Retry only our own executable.
+    let until = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        match std::fs::rename(binary, &previous) {
+            Ok(()) => break,
+            Err(_) if std::time::Instant::now() < until => std::thread::sleep(Duration::from_millis(200)),
+            Err(e) => { let _ = service.start::<&str>(&[]); return Err(e.into()); }
+        }
+    }
+    let pending = sidecar(binary, selfupdate::PENDING);
+    let install = (|| -> anyhow::Result<()> {
+        std::fs::write(&pending, format!("{version}\n"))?;
+        std::fs::rename(sidecar(binary, selfupdate::NEW), binary)?;
+        service.start::<&str>(&[])?;
+        let until = std::time::Instant::now() + Duration::from_secs(120);
+        while pending.exists() {
+            anyhow::ensure!(std::time::Instant::now() < until, "updated service did not reach the daemon");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        Ok(())
+    })();
+    if install.is_err() {
+        if service.query_status()?.current_state != ServiceState::Stopped { let _ = service.stop(); }
+        wait_stopped()?;
+        if binary.exists() { std::fs::remove_file(binary)?; }
+        std::fs::rename(&previous, binary)?;
+        std::fs::write(sidecar(binary, selfupdate::FAILED), format!("{version}\n"))?;
+        let _ = std::fs::remove_file(pending);
+        service.start::<&str>(&[])?;
+    }
+    install
+}
