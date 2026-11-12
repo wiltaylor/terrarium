@@ -2,7 +2,7 @@
 //! advance the runtime barrier or claim that an attachment is usable.
 use super::*;
 use terrarium_core::live_workspace::{
-    Caller, DaemonOperation, DaemonPhase, Delivery, Envelope, Holder, Kind, NamespaceIdentity,
+    AttachmentId, Caller, DaemonOperation, DaemonPhase, Delivery, Envelope, Holder, Kind, NamespaceIdentity,
     OperationId, PROTOCOL_VERSION, Provenance, RegistrationId, Reply, Request, RuntimeId,
     RuntimeIdentity, decode_frame,
 };
@@ -29,6 +29,9 @@ pub fn allocate_grant(t: &Tx<'_>, grant: &Grant) -> ApiResult<Envelope> {
             Code::LinkForbidden,
             "link provenance cannot allocate a grant",
         ));
+    }
+    if matches!(grant.provenance.caller, Caller::Agent(agent) if agent != grant.holder.enrollment.agent) {
+        return Err(ApiError::new(Code::Forbidden, "grant caller does not own the holder"));
     }
     let operation = grant.operation.0.to_string();
     let registration = grant.registration.0.to_string();
@@ -133,6 +136,83 @@ pub fn allocate_grant(t: &Tx<'_>, grant: &Grant) -> ApiResult<Envelope> {
     if changed != 1 {
         return Err(conflict());
     }
+    Ok(envelope)
+}
+
+/// The caller must hold the same per-registration serialization as dispatch.
+/// Ownership comes from the original durable grant, not a replacement holder
+/// supplied by a revoke request. This function never unseals a workspace.
+#[allow(clippy::type_complexity)]
+pub fn allocate_revoke(
+    t: &Tx<'_>, provenance: &Provenance, operation: OperationId,
+    registration: RegistrationId, attachment: AttachmentId,
+) -> ApiResult<Envelope> {
+    durable(t)?;
+    no_link(t)?;
+    if matches!(provenance.caller, Caller::Link(_)) {
+        return Err(ApiError::new(Code::LinkForbidden, "link provenance cannot revoke a workspace"));
+    }
+    let registration_id = registration.0.to_string();
+    let operation_id = operation.0.to_string();
+    let exists: bool = t.query_row("SELECT EXISTS(SELECT 1 FROM live_workspace_operations WHERE operation_id = ?1)", [&operation_id], |r| r.get(0))?;
+    if exists {
+        let saved = load(t, &operation_id)?;
+        if saved.envelope.original.kind != Kind::Revoke
+            || saved.envelope.original.provenance != *provenance
+            || saved.envelope.original.runtime.registration != registration
+            || saved.envelope.original.holder.as_ref().is_none_or(|h| h.attachment != attachment)
+        { return Err(conflict()); }
+        return Ok(saved.envelope);
+    }
+    let mut grants = t.prepare("SELECT operation_id FROM live_workspace_operations WHERE registration_id = ?1 AND kind = 'grant'")?;
+    let mut owner = None;
+    for id in grants.query_map([&registration_id], |r| r.get::<_, String>(0))? {
+        let candidate = load(t, &id?)?;
+        if candidate.envelope.original.holder.as_ref().is_some_and(|h| h.attachment == attachment) {
+            if owner.is_some() { return Err(conflict()); }
+            owner = Some(candidate);
+        }
+    }
+    let grant = owner.ok_or_else(conflict)?;
+    let holder = grant.envelope.original.holder.as_ref().ok_or_else(conflict)?;
+    if matches!(provenance.caller, Caller::Agent(agent) if agent != holder.enrollment.agent) {
+        return Err(ApiError::new(Code::Forbidden, "revoke caller does not own the holder"));
+    }
+    super::identity(t, &holder.enrollment)?;
+    let valid: bool = t.query_row("SELECT EXISTS(SELECT 1 FROM workspace_reservations WHERE workspace_id = ?1 AND trust_domain_id = ?2 AND current_registration_id = ?3)",
+        params![holder.enrollment.workspace.0.to_string(), holder.domain.0.to_string(), registration_id], |r| r.get(0))?;
+    if !valid { return Err(conflict()); }
+    let allocated: u64 = t.query_row("SELECT allocated_revision FROM live_workspace_targets WHERE registration_id = ?1 AND state != 'destroyed'", [&registration_id], |r| r.get(0))?;
+    let revision = allocated.checked_add(1).filter(|n| *n <= i64::MAX as u64).ok_or_else(conflict)?;
+    let existing: Option<(String, String, String, Option<u64>)> = t.query_row(
+        "SELECT workspace_id, registration_id, agent_id, revoke_revision FROM live_workspace_attachments WHERE attachment_id = ?1",
+        [attachment.0.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).optional()?;
+    if let Some((workspace, registered, agent, tombstone)) = &existing {
+        if workspace != &holder.enrollment.workspace.0.to_string() || registered != &registration_id
+            || agent != &holder.enrollment.agent.to_string() || tombstone.is_some()
+        { return Err(conflict()); }
+    }
+    let mut request = grant.envelope.original.clone();
+    request.operation = operation;
+    request.provenance = provenance.clone();
+    request.kind = Kind::Revoke;
+    request.revision = revision;
+    let envelope = Envelope { original_hash: request.hash().map_err(|_| conflict())?, original: request, delivery: Delivery::Apply };
+    if existing.is_some() {
+        t.execute("UPDATE live_workspace_attachments SET state = 'authority_ended' WHERE attachment_id = ?1 AND state = 'attached_verified'", [attachment.0.to_string()])?;
+        t.execute("UPDATE live_workspace_attachments SET state = 'revoke_pending', revoke_revision = ?2 WHERE attachment_id = ?1",
+            params![attachment.0.to_string(), revision])?;
+    } else {
+        // A grant not yet runtime-committed still needs a durable tombstone.
+        t.execute("INSERT INTO live_workspace_attachments VALUES (?1,?2,?3,?4,'revoke_pending',?5)",
+            params![attachment.0.to_string(), holder.enrollment.workspace.0.to_string(), registration_id, holder.enrollment.agent.to_string(), revision])?;
+    }
+    t.execute("UPDATE live_workspace_operations SET delivery = 'superseded' WHERE operation_id = ?1 AND phase = 'intent' AND delivery = 'apply'",
+        [grant.envelope.original.operation.0.to_string()])?;
+    t.execute("INSERT INTO live_workspace_operations VALUES (?1,?2,?3,'revoke',?4,?5,'apply','intent',NULL)",
+        params![operation_id, registration_id, revision, serde_json::to_vec(&envelope.original).map_err(|_| conflict())?, envelope.original_hash.as_slice()])?;
+    t.execute("UPDATE live_workspace_targets SET allocated_revision = ?2 WHERE registration_id = ?1", params![registration_id, revision])?;
     Ok(envelope)
 }
 
@@ -450,7 +530,10 @@ mod tests {
             assert_eq!(allocate_grant(t, &grant)?, first);
             let mut duplicate = Grant {
                 operation: OperationId(Ulid::new()),
-                ..grant
+                provenance: grant.provenance.clone(),
+                registration: grant.registration,
+                holder: grant.holder.clone(),
+                owning_sandbox: grant.owning_sandbox.clone(),
             };
             assert!(allocate_grant(t, &duplicate).is_err());
             duplicate.holder.attachment = AttachmentId(Ulid::new());
@@ -471,6 +554,21 @@ mod tests {
                     r.get(0)
                 })?;
             assert_eq!(attachments, 0);
+            let revoke_id = OperationId(Ulid::new());
+            let revoke = allocate_revoke(t, &grant.provenance, revoke_id, grant.registration, grant.holder.attachment)?;
+            assert_eq!(revoke.original.revision, 3);
+            assert_eq!(revoke.original.holder, first.original.holder);
+            assert_eq!(allocate_revoke(t, &grant.provenance, revoke_id, grant.registration, grant.holder.attachment)?, revoke);
+            let canceled = load(t, &grant.operation.0.to_string())?;
+            assert_eq!(canceled.envelope.original, first.original);
+            assert_eq!(canceled.envelope.original_hash, first.original_hash);
+            assert_eq!(canceled.envelope.delivery, Delivery::Superseded);
+            let tombstone: u64 = t.query_row("SELECT revoke_revision FROM live_workspace_attachments", [], |r| r.get(0))?;
+            assert_eq!(tombstone, 3);
+            assert!(allocate_revoke(t, &grant.provenance, OperationId(Ulid::new()), grant.registration, AttachmentId(Ulid::new())).is_err());
+            assert!(allocate_revoke(t, &grant.provenance, OperationId(Ulid::new()), grant.registration, grant.holder.attachment).is_err());
+            let sealed: u64 = t.query_row("SELECT count(*) FROM workspace_reservations", [], |r| r.get(0))?;
+            assert_eq!(sealed, 1);
             Ok(())
         })
         .await
