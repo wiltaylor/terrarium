@@ -573,21 +573,23 @@ pub fn spawn_with_context(
     if let Some(identity) = identity {
         // Windows otherwise opens the image/cwd as the service even though
         // the new process has a user token. Scope those opens to the user too.
-        identity.with_impersonation(|| checked(unsafe {
-            CreateProcessAsUserW(
-                identity.token(),
-                program.as_ptr(),
-                command.as_mut_ptr(),
-                null(),
-                null(),
-                i32::from(console.is_none()),
-                flags,
-                environment.as_ptr().cast(),
-                cwd.as_ref().map_or(null(), |s| s.as_ptr()),
-                &startup.StartupInfo,
-                &mut result,
-            )
-        }))?;
+        identity.with_impersonation(|| {
+            checked(unsafe {
+                CreateProcessAsUserW(
+                    identity.token(),
+                    program.as_ptr(),
+                    command.as_mut_ptr(),
+                    null(),
+                    null(),
+                    i32::from(console.is_none()),
+                    flags,
+                    environment.as_ptr().cast(),
+                    cwd.as_ref().map_or(null(), |s| s.as_ptr()),
+                    &startup.StartupInfo,
+                    &mut result,
+                )
+            })
+        })?;
     } else {
         // SAFETY: same initialized buffers and atomic containment as above.
         checked(unsafe {
