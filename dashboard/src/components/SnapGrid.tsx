@@ -63,7 +63,7 @@ export function SnapGrid<T extends GridWidget>(props: SnapGridProps<T>) {
     <For each={layout().map((widget) => widget.id)}>{(id) => {
       const widget = () => layout().find((item) => item.id === id)!;
       return <section class="snap-grid-item" data-widget-id={id} data-auto={autoHeight(widget())}
-      style={{ "grid-column": `${widget().x + 1} / span ${widget().w}`, "grid-row": `${widget().y + 1} / span ${widget().h}` }}>
+      style={{ "grid-column": `${widget().x + 1} / span ${widget().w}`, "grid-row": `${widget().y + 1} / span ${widget().h}`, "--widget-height": `${widget().h * (ROW_HEIGHT + GRID_GAP) - GRID_GAP}px` }}>
       <Show when={props.editing}><div class="snap-grid-controls">
         <button type="button" aria-label={`Move ${id}`} onKeyDown={(event) => key(event, widget())} onPointerDown={(event) => start(event, id, false)} onPointerUp={finish} onPointerCancel={() => { gesture = undefined; }}>Move</button>
         <button type="button" aria-label={`Resize ${id}`} onKeyDown={(event) => key(event, widget())} onPointerDown={(event) => start(event, id, true)} onPointerUp={finish} onPointerCancel={() => { gesture = undefined; }}>Resize</button>
