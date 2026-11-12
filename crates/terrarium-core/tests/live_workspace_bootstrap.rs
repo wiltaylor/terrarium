@@ -1,8 +1,8 @@
 //! Ordering/model tests, not privileged bootstrap evidence.
 use terrarium_core::live_workspace::bootstrap::{Journal, Request, Scaffold, Step};
 use terrarium_core::live_workspace::{
-    Caller, NamespaceIdentity, OperationId, PROTOCOL_VERSION, Provenance, RegistrationId, RuntimeId,
-    RuntimeIdentity, SourceIdentity, TrustDomainId,
+    Caller, NamespaceIdentity, OperationId, PROTOCOL_VERSION, Provenance, RegistrationId,
+    RuntimeId, RuntimeIdentity, SourceIdentity, TrustDomainId,
 };
 use ulid::Ulid;
 
@@ -26,9 +26,18 @@ fn steps(r: &Request) -> Vec<Step> {
     vec![
         Step::Intent,
         Step::ScaffoldVerified(Scaffold {
-            publisher: SourceIdentity { device: 1, inode: 1 },
-            staging: SourceIdentity { device: 1, inode: 2 },
-            state: SourceIdentity { device: 1, inode: 3 },
+            publisher: SourceIdentity {
+                device: 1,
+                inode: 1,
+            },
+            staging: SourceIdentity {
+                device: 1,
+                inode: 2,
+            },
+            state: SourceIdentity {
+                device: 1,
+                inode: 3,
+            },
         }),
         Step::CreatePending,
         Step::ContainerBound("a".repeat(64)),
@@ -36,7 +45,10 @@ fn steps(r: &Request) -> Vec<Step> {
             registration: r.registration,
             incarnation: r.incarnation,
             container_id: "a".repeat(64),
-            namespace: NamespaceIdentity { device: 2, inode: 8 },
+            namespace: NamespaceIdentity {
+                device: 2,
+                inode: 8,
+            },
         }),
         Step::Committed,
     ]
@@ -87,7 +99,9 @@ fn immutable_request_and_bound_runtime_cannot_be_substituted() {
     for step in &all[1..4] {
         j.advance(step.clone()).unwrap();
     }
-    let Step::ReceiverVerified(runtime) = &all[4] else { panic!() };
+    let Step::ReceiverVerified(runtime) = &all[4] else {
+        panic!()
+    };
     for field in 0..4 {
         let mut wrong = runtime.clone();
         match field {
@@ -127,9 +141,15 @@ fn corrupt_history_never_recovers_as_committed() {
     for field in ["steps", "original_hash", "original"] {
         let mut corrupt = saved.clone();
         match field {
-            "steps" => { corrupt["steps"].as_array_mut().unwrap().remove(2); }
-            "original_hash" => { corrupt[field][0] = 256.into(); }
-            _ => { corrupt[field]["target"] = "different".into(); }
+            "steps" => {
+                corrupt["steps"].as_array_mut().unwrap().remove(2);
+            }
+            "original_hash" => {
+                corrupt[field][0] = 256.into();
+            }
+            _ => {
+                corrupt[field]["target"] = "different".into();
+            }
         }
         if let Ok(mut recovered) = serde_json::from_value::<Journal>(corrupt) {
             recovered.recover_without_evidence();
@@ -147,7 +167,13 @@ fn link_provenance_aliases_and_untyped_paths_are_refused() {
     let mut r = request();
     r.target = "../other".into();
     assert!(Journal::new(r).is_err());
-    for field in ["publisher_root", "state_root", "staging_root", "pid", "flags"] {
+    for field in [
+        "publisher_root",
+        "state_root",
+        "staging_root",
+        "pid",
+        "flags",
+    ] {
         let mut wire = serde_json::to_value(request()).unwrap();
         wire[field] = "/arbitrary".into();
         assert!(serde_json::from_value::<Request>(wire).is_err());
@@ -158,7 +184,9 @@ fn link_provenance_aliases_and_untyped_paths_are_refused() {
 fn scaffold_aliases_zero_identity_and_short_container_ids_are_refused() {
     let r = request();
     let all = steps(&r);
-    let Step::ScaffoldVerified(scaffold) = &all[1] else { panic!() };
+    let Step::ScaffoldVerified(scaffold) = &all[1] else {
+        panic!()
+    };
     for field in 0..4 {
         let mut wrong = scaffold.clone();
         match field {
@@ -167,7 +195,12 @@ fn scaffold_aliases_zero_identity_and_short_container_ids_are_refused() {
             2 => wrong.state = wrong.staging.clone(),
             _ => wrong.publisher.inode = 0,
         }
-        assert!(Journal::new(r.clone()).unwrap().advance(Step::ScaffoldVerified(wrong)).is_err());
+        assert!(
+            Journal::new(r.clone())
+                .unwrap()
+                .advance(Step::ScaffoldVerified(wrong))
+                .is_err()
+        );
     }
     let mut j = Journal::new(r).unwrap();
     j.advance(all[1].clone()).unwrap();

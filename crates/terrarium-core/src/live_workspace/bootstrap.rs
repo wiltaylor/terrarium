@@ -100,6 +100,24 @@ impl Journal {
         &self.original
     }
 
+    /// Only the intent may be installed as the first durable snapshot.
+    pub fn initial(&self) -> bool {
+        self.valid() && !self.quarantined && self.steps == [Step::Intent]
+    }
+
+    /// A snapshot writer may persist one observed transition or quarantine,
+    /// never truncate history, skip durability boundaries or clear a fence.
+    pub fn follows(&self, old: &Self) -> bool {
+        self.valid()
+            && old.valid()
+            && self.original == old.original
+            && self.original_hash == old.original_hash
+            && (!old.quarantined || self.quarantined)
+            && self.steps.starts_with(&old.steps)
+            && (self.steps.len() == old.steps.len()
+                || (!old.quarantined && self.steps.len() == old.steps.len() + 1))
+    }
+
     pub fn quarantined(&self) -> bool {
         self.quarantined
     }
@@ -116,7 +134,9 @@ impl Journal {
         {
             return false;
         }
-        self.steps.windows(2).all(|pair| self.edge(&pair[0], &pair[1]))
+        self.steps
+            .windows(2)
+            .all(|pair| self.edge(&pair[0], &pair[1]))
     }
 
     fn edge(&self, from: &Step, to: &Step) -> bool {
