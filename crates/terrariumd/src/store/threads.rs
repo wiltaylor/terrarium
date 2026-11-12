@@ -839,7 +839,10 @@ pub fn on_card_moved(
 /// need not read the card's project (TER-146).
 fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
     if (reason == WAKE_REVIEW || reason == "monitor_green")
-        && !super::thread_test_ready::readiness(t, id, terrarium_version::VERSION)?.1.is_empty() {
+        && !super::thread_test_ready::readiness(t, id, terrarium_version::VERSION)?
+            .1
+            .is_empty()
+    {
         // Review is only a status event, never an invitation to test.
         let th = get_bare(t, id)?;
         emit_with(t, &th, "cards_status", json!({"reason": "review"}))?;

@@ -100,15 +100,27 @@ mod tests {
              INSERT INTO board_columns VALUES ('d', 'done'), ('r', 'review');
              INSERT INTO cards VALUES ('A', 'd', '[\"version:1.2.3\"]'), ('B', 'r', '[]');
              INSERT INTO thread_cards VALUES ('t', 'A'), ('t', 'B');",
-        ).unwrap();
-        assert_eq!(readiness(&c, "t", "1.2.3-alpha").unwrap().1, ["B: not done"]);
+        )
+        .unwrap();
+        assert_eq!(
+            readiness(&c, "t", "1.2.3-alpha").unwrap().1,
+            ["B: not done"]
+        );
         c.execute("UPDATE cards SET column_id = 'd'", []).unwrap();
         assert!(readiness(&c, "t", "1.2.3-alpha").unwrap().1.is_empty());
         assert!(readiness(&c, "t", "1.2.3").unwrap().1.is_empty());
         assert!(readiness(&c, "t", "1.2.2").unwrap().1[0].contains("not installed"));
-        c.execute("UPDATE cards SET labels = '[\"version:1.2.3-beta\"]' WHERE id = 'A'", []).unwrap();
+        c.execute(
+            "UPDATE cards SET labels = '[\"version:1.2.3-beta\"]' WHERE id = 'A'",
+            [],
+        )
+        .unwrap();
         assert!(readiness(&c, "t", "1.2.3-alpha").unwrap().1[0].contains("not installed"));
-        c.execute("UPDATE cards SET labels = '[\"version:vnext\"]' WHERE id = 'A'", []).unwrap();
+        c.execute(
+            "UPDATE cards SET labels = '[\"version:vnext\"]' WHERE id = 'A'",
+            [],
+        )
+        .unwrap();
         assert!(readiness(&c, "t", "1.2.3").unwrap().1[0].contains("not installed"));
         c.execute("UPDATE cards SET labels = '[]'", []).unwrap();
         assert!(readiness(&c, "t", "0.0.0-alpha").unwrap().1.is_empty());
