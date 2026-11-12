@@ -1,5 +1,6 @@
-//! Durable receipt ingestion only. This does not dispatch, enable a target,
-//! advance the runtime barrier or claim that an attachment is usable.
+//! Durable grant/revoke ordering and receipt ingestion. There is no transport
+//! or production caller here. Dispatch must serialize across helper I/O, not
+//! merely across these transactions. No function enables a target.
 use super::*;
 use terrarium_core::live_workspace::{
     AttachmentId, Caller, DaemonOperation, DaemonPhase, Delivery, Envelope, Holder, Kind,
@@ -278,6 +279,110 @@ pub fn allocate_revoke(
 
 fn conflict() -> ApiError {
     ApiError::new(Code::Conflict, "invalid live workspace operation record")
+}
+
+fn revoked(t: &Tx<'_>, holder: &Holder) -> ApiResult<bool> {
+    Ok(t.query_row("SELECT EXISTS(SELECT 1 FROM live_workspace_attachments WHERE attachment_id = ?1 AND revoke_revision IS NOT NULL)",
+        [holder.attachment.0.to_string()], |r| r.get(0))?)
+}
+
+fn still_authorized(t: &Tx<'_>, holder: &Holder, registration: &str) -> ApiResult<bool> {
+    super::identity(t, &holder.enrollment)?;
+    let reserved: bool = t.query_row("SELECT EXISTS(SELECT 1 FROM workspace_reservations WHERE workspace_id = ?1 AND trust_domain_id = ?2 AND current_registration_id = ?3)",
+        params![holder.enrollment.workspace.0.to_string(), holder.domain.0.to_string(), registration], |r| r.get(0))?;
+    Ok(reserved && !revoked(t, holder)? && super::current_authority(t, &holder.enrollment, registration)?)
+}
+
+fn cancel_grant(t: &Tx<'_>, stored: &DaemonOperation) -> ApiResult<()> {
+    let holder = stored.envelope.original.holder.as_ref().ok_or_else(conflict)?;
+    if !revoked(t, holder)? {
+        allocate_revoke(t, &Provenance {
+            daemon_instance: stored.envelope.original.provenance.daemon_instance,
+            caller: Caller::LocalOperator,
+        }, OperationId(Ulid::new()), stored.envelope.original.runtime.registration, holder.attachment)?;
+    }
+    // Never rewrite a helper-committed request or an original body/hash.
+    t.execute("UPDATE live_workspace_operations SET delivery = 'superseded' WHERE operation_id = ?1 AND phase = 'intent' AND delivery = 'apply'",
+        [stored.envelope.original.operation.0.to_string()])?;
+    Ok(())
+}
+
+/// Select only the next contiguous revision. The caller must hold a single
+/// per-registration lock across this transaction, helper I/O, receipt ingestion
+/// and runtime commit. This function alone is not a dispatch claim or lease.
+pub fn next(t: &Tx<'_>, registration: RegistrationId) -> ApiResult<Option<DaemonOperation>> {
+    durable(t)?;
+    no_link(t)?;
+    let id = registration.0.to_string();
+    let (last, allocated, state): (u64, u64, String) = t.query_row(
+        "SELECT last_contiguous_revision,allocated_revision,state FROM live_workspace_targets WHERE registration_id = ?1",
+        [&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    if state != "verified" { return Err(conflict()); }
+    if last == allocated { return Ok(None); }
+    let revision = last.checked_add(1).ok_or_else(conflict)?;
+    let operation: String = t.query_row("SELECT operation_id FROM live_workspace_operations WHERE registration_id = ?1 AND revision = ?2",
+        params![id, revision], |r| r.get(0))?;
+    let stored = load(t, &operation)?;
+    if !matches!(stored.phase, DaemonPhase::Intent | DaemonPhase::HelperCommitted) {
+        return Err(conflict());
+    }
+    if stored.envelope.original.kind == Kind::Grant {
+        let holder = stored.envelope.original.holder.as_ref().ok_or_else(conflict)?;
+        if !still_authorized(t, holder, &id)? { cancel_grant(t, &stored)?; }
+    }
+    Ok(Some(load(t, &operation)?))
+}
+
+/// Commit only a saved exact helper receipt, in the same transaction as the
+/// attachment mutation and contiguous barrier. Renew authority rather than
+/// treating the earlier helper result as a current authorization decision.
+pub fn commit_runtime(t: &Tx<'_>, operation: OperationId) -> ApiResult<()> {
+    durable(t)?;
+    no_link(t)?;
+    let id = operation.0.to_string();
+    let stored = load(t, &id)?;
+    let request = &stored.envelope.original;
+    let registration = request.runtime.registration.0.to_string();
+    let (last, state): (u64, String) = t.query_row("SELECT last_contiguous_revision,state FROM live_workspace_targets WHERE registration_id = ?1",
+        [&registration], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    if stored.phase == DaemonPhase::RuntimeCommitted && request.revision <= last {
+        return Ok(());
+    }
+    if state != "verified" || last.checked_add(1) != Some(request.revision)
+        || stored.phase != DaemonPhase::HelperCommitted
+    { return Err(conflict()); }
+    let mut verified = stored.clone();
+    verified.acknowledge(&stored.envelope, stored.helper_result.ok_or_else(conflict)?).map_err(|_| conflict())?;
+    match (request.kind, stored.envelope.delivery) {
+        (Kind::Grant, Delivery::Apply) => {
+            let holder = request.holder.as_ref().ok_or_else(conflict)?;
+            if still_authorized(t, holder, &registration)? {
+                t.execute("INSERT INTO live_workspace_attachments VALUES (?1,?2,?3,?4,'attached_verified',NULL)",
+                    params![holder.attachment.0.to_string(), holder.enrollment.workspace.0.to_string(), registration, holder.enrollment.agent.to_string()])?;
+            } else {
+                // The helper may already have published. Retain the seal and
+                // ordered revoke without admitting exec or claiming absence.
+                cancel_grant(t, &stored)?;
+            }
+        }
+        (Kind::Grant, Delivery::Superseded) => {
+            let holder = request.holder.as_ref().ok_or_else(conflict)?;
+            if !revoked(t, holder)? { return Err(conflict()); }
+        }
+        (Kind::Revoke, Delivery::Apply) => {
+            let holder = request.holder.as_ref().ok_or_else(conflict)?;
+            let updated = t.execute("UPDATE live_workspace_attachments SET state = 'path_revoked_verified' WHERE attachment_id = ?1 AND registration_id = ?2 AND revoke_revision = ?3 AND state = 'revoke_pending'",
+                params![holder.attachment.0.to_string(), registration, request.revision])?;
+            if updated != 1 { return Err(conflict()); }
+        }
+        _ => return Err(conflict()), // Lifecycle runtime commits need their own verified integration.
+    }
+    verified.commit_runtime().map_err(|_| conflict())?;
+    t.execute("UPDATE live_workspace_operations SET phase = 'daemon_committed' WHERE operation_id = ?1", [&id])?;
+    t.execute("UPDATE live_workspace_targets SET last_contiguous_revision = ?2 WHERE registration_id = ?1",
+        params![registration, request.revision])?;
+    Ok(())
 }
 
 #[allow(clippy::type_complexity)]
@@ -669,6 +774,42 @@ mod tests {
                     r.get(0)
                 })?;
             assert_eq!(sealed, 1);
+            // Seed revision 1 is synthetic registration setup, not a live
+            // helper operation. Advance this fixture only to exercise grants.
+            t.execute("UPDATE live_workspace_operations SET phase = 'helper_committed', result = ?1 WHERE kind = 'reconcile'",
+                [serde_json::to_vec(&Reply::Applied).unwrap()])?;
+            t.execute("UPDATE live_workspace_operations SET phase = 'daemon_committed' WHERE kind = 'reconcile'", [])?;
+            t.execute("UPDATE live_workspace_targets SET last_contiguous_revision = 1", [])?;
+            assert!(commit_runtime(t, revoke_id).is_err()); // No skipping grant barrier.
+            let barrier = next(t, grant.registration)?.unwrap();
+            assert_eq!(barrier.envelope, canceled.envelope);
+            assert_eq!(acknowledge(t, &barrier.envelope, Reply::Superseded)?, Reply::Superseded);
+            commit_runtime(t, grant.operation)?;
+            commit_runtime(t, grant.operation)?; // Exact runtime retry is idempotent.
+            let ordered_revoke = next(t, grant.registration)?.unwrap();
+            assert_eq!(ordered_revoke.envelope, revoke);
+            assert_eq!(acknowledge(t, &revoke, Reply::PathRevokedVerified)?, Reply::PathRevokedVerified);
+            commit_runtime(t, revoke_id)?;
+            assert!(next(t, grant.registration)?.is_none());
+            let state: String = t.query_row("SELECT state FROM live_workspace_attachments", [], |r| r.get(0))?;
+            assert_eq!(state, "path_revoked_verified");
+            t.execute("UPDATE agents SET status = 'idle'", [])?;
+            let late = Grant {
+                operation: OperationId(Ulid::new()), provenance: grant.provenance.clone(), registration: grant.registration,
+                holder: Holder { attachment: AttachmentId(Ulid::new()), ..grant.holder.clone() },
+                owning_sandbox: grant.owning_sandbox.clone(),
+            };
+            let late_envelope = allocate_grant(t, &late)?;
+            assert_eq!(late_envelope.original.revision, 4);
+            assert_eq!(acknowledge(t, &late_envelope, Reply::Applied)?, Reply::Applied);
+            t.execute("UPDATE agents SET status = 'stopped'", [])?;
+            commit_runtime(t, late.operation)?;
+            let published: u64 = t.query_row("SELECT count(*) FROM live_workspace_attachments WHERE state = 'attached_verified'", [], |r| r.get(0))?;
+            assert_eq!(published, 0);
+            let cleanup = next(t, grant.registration)?.unwrap();
+            assert_eq!(cleanup.envelope.original.kind, Kind::Revoke);
+            assert_eq!(cleanup.envelope.original.revision, 5);
+            assert_eq!(load(t, &late.operation.0.to_string())?.envelope.delivery, Delivery::Apply);
             Ok(())
         })
         .await
