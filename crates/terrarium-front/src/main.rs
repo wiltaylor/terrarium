@@ -12,11 +12,10 @@ async fn main() -> anyhow::Result<()> {
             PathBuf::from("/front/sessions.json"),
             webhook,
         )
-        .router()
     };
     tokio::try_join!(
-        axum::serve(web, make(8080, false)),
-        axum::serve(hooks, make(8083, true))
+        terrarium_front::serve(web, make(8080, false)),
+        terrarium_front::serve(hooks, make(8083, true))
     )?;
     Ok(())
 }

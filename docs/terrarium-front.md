@@ -31,6 +31,15 @@ new daemon HTTP route is added.
 
 ## First installation and updates
 
+Both listeners enforce `HEADER_TIMEOUT` (15 seconds to read request headers),
+`UPLOAD_IDLE_TIMEOUT` (60 seconds without a request-body chunk), and
+`MAX_CONNECTIONS` (1024 concurrent client connections per listener). These
+constants and their shared test overrides are defined in the front library.
+The upload timer resets on each chunk, with no total upload duration limit
+and no body buffering. Upload inactivity closes both client and upstream
+connections. Excess connections receive a plain 503 and are closed without
+entering a routing task. WebSocket tunnels retain their connection slot.
+
 This release requires the full container-swap procedure, not a hot swap.
 Install the new compose file, create `state/front` (mode 0700) and
 `updater/state/front` owned by the daemon/updater UID and GID, then recreate

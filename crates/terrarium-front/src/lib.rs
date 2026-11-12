@@ -15,11 +15,74 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 const DEADLINE: Duration = Duration::from_secs(2);
+pub const HEADER_TIMEOUT: Duration = Duration::from_secs(15);
+pub const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+pub const MAX_CONNECTIONS: usize = 1024;
+
+#[derive(Clone, Copy)]
+pub struct Limits {
+    pub header_timeout: Duration,
+    pub upload_idle_timeout: Duration,
+    pub max_connections: usize,
+}
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            header_timeout: HEADER_TIMEOUT,
+            upload_idle_timeout: UPLOAD_IDLE_TIMEOUT,
+            max_connections: MAX_CONNECTIONS,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ClientConnection {
+    close: Arc<tokio::sync::Notify>,
+    // Keep upgraded sockets counted until their tunnel closes too.
+    _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+}
+
+/// Bound headers and connections before routing, independently per listener.
+pub async fn serve(listener: tokio::net::TcpListener, front: Front) -> std::io::Result<()> {
+    use tower::ServiceExt;
+    let limits = front.limits;
+    let router = front.router();
+    let slots = Arc::new(tokio::sync::Semaphore::new(limits.max_connections));
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        let Ok(permit) = slots.clone().try_acquire_owned() else {
+            // No task or wait queue for rejected connections. A small write is
+            // attempted once, then the socket is dropped even if it would block.
+            let _ = stream.try_write(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\nRetry-After: 2\r\n\r\n");
+            continue;
+        };
+        let router = router.clone();
+        tokio::spawn(async move {
+            let client = ClientConnection {
+                close: Arc::new(tokio::sync::Notify::new()),
+                _permit: Arc::new(permit),
+            };
+            let close = client.close.clone();
+            let service = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
+                req.extensions_mut().insert(client.clone());
+                router.clone().oneshot(req.map(Body::new))
+            });
+            let mut builder = hyper::server::conn::http1::Builder::new();
+            builder.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(limits.header_timeout);
+            let connection = builder.serve_connection(TokioIo::new(&mut stream), service).with_upgrades();
+            tokio::select! {
+                _ = connection => (),
+                _ = close.notified() => (),
+            }
+        });
+    }
+}
 
 // Signal completion without buffering or setting a deadline on an upload.
 struct UploadBody {
     body: Body,
     sent: Option<tokio::sync::oneshot::Sender<()>>,
+    progress: tokio::sync::watch::Sender<tokio::time::Instant>,
 }
 impl axum::body::HttpBody for UploadBody {
     type Data = axum::body::Bytes;
@@ -30,6 +93,9 @@ impl axum::body::HttpBody for UploadBody {
     ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
         let this = self.get_mut();
         let result = std::pin::Pin::new(&mut this.body).poll_frame(cx);
+        if let std::task::Poll::Ready(Some(Ok(_))) = &result {
+            this.progress.send_replace(tokio::time::Instant::now());
+        }
         if (matches!(result, std::task::Poll::Ready(None)) || this.body.is_end_stream())
             && let Some(sent) = this.sent.take()
         {
@@ -51,6 +117,7 @@ pub struct Front {
     pub sessions: PathBuf,
     pub webhook: bool,
     outage: Mutex<Option<Instant>>,
+    limits: Limits,
 }
 
 impl Front {
@@ -61,7 +128,12 @@ impl Front {
             sessions,
             webhook,
             outage: Mutex::new(None),
+            limits: Limits::default(),
         }
+    }
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
     }
     pub fn router(self) -> axum::Router {
         axum::Router::new()
@@ -71,6 +143,7 @@ impl Front {
 }
 
 async fn proxy(State(front): State<Arc<Front>>, mut req: Request) -> Response {
+    let client_connection = req.extensions().get::<ClientConnection>().cloned();
     let browser = !front.webhook
         && req.method() == axum::http::Method::GET
         && !req.uri().path().starts_with("/api/")
@@ -90,11 +163,12 @@ async fn proxy(State(front): State<Arc<Front>>, mut req: Request) -> Response {
         let stream = timeout(DEADLINE, TcpStream::connect(&front.upstream)).await??;
         let (mut sender, connection) =
             hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
-        tokio::spawn(async move {
+        let upstream_connection = tokio::spawn(async move {
             let _ = connection.with_upgrades().await;
         });
         use axum::body::HttpBody;
         let (sent, uploaded) = tokio::sync::oneshot::channel();
+        let (progress, mut activity) = tokio::sync::watch::channel(tokio::time::Instant::now());
         let (parts, body) = req.into_parts();
         let sent = if body.is_end_stream() {
             let _ = sent.send(());
@@ -102,10 +176,27 @@ async fn proxy(State(front): State<Arc<Front>>, mut req: Request) -> Response {
         } else {
             Some(sent)
         };
-        let req = Request::from_parts(parts, Body::new(UploadBody { body, sent }));
+        let req = Request::from_parts(parts, Body::new(UploadBody {
+            body, sent, progress,
+        }));
         let response = sender.send_request(req);
         tokio::pin!(response);
         let response = tokio::select! {
+            _ = async {
+                loop {
+                    let deadline = *activity.borrow_and_update() + front.limits.upload_idle_timeout;
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => break,
+                        result = activity.changed() => {
+                            if result.is_err() { std::future::pending::<()>().await; }
+                        },
+                    }
+                }
+            } => {
+                upstream_connection.abort();
+                if let Some(client) = &client_connection { client.close.notify_one(); }
+                return Err(anyhow::anyhow!("upload inactive"));
+            },
             response = &mut response => response?,
             _ = uploaded => timeout(DEADLINE, &mut response).await??,
         };
@@ -120,6 +211,7 @@ async fn proxy(State(front): State<Arc<Front>>, mut req: Request) -> Response {
             if response.status() == StatusCode::SWITCHING_PROTOCOLS {
                 let upstream = hyper::upgrade::on(&mut response);
                 tokio::spawn(async move {
+                    let _client_connection = client_connection;
                     if let (Ok(client), Ok(server)) = tokio::join!(upgrade, upstream) {
                         let _ = tokio::io::copy_bidirectional(
                             &mut TokioIo::new(client),

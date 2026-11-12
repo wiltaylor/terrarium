@@ -13,14 +13,19 @@ async fn serve(router: Router) -> (String, tokio::task::JoinHandle<()>) {
     });
     (address, task)
 }
-fn front(upstream: String, webhook: bool) -> Router {
+async fn serve_front(front: Front) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let task = tokio::spawn(async move { terrarium_front::serve(listener, front).await.unwrap(); });
+    (address, task)
+}
+fn front(upstream: String, webhook: bool) -> Front {
     Front::new(
         upstream,
         PathBuf::from("/nonexistent/history"),
         PathBuf::from("/nonexistent/sessions"),
         webhook,
     )
-    .router()
 }
 
 #[tokio::test]
@@ -28,7 +33,7 @@ async fn outage_browser_api_webhook_and_recovery() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream = listener.local_addr().unwrap().to_string();
     drop(listener);
-    let (address, task) = serve(front(upstream.clone(), false)).await;
+    let (address, task) = serve_front(front(upstream.clone(), false)).await;
     let client = reqwest::Client::new();
     let url = format!("http://{address}");
     let page = client
@@ -50,7 +55,7 @@ async fn outage_browser_api_webhook_and_recovery() {
         .unwrap();
     assert_eq!(api.status(), 503);
     assert!(api.text().await.unwrap().contains("\"maintenance\":true"));
-    let (hooks, hook_task) = serve(front(upstream.clone(), true)).await;
+    let (hooks, hook_task) = serve_front(front(upstream.clone(), true)).await;
     let hook = client
         .post(format!("http://{hooks}/hooks/test"))
         .header("accept", "text/html")
@@ -160,7 +165,7 @@ async fn headers_streams_and_websocket_survive() {
             }),
         );
     let (upstream, daemon) = serve(upstream).await;
-    let (address, task) = serve(front(upstream, false)).await;
+    let (address, task) = serve_front(front(upstream, false)).await;
     let client = reqwest::Client::new();
     let text = client
         .get(format!("http://{address}/headers"))
@@ -226,7 +231,7 @@ async fn slow_headers_timeout_but_streaming_body_does_not() {
         }),
     );
     let (upstream, daemon) = serve(upstream).await;
-    let (address, task) = serve(front(upstream, false)).await;
+    let (address, task) = serve_front(front(upstream, false)).await;
     let start = std::time::Instant::now();
     assert_eq!(
         reqwest::get(format!("http://{address}/"))
@@ -250,7 +255,7 @@ async fn paced_upload_is_not_an_outage_and_receives_the_daemon_response() {
         }),
     );
     let (upstream, daemon) = serve(upstream).await;
-    let (address, task) = serve(front(upstream, false)).await;
+    let (address, task) = serve_front(front(upstream, false)).await;
     let chunks = futures_util::stream::unfold(0, |n| async move {
         if n == 5 {
             return None;
@@ -268,6 +273,89 @@ async fn paced_upload_is_not_an_outage_and_receives_the_daemon_response() {
     assert_eq!(response.status(), 200);
     assert_eq!(response.text().await.unwrap(), "complete upload");
     assert!(start.elapsed() > Duration::from_secs(2));
+    task.abort();
+    daemon.abort();
+}
+
+async fn read_head(stream: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut bytes = Vec::new();
+    while !bytes.ends_with(b"\r\n\r\n") {
+        bytes.push(stream.read_u8().await.unwrap());
+    }
+    String::from_utf8(bytes).unwrap()
+}
+
+#[tokio::test]
+async fn inactive_upload_closes_both_connections() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream.local_addr().unwrap().to_string();
+    let (closed, observed) = tokio::sync::oneshot::channel();
+    let daemon = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        assert!(read_head(&mut stream).await.starts_with("POST "));
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        closed.send(body).unwrap();
+    });
+    let limits = terrarium_front::Limits {
+        upload_idle_timeout: Duration::from_millis(200),
+        ..Default::default()
+    };
+    let (address, task) = serve_front(front(upstream_address, false).with_limits(limits)).await;
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    client.write_all(b"POST /upload HTTP/1.1\r\nHost: test\r\nContent-Length: 100\r\n\r\nabc").await.unwrap();
+    // Keep the write side open. Only the front's idle policy can end this.
+    let mut reply = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut reply)).await.unwrap().unwrap();
+    let body = tokio::time::timeout(Duration::from_secs(2), observed).await.unwrap().unwrap();
+    assert_eq!(body, b"abc");
+    daemon.await.unwrap();
+    task.abort();
+}
+
+#[tokio::test]
+async fn missing_headers_close_at_the_header_deadline() {
+    use tokio::io::AsyncReadExt;
+    let limits = terrarium_front::Limits {
+        header_timeout: Duration::from_millis(150),
+        ..Default::default()
+    };
+    assert_eq!(terrarium_front::HEADER_TIMEOUT, Duration::from_secs(15));
+    assert_eq!(terrarium_front::UPLOAD_IDLE_TIMEOUT, Duration::from_secs(60));
+    let (address, task) = serve_front(front("127.0.0.1:1".into(), false).with_limits(limits)).await;
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    let start = std::time::Instant::now();
+    let mut bytes = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut bytes)).await.unwrap().unwrap();
+    assert!(start.elapsed() >= limits.header_timeout);
+    task.abort();
+}
+
+#[tokio::test]
+async fn connection_cap_rejects_only_connections_above_the_limit() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    assert_eq!(terrarium_front::MAX_CONNECTIONS, 1024);
+    let (upstream, daemon) = serve(Router::new().route("/", get(|| async { "ok" }))).await;
+    let limits = terrarium_front::Limits { max_connections: 2, ..Default::default() };
+    let (address, task) = serve_front(front(upstream, false).with_limits(limits)).await;
+    let mut clients = Vec::new();
+    for _ in 0..limits.max_connections {
+        let mut client = tokio::net::TcpStream::connect(&address).await.unwrap();
+        client.write_all(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n").await.unwrap();
+        assert!(read_head(&mut client).await.starts_with("HTTP/1.1 200"));
+        let mut body = [0; 2];
+        client.read_exact(&mut body).await.unwrap();
+        assert_eq!(&body, b"ok");
+        clients.push(client);
+    }
+    let mut excess = tokio::net::TcpStream::connect(&address).await.unwrap();
+    assert!(read_head(&mut excess).await.starts_with("HTTP/1.1 503"));
+    // The last admitted connection remains usable while the cap is reached.
+    let client = clients.last_mut().unwrap();
+    client.write_all(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n").await.unwrap();
+    assert!(read_head(client).await.starts_with("HTTP/1.1 200"));
     task.abort();
     daemon.abort();
 }

@@ -11,6 +11,7 @@ tokio.workspace = true
 axum.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+tower.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
