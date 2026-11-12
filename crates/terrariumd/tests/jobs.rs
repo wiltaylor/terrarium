@@ -3813,7 +3813,7 @@ async fn delivery_secret_config_refuses_plaintext_and_arbitrary_env_injection() 
 #[tokio::test]
 async fn release_handoff_publishes_and_delivers_linked_inputs() {
     use base64::Engine;
-    use sha2::{Digest, Sha256};
+    use terrariumd::release_handoff::sha256;
     let lab = lab(1).await;
     release_client(&lab, "rel-client").await;
     let recipe = r#"set -eu
@@ -3898,7 +3898,7 @@ fi"#;
             .decode(download["data"].as_str().unwrap())
             .unwrap();
         assert_eq!(artifact["size"], bytes.len());
-        assert_eq!(artifact["sha256"], format!("{:x}", Sha256::digest(&bytes)));
+        assert_eq!(artifact["sha256"], sha256(&bytes));
     }
     // Missing attachment cannot queue a successor.
     assert_eq!(
@@ -3928,9 +3928,12 @@ fi"#;
         .clone();
     assert_eq!(
         attached["attachment"]["sha256"],
-        format!("{:x}", Sha256::digest(b"smoke-ok"))
+        sha256(b"smoke-ok")
     );
     // Advance main. Phase 2 must still take phase 1's exact commit.
+    assert_eq!(lab.td.post_as(&lab.lead, &endpoint, json!({"after":first,"commit":"0000000000000000000000000000000000000000"})).await.status, 409);
+    lab.td.post("/api/projects/p/repos", json!({"name":"other","url":lab.origin.display().to_string()})).await.ok();
+    assert_eq!(lab.td.post_as(&lab.lead, &endpoint, json!({"after":first,"repo":"other"})).await.status, 422);
     std::fs::write(lab.work.join("new-main"), "later").unwrap();
     git(&lab.work, &["add", "."]);
     git(&lab.work, &["commit", "-qm", "later main"]);
@@ -3970,6 +3973,33 @@ fi"#;
             .status,
         409
     );
+}
+
+#[tokio::test]
+async fn release_handoff_oversized_publish_fails_without_partial_files() {
+    let lab = lab(1).await;
+    release_client(&lab, "rel-client").await;
+    lab.td.put("/api/projects/p/delivery", json!({
+        "target":"p-box", "recipe":"true", "next_repos":["app"],
+        "work_dir":lab._dirs.path().join("jobs"), "release_target":"rel-client",
+        "release_recipe":"mkdir handoff && printf small > handoff/small && truncate -s 209715201 handoff/large",
+        "release_outputs":"handoff"
+    })).await.ok();
+    let card = lab.card("oversized handoff", "main").await;
+    let queued = lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/release"), json!({})).await.ok().clone();
+    let id = queued["job"]["id"].as_str().unwrap();
+    let jobs = lab.until_idle().await;
+    let job = jobs.iter().find(|j| j["id"] == id).unwrap();
+    assert_eq!(job["state"], "failed", "{job:?}");
+    assert!(job["tail"].as_str().unwrap().contains("per-job limit"), "{job:?}");
+    let outputs = lab.td.get_as(&lab.lead, &format!("/api/jobs/{id}/artifacts")).await.ok().clone();
+    assert!(outputs["artifacts"].as_array().unwrap().is_empty());
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let root = state.state_dir.join("release-handoffs").join(id);
+    if root.exists() {
+        assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);
+    }
+    assert_eq!(lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/release"), json!({"after":id})).await.status, 409);
 }
 
 /// TER-623: a release job runs the release recipe on the release target,

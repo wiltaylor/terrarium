@@ -85,6 +85,7 @@ fn io(e: impl std::fmt::Display) -> ApiError {
 
 pub fn relative_directory(path: &str) -> ApiResult<()> {
     if path.is_empty()
+        || path.split('/').any(|part| matches!(part, "" | "." | ".."))
         || Path::new(path)
             .components()
             .any(|c| !matches!(c, Component::Normal(_)))
@@ -184,7 +185,7 @@ pub fn publish(
         artifacts.push(Artifact {
             name: filename.to_owned(),
             size,
-            sha256: format!("{:x}", hash.finalize()),
+            sha256: hash.finalize().iter().map(|b| format!("{b:02x}")).collect(),
         });
     }
     artifacts.sort_by(|a, b| a.name.cmp(&b.name));
@@ -200,6 +201,7 @@ pub fn publish(
     let mut file = File::create(stage.path().join("manifest.json")).map_err(io)?;
     file.write_all(&manifest).map_err(io)?;
     file.sync_all().map_err(io)?;
+    File::open(stage.path()).and_then(|f| f.sync_all()).map_err(io)?;
     fs::rename(stage.path(), root.join("outputs")).map_err(io)?;
     File::open(&root).and_then(|f| f.sync_all()).map_err(io)?;
     Ok(artifacts)
@@ -237,7 +239,7 @@ pub fn attachment(state: &Path, job: &str, bytes: &[u8]) -> ApiResult<Artifact> 
     Ok(Artifact {
         name: "attachment".into(),
         size: bytes.len() as u64,
-        sha256: format!("{:x}", Sha256::digest(bytes)),
+        sha256: sha256(bytes),
     })
 }
 
@@ -251,7 +253,7 @@ pub fn inputs(state: &Path, link: &Successor) -> ApiResult<Vec<u8>> {
     for artifact in artifacts(state, &link.predecessor)? {
         let bytes = fs::read(output_path(state, &link.predecessor, &artifact.name)?).map_err(io)?;
         if bytes.len() as u64 != artifact.size
-            || format!("{:x}", Sha256::digest(&bytes)) != artifact.sha256
+            || sha256(&bytes) != artifact.sha256
         {
             return Err(ApiError::invalid(
                 "stored release artifact failed SHA-256 verification",
@@ -261,7 +263,7 @@ pub fn inputs(state: &Path, link: &Successor) -> ApiResult<Vec<u8>> {
     }
     let bytes = attachment_bytes(state, &link.predecessor)?;
     if bytes.len() as u64 != link.attachment_size
-        || format!("{:x}", Sha256::digest(&bytes)) != link.attachment_sha256
+        || sha256(&bytes) != link.attachment_sha256
     {
         return Err(ApiError::invalid(
             "stored release attachment failed SHA-256 verification",
@@ -277,6 +279,10 @@ fn append(tar: &mut tar::Builder<Vec<u8>>, path: &str, bytes: &[u8]) -> ApiResul
     header.set_mode(0o400);
     header.set_cksum();
     tar.append_data(&mut header, path, bytes).map_err(io)
+}
+
+pub fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub fn output_limit() -> ApiResult<u64> {
@@ -318,7 +324,7 @@ mod tests {
         let got = publish(state.path(), "job-1", &bytes[..], 100).unwrap();
         assert_eq!(got.len(), 2);
         assert_eq!(got, artifacts(state.path(), "job-1").unwrap());
-        assert_eq!(got[1].sha256, format!("{:x}", Sha256::digest(b"apk")));
+        assert_eq!(got[1].sha256, sha256(b"apk"));
         assert_eq!(
             fs::read(output_path(state.path(), "job-1", "signed.apk").unwrap()).unwrap(),
             b"apk"
@@ -360,8 +366,21 @@ mod tests {
     fn attachment_limit_and_digest() {
         let state = tempfile::tempdir().unwrap();
         let got = attachment(state.path(), "job-1", b"smoke").unwrap();
-        assert_eq!(got.sha256, format!("{:x}", Sha256::digest(b"smoke")));
+        assert_eq!(got.sha256, sha256(b"smoke"));
         assert!(attachment(state.path(), "job-1", &vec![0; ATTACHMENT_LIMIT + 1]).is_err());
         assert_eq!(attachment_bytes(state.path(), "job-1").unwrap(), b"smoke");
+    }
+
+    #[test]
+    fn sha256_matches_known_digest() {
+        assert_eq!(sha256(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn output_directory_must_stay_inside_checkout() {
+        for invalid in ["", "/absolute", "../outside", "a/../outside", "a/./b", "a//b"] {
+            assert!(relative_directory(invalid).is_err(), "{invalid}");
+        }
+        assert!(relative_directory("release-out/handoff").is_ok());
     }
 }

@@ -3595,14 +3595,35 @@ async fn finish_recipe(
             argv: low_priority(cmd.argv.clone(), x.ionice),
             ..cmd
         };
-        let running = crate::executor::start_cmd(x.state, x.def, &cmd)?;
+        let admission = x.state.executor.target_admission(x.def).await?;
+        let (running, report) = crate::run_kill::start_named_locked(
+            x.state, x.def, &cmd, crate::run_kill::job_pidfile(&job.id), &admission,
+        )?;
+        let mut running = crate::executor::track_resource_run(x.state, x.def, &cmd, running, report.clone())?;
         set_control(&job.id, Some(running.ctl.clone()));
+        drop(admission);
         if killed(&job.id) {
             let _ = running.ctl.send(Control::Kill);
         }
         let cap = limit as usize + 2 * 1024 * 1024;
-        let output = running.collect(cap).await;
-        if output.stdout.len() == cap {
+        let mut output = Collected::default();
+        let mut oversized = false;
+        while let Some(event) = running.events.recv().await {
+            match event {
+                crate::executor::Ev::Data(crate::executor::Stream::Stdout, bytes) => {
+                    if !oversized && bytes.len() <= cap.saturating_sub(output.stdout.len()) {
+                        output.stdout.extend_from_slice(&bytes);
+                    } else if !oversized {
+                        oversized = true;
+                        let _ = running.ctl.send(Control::Kill);
+                    }
+                }
+                crate::executor::Ev::End(end) => output.end = Some(end),
+                _ => {}
+            }
+        }
+        if let Some(report) = report { let _ = crate::run_kill::report(report).await; }
+        if oversized {
             return Err(ApiError::invalid(format!(
                 "release artifacts exceed the per-job limit of {limit} bytes"
             )));
