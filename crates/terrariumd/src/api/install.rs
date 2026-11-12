@@ -150,6 +150,8 @@ pub async fn update_offer(
         return None;
     }
     Some(terrarium_host::protocol::UpdateOffer {
+        os: Some("linux".into()),
+        arch: Some(arch.into()),
         version: VERSION.to_owned(),
         path: format!("{BINARY_PATH}?arch={arch}"),
         sha256,

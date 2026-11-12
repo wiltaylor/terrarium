@@ -49,16 +49,28 @@ pub struct Limits {
 }
 
 /// One session's job. The last handle closing kills every descendant.
+#[derive(Debug)]
 pub struct Job(OwnedHandle);
+
+impl PartialEq for Job {
+    fn eq(&self, other: &Self) -> bool { self.0.as_raw_handle() == other.0.as_raw_handle() }
+}
+impl Eq for Job {}
 
 impl Job {
     pub fn new(limits: Limits) -> io::Result<Self> {
+        // SAFETY: null security/name creates a fresh unnamed, non-inherited job.
+        let job = Self(owned(unsafe { CreateJobObjectW(null(), null()) })?);
+        job.set_limits(limits)?;
+        Ok(job)
+    }
+
+    /// Update the shared holder budget without replacing its job handle.
+    pub fn set_limits(&self, limits: Limits) -> io::Result<()> {
         if limits.processes == Some(0) || limits.memory_bytes == Some(0)
             || limits.cpu_rate.is_some_and(|n| !(1..=10000).contains(&n)) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid job limit"));
         }
-        // SAFETY: null security/name creates a fresh unnamed, non-inherited job.
-        let job = Self(owned(unsafe { CreateJobObjectW(null(), null()) })?);
         // SAFETY: this Win32 POD has a valid all-zero initial state.
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -71,18 +83,18 @@ impl Job {
             info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
         }
         // SAFETY: live job and initialized info of the documented class and size.
-        checked(unsafe { SetInformationJobObject(job.0.as_raw_handle(), JobObjectExtendedLimitInformation,
+        checked(unsafe { SetInformationJobObject(self.0.as_raw_handle(), JobObjectExtendedLimitInformation,
             (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(), size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32) })?;
-        if let Some(rate) = limits.cpu_rate {
+        {
             let info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
-                ControlFlags: JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
-                Anonymous: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0 { CpuRate: rate },
+                ControlFlags: if limits.cpu_rate.is_some() { JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP } else { 0 },
+                Anonymous: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0 { CpuRate: limits.cpu_rate.unwrap_or(0) },
             };
             // SAFETY: live job and initialized CPU-rate POD with matching class/size.
-            checked(unsafe { SetInformationJobObject(job.0.as_raw_handle(), JobObjectCpuRateControlInformation,
+            checked(unsafe { SetInformationJobObject(self.0.as_raw_handle(), JobObjectCpuRateControlInformation,
                 (&info as *const JOBOBJECT_CPU_RATE_CONTROL_INFORMATION).cast(), size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32) })?;
         }
-        Ok(job)
+        Ok(())
     }
 
     pub fn terminate(&self) -> io::Result<()> {
@@ -217,6 +229,13 @@ fn quote(arg: &OsStr) -> io::Result<Vec<u16>> {
 /// is explicit, not a shell command. Arguments follow Windows CRT quoting.
 pub fn spawn(program: &Path, args: &[String], cwd: Option<&Path>, env: &BTreeMap<String, String>,
     terminal: Option<Size>, limits: Limits) -> io::Result<Child> {
+    spawn_in_holder(program, args, cwd, env, terminal, limits, None)
+}
+
+/// Nested jobs keep a shared holder budget and an independent killable
+/// session tree. The parent must outlive every session using its budget.
+pub fn spawn_in_holder(program: &Path, args: &[String], cwd: Option<&Path>, env: &BTreeMap<String, String>,
+    terminal: Option<Size>, limits: Limits, holder: Option<&Job>) -> io::Result<Child> {
     let job = Job::new(limits)?;
     let program = wide(program.as_os_str())?;
     let mut command = quote(OsStr::new(&String::from_utf16_lossy(&program[..program.len()-1])))?;
@@ -257,7 +276,9 @@ pub fn spawn(program: &Path, args: &[String], cwd: Option<&Path>, env: &BTreeMap
         None
     };
     let mut attributes = Attributes::new(2)?;
-    let jobs = [job.0.as_raw_handle()];
+    let mut jobs = Vec::with_capacity(2);
+    if let Some(holder) = holder { jobs.push(holder.0.as_raw_handle()); }
+    jobs.push(job.0.as_raw_handle());
     attributes.add(PROC_THREAD_ATTRIBUTE_JOB_LIST as usize, &jobs)?;
     let handles = [child_in.as_raw_handle(), child_out.as_raw_handle(), child_err.as_ref().map_or(null_mut(), |h| h.as_raw_handle())];
     if let Some(console) = &console {

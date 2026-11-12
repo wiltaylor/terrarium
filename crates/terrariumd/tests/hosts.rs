@@ -4418,6 +4418,7 @@ async fn scheduled_exec_runs_through_the_executor() {
 
 fn full_limits_cap() -> LimitsCapability {
     LimitsCapability {
+        job_objects: false,
         systemd: false,
         controllers: Vec::new(),
         reason: Some("systemd-run is off in this test".into()),

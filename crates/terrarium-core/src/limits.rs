@@ -111,6 +111,10 @@ pub struct Limits {
 /// limits.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LimitsCapability {
+    /// Windows Job Objects enforce an aggregate holder budget. `pids` on
+    /// this backend counts processes, not Linux tasks/threads.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub job_objects: bool,
     /// `systemd-run --user --scope` works with a `MemoryMax`: a `host`
     /// target can have limits.
     #[serde(default)]
@@ -334,6 +338,12 @@ impl Limits {
         let Some(cap) = cap else {
             return Err(too_old());
         };
+        if cap.job_objects {
+            if self.swap_bytes.is_some() || self.io_weight.is_some() {
+                return Err("Windows Job Objects cannot enforce swap or IO weight".into());
+            }
+            return Ok(());
+        }
         if !cap.systemd {
             return Err(cap
                 .reason
@@ -384,6 +394,21 @@ pub fn refusal(reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_job_capability_rejects_unenforceable_limits() {
+        let cap = LimitsCapability { job_objects: true, ..Default::default() };
+        let mut limits = Limits { cpu_millis: Some(1000), memory_bytes: Some(64 << 20), pids: Some(8), ..Default::default() };
+        assert!(limits.host_support(Some(&cap)).is_ok());
+        limits.swap_bytes = Some(0);
+        assert!(limits.host_support(Some(&cap)).unwrap_err().contains("swap"));
+        limits.swap_bytes = None;
+        limits.io_weight = Some(100);
+        assert!(limits.host_support(Some(&cap)).unwrap_err().contains("IO weight"));
+        let old: LimitsCapability = serde_json::from_str(r#"{"systemd":false}"#).unwrap();
+        assert!(!old.job_objects);
+        assert!(limits.host_support(Some(&old)).is_err());
+    }
 
     fn lim(text: &str) -> TargetLimits {
         toml::from_str(text).expect("parse limits")
@@ -491,6 +516,7 @@ mod tests {
         let e = l.host_support(Some(&partial)).unwrap_err();
         assert!(e.contains("no cpu, io controller"), "{e}");
         let full = LimitsCapability {
+            job_objects: false,
             systemd: true,
             controllers: ["cpu", "io", "memory", "pids"].map(String::from).to_vec(),
             reason: None,

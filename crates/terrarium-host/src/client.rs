@@ -253,6 +253,8 @@ struct Entry {
 }
 
 struct Shared {
+    #[cfg(windows)]
+    windows_jobs: Mutex<HashMap<(String, String), Arc<terrarium_winapi::Job>>>,
     sessions: Mutex<HashMap<SessionId, Entry>>,
     resume_token: Mutex<Option<String>>,
     /// The bearer token for the next dial. It starts as the configured
@@ -307,6 +309,8 @@ pub struct Client {
 impl Client {
     pub fn new(opts: ClientOptions) -> Self {
         let shared = Shared {
+            #[cfg(windows)]
+            windows_jobs: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             resume_token: Mutex::new(None),
             bearer: Mutex::new(opts.token.clone()),
@@ -512,7 +516,7 @@ impl Client {
             su.supervised,
             failed.as_deref(),
         ) {
-            tracing::warn!(offered = %offer.version, own = %self.opts.version, "self-update: not updating: {why}");
+            tracing::warn!(offered = %offer.version, asset = %offer.path, own = %self.opts.version, "self-update: not updating: {why}");
             self.refuse_update(&offer.version);
             return;
         }
@@ -1353,6 +1357,28 @@ impl Client {
         l.limits
             .host_support(self.opts.capabilities.limits.as_ref())
             .map_err(refuse)?;
+        #[cfg(windows)]
+        {
+            let _ = session;
+            if l.reservation.is_some() {
+                return Err(refuse("Windows resource reservations are unsupported".into()));
+            }
+            let limits = crate::session_windows::budget(&l.limits).map_err(refuse)?;
+            let mut jobs = self.shared.windows_jobs.lock().unwrap_or_else(|e| e.into_inner());
+            let key = (l.target.clone(), l.holder.clone());
+            let job = if let Some(job) = jobs.get(&key) {
+                job.set_limits(limits).map_err(|e| refuse(e.to_string()))?;
+                job.clone()
+            } else {
+                let job = Arc::new(terrarium_winapi::Job::new(limits).map_err(|e| refuse(e.to_string()))?);
+                jobs.insert(key, job.clone());
+                job
+            };
+            plan.exec.windows_holder = Some(job);
+            return Ok(plan);
+        }
+        #[cfg(unix)]
+        {
         let slice = crate::limits::slice_name(&l.target, &l.holder);
         let applied = if let Some(reservation) = &l.reservation {
             reservation
@@ -1371,6 +1397,7 @@ impl Client {
         tracing::info!(session, %slice, %scope, limits = %l.limits.summary(), "limited session");
         crate::limits::wrap(&mut plan.exec, &slice, &scope);
         Ok(plan)
+        }
     }
 
     /// The helper, when `[native_gpu]` is on and the helper answered with

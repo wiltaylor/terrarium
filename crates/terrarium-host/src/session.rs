@@ -41,6 +41,9 @@ pub const CAPTURE_LIMIT: usize = 4 * 1024 * 1024;
 /// What to run.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExecPlan {
+    /// Shared Windows holder budget. Each session also gets its own child job.
+    #[cfg(windows)]
+    pub windows_holder: Option<Arc<terrarium_winapi::Job>>,
     pub program: String,
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,

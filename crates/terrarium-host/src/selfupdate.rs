@@ -110,6 +110,22 @@ pub fn confirm(bin: &Path) -> Option<String> {
     Some(first_line(&text).unwrap_or_default())
 }
 
+/// Fail closed on foreign or unidentified Windows assets, before any I/O.
+/// Legacy offers are Linux-only. Windows releases must carry release checksums.
+pub fn platform_support(offer: &UpdateOffer, os: &str, arch: &str) -> Result<(), String> {
+    let offered_os = offer.os.as_deref().unwrap_or("linux");
+    let offered_arch = offer.arch.as_deref().or_else(|| {
+        offer.path.split_once('?')?.1.split('&').find_map(|part| part.strip_prefix("arch="))
+    });
+    if offered_os != os || offered_arch != Some(arch) {
+        return Err(format!("foreign asset {} ({offered_os}/{offered_arch:?}), need {os}/{arch}", offer.path));
+    }
+    if os == "windows" && offer.release_sha256.is_none() {
+        return Err(format!("Windows asset {} has no release checksum", offer.path));
+    }
+    Ok(())
+}
+
 /// Whether to take an offer. `Err` holds the reason not to.
 pub fn decide(
     offer: &UpdateOffer,
@@ -118,6 +134,7 @@ pub fn decide(
     supervised: bool,
     failed: Option<&str>,
 ) -> Result<(), String> {
+    platform_support(offer, std::env::consts::OS, std::env::consts::ARCH)?;
     if !enabled {
         return Err("auto_update = false in the config".into());
     }
@@ -520,6 +537,8 @@ mod tests {
 
     fn offer(version: &str, data: &[u8]) -> UpdateOffer {
         UpdateOffer {
+            os: None,
+            arch: None,
             version: version.into(),
             path: "/install/terrarium-host?arch=x86_64".into(),
             sha256: sha256_hex(data),

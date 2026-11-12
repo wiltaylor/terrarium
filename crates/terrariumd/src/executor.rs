@@ -5998,6 +5998,7 @@ mod tests {
         h.name = "box".into();
         let mut caps = HostCapabilities {
             limits: Some(terrarium_core::limits::LimitsCapability {
+                job_objects: false,
                 systemd: true,
                 controllers: vec!["cpu".into(), "memory".into()],
                 reason: None,

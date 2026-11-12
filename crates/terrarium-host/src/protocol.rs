@@ -243,6 +243,11 @@ pub struct Welcome {
 /// The update offer in `welcome`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateOffer {
+    /// Explicit asset identity. Absent only for legacy Linux offers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
     /// The build version of the offered binary: the daemon's own.
     pub version: String,
     /// The path of the binary on the host listener, for example
@@ -1395,6 +1400,7 @@ mod tests {
                 },
                 metrics: true,
                 limits: Some(LimitsCapability {
+                    job_objects: false,
                     systemd: true,
                     controllers: vec!["cpu".into(), "memory".into()],
                     reason: None,
@@ -1549,6 +1555,8 @@ mod tests {
             token: None,
             metrics: false,
             update: Some(UpdateOffer {
+                os: None,
+                arch: None,
                 version: "0.3.0+abc1234".into(),
                 path: "/install/terrarium-host?arch=x86_64".into(),
                 sha256: "ab".repeat(32),

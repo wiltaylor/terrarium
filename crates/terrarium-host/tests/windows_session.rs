@@ -12,6 +12,22 @@ fn plan(script: &str) -> ExecPlan {
         capture_stdout: true, ..Default::default() }
 }
 
+#[test]
+fn linux_update_offer_is_refused_before_staging() {
+    use terrarium_host::protocol::UpdateOffer;
+    use terrarium_host::selfupdate::decide;
+    let mut offer = UpdateOffer { os: Some("linux".into()), arch: Some("x86_64".into()),
+        version: "99.0.0+test".into(), path: "/install/terrarium-host?arch=x86_64".into(),
+        sha256: "0".repeat(64), release_sha256: Some("0".repeat(64)) };
+    assert!(decide(&offer, "0.1.0+old", true, true, None).unwrap_err().contains("foreign asset"));
+    offer.os = None; offer.arch = None;
+    assert!(decide(&offer, "0.1.0+old", true, true, None).unwrap_err().contains("foreign asset"));
+    offer.os = Some("windows".into()); offer.arch = Some("aarch64".into());
+    assert!(decide(&offer, "0.1.0+old", true, true, None).unwrap_err().contains("foreign asset"));
+    offer.arch = Some("x86_64".into()); offer.release_sha256 = None;
+    assert!(decide(&offer, "0.1.0+old", true, true, None).unwrap_err().contains("no release checksum"));
+}
+
 #[tokio::test]
 async fn pipe_session_stdin_capture_and_exit() {
     let running = spawn(plan("$x=[Console]::ReadLine(); [Console]::WriteLine($x); exit 7"), Arc::new(Outbox::new(1, 65536))).unwrap();

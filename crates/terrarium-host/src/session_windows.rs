@@ -10,6 +10,25 @@ use crate::protocol::{CHUNK_SIZE, ExitReason, StreamTag};
 use crate::session::{CAPTURE_LIMIT, ExecPlan, ExitInfo, Running, SessionInput, SpawnError};
 use terrarium_winapi::{Child, Limits, Size};
 
+/// Convert cores to the machine-wide Job Object hard-cap rate. Round down
+/// rather than grant more CPU than requested. Unsupported limits fail closed.
+pub fn budget(limits: &crate::protocol::Limits) -> Result<Limits, String> {
+    if limits.swap_bytes.is_some() || limits.io_weight.is_some() {
+        return Err("Windows cannot enforce swap or IO weight".into());
+    }
+    let cpu_rate = limits.cpu_millis.map(|millis| {
+        let cpus = std::thread::available_parallelism().map_err(|e| e.to_string())?.get() as u64;
+        let rate = (u64::from(millis) * 10 / cpus).min(10000);
+        if rate == 0 { return Err("CPU limit is below Job Object precision".into()); }
+        Ok(rate as u32)
+    }).transpose()?;
+    Ok(Limits {
+        memory_bytes: limits.memory_bytes.map(|n| usize::try_from(n).map_err(|_| "memory limit overflows Windows usize".to_owned())).transpose()?,
+        processes: limits.pids.map(|n| u32::try_from(n).map_err(|_| "process count overflows Windows DWORD".to_owned())).transpose()?,
+        cpu_rate,
+    })
+}
+
 fn reader(mut file: std::fs::File, stream: StreamTag, outbox: Arc<Outbox>,
     capture: Option<Arc<Mutex<Vec<u8>>>>, overflow: mpsc::UnboundedSender<()>) -> tokio::task::JoinHandle<()> {
     let rt = tokio::runtime::Handle::current();
@@ -31,9 +50,9 @@ fn reader(mut file: std::fs::File, stream: StreamTag, outbox: Arc<Outbox>,
 }
 
 pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError> {
-    let Child { job, process, console, stdin, stdout, stderr } = terrarium_winapi::spawn(
+    let Child { job, process, console, stdin, stdout, stderr } = terrarium_winapi::spawn_in_holder(
         std::path::Path::new(&plan.program), &plan.args, plan.cwd.as_deref(), &plan.env,
-        plan.pty.map(|p| Size { cols: p.cols, rows: p.rows }), Limits::default())
+        plan.pty.map(|p| Size { cols: p.cols, rows: p.rows }), Limits::default(), plan.windows_holder.as_deref())
         .map_err(|source| SpawnError::Io { program: plan.program.clone(), source })?;
     let pid = Some(process.id());
     let capture = plan.capture_stdout.then(|| Arc::new(Mutex::new(Vec::new())));
@@ -53,6 +72,7 @@ pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
         // including when this future is cancelled by runtime shutdown.
         struct Containment { job: terrarium_winapi::Job, console: Option<terrarium_winapi::Console> }
         let containment = Containment { job, console };
+        let _holder = plan.windows_holder;
         let _private_file = plan.private_file;
         let deadline = async {
             match plan.timeout {
