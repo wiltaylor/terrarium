@@ -3695,6 +3695,7 @@ while True:
         "next_repos": ["app"], "work_dir": lab._dirs.path().join("jobs"),
         "release_target": "rel-client", "release_recipe": release_recipe,
         "release_secrets": {"GH_TOKEN": "@secret:release-github",
+                            "ANDROID_KEYSTORE_BASE64": "@secret:release-github",
                             "COSIGN_PASSWORD": "@secret:release-cosign.value"},
         "docker_release": {"destination": "root@test-release-vm", "port": 2251,
                            "known_hosts": "test-release-vm ssh-ed25519 public-test-pin\n",
@@ -3737,6 +3738,7 @@ while True:
     let env: std::collections::BTreeMap<String, String> =
         serde_json::from_slice(&std::fs::read(&release_env).unwrap()).unwrap();
     assert_eq!(env["GH_TOKEN"], GH);
+    assert_eq!(env["ANDROID_KEYSTORE_BASE64"], GH);
     assert_eq!(env["COSIGN_PASSWORD"], COSIGN);
     assert_eq!(env["TERRARIUM_JOB_KIND"], "release");
     assert_eq!(env["TERRARIUM_HEAD"], main);
@@ -3776,6 +3778,7 @@ while True:
         serde_json::from_slice(&std::fs::read(&merge_env).unwrap()).unwrap();
     for name in [
         "GH_TOKEN",
+        "ANDROID_KEYSTORE_BASE64",
         "COSIGN_PASSWORD",
         "DOCKER_RELEASE_KEY",
         "TERRARIUM_DOCKER_HOST",
@@ -3897,6 +3900,33 @@ async fn the_release_config_refuses_a_shared_target_and_plain_values() {
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     let base = json!({"target": "p-box", "recipe": "true", "release_target": "rel-client"});
+    let r = lab.td.put("/api/projects/p/delivery", base.clone()).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let before = lab.td.get("/api/projects/p/delivery").await.ok();
+    for name in [
+        "PATH", "HOME", "USER", "SHELL", "PWD", "IFS", "ENV", "BASH_ENV",
+        "TMPDIR", "LANG", "NODE_OPTIONS", "DOCKER_RELEASE_KEY", "DOCKER_HOST",
+        "DOCKER_CONFIG", "LD_TEST", "DYLD_TEST", "TERRARIUM_TEST", "DOCKER_CI_TEST",
+        "GIT_TEST", "SSH_TEST", "CARGO_TEST", "RUST", "RUST_TEST", "PYTHON_TEST",
+        "NPM_CONFIG_TEST", "JUST_TEST", "lowercase", "HAS-DASH", "", "1KEY",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ] {
+        let mut config = base.clone();
+        config["recipe"] = json!("must not be saved");
+        config["release_secrets"] = json!({"ANDROID_KEYSTORE_BASE64": "@secret:release-github"});
+        config["release_secrets"][name] = json!("@secret:release-github");
+        let r = lab.td.put("/api/projects/p/delivery", config).await;
+        assert_eq!(r.status, 422, "{name}: {}", r.body);
+        assert_eq!(lab.td.get("/api/projects/p/delivery").await.ok(), before);
+    }
+    for value in ["plain-token", "@secret:q/release-github"] {
+        let mut config = base.clone();
+        config["recipe"] = json!("must not be saved");
+        config["release_secrets"] = json!({"ANDROID_KEYSTORE_BASE64": value});
+        let r = lab.td.put("/api/projects/p/delivery", config).await;
+        assert_eq!(r.status, 422, "{}", r.body);
+        assert_eq!(lab.td.get("/api/projects/p/delivery").await.ok(), before);
+    }
     let mut bad = Vec::new();
     for (key, value) in [
         ("release_target", json!("p-box")),
