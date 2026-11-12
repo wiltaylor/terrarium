@@ -1155,7 +1155,7 @@ fn two_pool_uids_of_one_holder_share_its_workspace() {
     .unwrap();
     assert_eq!(
         p.env,
-        "GIT_CONFIG_COUNT=\"2\"\nGIT_CONFIG_KEY_0=\"credential.helper\"\nGIT_CONFIG_KEY_1=\"safe.directory\"\nGIT_CONFIG_VALUE_0=\"!terrarium repo credential\"\nGIT_CONFIG_VALUE_1=\"*\"\n"
+        "CUDA_VISIBLE_DEVICES=\"\"\nGIT_CONFIG_COUNT=\"2\"\nGIT_CONFIG_KEY_0=\"credential.helper\"\nGIT_CONFIG_KEY_1=\"safe.directory\"\nGIT_CONFIG_VALUE_0=\"!terrarium repo credential\"\nGIT_CONFIG_VALUE_1=\"*\"\n"
     );
     for bad in ["x", "-1", "1000"] {
         assert!(plan_for("terra/w-1", &a, 2002, &[("GIT_CONFIG_COUNT", bad)]).is_err());
@@ -1163,7 +1163,7 @@ fn two_pool_uids_of_one_holder_share_its_workspace() {
     // The operator: the umask, no git override.
     let op = plan_for("operator", &real, 2001, &[]).unwrap();
     assert!(props(&op.args).contains(&"UMask=0007"));
-    assert_eq!(op.env, "");
+    assert_eq!(op.env, "CUDA_VISIBLE_DEVICES=\"\"\n");
 }
 
 /// The bind scope follows the holder's trust domain: a project service
