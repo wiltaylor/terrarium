@@ -695,10 +695,7 @@ impl HostRegistry {
             return Ok(());
         };
         let mut entries = self.lock();
-        let mut prefixes = vec![
-            format!("prepare/{job}/"),
-            format!("recipe/{job}/"),
-        ];
+        let mut prefixes = vec![format!("prepare/{job}/"), format!("recipe/{job}/")];
         let mut removed = Vec::new();
         for phase in ["recipe", "receive"] {
             let prefix = format!("bound/{phase}/{job}/");
