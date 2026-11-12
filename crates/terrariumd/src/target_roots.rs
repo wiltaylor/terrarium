@@ -694,6 +694,34 @@ pub async fn prepare_exec(
     let Some(a) = actor.agent() else {
         return Ok(());
     };
+    let kind = crate::executor::path_kind(state, def);
+    if kind == terrarium_host::protocol::PathKind::Windows {
+        // Windows creation and ACL enforcement belong to the host. Do not
+        // send the Linux prepare script to it. Still enforce lexical scope.
+        let root = kind
+            .workspace(&a.project, &a.name)
+            .ok_or_else(|| ApiError::invalid("invalid Windows workspace name"))?;
+        if cmd
+            .cwd
+            .as_deref()
+            .is_some_and(|p| !kind.inside(&root, p, true))
+        {
+            return Err(ApiError::invalid(format!("cwd must be inside {root}")));
+        }
+        cmd.cwd.get_or_insert(root.clone());
+        for (key, suffix) in [("CARGO_TARGET_DIR", "target"), ("RESULTS_DIR", "results")] {
+            let value = cmd
+                .env
+                .entry(key.into())
+                .or_insert(format!(r"{root}\{suffix}"));
+            if !kind.inside(&root, value, false) {
+                return Err(ApiError::invalid(format!(
+                    "{key} must be strictly under {root}"
+                )));
+            }
+        }
+        return Ok(());
+    }
     let stored = stored_base(state, &a.id, &def.name).await?;
     let r = root(stored.as_deref().unwrap_or(base(def)), &a.project, &a.name)?;
     let paths = [
@@ -758,6 +786,27 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
         // Roots are recorded against the VM's resolved SSH definition. Resolve
         // the current VM too, so cleanup checks the same machine identity.
         if row.def.kind == terrarium_core::config::TargetKind::Exedev {
+            match crate::exedev::root_vm_absent(state, &row.def, &definition).await {
+                Ok(true) => {
+                    state.db.write("system", move |t| {
+                        let changed = t.execute(
+                            "DELETE FROM agent_target_roots WHERE agent=?1 AND target=?2",
+                            params![id, target],
+                        )?;
+                        if changed != 0 {
+                            t.audit("target.root_dropped", &id, Some(&project),
+                                serde_json::json!({"agent": id, "target": target, "reason": "vm_absent"}))?;
+                        }
+                        Ok(())
+                    }).await?;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    refusal(state, &id, &project, &target, &e.to_string()).await?;
+                    continue;
+                }
+            }
             match crate::exedev::exec_def(state, &row.def) {
                 Ok(def) => row.def = def,
                 Err(e) => {

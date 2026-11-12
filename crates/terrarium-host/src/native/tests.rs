@@ -264,7 +264,10 @@ fn a_gpu_session_allows_only_its_gpu_and_the_support_nodes() {
         &plan.args[dashes + 1..],
         request(root.path()).argv.as_slice()
     );
-    assert_eq!(plan.env, "TOKEN=\"a\\\"b\\\\c\\$d\\`e\"\n");
+    assert_eq!(
+        plan.env,
+        format!("CUDA_VISIBLE_DEVICES=\"{A}\"\nTOKEN=\"a\\\"b\\\\c\\$d\\`e\"\n")
+    );
     assert_eq!(
         plan.env_file,
         PathBuf::from(
@@ -928,8 +931,9 @@ fn multi_line_env_values_reach_the_unit_byte_for_byte() {
         .into_iter()
         .map(|(k, v)| (String::from_utf8(k).unwrap(), v))
         .collect();
-    let want: Vec<(String, Vec<u8>)> = req
-        .env
+    let mut expected = req.env.clone();
+    expected.insert("CUDA_VISIBLE_DEVICES".into(), req.gpus.join(","));
+    let want: Vec<(String, Vec<u8>)> = expected
         .iter()
         .map(|(k, v)| (k.clone(), v.as_bytes().to_vec()))
         .collect();
@@ -1134,7 +1138,7 @@ fn two_pool_uids_of_one_holder_share_its_workspace() {
         assert!(p.contains(&format!("ReadWritePaths={}", a.display()).as_str()));
         assert_eq!(
             plan.env,
-            "GIT_CONFIG_COUNT=\"1\"\nGIT_CONFIG_KEY_0=\"safe.directory\"\nGIT_CONFIG_VALUE_0=\"*\"\n"
+            "CUDA_VISIBLE_DEVICES=\"\"\nGIT_CONFIG_COUNT=\"1\"\nGIT_CONFIG_KEY_0=\"safe.directory\"\nGIT_CONFIG_VALUE_0=\"*\"\n"
         );
     }
     // The request's own git config entries stay first.
@@ -1151,7 +1155,7 @@ fn two_pool_uids_of_one_holder_share_its_workspace() {
     .unwrap();
     assert_eq!(
         p.env,
-        "GIT_CONFIG_COUNT=\"2\"\nGIT_CONFIG_KEY_0=\"credential.helper\"\nGIT_CONFIG_KEY_1=\"safe.directory\"\nGIT_CONFIG_VALUE_0=\"!terrarium repo credential\"\nGIT_CONFIG_VALUE_1=\"*\"\n"
+        "CUDA_VISIBLE_DEVICES=\"\"\nGIT_CONFIG_COUNT=\"2\"\nGIT_CONFIG_KEY_0=\"credential.helper\"\nGIT_CONFIG_KEY_1=\"safe.directory\"\nGIT_CONFIG_VALUE_0=\"!terrarium repo credential\"\nGIT_CONFIG_VALUE_1=\"*\"\n"
     );
     for bad in ["x", "-1", "1000"] {
         assert!(plan_for("terra/w-1", &a, 2002, &[("GIT_CONFIG_COUNT", bad)]).is_err());
@@ -1159,7 +1163,7 @@ fn two_pool_uids_of_one_holder_share_its_workspace() {
     // The operator: the umask, no git override.
     let op = plan_for("operator", &real, 2001, &[]).unwrap();
     assert!(props(&op.args).contains(&"UMask=0007"));
-    assert_eq!(op.env, "");
+    assert_eq!(op.env, "CUDA_VISIBLE_DEVICES=\"\"\n");
 }
 
 /// The bind scope follows the holder's trust domain: a project service

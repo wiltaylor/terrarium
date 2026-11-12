@@ -2371,6 +2371,69 @@ async fn the_stats_give_the_first_attempt_pass_rate_and_the_failed_targets() {
 }
 
 both_flows!(a_merge_validates_and_pushes_next);
+#[tokio::test]
+async fn merge_identity_resolves_repo_project_and_instance_without_off_trailers() {
+    for scope in ["repo", "project", "instance"] {
+        let lab = lab(1).await;
+        lab.td
+            .patch("/api/projects/p/git", json!({"provenance": false}))
+            .await
+            .ok();
+        if scope != "instance" {
+            lab.td
+                .patch(
+                    "/api/projects/p/git",
+                    json!({"name": "Project Merge", "email": "project-merge@example.test"}),
+                )
+                .await
+                .ok();
+        }
+        if scope == "repo" {
+            let repos = lab.td.get("/api/projects/p/repos").await.ok().clone();
+            let id = repos.as_array().unwrap()[0]["id"].as_str().unwrap();
+            lab.td
+                .patch(
+                    &format!("/api/repos/{id}/git"),
+                    json!({"name": "Repo Merge", "email": "repo-merge@example.test"}),
+                )
+                .await
+                .ok();
+        }
+        lab.branch("identity-card", "next", &[("OK", "yes\n")]);
+        let card = lab.card("merge identity", "identity-card").await;
+        lab.td
+            .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+            .await
+            .ok();
+        lab.until_card(&card, "accepted", |c| c["column"] == "accepted")
+            .await;
+        lab.until_idle().await;
+        let identity = match scope {
+            "repo" => terrariumd::git_identity::Identity {
+                name: "Repo Merge".into(),
+                email: "repo-merge@example.test".into(),
+            },
+            "project" => terrariumd::git_identity::Identity {
+                name: "Project Merge".into(),
+                email: "project-merge@example.test".into(),
+            },
+            _ => terrariumd::git_identity::Identity::from_env(),
+        };
+        let actual = git(
+            &lab.origin,
+            &["show", "-s", "--format=%an <%ae>%n%cn <%ce>", "next"],
+        );
+        let expected = format!(
+            "{} <{}>\n{} <{}>",
+            identity.name, identity.email, identity.name, identity.email
+        );
+        assert_eq!(actual, expected, "{scope}");
+        let message = git(&lab.origin, &["show", "-s", "--format=%B", "next"]);
+        assert!(!message.contains("Terrarium-"), "{scope}: {message}");
+        lab.settle().await;
+    }
+}
+
 async fn a_merge_validates_and_pushes_next(flow: &'static str) {
     let lab = lab_flow(2, flow).await;
     let head = lab.branch("ter-c", "next", &[("OK", "yes\n")]);
@@ -2689,17 +2752,19 @@ async fn the_host_cap_holds_across_projects_in_order() {
         cards.push(id);
     }
 
-    // While they run, never more than one runs on lab1.
+    // Check the cap from one host snapshot. Separate project reads can
+    // observe consecutive jobs as running if one ends between the reads.
     let all = |v: &Value| v.as_i64().unwrap();
     let start = Instant::now();
     loop {
         let p = lab.td.get("/api/projects/p/jobs").await.ok().clone();
         let q = lab.td.get("/api/projects/q/jobs").await.ok().clone();
         let h = lab.td.get("/api/job-hosts").await.ok().clone();
-        let running = all(&p["running"]) + all(&q["running"]);
-        assert!(running <= 1, "p {p}\nq {q}");
         assert!(h["hosts"][0]["running"].as_i64().unwrap() <= 1, "{h}");
-        if running == 0 && all(&p["queued"]) + all(&q["queued"]) == 0 {
+        // No more jobs are submitted, so terminal project snapshots stay drained.
+        if all(&p["running"]) + all(&q["running"]) == 0
+            && all(&p["queued"]) + all(&q["queued"]) == 0
+        {
             break;
         }
         assert!(

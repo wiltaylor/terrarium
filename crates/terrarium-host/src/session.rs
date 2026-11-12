@@ -380,6 +380,18 @@ async fn deadline(timeout: Option<Duration>) {
 #[cfg(unix)]
 fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError> {
     let mut cmd = tokio::process::Command::new(&plan.program);
+    // Agent commands use checkout Git configuration. Do not inherit the
+    // host agent's own commit identity over that repo-local configuration.
+    if plan.env.contains_key("TERRARIUM_GIT_TRAILERS") {
+        for key in [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ] {
+            cmd.env_remove(key);
+        }
+    }
     cmd.args(&plan.args)
         .envs(&plan.env)
         .stdin(std::process::Stdio::piped())
@@ -581,6 +593,16 @@ fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
         .map_err(pty_err)?;
     let mut cmd = CommandBuilder::new(&plan.program);
     cmd.args(&plan.args);
+    if plan.env.contains_key("TERRARIUM_GIT_TRAILERS") {
+        for key in [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ] {
+            cmd.env_remove(key);
+        }
+    }
     if !plan.env.contains_key("TERM") {
         cmd.env("TERM", "xterm-256color");
     }

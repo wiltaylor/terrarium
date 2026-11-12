@@ -139,12 +139,13 @@ export default function ThreadPage() {
                   {(entry, index) => {
                     const author = () => entry.kind === "message" ? entry.message.author_name : entry.kind === "question" ? entry.question.agent_name : whoName(t(), entry.kind === "response" ? t().response?.by ?? null : entry.kind === "proposal" ? t().close_proposal?.by ?? null : t().closed_by);
                     const operator = () => entry.kind === "message" ? byOperator(entry.message) : entry.kind === "response" || (entry.kind === "handoff" && t().closed_by === "operator");
+                    const authorId = () => operator() ? undefined : entry.kind === "message" ? entry.message.author : entry.kind === "question" ? entry.question.agent : entry.kind === "proposal" ? t().close_proposal?.by : t().closed_by;
                     const label = () => entry.kind === "message" ? (entry.message.kind === "response" ? "Response" : "Message") : entry.kind === "question" ? (entry.question.kind === "bundle" ? "Question bundle" : "Question") : entry.kind === "proposal" ? "Close proposal" : entry.kind === "handoff" ? "Handoff" : "Response";
                     const text = () => entry.kind === "message" ? entry.message.text : entry.kind === "question" ? entry.question.text : entry.kind === "response" ? t().response?.text ?? "" : entry.kind === "proposal" ? t().close_proposal?.summary ?? "" : t().handoff?.summary ?? "";
                     return (
                     <>
                     <Show when={index() === read.first()}><ReadBoundary /></Show>
-                    <ForumPost id={`post-${index() + 1}`} number={index() + 1} href={`/threads/${encodeURIComponent(t().id)}#post-${index() + 1}`} author={operator() ? "You" : author()} label={label()} at={entry.at} now={now()} icon={<ThreadIcon icon={operator() ? "you" : "agent"} />} onQuote={closed() ? undefined : (post) => quote(text(), post)} badges={<Show when={entry.kind === "question" && (entry.question.status === "open" || entry.question.status === "in_thread")}><span class="chip warn">Waiting on you</span></Show>}>
+                    <ForumPost id={`post-${index() + 1}`} number={index() + 1} href={`/threads/${encodeURIComponent(t().id)}#post-${index() + 1}`} author={operator() ? "You" : author()} authorId={authorId()} session={entry.kind === "message" ? entry.message : undefined} label={label()} at={entry.at} now={now()} icon={<ThreadIcon icon={operator() ? "you" : "agent"} />} onQuote={closed() ? undefined : (post) => quote(text(), post)} badges={<Show when={entry.kind === "question" && (entry.question.status === "open" || entry.question.status === "in_thread")}><span class="chip warn">Waiting on you</span></Show>}>
                     <Switch>
                       <Match when={entry.kind === "message" && entry.message}>
                         {(m) => (

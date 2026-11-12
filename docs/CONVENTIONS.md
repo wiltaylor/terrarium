@@ -275,12 +275,41 @@ a new token, when `.env` does not exist. The daemon reads:
 Agent checkouts made or refreshed by `repo checkout` install a
 `prepare-commit-msg` hook. It adds `Terrarium-Session` (the Terrarium session
 ULID), `Terrarium-Agent`, `Terrarium-Harness` (name and version),
-`Terrarium-Model`, and `Terrarium-Card` when there is a current card. Missing
-model or version telemetry is `unknown`. Existing release trailers stay intact.
+`Terrarium-Model` when the agent has a known model, and `Terrarium-Card` when
+there is a current card. Missing version telemetry is `unknown`. Existing
+release trailers stay intact. An explicitly empty `TERRARIUM_GIT_TRAILERS`
+disables trailers, taking precedence over the live file and checkout snapshot.
 The sandbox reads live session metadata, and target execs supply their caller's
 current metadata. A target commit made outside an agent exec uses the checkout's
 snapshot. Refresh older checkouts to install the hook. These hooks are attribution
 helpers, not a security boundary. Merge jobs still disable checkout hooks.
+
+Provenance defaults to on for GitHub repositories owned by `wiltaylor`, off
+for other remotes. `project set --provenance on|off` sets a project default,
+and `repo set --provenance on|off` overrides it. Off suppresses live and
+snapshot trailers. Commit identity resolves each name/email independently:
+repo setting, project setting, then `TERRARIUM_GIT_NAME`/`TERRARIUM_GIT_EMAIL`.
+Only the operator and sysadmins may change identity, provenance, or warn-only
+settings. Members and project admins may read them. Each change records old
+and new settings in the audit log. Managed merge jobs resolve the same repo,
+project, then instance identity and do not add trailers when provenance is off.
+Sandbox identity is a global Git fallback, not author/committer environment
+variables that would override local repo configuration. Refresh managed
+checkouts after changing settings and restart sessions for a new project
+fallback identity. Existing commits are never rewritten.
+
+With provenance off, the managed pre-push hook refuses outgoing commits with
+`Terrarium-` metadata or the default identity. The operator or a sysadmin may set
+`repo set --warn-only true` to warn instead. New branches are checked against
+local remote-tracking refs. Missing remote base objects fail the check closed.
+The hook records a short-lived, one-use marker for the authenticated agent,
+repo, and exact ref updates. This marker is only a warning deduplication aid,
+not proof that a hook ran. When no marker matches, the proxy warns once per
+push (sideband-capable clients), audits repo/agent/ref names without commit
+contents, and comments on the agent's card or mails its project lead. With
+no project lead it mails the operator. The proxy never unpacks push data.
+Hooks and markers can be bypassed. Protection comes from disabling trailers
+and configuring the correct identity before making commits, not from the hook.
 
 ### The directories
 

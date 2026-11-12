@@ -13,6 +13,7 @@ mod remotes;
 mod ter221_latency;
 #[path = "../trouble.rs"]
 mod trouble;
+mod windows_paths;
 mod workspace_sync;
 
 mod reservations;

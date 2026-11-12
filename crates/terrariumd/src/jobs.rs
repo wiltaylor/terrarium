@@ -2891,7 +2891,12 @@ fn brought_from_next(
 /// Step 1, in the daemon, with the repo credential (TER-103): fetch, check
 /// out or merge, record the commit as [`job_ref`], and write the bundle.
 /// Blocking.
-fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared {
+fn prepare(
+    repo: &git::JobRepo,
+    job: &Job,
+    bundle: &std::path::Path,
+    identity: &crate::git_identity::Identity,
+) -> Prepared {
     let failed = |what: String| {
         Prepared::End(JobEnd {
             passed: false,
@@ -3000,7 +3005,7 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
                 }
             }
             // The commit, not the ref: the merge takes what was checked.
-            match repo.merge(&cur, &tip, &format!("Merge {b} onto {onto}")) {
+            match repo.merge(&cur, &tip, &format!("Merge {b} onto {onto}"), identity) {
                 Ok(git::MergeStep::Merged(c)) => {
                     cur = c;
                     merged += 1;
@@ -3166,6 +3171,20 @@ async fn steps(
         }
     }
     x.at(STEP_PREPARE);
+    let project = job.project.clone();
+    let repo_name = job.repo.clone();
+    let merge_identity = if job.kind == JobKind::Merge {
+        x.state
+            .db
+            .read(move |c| {
+                let repo = repos::resolve(c, &repo_name, Some(&project))?;
+                Ok(crate::git_identity::effective(c, &repo)?.1)
+            })
+            .await?
+    } else {
+        // Validate jobs do not create commits during preparation.
+        crate::git_identity::Identity::from_env()
+    };
     let guard = Arc::new(guard);
     let prepare_key = format!("prepare/{}/{}", job.id, job.attempt);
     let cached = journal.load::<Prepared>(&prepare_key)?;
@@ -3184,12 +3203,13 @@ async fn steps(
             break;
         }
         let (j, bundle, prepare_guard) = (job.clone(), x.bundle.clone(), guard.clone());
+        let identity = merge_identity.clone();
         let (result, damaged) = x
             .daemon(move |r| {
                 let _guard = prepare_guard;
                 #[cfg(test)]
                 tests::prepare_fault(r);
-                let result = prepare(r, &j, &bundle);
+                let result = prepare(r, &j, &bundle, &identity);
                 let damaged = matches!(result, Prepared::End(_)) && r.needs_rebuild();
                 (result, damaged)
             })
