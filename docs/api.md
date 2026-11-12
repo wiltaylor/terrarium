@@ -4933,6 +4933,32 @@ the GitHub label nor title cannot be recognized as GitHub work.
 A card that a schedule `card` action (§19) opens as the operator is not
 gated. The action never finds a held card: `close` does not move it and
 `open` does not comment on it, whatever its `trigger:<key>` label.
+**Close shipped issues** (TER-948): `POST /api/projects/{name}/github-issues/close-done`
+accepts `{ "repo": "terrarium", "dry_run": true }`. Only the operator or a
+`project_admin` of the named project can call it. Link keys are refused.
+`terrarium issue close-done --repo terrarium --dry-run` prints each eligible
+issue's cards and published versions without writing to GitHub. Omit
+`--dry-run` to post a closing comment and close each open issue. The hourly
+`github-issues` schedule can invoke this CLI after its import step.
+
+Closure is restricted to project `terrarium` and registered GitHub repository
+`wiltaylor/terrarium`. The daemon opens the `github-issues-token` secret at use
+time, with the repository's normal project secret/grant checks. A missing,
+unavailable, or non-token secret refuses the operation. No token goes to the
+caller. Requests go only to `api.github.com`, without redirects.
+
+Cards are matched by `GitHub #<number>:` titles (with no repository or the
+selected repository) or exact issue URL links. Every matched card, including
+archived cards, must be unheld, in the done role, and labelled with a version
+acknowledged by `group built`. No match means no closure. The comment names
+every card and its published versions. A hidden comment marker lets a retry
+finish closing without posting again after a failed close. Concurrent callers
+are serialized. A reopened issue with the marker is closed without a second
+comment. Reads use project/number keyset pages (200 cards, at most 20,000 cards)
+and indexed card-link lookups. Comment history is limited to 10,000 comments
+per issue. Exceeding either bound refuses rather than guessing eligibility.
+The command stops on the first API error, without undoing earlier closures.
+
 **Import an issue** (TER-124): `POST /api/projects/{name}/github-issues/import`
 with `{"repo":"configured-repo-name","number":123}` returns `200` and the
 card. Requires project write access. The daemon fetches the issue from

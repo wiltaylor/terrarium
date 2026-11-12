@@ -23,7 +23,10 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
         .route(
             "/projects/{name}/github-issues/close-done",
             post(close_done_issues),
-            &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)],
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
         )
         .route(
             "/projects/{name}/board",
@@ -158,9 +161,12 @@ async fn close_done_issues(
     Path(name): Path<String>,
     ApiJson(body): ApiJson<CloseDoneIssues>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(serde_json::to_value(crate::github_issues::close_done(
-        &state, actor, name, body.repo, body.dry_run,
-    ).await?).map_err(|_| crate::error::ApiError::internal("cannot serialize issue closures"))?))
+    Ok(Json(
+        serde_json::to_value(
+            crate::github_issues::close_done(&state, actor, name, body.repo, body.dry_run).await?,
+        )
+        .map_err(|_| crate::error::ApiError::internal("cannot serialize issue closures"))?,
+    ))
 }
 
 async fn import_issue(

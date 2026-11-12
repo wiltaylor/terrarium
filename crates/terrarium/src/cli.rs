@@ -384,7 +384,7 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum IssueCmd {
-    /// Close shipped issues in the approved repository (operator only)
+    /// Close shipped issues in the approved repository (operator or project admin)
     CloseDone {
         #[arg(long)]
         repo: String,
