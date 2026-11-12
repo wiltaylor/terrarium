@@ -215,6 +215,8 @@ impl Engine for Fake {
                     code: i64::from(failed),
                     stdout: if cmd == "probe" {
                         "a".repeat(64)
+                    } else if cmd == "preview-backups" {
+                        serde_json::json!({"preview":[{"name":"eligible.zip","created_at":"2026-10-01T00:00:00Z","size":123}],"total_files":1,"total_bytes":123}).to_string()
                     } else if cmd == "retain-backups" {
                         serde_json::json!({"removed": [], "protected": serde_json::from_str::<serde_json::Value>(&argv[3]).unwrap()}).to_string()
                     } else {
@@ -653,6 +655,36 @@ async fn retention_transport_error_revokes_and_verifies_the_exact_helper_before_
         .begin(RunKind::Update, "latest", "operator")
         .unwrap();
     drop(guard);
+}
+
+#[tokio::test]
+async fn retention_init_previews_without_enabling_until_operator_confirms() {
+    let r = rig();
+    let path = r.store.dir().join("retention.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value.as_object_mut().unwrap().remove("initialized");
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    for confirm in [false, true] {
+        let Response::Retained { detail } = r.updater.handle(Request::RetentionInit { confirm, no_rollback_reference: false }).await else { panic!("initialization failed"); };
+        assert_eq!(detail["initialized"], confirm);
+        assert_eq!(detail["preview"][0]["size"], 123);
+        assert_eq!(detail["total_files"], 1);
+        assert_eq!(detail["total_bytes"], 123);
+        assert_eq!(r.store.retention_protected(None).is_ok(), confirm);
+    }
+    assert_eq!(r.fake.calls(), vec!["hot:preview-backups", "hot:preview-backups"]);
+}
+
+#[tokio::test]
+async fn retention_observed_pids_remain_durable_until_cancellation_is_verified() {
+    let r = rig();
+    r.fake.fail("control-cancel");
+    assert!(matches!(r.updater.handle(Request::Retention { release: None }).await, Response::Error { .. }));
+    let persisted = r.store.retention_running().unwrap().unwrap();
+    assert_eq!(persisted.pid, Some(4242));
+    assert_eq!(persisted.worker_pid, Some(42));
+    assert_eq!(persisted.worker_start.as_deref(), Some("123"));
+    assert!(r.updater.begin(RunKind::Update, "latest", "operator").is_err());
 }
 
 #[tokio::test]
