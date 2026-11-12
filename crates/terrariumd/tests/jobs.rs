@@ -2689,17 +2689,19 @@ async fn the_host_cap_holds_across_projects_in_order() {
         cards.push(id);
     }
 
-    // While they run, never more than one runs on lab1.
+    // Check the cap from one host snapshot. Separate project reads can
+    // observe consecutive jobs as running if one ends between the reads.
     let all = |v: &Value| v.as_i64().unwrap();
     let start = Instant::now();
     loop {
         let p = lab.td.get("/api/projects/p/jobs").await.ok().clone();
         let q = lab.td.get("/api/projects/q/jobs").await.ok().clone();
         let h = lab.td.get("/api/job-hosts").await.ok().clone();
-        let running = all(&p["running"]) + all(&q["running"]);
-        assert!(running <= 1, "p {p}\nq {q}");
         assert!(h["hosts"][0]["running"].as_i64().unwrap() <= 1, "{h}");
-        if running == 0 && all(&p["queued"]) + all(&q["queued"]) == 0 {
+        // No more jobs are submitted, so terminal project snapshots stay drained.
+        if all(&p["running"]) + all(&q["running"]) == 0
+            && all(&p["queued"]) + all(&q["queued"]) == 0
+        {
             break;
         }
         assert!(

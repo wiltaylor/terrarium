@@ -281,6 +281,10 @@ pub struct PendingTurns {
 
 /// Runs agents. Work happens in the background and shows up as events.
 pub trait Supervisor: Send + Sync + 'static {
+    /// The workspace bind alias inside the agent sandbox, if one exists.
+    fn workspace_alias(&self) -> Option<std::path::PathBuf> {
+        None
+    }
     fn list_pending(
         &self,
         _agent: AgentId,
@@ -672,6 +676,7 @@ mod fake {
 
     #[derive(Default)]
     struct Inner {
+        workspace_alias: Option<std::path::PathBuf>,
         agents: HashMap<AgentId, FakeAgent>,
         /// With mail push on: the mail of each agent that waits for its
         /// next idle (the message IDs).
@@ -705,6 +710,9 @@ mod fake {
     }
 
     impl InMemorySupervisor {
+        pub fn set_workspace_alias(&self, alias: std::path::PathBuf) {
+            self.lock().workspace_alias = Some(alias);
+        }
         /// Hold the next stop of `agent` until released. The receiver fires
         /// after the harness is stopped, before stop returns to its caller.
         pub fn gate_stop(&self, agent: AgentId) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
@@ -1186,6 +1194,9 @@ mod fake {
     }
 
     impl Supervisor for InMemorySupervisor {
+        fn workspace_alias(&self) -> Option<std::path::PathBuf> {
+            self.lock().workspace_alias.clone()
+        }
         fn list_pending(
             &self,
             agent: AgentId,
