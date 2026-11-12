@@ -3296,6 +3296,7 @@ mod tests {
         let reg = Arc::new(registry);
         reg.restore_with_db(dir.path(), db.clone()).unwrap();
         let mut session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let session_id = session.id();
         let completed = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
         reg.on_session_frame("lab1", HostFrame::Exit { session: completed.id(), code: Some(0), signal: None, reason: ExitReason::Exited });
         let route_reg = reg.clone();
@@ -3389,7 +3390,7 @@ mod tests {
             }
         }).await.unwrap();
         consumer.await.unwrap();
-        let events = journal.scan::<SessionEvent>(&format!("event/lab1/{}/", reg.lock()["lab1"].sessions.keys().find(|&&id| id != completed.id()).unwrap())).unwrap();
+        let events = journal.scan::<SessionEvent>(&format!("event/lab1/{session_id}/")).unwrap();
         assert_eq!(events.len(), 129);
         for (offset, (_, event)) in events.iter().take(128).enumerate() {
             assert_eq!(event, &SessionEvent::Data { stream: StreamTag::Stdout, bytes: (offset as u32).to_le_bytes().to_vec() });
