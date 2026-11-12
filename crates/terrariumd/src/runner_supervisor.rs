@@ -2227,7 +2227,7 @@ impl RunnerSupervisor {
             && let Some(pid) = live_runner_pid(&self.inner.cfg.runtime_dir, id)
         {
             warn!(agent = %id, pid, "a runner process still holds the agent; taking it over");
-            let remote = match self.connect_runner(id, None).await {
+            let remote = match self.connect_runner_for_adoption(id, None).await {
                 Ok(r) => r,
                 Err(e) => {
                     self.release(id, epoch, AgentStatus::Stopped);
@@ -2337,6 +2337,9 @@ impl RunnerSupervisor {
                 slot.start_reason.take(),
             )
         };
+        // Until the owner-sandbox incarnation path is integrated, no legacy
+        // launch (including None mode and restart) may retain a sealed source.
+        self.admit_legacy_workspace(id).await?;
         let entry = self.entry(agent.harness)?;
         let view = self.store_view(&agent).await;
         let Built {
@@ -2781,6 +2784,24 @@ impl RunnerSupervisor {
         .map_err(|e| SupervisorError::Other(format!("cannot connect to the runner of {id}: {e}")))
     }
 
+    async fn connect_runner_for_adoption(
+        &self, id: AgentId, since: Option<u64>,
+    ) -> Result<RemoteRunner, SupervisorError> {
+        // Adoption retains workspace use. A cleanup-only connection used to
+        // kill a stray runner must remain possible even when admission fails.
+        self.admit_legacy_workspace(id).await?;
+        self.connect_runner(id, since).await
+    }
+
+    async fn admit_legacy_workspace(&self, id: AgentId) -> Result<(), SupervisorError> {
+        if let Some(state) = self.state() {
+            state.db.write_full("workspace:legacy-runner", move |t| {
+                crate::store::live_workspaces::admit_generic_agent(t, &id.to_string())
+            }).await.map_err(|e| SupervisorError::NotReady(format!("workspace admission refused: {e}")))?;
+        }
+        Ok(())
+    }
+
     /// Take over a connected runner process: the slot of epoch `epoch`
     /// holds it, and a forward task passes its events on. The harness does
     /// not restart. False: the slot moved on (a stop or a new start).
@@ -3015,7 +3036,7 @@ impl RunnerSupervisor {
             && let Some(pid) = live_runner_pid(&self.inner.cfg.runtime_dir, id)
         {
             warn!(agent = %id, pid, "the control connection to the runner dropped; connecting again");
-            match self.connect_runner(id, Some(last)).await {
+            match self.connect_runner_for_adoption(id, Some(last)).await {
                 Ok(remote) => {
                     if !self.adopt(id, epoch, remote, Some(last)) {
                         debug!(agent = %id, "the agent moved on while the supervisor connected again");
@@ -3657,7 +3678,10 @@ impl RunnerSupervisor {
     async fn targets_up(&self, agent: &Agent) {
         let Some(state) = self.state() else { return };
         // The workspace moves to the work root before a target binds it.
-        crate::workspace::ensure(&state.state_dir, &state.work_dir, agent, true);
+        if let Err(e) = crate::workspace::ensure_generic(&state, agent, true).await {
+            warn!(agent = %agent.id, "target startup workspace admission refused: {e}");
+            return;
+        }
         // The files of the agent's cards, before the harness starts (§8.4).
         crate::card_delivery::deliver_at_start(&state, agent).await;
         let id = agent.id.to_string();
@@ -5675,7 +5699,7 @@ impl Supervisor for RunnerSupervisor {
                 Err(SupervisorError::AlreadyRunning(_)) => return Ok(Recovery::Attached),
                 Err(e) => return Err(e),
             };
-            let remote = match self.connect_runner(id, Some(events_since)).await {
+            let remote = match self.connect_runner_for_adoption(id, Some(events_since)).await {
                 Ok(r) => r,
                 Err(e) => {
                     self.release(id, epoch, AgentStatus::Error);

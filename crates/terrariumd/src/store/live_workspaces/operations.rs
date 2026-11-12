@@ -141,6 +141,8 @@ pub fn allocate_grant(t: &Tx<'_>, grant: &Grant) -> ApiResult<Envelope> {
     if changed != 1 {
         return Err(conflict());
     }
+    t.audit("workspace.grant_intent", &operation, Some(&grant.holder.enrollment.project),
+        json!({"registration": registration, "revision": revision, "attachment": grant.holder.attachment.0.to_string()}))?;
     Ok(envelope)
 }
 
@@ -274,6 +276,8 @@ pub fn allocate_revoke(
         "UPDATE live_workspace_targets SET allocated_revision = ?2 WHERE registration_id = ?1",
         params![registration_id, revision],
     )?;
+    t.audit("workspace.revoke_intent", &operation_id, Some(&holder.enrollment.project),
+        json!({"registration": registration_id, "revision": revision, "attachment": attachment.0.to_string()}))?;
     Ok(envelope)
 }
 
@@ -421,6 +425,8 @@ pub fn commit_runtime(t: &Tx<'_>, operation: OperationId) -> ApiResult<()> {
     )?;
     t.execute("UPDATE live_workspace_targets SET last_contiguous_revision = ?2 WHERE registration_id = ?1",
         params![registration, request.revision])?;
+    t.audit("workspace.runtime_committed", &id, request.holder.as_ref().map(|h| h.enrollment.project.as_str()),
+        json!({"registration": registration, "revision": request.revision, "kind": request.kind, "delivery": stored.envelope.delivery}))?;
     Ok(())
 }
 
@@ -569,13 +575,19 @@ pub fn acknowledge(t: &Tx<'_>, receipt: &Envelope, result: Reply) -> ApiResult<R
             [&operation],
         )?;
         t.execute("UPDATE live_workspace_targets SET state = 'quarantined' WHERE registration_id = ?1 AND state != 'destroyed'", [&registration])?;
+        t.audit("workspace.receipt_quarantined", &operation, None,
+            json!({"registration": registration, "reason": "receipt_or_order_mismatch"}))?;
         return Ok(Reply::Quarantined);
     }
     let stored = valid?;
     if stored.phase == DaemonPhase::HelperCommitted {
         let bytes = serde_json::to_vec(&result).map_err(|_| conflict())?;
-        t.execute("UPDATE live_workspace_operations SET phase = 'helper_committed', result = ?2 WHERE operation_id = ?1 AND phase = 'intent'",
+        let changed = t.execute("UPDATE live_workspace_operations SET phase = 'helper_committed', result = ?2 WHERE operation_id = ?1 AND phase = 'intent'",
             params![operation, bytes])?;
+        if changed == 1 {
+            t.audit("workspace.helper_committed", &operation, stored.envelope.original.holder.as_ref().map(|h| h.enrollment.project.as_str()),
+                json!({"registration": registration, "revision": stored.envelope.original.revision, "result": result}))?;
+        }
     }
     // No revision, attachment, reservation or runtime mutation here.
     Ok(result)
