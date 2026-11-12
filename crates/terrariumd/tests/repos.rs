@@ -113,6 +113,8 @@ fn agent_git(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
 #[tokio::test]
 async fn git_settings_scope_identity_and_off_hooks() {
     let (td, _origin, _remotes) = daemon_with_repo().await;
+    let repos = td.get("/api/projects/terra/repos").await.ok().clone();
+    let id = repos.as_array().unwrap().iter().find(|r| r["name"] == "proj").unwrap()["id"].as_str().unwrap();
     td.patch(
         "/api/projects/terra/git",
         json!({"name": "Project Author", "email": "project@example.test"}),
@@ -120,7 +122,7 @@ async fn git_settings_scope_identity_and_off_hooks() {
     .await
     .ok();
     td.patch(
-        "/api/repos/proj/git",
+        &format!("/api/repos/{id}/git"),
         json!({"provenance": false, "name": "Repo Author"}),
     )
     .await
@@ -153,7 +155,7 @@ async fn git_settings_scope_identity_and_off_hooks() {
         "{message}"
     );
     assert!(!message.contains("Terrarium-"), "{message}");
-    td.patch("/api/repos/proj/git", json!({"provenance": true}))
+    td.patch(&format!("/api/repos/{id}/git"), json!({"provenance": true}))
         .await
         .ok();
     td.post_as("terra/identity", "/api/repos/proj/checkout", json!({}))

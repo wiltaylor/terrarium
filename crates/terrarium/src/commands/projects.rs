@@ -337,7 +337,10 @@ pub async fn repo(ctx: &Ctx, cmd: &RepoCmd) -> anyhow::Result<()> {
             git_email,
             warn_only,
         } => {
-            let id = repo;
+            let name = ctx.project_or(None).await?;
+            let all = ctx.api.list(&format!("{}/repos", project_path(&name)), vec![], None).await?;
+            let id = all.iter().find(|r| r["name"] == repo.as_str() || r["id"] == repo.as_str())
+                .map_or_else(|| repo.clone(), |r| field(r, "id"));
             let mut body = json!({});
             if let Some(p) = provenance {
                 body["provenance"] = (p == "on").into();
