@@ -5,8 +5,8 @@ use serde::Deserialize;
 
 pub const MAX_BUNDLE_BYTES: usize = 1 << 20;
 pub const RELEASE_KEY: Option<&str> = match option_env!("TERRARIUM_RELEASE_PUBKEY") {
-    Some("") | None => None,
-    key => key,
+    Some(key) if !key.is_empty() => Some(key),
+    _ => None,
 };
 
 /// Download only through the daemon's configured transport, then authenticate before staging.
