@@ -142,6 +142,10 @@ impl PendingJournal {
 
     fn push(&mut self, event: SessionEvent) -> bool {
         let bytes = serde_json::to_vec(&event).map_or(usize::MAX, |v| v.len());
+        if self.events.len() >= JOURNAL_RETRY_EVENTS || bytes > JOURNAL_RETRY_BYTES.saturating_sub(self.bytes) {
+            self.exhausted = true;
+            return false;
+        }
         // The receive loop stops at the watermark. Retain the frame that
         // crossed it too, rather than losing data or closing a healthy link.
         self.bytes += bytes;
@@ -1367,7 +1371,9 @@ impl HostRegistry {
     /// Save before exposing output to a consumer that can acknowledge it.
     fn deliver(&self, host: &str, entry: &mut Entry, id: SessionId, event: SessionEvent) -> bool {
         if let Some(pending) = entry.pending_journal.get_mut(&id) {
-            pending.push(event);
+            if !pending.push(event) && let Some(c) = &entry.conn {
+                let _ = c.tx.send(Outgoing::Close(None));
+            }
             return false;
         }
         match self.try_deliver(host, entry, id, &event) {
@@ -2297,7 +2303,7 @@ async fn drive_link(
                     journal_task = Some(tokio::task::spawn_blocking(move || registry.retry_journal(&host, conn_id)));
                 }
             },
-            msg = stream.next(), if !reg.journal_backpressured(host) => {
+            msg = stream.next() => {
                 last_rx = Instant::now();
                 match msg {
                     Some(Ok(WsMessage::Text(t))) => match decode_control::<HostFrame>(t.as_str()) {
