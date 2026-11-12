@@ -10,7 +10,7 @@ use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use terrarium_core::live_workspace::{AttachmentId, Enrollment, Holder, NamespaceIdentity};
+use terrarium_core::live_workspace::{AttachmentId, Enrollment, Holder, NamespaceIdentity, WorkspaceId};
 
 struct Pending {
     envelope: Envelope,
@@ -30,6 +30,7 @@ pub struct Kernel<I, A> {
     inspector: I,
     attributes: A,
     live: BTreeMap<AttachmentId, Holder>,
+    known: BTreeMap<WorkspaceId, Holder>,
     pending: Option<Pending>,
     revoking: Option<(Holder, File)>,
     receiver_relative: String,
@@ -80,7 +81,7 @@ fn absent(root: &File, relative: &str) -> Result<(), Reply> {
 impl<I: Inspector, A: Attributes> Kernel<I, A> {
     pub fn new(source: ProtectedRoot, publisher: ProtectedRoot, staging: ProtectedRoot, runtime: PinnedRuntime, inspector: I, attributes: A) -> Result<Self, Reply> {
         if !nix::unistd::geteuid().is_root() { return Err(Reply::Unauthorized); }
-        Ok(Self { source, publisher, staging, runtime, inspector, attributes, live: BTreeMap::new(), pending: None, revoking: None, receiver_relative: "work".into() })
+        Ok(Self { source, publisher, staging, runtime, inspector, attributes, live: BTreeMap::new(), known: BTreeMap::new(), pending: None, revoking: None, receiver_relative: "work".into() })
     }
 
     #[cfg(test)]
@@ -93,6 +94,17 @@ impl<I: Inspector, A: Attributes> Kernel<I, A> {
         let fd = self.source.enrolled(e)?;
         let (root, device) = root_of(&fd, &host_view()?)?;
         Ok((fd, root, device))
+    }
+
+    fn remember(&mut self, holder: &Holder) -> Result<(), Reply> {
+        let e = &holder.enrollment;
+        if let Some(old) = self.known.get(&e.workspace) {
+            if old.enrollment != *e || old.domain != holder.domain { return Err(Reply::Conflict); }
+        } else {
+            if self.known.values().any(|h| h.enrollment.source == e.source || (h.enrollment.project == e.project && h.enrollment.name == e.name)) { return Err(Reply::Conflict); }
+            self.known.insert(e.workspace, holder.clone());
+        }
+        Ok(())
     }
 
     fn topology(&mut self) -> Result<(Vec<MountEvidence>, Vec<MountEvidence>), Reply> {
@@ -145,8 +157,10 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
         let mut history: Vec<_> = journal.operations.values().filter(|i| i.result.is_some()).collect();
         history.sort_by_key(|i| i.envelope.original.revision);
         self.live.clear();
+        self.known.clear();
         for i in history {
             let e = &i.envelope;
+            if let Some(holder) = &e.original.holder { self.remember(holder)?; }
             if e.delivery == Delivery::Superseded { continue; }
             if let Some(holder) = &e.original.holder {
                 match e.original.kind {
@@ -154,7 +168,7 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
                         if self.live.values().any(|h| h.enrollment.workspace == holder.enrollment.workspace || (h.enrollment.project == holder.enrollment.project && h.enrollment.name == holder.enrollment.name)) { return Err(Reply::Quarantined); }
                         if self.live.insert(holder.attachment, holder.clone()).is_some() { return Err(Reply::Quarantined); }
                     }
-                    Kind::Revoke => { self.live.remove(&holder.attachment); }
+                    Kind::Revoke => { if self.live.remove(&holder.attachment).as_ref() != Some(holder) { return Err(Reply::Quarantined); } }
                     _ => {},
                 }
             }
@@ -176,6 +190,7 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
     fn stage(&mut self, e: &Envelope) -> Result<(), Reply> {
         if self.pending.is_some() || self.revoking.is_some() { return Err(Reply::Busy); }
         let holder = e.original.holder.as_ref().ok_or(Reply::Failed)?;
+        self.remember(holder)?;
         if self.live.contains_key(&holder.attachment) || self.live.values().any(|h| h.enrollment.workspace == holder.enrollment.workspace || (h.enrollment.project == holder.enrollment.project && h.enrollment.name == holder.enrollment.name)) { return Err(Reply::Conflict); }
         let (source, root, device) = self.source_root(&holder.enrollment)?;
         scan_source(&source)?;

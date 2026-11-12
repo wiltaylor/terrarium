@@ -7,6 +7,7 @@
 pub mod mountinfo;
 pub mod mounts;
 pub mod kernel;
+pub mod service;
 mod paths;
 pub mod runtime;
 mod store;
@@ -161,9 +162,13 @@ impl<B: Backend> Helper<B> {
 /// Listener creation/ownership is deliberately not part of host-agent startup.
 pub async fn serve_connection<B: Backend>(
     helper: &mut Helper<B>,
-    mut stream: UnixStream,
+    stream: UnixStream,
     agent_uid: u32,
 ) -> std::io::Result<()> {
+    serve_frame(stream, agent_uid, |bytes| helper.apply(bytes)).await
+}
+
+pub(super) async fn serve_frame(mut stream: UnixStream, agent_uid: u32, mut apply: impl FnMut(&[u8]) -> Result<Reply, Reply>) -> std::io::Result<()> {
     use std::time::Duration;
     let peer = stream.peer_cred()?;
     tracing::info!(uid = peer.uid(), allowed = peer.uid() == agent_uid, "workspace helper peer");
@@ -179,7 +184,7 @@ pub async fn serve_connection<B: Backend>(
             } else {
                 let mut bytes = vec![0; size];
                 stream.read_exact(&mut bytes).await?;
-                helper.apply(&bytes)
+                apply(&bytes)
             }
         };
         let reply = result.unwrap_or_else(|r| r);

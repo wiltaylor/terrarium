@@ -174,6 +174,20 @@ fn kernel_publish_revoke_and_refusals() {
             inode: m.ino(),
         };
         let opened = source_root.enrolled(&enrollment).unwrap();
+        let mut wrong = enrollment.clone();
+        wrong.source.inode += 1;
+        assert!(source_root.enrolled(&wrong).is_err());
+        wrong = enrollment.clone(); wrong.source.device += 1;
+        assert!(source_root.enrolled(&wrong).is_err());
+        let renamed = source_path.join("project").join(format!("{name}-original"));
+        std::fs::rename(&workspace, &renamed).unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        assert!(source_root.enrolled(&enrollment).is_err());
+        std::fs::remove_dir(&workspace).unwrap();
+        std::os::unix::fs::symlink(&renamed, &workspace).unwrap();
+        assert!(source_root.enrolled(&enrollment).is_err());
+        std::fs::remove_file(&workspace).unwrap();
+        std::fs::rename(&renamed, &workspace).unwrap();
         scan_source(&opened).unwrap();
         let socket = std::os::unix::net::UnixListener::bind(workspace.join("socket")).unwrap();
         assert_eq!(scan_source(&opened), Err(Reply::Unauthorized));
@@ -188,6 +202,10 @@ fn kernel_publish_revoke_and_refusals() {
         assert_eq!(scan_source(&opened), Err(Reply::Unauthorized));
         mounts::lazy_detach(&nested).unwrap();
         scan_source(&opened).unwrap();
+        let device = workspace.join("device");
+        nix::sys::stat::mknod(&device, nix::sys::stat::SFlag::S_IFCHR, nix::sys::stat::Mode::S_IRUSR, nix::sys::stat::makedev(1, 3)).unwrap();
+        assert_eq!(scan_source(&opened), Err(Reply::Unauthorized));
+        std::fs::remove_file(&device).unwrap();
 
         let stage = staging_root.destination(&enrollment).unwrap();
         let destination = publisher_root.destination(&enrollment).unwrap();
@@ -303,6 +321,18 @@ fn kernel_publish_revoke_and_refusals() {
         let pin = runtime::PinnedRuntime::acquire(&mut docker, &identity).unwrap();
         kernel::Kernel::new(ProtectedRoot::open(&source_path).unwrap(), ProtectedRoot::open(&publisher_path).unwrap(), ProtectedRoot::open(&staging_path).unwrap(), pin, docker, LinuxAttributes).unwrap().fixture_receiver(&receiver_path)
     };
+    // Foreign receiver mounts quarantine even when the source/root/flags of
+    // the legitimate publisher are otherwise correct. Nothing is deleted.
+    assert!(Command::new("/usr/bin/nsenter").arg(format!("--mount=/proc/{pid}/ns/mnt")).args(["/usr/bin/mount", "--bind"]).arg(fixture.path().join("other")).arg(receiver_path.join("reverse")).status().unwrap().success());
+    let foreign_state = fixture.path().join("foreign-state");
+    std::fs::create_dir(&foreign_state).unwrap();
+    let foreign_store = Store::open(ProtectedRoot::open(&foreign_state).unwrap()).unwrap();
+    foreign_store.save(&journal).unwrap();
+    let foreign_service = Helper::open(foreign_store, kernel()).unwrap();
+    assert!(foreign_service.journal().quarantined);
+    assert!(receiver_lookup.join("reverse/reverse-canary").exists());
+    drop(foreign_service);
+    assert!(Command::new("/usr/bin/nsenter").arg(format!("--mount=/proc/{pid}/ns/mnt")).arg("/usr/bin/umount").arg(receiver_path.join("reverse")).status().unwrap().success());
     let request = |revision, kind, name: &str| {
         let mut e = super::tests::envelope(revision, kind);
         e.original.runtime = identity.clone();
@@ -323,11 +353,17 @@ fn kernel_publish_revoke_and_refusals() {
     assert_eq!(service.apply(&first), Ok(Reply::Applied));
     assert_eq!(service.apply(&first), Ok(Reply::Applied));
     assert_eq!(service.apply(&request(2, Kind::Grant, "agent2")), Ok(Reply::Applied));
+    let retained = File::open(receiver_lookup.join("project/agent")).unwrap();
     drop(service);
     let mut service = Helper::open(Store::open(ProtectedRoot::open(&state_path).unwrap()).unwrap(), kernel()).unwrap();
     assert!(!service.journal().quarantined, "committed restart must reconcile both views");
     assert_eq!(service.apply(&request(3, Kind::Revoke, "agent")), Ok(Reply::PathRevokedVerified));
     assert!(!receiver_lookup.join("project/agent").exists());
+    std::fs::write(source_path.join("project/agent/late"), b"retained-handle-limit").unwrap();
+    let mut late = File::from(nix::fcntl::openat(&retained, "late", nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC, nix::sys::stat::Mode::empty()).unwrap());
+    let mut value = String::new();
+    std::io::Read::read_to_string(&mut late, &mut value).unwrap();
+    assert_eq!(value, "retained-handle-limit");
     assert!(receiver_lookup.join("project/agent2/canary").exists());
     assert_eq!(service.apply(&request(4, Kind::Revoke, "agent2")), Ok(Reply::PathRevokedVerified));
     assert_eq!(service.store.load().unwrap().last_contiguous_revision, 4);
