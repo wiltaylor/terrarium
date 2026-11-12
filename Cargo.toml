@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/terrarium-front",
     "crates/terrarium-core",
     "crates/terrariumd",
     "crates/terrarium",
