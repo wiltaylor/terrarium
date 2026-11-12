@@ -549,7 +549,8 @@ impl HostRegistry {
             .collect();
         journal.replace(&values, &removed, &[])?;
         if binding.is_some() {
-            self.ownership_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.ownership_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(())
     }
@@ -1113,9 +1114,14 @@ impl HostRegistry {
                 return Err(ApiError::internal("cannot persist missing host session"));
             }
         }
-        let held: Vec<_> = resume.iter().map(|r| (r.session, e.sessions[&r.session].held)).collect();
+        let held: Vec<_> = resume
+            .iter()
+            .map(|r| (r.session, e.sessions[&r.session].held))
+            .collect();
         for (id, _) in &held {
-            if let Some(s) = e.sessions.get_mut(id) { s.held = true; }
+            if let Some(s) = e.sessions.get_mut(id) {
+                s.held = true;
+            }
         }
         e.resume_token = Some(token.clone());
         let info = LiveInfo {
@@ -1133,7 +1139,9 @@ impl HostRegistry {
         if let Err(error) = self.persist(&row.name, e, None) {
             e.resume_token = previous_token;
             for (id, held) in held {
-                if let Some(s) = e.sessions.get_mut(&id) { s.held = held; }
+                if let Some(s) = e.sessions.get_mut(&id) {
+                    s.held = held;
+                }
             }
             return Err(error);
         }
@@ -3077,7 +3085,9 @@ mod tests {
         );
     }
 
-    fn hold_writer(db: crate::db::Db) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    fn hold_writer(
+        db: crate::db::Db,
+    ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
         let (ready, acquired) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
@@ -3085,7 +3095,8 @@ mod tests {
                 ready.send(()).unwrap();
                 released.recv_timeout(Duration::from_secs(30)).unwrap();
                 Ok(())
-            }).unwrap();
+            })
+            .unwrap();
         });
         acquired.recv_timeout(Duration::from_secs(5)).unwrap();
         (release, thread)
@@ -3115,7 +3126,11 @@ mod tests {
         let journal = resume::Journal::with_db(dir.path(), db.clone());
         let (release, writer) = hold_writer(db.clone());
         let r = reg.clone();
-        let opening = std::thread::spawn(move || r.open_bound("lab1", Some("test/open"), |_| DaemonFrame::Ping { nonce: 42 }));
+        let opening = std::thread::spawn(move || {
+            r.open_bound("lab1", Some("test/open"), |_| DaemonFrame::Ping {
+                nonce: 42,
+            })
+        });
         metadata_retry_started(&reg);
         assert!(reg.lock()["lab1"].sessions.is_empty());
         assert_eq!(reg.lock()["lab1"].next_id, 0);
@@ -3124,22 +3139,40 @@ mod tests {
         writer.join().unwrap();
         let session = opening.join().unwrap().unwrap();
         assert!(matches!(outgoing.try_recv().unwrap(), Outgoing::Frame(_)));
-        assert_eq!(journal.load::<(String, u32)>("bound/test/open").unwrap(), Some(("lab1".into(), session.id())));
+        assert_eq!(
+            journal.load::<(String, u32)>("bound/test/open").unwrap(),
+            Some(("lab1".into(), session.id()))
+        );
 
         let (release, writer) = hold_writer(db.clone());
         let r = reg.clone();
         let id = session.id();
-        let older = std::thread::spawn(move || r.save_exec("test", &json!({"host_session": ["lab1", id], "revision": 1})));
+        let older = std::thread::spawn(move || {
+            r.save_exec(
+                "test",
+                &json!({"host_session": ["lab1", id], "revision": 1}),
+            )
+        });
         metadata_retry_started(&reg);
         let r = reg.clone();
-        let newer = std::thread::spawn(move || r.save_exec("test", &json!({"host_session": ["lab1", id], "revision": 2})));
+        let newer = std::thread::spawn(move || {
+            r.save_exec(
+                "test",
+                &json!({"host_session": ["lab1", id], "revision": 2}),
+            )
+        });
         release.send(()).unwrap();
         writer.join().unwrap();
         older.join().unwrap().unwrap();
         newer.join().unwrap().unwrap();
-        assert_eq!(journal.load::<Value>("exec/test").unwrap().unwrap()["revision"], 2);
+        assert_eq!(
+            journal.load::<Value>("exec/test").unwrap().unwrap()["revision"],
+            2
+        );
 
-        let other = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let other = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
         outgoing.try_recv().unwrap();
         let (release, writer) = hold_writer(db.clone());
         let r = reg.clone();
@@ -3151,10 +3184,19 @@ mod tests {
         writer.join().unwrap();
         // This event may commit before or after deletion. Either order must
         // preserve it instead of writing the metadata retry's old snapshot.
-        reg.on_data("lab1", DataFrame::new(other.id(), StreamTag::Stdout, b"new".to_vec()));
+        reg.on_data(
+            "lab1",
+            DataFrame::new(other.id(), StreamTag::Stdout, b"new".to_vec()),
+        );
         deleting.join().unwrap().unwrap();
         if !reg.lock()["lab1"].pending_journal.is_empty() {
-            reg.lock().get_mut("lab1").unwrap().pending_journal.get_mut(&other.id()).unwrap().next = Instant::now();
+            reg.lock()
+                .get_mut("lab1")
+                .unwrap()
+                .pending_journal
+                .get_mut(&other.id())
+                .unwrap()
+                .next = Instant::now();
             reg.retry_journal("lab1", 1);
         }
         let saved = journal.load::<SavedHost>("host/lab1").unwrap().unwrap();
@@ -3171,22 +3213,43 @@ mod tests {
         let db = crate::db::Db::new(conn, crate::events::EventHub::default());
         let reg = Arc::new(registry("lab1", true));
         reg.restore_with_db(dir.path(), db.clone()).unwrap();
-        let session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
-        reg.save_exec("kept", &json!({"host_session": ["lab1", session.id()]})).unwrap();
+        let session = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
+        reg.save_exec("kept", &json!({"host_session": ["lab1", session.id()]}))
+            .unwrap();
         let next_id = reg.lock()["lab1"].next_id;
         db.read_now(|_| {
-            assert!(matches!(reg.open_bound("lab1", Some("never"), |_| DaemonFrame::Ping { nonce: 0 }), Err(HostError::JournalBusy)));
-            assert_eq!(reg.save_exec("new", &1).unwrap_err().code, Code::ResourceBusy);
-            assert_eq!(reg.forget_exec("kept").unwrap_err().code, Code::ResourceBusy);
+            assert!(matches!(
+                reg.open_bound("lab1", Some("never"), |_| DaemonFrame::Ping { nonce: 0 }),
+                Err(HostError::JournalBusy)
+            ));
+            assert_eq!(
+                reg.save_exec("new", &1).unwrap_err().code,
+                Code::ResourceBusy
+            );
+            assert_eq!(
+                reg.forget_exec("kept").unwrap_err().code,
+                Code::ResourceBusy
+            );
             assert_eq!(reg.lock()["lab1"].sessions.len(), 1);
             assert_eq!(reg.lock()["lab1"].next_id, next_id);
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         let journal = resume::Journal::with_db(dir.path(), db);
         assert!(journal.load::<Value>("exec/kept").unwrap().is_some());
         assert!(journal.load::<Value>("exec/new").unwrap().is_none());
         assert!(journal.load::<Value>("bound/never").unwrap().is_none());
-        assert_eq!(journal.load::<SavedHost>("host/lab1").unwrap().unwrap().sessions.len(), 1);
+        assert_eq!(
+            journal
+                .load::<SavedHost>("host/lab1")
+                .unwrap()
+                .unwrap()
+                .sessions
+                .len(),
+            1
+        );
     }
 
     #[test]

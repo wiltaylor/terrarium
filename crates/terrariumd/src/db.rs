@@ -2565,7 +2565,9 @@ impl DatabaseScope {
 
 impl Drop for DatabaseScope {
     fn drop(&mut self) {
-        HELD_DATABASES.with(|held| { held.borrow_mut().pop(); });
+        HELD_DATABASES.with(|held| {
+            held.borrow_mut().pop();
+        });
     }
 }
 
@@ -2666,8 +2668,13 @@ impl Db {
         wait: bool,
         f: impl FnOnce(&mut Connection) -> ApiResult<T>,
     ) -> ApiResult<T> {
-        if wait && HELD_DATABASES.with(|held| held.borrow().contains(&(Arc::as_ptr(&self.conn) as usize))) {
-            return Err(ApiError::internal("journal cannot wait inside a database closure"));
+        if wait
+            && HELD_DATABASES
+                .with(|held| held.borrow().contains(&(Arc::as_ptr(&self.conn) as usize)))
+        {
+            return Err(ApiError::internal(
+                "journal cannot wait inside a database closure",
+            ));
         }
         let mut guard = if wait {
             match self.conn.lock() {

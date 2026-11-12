@@ -220,20 +220,48 @@ mod tests {
         let db = crate::db::Db::new(conn, crate::events::EventHub::default());
         let journal = Journal::with_db(dir.path(), db.clone());
         db.read_now(|_| {
-            assert!(journal.save("nested", &1).unwrap_err().message.contains("inside a database closure"));
+            assert!(
+                journal
+                    .save("nested", &1)
+                    .unwrap_err()
+                    .message
+                    .contains("inside a database closure")
+            );
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         let journal = Journal::with_db(dir.path(), db.clone());
         db.read(move |_| {
-            assert!(journal.load::<u32>("nested").unwrap_err().message.contains("inside a database closure"));
+            assert!(
+                journal
+                    .load::<u32>("nested")
+                    .unwrap_err()
+                    .message
+                    .contains("inside a database closure")
+            );
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let journal = Journal::with_db(dir.path(), db.clone());
         db.write("system", move |_| {
-            assert!(journal.save("nested", &1).unwrap_err().message.contains("inside a database closure"));
+            assert!(
+                journal
+                    .save("nested", &1)
+                    .unwrap_err()
+                    .message
+                    .contains("inside a database closure")
+            );
             Ok(())
-        }).await.unwrap();
-        assert!(Journal::with_db(dir.path(), db).load::<u32>("nested").unwrap().is_none());
+        })
+        .await
+        .unwrap();
+        assert!(
+            Journal::with_db(dir.path(), db)
+                .load::<u32>("nested")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
