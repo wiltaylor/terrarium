@@ -4052,7 +4052,10 @@ fn check_release_owner(
     let fields = [
         ("release_target", old.release_target != def.release_target),
         ("release_recipe", old.release_recipe != def.release_recipe),
-        ("release_outputs", old.release_outputs != def.release_outputs),
+        (
+            "release_outputs",
+            old.release_outputs != def.release_outputs,
+        ),
         (
             "release_secrets",
             old.release_secrets != def.release_secrets,
