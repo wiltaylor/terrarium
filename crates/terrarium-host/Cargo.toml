@@ -44,7 +44,7 @@ ironrdp.workspace = true
 ironrdp-tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-win32job = "2.1.0"
+terrarium-winapi = { path = "../terrarium-winapi" }
 windows-service = "0.8.1"
 
 [dev-dependencies]

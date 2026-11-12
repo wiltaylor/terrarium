@@ -270,7 +270,7 @@ fn check_cwd(plan: &ExecPlan) -> Result<(), SpawnError> {
 pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError> {
     check_cwd(&plan)?;
     #[cfg(windows)]
-    return crate::session_runner::windows::spawn(plan, outbox);
+    return crate::session_windows::spawn(plan, outbox);
     #[cfg(unix)]
     spawn_direct(plan, outbox)
 }
@@ -584,14 +584,6 @@ fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
     }
     let mut reader = pair.master.try_clone_reader().map_err(pty_err)?;
     let mut writer = pair.master.take_writer().map_err(pty_err)?;
-    // portable-pty 0.9 requests inherited cursor state on Windows. There
-    // is no parent console in a service. Supply the new terminal's origin
-    // before CreateProcess, which can wait for that cursor response.
-    #[cfg(windows)]
-    {
-        writer.write_all(b"\x1b[1;1R").map_err(pty_err)?;
-        writer.flush().map_err(pty_err)?;
-    }
     let mut child = pair.slave.spawn_command(cmd).map_err(pty_err)?;
     drop(pair.slave);
     let pid = child.process_id();

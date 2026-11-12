@@ -64,10 +64,6 @@ enum Cmd {
     /// Run under the Windows Service Control Manager as LocalSystem.
     #[cfg(windows)]
     Service,
-    /// Internal Windows per-session containment process.
-    #[cfg(windows)]
-    #[command(hide = true)]
-    SessionRunner,
     /// Connect to the daemon and serve sessions (the default).
     Run,
     /// Print the detected capabilities and the resolved settings, then exit.
@@ -522,10 +518,6 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     #[cfg(windows)]
-    if matches!(args.command, Some(Cmd::SessionRunner)) {
-        return terrarium_host::session_runner::windows::run();
-    }
-    #[cfg(windows)]
     if let Some(Cmd::ApplyServiceUpdate { binary, version }) = &args.command {
         return windows_service_host::apply_update(binary, version);
     }
@@ -576,8 +568,6 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::ApplyServiceUpdate { .. }) => unreachable!("handled before the runtime"),
         #[cfg(windows)]
         Some(Cmd::Service) => unreachable!("handled by the service dispatcher"),
-        #[cfg(windows)]
-        Some(Cmd::SessionRunner) => unreachable!("handled before the runtime"),
         Some(Cmd::Check { json, probe }) => rt.block_on(check(&cfg, json, probe)),
         Some(Cmd::Run) | None => rt.block_on(run(cfg)),
         Some(

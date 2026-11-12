@@ -52,7 +52,8 @@ pub mod prepare;
 pub mod protocol;
 pub mod selfupdate;
 pub mod session;
-pub mod session_runner;
+#[cfg(windows)]
+mod session_windows;
 pub mod tls;
 pub mod transfer;
 pub mod verb;
