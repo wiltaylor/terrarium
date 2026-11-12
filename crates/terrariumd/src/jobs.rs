@@ -3173,14 +3173,18 @@ async fn steps(
     x.at(STEP_PREPARE);
     let project = job.project.clone();
     let repo_name = job.repo.clone();
-    let merge_identity = x
-        .state
-        .db
-        .read(move |c| {
-            let repo = repos::resolve(c, &repo_name, Some(&project))?;
-            Ok(crate::git_identity::effective(c, &repo)?.1)
-        })
-        .await?;
+    let merge_identity = if job.kind == JobKind::Merge {
+        x.state
+            .db
+            .read(move |c| {
+                let repo = repos::resolve(c, &repo_name, Some(&project))?;
+                Ok(crate::git_identity::effective(c, &repo)?.1)
+            })
+            .await?
+    } else {
+        // Validate jobs do not create commits during preparation.
+        crate::git_identity::Identity::from_env()
+    };
     let guard = Arc::new(guard);
     let prepare_key = format!("prepare/{}/{}", job.id, job.attempt);
     let cached = journal.load::<Prepared>(&prepare_key)?;
