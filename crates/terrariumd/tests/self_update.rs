@@ -100,7 +100,9 @@ fn serve(path: PathBuf) -> Arc<FakeUpdater> {
             let req: Request = serde_json::from_str(line.trim()).unwrap();
             f.requests.lock().unwrap().push(req.clone());
             let answer = match req {
-                Request::Retention { .. } | Request::RetentionInit { .. } | Request::RetentionRepair { .. } => Response::Retained {
+                Request::Retention { .. }
+                | Request::RetentionInit { .. }
+                | Request::RetentionRepair { .. } => Response::Retained {
                     detail: json!({"removed": []}),
                 },
                 Request::Status => {

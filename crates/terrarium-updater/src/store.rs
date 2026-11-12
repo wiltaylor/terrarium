@@ -46,7 +46,7 @@ pub struct RetentionRunning {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum HistoryEntry {
-    Run(Run),
+    Run(Box<Run>),
     Initialization { retention_initialized: Epoch },
 }
 
@@ -57,10 +57,13 @@ struct Epoch {
 }
 
 fn history_runs(entries: &[HistoryEntry]) -> Vec<Run> {
-    entries.iter().filter_map(|entry| match entry {
-        HistoryEntry::Run(run) => Some(run.clone()),
-        HistoryEntry::Initialization { .. } => None,
-    }).collect()
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            HistoryEntry::Run(run) => Some((**run).clone()),
+            HistoryEntry::Initialization { .. } => None,
+        })
+        .collect()
 }
 
 fn validate_epoch(r: &Retention, entries: &[HistoryEntry]) -> std::io::Result<()> {
@@ -207,10 +210,22 @@ impl Store {
         self.retention_initialize(confirm, no_rollback, None)
     }
 
-    fn retention_initialize(&self, confirm: bool, no_rollback: bool, first_pass: Option<Vec<String>>) -> std::io::Result<Vec<String>> {
+    fn retention_initialize(
+        &self,
+        confirm: bool,
+        no_rollback: bool,
+        first_pass: Option<Vec<String>>,
+    ) -> std::io::Result<Vec<String>> {
         let path = self.dir.join("retention.json");
-        let mut entries: Vec<HistoryEntry> = if no_rollback && !self.dir.join(HISTORY).try_exists()? { Vec::new() } else { strict_json(&self.dir.join(HISTORY))? };
-        let prior_epoch = entries.iter().any(|entry| matches!(entry, HistoryEntry::Initialization { .. }));
+        let mut entries: Vec<HistoryEntry> =
+            if no_rollback && !self.dir.join(HISTORY).try_exists()? {
+                Vec::new()
+            } else {
+                strict_json(&self.dir.join(HISTORY))?
+            };
+        let prior_epoch = entries
+            .iter()
+            .any(|entry| matches!(entry, HistoryEntry::Initialization { .. }));
         if prior_epoch && strict_json::<Retention>(&path).is_err() {
             return Err(std::io::Error::other("retention state lost: use repair"));
         }
@@ -219,7 +234,9 @@ impl Store {
         } else {
             Retention::default()
         };
-        if prior_epoch || r.initialized { validate_epoch(&r, &entries)?; }
+        if prior_epoch || r.initialized {
+            validate_epoch(&r, &entries)?;
+        }
         if r.retention_running.is_some() {
             return Err(std::io::Error::other(
                 "retention helper requires reconciliation before initialization",
@@ -273,7 +290,12 @@ impl Store {
             audit.sync_all()?;
             // Explicitly record even an empty baseline. Later loss fails closed.
             let epoch = ulid::Ulid::new().to_string();
-            entries.push(HistoryEntry::Initialization { retention_initialized: Epoch { id: epoch.clone(), at: chrono::Utc::now().to_rfc3339() } });
+            entries.push(HistoryEntry::Initialization {
+                retention_initialized: Epoch {
+                    id: epoch.clone(),
+                    at: chrono::Utc::now().to_rfc3339(),
+                },
+            });
             write_json(&self.dir.join(HISTORY), &entries)?;
             write_json(&self.dir.join(PREVIOUS), &previous)?;
             r.initialized = true;
@@ -290,20 +312,37 @@ impl Store {
     }
 
     pub fn retention_confirm(&self, no_rollback: bool, names: Vec<String>) -> std::io::Result<()> {
-        self.retention_initialize(true, no_rollback, Some(names)).map(|_| ())
+        self.retention_initialize(true, no_rollback, Some(names))
+            .map(|_| ())
     }
 
     /// Caller holds admission lock and has inspected every container ExecID.
-    pub fn retention_repair(&self, confirm: bool, inventory: &std::collections::BTreeMap<String, String>, names: Vec<String>) -> std::io::Result<Vec<String>> {
+    pub fn retention_repair(
+        &self,
+        confirm: bool,
+        inventory: &std::collections::BTreeMap<String, String>,
+        names: Vec<String>,
+    ) -> std::io::Result<Vec<String>> {
         let mut entries: Vec<HistoryEntry> = strict_json(&self.dir.join(HISTORY))?;
         let previous: Option<Previous> = strict_json(&self.dir.join(PREVIOUS))?;
         let path = self.dir.join("retention.json");
         // Unreadable lost state can only be replaced through this audited path.
         let mut r: Retention = strict_json(&path).unwrap_or_default();
-        if r.pending.is_some() { return Err(std::io::Error::other("unfinished update blocks retention repair")); }
+        if r.pending.is_some() {
+            return Err(std::io::Error::other(
+                "unfinished update blocks retention repair",
+            ));
+        }
         r.protected.extend(inventory.clone());
         for run in history_runs(&entries) {
-            if !r.released.contains(&run.id) && matches!(run.outcome, crate::protocol::Outcome::RecoveryFailed | crate::protocol::Outcome::RollbackFailed) && let Some(backup) = run.backup {
+            if !r.released.contains(&run.id)
+                && matches!(
+                    run.outcome,
+                    crate::protocol::Outcome::RecoveryFailed
+                        | crate::protocol::Outcome::RollbackFailed
+                )
+                && let Some(backup) = run.backup
+            {
                 r.protected.insert(run.id, backup);
             }
         }
@@ -312,10 +351,23 @@ impl Store {
         if confirm {
             use std::os::unix::fs::OpenOptionsExt;
             let epoch = ulid::Ulid::new().to_string();
-            let mut audit = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(self.dir.join("retention-audit.jsonl"))?;
-            writeln!(audit, "{}", serde_json::json!({"action":"backup.retention.repair","actor":"operator","epoch":epoch,"protected":r.protected,"first_pass":names,"at":chrono::Utc::now()}))?;
+            let mut audit = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(self.dir.join("retention-audit.jsonl"))?;
+            writeln!(
+                audit,
+                "{}",
+                serde_json::json!({"action":"backup.retention.repair","actor":"operator","epoch":epoch,"protected":r.protected,"first_pass":names,"at":chrono::Utc::now()})
+            )?;
             audit.sync_all()?;
-            entries.push(HistoryEntry::Initialization { retention_initialized: Epoch { id: epoch.clone(), at: chrono::Utc::now().to_rfc3339() } });
+            entries.push(HistoryEntry::Initialization {
+                retention_initialized: Epoch {
+                    id: epoch.clone(),
+                    at: chrono::Utc::now().to_rfc3339(),
+                },
+            });
             write_json(&self.dir.join(HISTORY), &entries)?;
             r.epoch = Some(epoch);
             r.initialized = true;
@@ -326,25 +378,53 @@ impl Store {
         Ok(protected)
     }
 
-    pub fn retention_authorization(&self, running: &RetentionRunning) -> std::io::Result<serde_json::Value> {
+    pub fn retention_authorization(
+        &self,
+        running: &RetentionRunning,
+    ) -> std::io::Result<serde_json::Value> {
         let r: Retention = strict_json(&self.dir.join("retention.json"))?;
         let entries: Vec<HistoryEntry> = strict_json(&self.dir.join(HISTORY))?;
         validate_epoch(&r, &entries)?;
         let history = history_runs(&entries);
         let previous: Option<Previous> = strict_json(&self.dir.join(PREVIOUS))?;
-        if !r.initialized || r.pending.is_some() || !r.retention_running.as_ref().is_some_and(|current| current.token == running.token && current.exec_id == running.exec_id && current.container == running.container) {
-            return Err(std::io::Error::other("retention authorization safety state changed"));
+        if !r.initialized
+            || r.pending.is_some()
+            || !r.retention_running.as_ref().is_some_and(|current| {
+                current.token == running.token
+                    && current.exec_id == running.exec_id
+                    && current.container == running.container
+            })
+        {
+            return Err(std::io::Error::other(
+                "retention authorization safety state changed",
+            ));
         }
         let mut protected: Vec<_> = r.protected.values().cloned().collect();
         protected.extend(previous.and_then(|p| p.backup));
-        protected.extend(history.into_iter().filter(|run| !r.released.contains(&run.id) && matches!(run.outcome, crate::protocol::Outcome::RecoveryFailed | crate::protocol::Outcome::RollbackFailed)).filter_map(|run| run.backup));
-        Ok(serde_json::json!({"token":running.token,"protected":protected,"first_pass":r.first_pass,"expires_at":chrono::Utc::now().timestamp_millis() as f64 / 1000.0 + 10.0}))
+        protected.extend(
+            history
+                .into_iter()
+                .filter(|run| {
+                    !r.released.contains(&run.id)
+                        && matches!(
+                            run.outcome,
+                            crate::protocol::Outcome::RecoveryFailed
+                                | crate::protocol::Outcome::RollbackFailed
+                        )
+                })
+                .filter_map(|run| run.backup),
+        );
+        Ok(
+            serde_json::json!({"token":running.token,"protected":protected,"first_pass":r.first_pass,"expires_at":chrono::Utc::now().timestamp_millis() as f64 / 1000.0 + 10.0}),
+        )
     }
 
     pub fn retention_pass_finished(&self) -> std::io::Result<()> {
         let path = self.dir.join("retention.json");
         let mut r: Retention = strict_json(&path)?;
-        if r.retention_running.is_some() { return Err(std::io::Error::other("retention still running")); }
+        if r.retention_running.is_some() {
+            return Err(std::io::Error::other("retention still running"));
+        }
         r.first_pass = None;
         write_json(&path, &r)
     }
@@ -374,13 +454,17 @@ impl Store {
 
     /// Put `run` first, and keep the newest runs.
     pub fn push(&self, run: &Run) -> std::io::Result<()> {
-        let mut entries: Vec<HistoryEntry> = if self.dir.join(HISTORY).try_exists()? { strict_json(&self.dir.join(HISTORY))? } else { Vec::new() };
+        let mut entries: Vec<HistoryEntry> = if self.dir.join(HISTORY).try_exists()? {
+            strict_json(&self.dir.join(HISTORY))?
+        } else {
+            Vec::new()
+        };
         entries.retain(|entry| matches!(entry, HistoryEntry::Initialization { .. }));
         let mut h = self.history();
         h.retain(|r| r.id != run.id);
         h.insert(0, run.clone());
         h.truncate(self.keep);
-        entries.extend(h.into_iter().map(HistoryEntry::Run));
+        entries.extend(h.into_iter().map(|run| HistoryEntry::Run(Box::new(run))));
         write_json(&self.dir.join(HISTORY), &entries)
     }
 
@@ -504,10 +588,20 @@ mod tests {
         s.push(&run("new")).unwrap();
         assert_eq!(s.history().len(), 1);
         std::fs::remove_file(dir.path().join("retention.json")).unwrap();
-        assert!(s.retention_init(true, false).unwrap_err().to_string().contains("retention state lost: use repair"));
-        let inventory = [("snapshot:old.zip".into(), "/state/backups/old.zip".into())].into_iter().collect();
+        assert!(
+            s.retention_init(true, false)
+                .unwrap_err()
+                .to_string()
+                .contains("retention state lost: use repair")
+        );
+        let inventory = [("snapshot:old.zip".into(), "/state/backups/old.zip".into())]
+            .into_iter()
+            .collect();
         s.retention_repair(true, &inventory, Vec::new()).unwrap();
-        assert_eq!(s.retention_protected(None).unwrap(), ["/state/backups/old.zip"]);
+        assert_eq!(
+            s.retention_protected(None).unwrap(),
+            ["/state/backups/old.zip"]
+        );
         s.retention_protected(Some("snapshot:old.zip")).unwrap();
         assert!(s.retention_protected(None).unwrap().is_empty());
     }
@@ -519,7 +613,14 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let s = Store::new(dir.path(), 1);
                 s.retention_init(true, true).unwrap();
-                let running = RetentionRunning { container:"daemon".into(), exec_id:"exact".into(), token:"A".repeat(26), pid:None, worker_pid:None, worker_start:None };
+                let running = RetentionRunning {
+                    container: "daemon".into(),
+                    exec_id: "exact".into(),
+                    token: "A".repeat(26),
+                    pid: None,
+                    worker_pid: None,
+                    worker_start: None,
+                };
                 s.set_retention_running(Some(running.clone())).unwrap();
                 assert!(s.retention_authorization(&running).is_ok());
                 if file == "initialized" {
@@ -527,10 +628,98 @@ mod tests {
                     let mut value: serde_json::Value = strict_json(&path).unwrap();
                     value.as_object_mut().unwrap().remove("initialized");
                     write_json(&path, &value).unwrap();
-                } else if corrupt { std::fs::write(dir.path().join(file), "{").unwrap(); }
-                else { std::fs::remove_file(dir.path().join(file)).unwrap(); }
-                assert!(s.retention_authorization(&running).is_err(), "{file}, corrupt={corrupt}");
+                } else if corrupt {
+                    std::fs::write(dir.path().join(file), "{").unwrap();
+                } else {
+                    std::fs::remove_file(dir.path().join(file)).unwrap();
+                }
+                assert!(
+                    s.retention_authorization(&running).is_err(),
+                    "{file}, corrupt={corrupt}"
+                );
             }
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn paused_real_helpers_stop_after_safety_state_loss_and_lease_expiry() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        // Each real helper is authorized, then paused on the creator's flock.
+        // Simulate updater loss too: it cannot deliver revocation, so expiry
+        // itself must prevent every unlink when the helpers resume.
+        let script = r#"
+import datetime, fcntl, importlib.util, json, os, pathlib, subprocess, sys, zipfile
+helper, directory, authorization = sys.argv[1:]
+os.environ['TERRARIUM_BACKUP_DIR'] = directory
+os.environ['TERRARIUM_STATE_DIR'] = str(pathlib.Path(directory).parent)
+spec = importlib.util.spec_from_file_location('hot', helper)
+hot = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hot)
+directory = pathlib.Path(directory)
+directory.mkdir()
+for age in range(20, 40):
+    created = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0) - datetime.timedelta(days=age)
+    name = f'terrarium-backup-{created:%Y%m%dT%H%M%SZ}-full.zip'
+    with zipfile.ZipFile(directory / name, 'w') as archive:
+        archive.writestr('backup.json', json.dumps(dict(format='terrarium-backup', version=1, kind='full', created_at=created.isoformat())))
+authorization = json.loads(authorization)
+hot.retention_control('prepare', authorization)
+with (directory / '.retention.lock').open('a') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    child = subprocess.Popen([sys.executable, helper, 'retain-backups', authorization['token']], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        print('authorized', flush=True)
+        sys.stdin.readline()
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        stdout, stderr = child.communicate(timeout=5)
+        if child.returncode:
+            raise RuntimeError(stderr.decode())
+        receipt = json.loads(stdout)
+        assert receipt['stopped'] and receipt['removed'] == [], receipt
+        assert len(list(directory.glob('*.zip'))) == 20
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate()
+"#;
+        let mut children = Vec::new();
+        let mut latest_expiry = 0.0_f64;
+        for file in ["retention.json", HISTORY, PREVIOUS, "initialized"] {
+            for corrupt in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let s = Store::new(dir.path().join("updater"), 1);
+                s.retention_init(true, true).unwrap();
+                let running = RetentionRunning { container: "daemon".into(), exec_id: "exact".into(), token: ulid::Ulid::new().to_string(), pid: None, worker_pid: None, worker_start: None };
+                s.set_retention_running(Some(running.clone())).unwrap();
+                let authorization = s.retention_authorization(&running).unwrap();
+                latest_expiry = latest_expiry.max(authorization["expires_at"].as_f64().unwrap());
+                let mut child = Command::new("python3").arg("-u").arg("-c").arg(script)
+                    .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docker/hot-swap.py"))
+                    .arg(dir.path().join("backups")).arg(authorization.to_string())
+                    .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+                let mut ready = String::new();
+                BufReader::new(child.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+                assert_eq!(ready.trim(), "authorized");
+                let path = s.dir().join(if file == "initialized" { "retention.json" } else { file });
+                if file == "initialized" {
+                    let mut value: serde_json::Value = strict_json(&path).unwrap();
+                    if corrupt { value["initialized"] = false.into(); }
+                    else { value.as_object_mut().unwrap().remove("initialized"); }
+                    write_json(&path, &value).unwrap();
+                } else if corrupt { std::fs::write(path, "{").unwrap(); }
+                else { std::fs::remove_file(path).unwrap(); }
+                assert!(s.retention_authorization(&running).is_err(), "{file}, corrupt={corrupt}");
+                children.push((child, dir));
+            }
+        }
+        let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+        std::thread::sleep(std::time::Duration::from_secs_f64((latest_expiry - now + 0.1).max(0.0)));
+        for (mut child, _dir) in children {
+            child.stdin.take().unwrap().write_all(b"resume\n").unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         }
     }
 

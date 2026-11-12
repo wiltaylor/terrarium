@@ -21,7 +21,13 @@ async fn the_api_makes_lists_and_serves_backups_for_the_operator_only() {
         .to_owned();
 
     // An agent, also a sysadmin, gets nothing.
-    td.post_as(&sys, "/api/backups/retention/repair", json!({"confirm":true})).await.err(403, "forbidden");
+    td.post_as(
+        &sys,
+        "/api/backups/retention/repair",
+        json!({"confirm":true}),
+    )
+    .await
+    .err(403, "forbidden");
     td.post_as(&sys, "/api/backups", json!({}))
         .await
         .err(403, "forbidden");

@@ -379,6 +379,14 @@ def main(argv):
             initialized.touch()
     elif command == "retention-inventory":
         print(json.dumps(retention_inventory()))
+    elif command == "retention-repair-revoke":
+        try:
+            control = retention_read(backup_directory(), ".retention-control.json")
+        except FileNotFoundError:
+            control = None
+        if control is not None:
+            retention_control("cancel", {"token": control["token"]})
+        print("{}")
     elif command == "retention-control":
         print(json.dumps(retention_control(argv[1], json.loads(argv[2]))))
     elif command == "preview-backups":

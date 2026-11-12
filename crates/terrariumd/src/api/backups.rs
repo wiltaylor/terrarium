@@ -56,7 +56,10 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
         .route(
             "/backups/retention/repair",
             axum::routing::post(retention_repair),
-            &[(axum::http::Method::POST, super::link_registry::Access::OperatorOnly)],
+            &[(
+                axum::http::Method::POST,
+                super::link_registry::Access::OperatorOnly,
+            )],
         )
         .route(
             "/backups/retention/init",
@@ -231,11 +234,22 @@ struct InitBody {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RepairBody { #[serde(default)] confirm: bool }
+struct RepairBody {
+    #[serde(default)]
+    confirm: bool,
+}
 
-async fn retention_repair(actor: Actor, Json(body): Json<RepairBody>) -> ApiResult<Json<serde_json::Value>> {
+async fn retention_repair(
+    actor: Actor,
+    Json(body): Json<RepairBody>,
+) -> ApiResult<Json<serde_json::Value>> {
     policy::operator_only(&actor, "repairing backup retention")?;
-    backup::retention::call(terrarium_updater::protocol::Request::RetentionRepair { confirm: body.confirm }).await.map(Json).map_err(ApiError::invalid)
+    backup::retention::call(terrarium_updater::protocol::Request::RetentionRepair {
+        confirm: body.confirm,
+    })
+    .await
+    .map(Json)
+    .map_err(ApiError::invalid)
 }
 
 async fn retention_init(
