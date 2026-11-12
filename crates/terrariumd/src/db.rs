@@ -3782,8 +3782,11 @@ mod tests {
     #[test]
     fn seeded_waits_complete_silently_once_across_pages() {
         let mut conn = Connection::open_in_memory().unwrap();
-        let before: Vec<_> = NAMED_MIGRATIONS.iter().copied()
-            .filter(|(name, _)| *name != "ter-970-seeded-waits.sql").collect();
+        let before: Vec<_> = NAMED_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|(name, _)| *name != "ter-970-seeded-waits.sql")
+            .collect();
         migrate_with(&mut conn, MIGRATIONS).unwrap();
         migrate_named(&mut conn, &before).unwrap();
         seed_migration_dependencies(&conn);
@@ -3800,20 +3803,45 @@ mod tests {
              SELECT id,'legacy','all','{}','operator' FROM cards WHERE number>=10;"
         ).unwrap();
         let counts = |conn: &Connection| -> (i64, i64) {
-            (conn.query_row("SELECT count(*) FROM events", [], |r| r.get(0)).unwrap(),
-             conn.query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap())
+            (
+                conn.query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+                    .unwrap(),
+                conn.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+                    .unwrap(),
+            )
         };
         let initial = counts(&conn);
         assert_eq!(migrate(&mut conn).unwrap(), 1);
-        let met: i64 = conn.query_row("SELECT count(*) FROM card_waits WHERE met_at IS NOT NULL", [], |r| r.get(0)).unwrap();
+        let met: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM card_waits WHERE met_at IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(met, 262);
-        let timestamp: String = conn.query_row("SELECT met_at FROM card_waits WHERE card='P-2'", [], |r| r.get(0)).unwrap();
+        let timestamp: String = conn
+            .query_row("SELECT met_at FROM card_waits WHERE card='P-2'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         for card in ["P-1", "P-3"] {
-            assert!(conn.query_row("SELECT met_at FROM card_waits WHERE card=?1", [card], |r| r.get::<_, Option<String>>(0)).unwrap().is_none());
+            assert!(
+                conn.query_row("SELECT met_at FROM card_waits WHERE card=?1", [card], |r| r
+                    .get::<_, Option<String>>(0))
+                    .unwrap()
+                    .is_none()
+            );
         }
         assert_eq!(counts(&conn), initial);
         assert_eq!(migrate(&mut conn).unwrap(), 0);
-        assert_eq!(conn.query_row("SELECT met_at FROM card_waits WHERE card='P-2'", [], |r| r.get::<_, String>(0)).unwrap(), timestamp);
+        assert_eq!(
+            conn.query_row("SELECT met_at FROM card_waits WHERE card='P-2'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            timestamp
+        );
         assert_eq!(counts(&conn), initial);
     }
 
@@ -3829,7 +3857,9 @@ mod tests {
             .filter(|(name, _)| {
                 !matches!(
                     *name,
-                    "ter-712-card-waits.sql" | "ter-893-legacy-listing-expiry.sql" | "ter-970-seeded-waits.sql"
+                    "ter-712-card-waits.sql"
+                        | "ter-893-legacy-listing-expiry.sql"
+                        | "ter-970-seeded-waits.sql"
                 )
             })
             .collect();
