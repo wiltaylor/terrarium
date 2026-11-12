@@ -541,24 +541,44 @@ async fn a_stale_dev_host_refuses_unsigned_updates_and_reports_manual_updates() 
         o
     };
     use terrarium_host::selfupdate::{NEW, PENDING, PREV, sidecar};
-    let bundle_url = format!("http://{addr}/install/terrarium-host.sigstore.json?arch={}", std::env::consts::ARCH);
-    assert_eq!(reqwest::get(&bundle_url).await.unwrap().status(), reqwest::StatusCode::NOT_FOUND);
+    let bundle_url = format!(
+        "http://{addr}/install/terrarium-host.sigstore.json?arch={}",
+        std::env::consts::ARCH
+    );
+    assert_eq!(
+        reqwest::get(&bundle_url).await.unwrap().status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
     for cached in [false, true] {
         if cached {
-            let name = format!("terrarium-host-{}-linux.{}.sigstore.json", std::env::consts::ARCH, sha(served.as_bytes()));
+            let name = format!(
+                "terrarium-host-{}-linux.{}.sigstore.json",
+                std::env::consts::ARCH,
+                sha(served.as_bytes())
+            );
             std::fs::write(dist.path().join(name), b"untrusted bundle").unwrap();
             let response = reqwest::get(&bundle_url).await.unwrap();
             assert_eq!(response.status(), reqwest::StatusCode::OK);
-            assert_eq!(response.bytes().await.unwrap().as_ref(), b"untrusted bundle");
+            assert_eq!(
+                response.bytes().await.unwrap().as_ref(),
+                b"untrusted bundle"
+            );
         }
         let task = tokio::spawn(Client::new(options("0.0.9+0000000")).run());
-        wait_until(&trace, "missing signature refusal was not logged", async || {
-            if cached {
-                trace.text().contains("no release verification key")
-            } else {
-                trace.text().contains("cannot obtain release signature bundle")
-            }
-        }).await;
+        wait_until(
+            &trace,
+            "missing signature refusal was not logged",
+            async || {
+                if cached {
+                    trace.text().contains("no release verification key")
+                } else {
+                    trace
+                        .text()
+                        .contains("cannot obtain release signature bundle")
+                }
+            },
+        )
+        .await;
         assert!(!task.is_finished());
         assert_eq!(std::fs::read_to_string(&bin).unwrap(), old);
         for suffix in [NEW, PENDING, PREV] {
@@ -572,7 +592,11 @@ async fn a_stale_dev_host_refuses_unsigned_updates_and_reports_manual_updates() 
     // the signature requirement in Client::self_update.
     write_exec(&bin, &served);
     std::fs::write(sidecar(&bin, PREV), &old).unwrap();
-    std::fs::write(sidecar(&bin, PENDING), format!("{}\n", terrarium_version::FULL)).unwrap();
+    std::fs::write(
+        sidecar(&bin, PENDING),
+        format!("{}\n", terrarium_version::FULL),
+    )
+    .unwrap();
 
     // "systemd" starts the new build: it confirms the update, and the
     // daemon records it.
