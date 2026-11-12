@@ -428,7 +428,12 @@ async fn connection_cap_holds_websocket_slot_until_tunnel_closes() {
         drop(socket);
         // Closing the tunnel and releasing its permit happen asynchronously.
         loop {
-            let response = reqwest::get(format!("http://{address}/")).await.unwrap();
+            // An over-cap socket gets an unsolicited 503 before the client
+            // writes its request, which reqwest can report as UnexpectedMessage.
+            let Ok(response) = reqwest::get(format!("http://{address}/")).await else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            };
             if response.status() == 200 {
                 assert_eq!(response.text().await.unwrap(), "ok");
                 break;
@@ -468,7 +473,10 @@ async fn connection_cap_releases_idle_keep_alive_after_header_timeout() {
         let mut bytes = Vec::new();
         idle.read_to_end(&mut bytes).await.unwrap();
         loop {
-            let response = reqwest::get(format!("http://{address}/")).await.unwrap();
+            let Ok(response) = reqwest::get(format!("http://{address}/")).await else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            };
             if response.status() == 200 {
                 assert_eq!(response.text().await.unwrap(), "ok");
                 break;
