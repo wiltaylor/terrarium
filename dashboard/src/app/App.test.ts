@@ -9,13 +9,14 @@ import { waitFor } from "../test/wait";
 import { MOVED_ROUTES, movedTo, PROJECT_TABS } from "./nav";
 
 const { stub } = vi.hoisted(() => ({ stub: (label: string) => () => label }));
+const dashboardRoute = vi.hoisted(() => ({ slug: "dashboard" }));
 
 vi.mock("../api", () => ({ isMock: false }));
 // The project shell reads the tab counts (TER-154): no agent, no count.
 vi.mock("../stores", async () => { const { instanceTestStores } = await import("../test/instance"); return instanceTestStores(({
   auth: { mode: () => "operator", token: () => null, csrf: () => null },
   agents: { inProject: () => [] },
-  api: { projects: { counts: async () => ({ blocked_cards: 0, questions: null }) }, pages: { list: async () => ({ items: [], can_edit: false }) } },
+  api: { projects: { counts: async () => ({ blocked_cards: 0, questions: null }) }, pages: { list: async () => ({ items: [], can_edit: false, dashboard_slug: dashboardRoute.slug }) } },
   events: { on: () => () => {} },
 })); });
 vi.mock("./Layout", () => ({ Layout: (props: { children?: unknown }) => props.children }));
@@ -64,6 +65,7 @@ const { App } = await import("./App");
 let dispose: (() => void) | undefined;
 
 afterEach(() => {
+  dashboardRoute.slug = "dashboard";
   dispose?.();
   dispose = undefined;
   document.body.replaceChildren();
@@ -151,6 +153,13 @@ describe("App project routes", () => {
     const root = mount("/p/my%20app/dashboard");
     await waitFor(() => expect(root.textContent).toContain("Custom page"));
     expect(window.location.pathname).toBe("/p/my%20app/pages/dashboard");
+  });
+
+  it("uses the recorded fallback slug when a user already owns dashboard", async () => {
+    dashboardRoute.slug = "dashboard-legacy-2";
+    const root = mount("/p/my%20app/dashboard");
+    await waitFor(() => expect(root.textContent).toContain("Custom page"));
+    expect(window.location.pathname).toBe("/p/my%20app/pages/dashboard-legacy-2");
   });
 
   it("keeps the nested tab rows encoded and active on deep paths", async () => {
