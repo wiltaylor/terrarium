@@ -321,7 +321,10 @@ impl Updater {
             ended_at: None,
         };
         if let Err(e) = self.store.retention_begin(&run) {
-            return Err(Response::Error { message: format!("cannot protect update backups: {e}"), busy: false });
+            return Err(Response::Error {
+                message: format!("cannot protect update backups: {e}"),
+                busy: false,
+            });
         }
         *self.running() = Some(run.clone());
         Ok((run, guard))
@@ -376,21 +379,33 @@ impl Updater {
 
     async fn retention(&self, release: Option<&str>) -> Response {
         let Ok(_guard) = self.busy.clone().try_lock_owned() else {
-            return Response::Error { message: "update or rollback in progress: retention deferred".into(), busy: true };
+            return Response::Error {
+                message: "update or rollback in progress: retention deferred".into(),
+                busy: true,
+            };
         };
         let result = async {
-            let protected = self.store.retention_protected(release).map_err(|e| e.to_string())?;
+            let protected = self
+                .store
+                .retention_protected(release)
+                .map_err(|e| e.to_string())?;
             if let Some(id) = release {
                 return Ok(serde_json::json!({"released": id, "removed": []}));
             }
             let cur = self.engine.target().await?;
             let protected = serde_json::to_string(&protected).map_err(|e| e.to_string())?;
-            let out = self.exec_ok(&cur.id, hot_argv("retain-backups", &[&protected])).await?;
+            let out = self
+                .exec_ok(&cur.id, hot_argv("retain-backups", &[&protected]))
+                .await?;
             serde_json::from_str(&out).map_err(|e| format!("bad retention receipt: {e}"))
-        }.await;
+        }
+        .await;
         match result {
             Ok(detail) => Response::Retained { detail },
-            Err(message) => Response::Error { message, busy: false },
+            Err(message) => Response::Error {
+                message,
+                busy: false,
+            },
         }
     }
 

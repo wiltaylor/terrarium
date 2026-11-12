@@ -62,7 +62,9 @@ impl Store {
     pub fn retention_begin(&self, run: &Run) -> std::io::Result<()> {
         let mut r: Retention = strict_json(&self.dir.join("retention.json"))?;
         if r.pending.is_some() {
-            return Err(std::io::Error::other("unfinished update requires operator recovery release"));
+            return Err(std::io::Error::other(
+                "unfinished update requires operator recovery release",
+            ));
         }
         r.pending = Some(run.id.clone());
         write_json(&self.dir.join("retention.json"), &r)
@@ -70,8 +72,10 @@ impl Store {
 
     pub fn retention_finish(&self, run: &Run) -> std::io::Result<()> {
         let mut r: Retention = strict_json(&self.dir.join("retention.json"))?;
-        if matches!(run.outcome, crate::protocol::Outcome::RecoveryFailed | crate::protocol::Outcome::RollbackFailed)
-            && let Some(backup) = &run.backup
+        if matches!(
+            run.outcome,
+            crate::protocol::Outcome::RecoveryFailed | crate::protocol::Outcome::RollbackFailed
+        ) && let Some(backup) = &run.backup
         {
             r.protected.insert(run.id.clone(), backup.clone());
         }
@@ -85,7 +89,11 @@ impl Store {
         let history: Vec<Run> = strict_json(&self.dir.join(HISTORY))?;
         for run in history {
             if !r.released.contains(&run.id)
-                && matches!(run.outcome, crate::protocol::Outcome::RecoveryFailed | crate::protocol::Outcome::RollbackFailed)
+                && matches!(
+                    run.outcome,
+                    crate::protocol::Outcome::RecoveryFailed
+                        | crate::protocol::Outcome::RollbackFailed
+                )
                 && let Some(backup) = run.backup
             {
                 r.protected.insert(run.id, backup);
@@ -97,21 +105,34 @@ impl Store {
             }
             // Audit durably BEFORE making the release effective.
             use std::os::unix::fs::OpenOptionsExt;
-            let mut audit = std::fs::OpenOptions::new().create(true).append(true).mode(0o600)
+            let mut audit = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
                 .open(self.dir.join("retention-audit.jsonl"))?;
-            writeln!(audit, "{}", serde_json::json!({"action":"backup.recovery.release", "actor":"operator", "run":id, "at":chrono::Utc::now()}))?;
+            writeln!(
+                audit,
+                "{}",
+                serde_json::json!({"action":"backup.recovery.release", "actor":"operator", "run":id, "at":chrono::Utc::now()})
+            )?;
             audit.sync_all()?;
             r.protected.remove(id);
             r.released.insert(id.to_owned());
-            if r.pending.as_deref() == Some(id) { r.pending = None; }
+            if r.pending.as_deref() == Some(id) {
+                r.pending = None;
+            }
         }
         write_json(&self.dir.join("retention.json"), &r)?;
         if r.pending.is_some() {
-            return Err(std::io::Error::other("unfinished update blocks retention until operator recovery release"));
+            return Err(std::io::Error::other(
+                "unfinished update blocks retention until operator recovery release",
+            ));
         }
         let previous: Option<Previous> = strict_json(&self.dir.join(PREVIOUS))?;
         let mut protected: Vec<_> = r.protected.into_values().collect();
-        if let Some(p) = previous.and_then(|p| p.backup) { protected.push(p); }
+        if let Some(p) = previous.and_then(|p| p.backup) {
+            protected.push(p);
+        }
         Ok(protected)
     }
     pub fn new(dir: impl Into<PathBuf>, keep: usize) -> Self {

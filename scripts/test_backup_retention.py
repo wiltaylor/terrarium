@@ -39,6 +39,8 @@ class RetentionTests(unittest.TestCase):
     def test_newest_five_plus_latest_per_utc_day_for_fourteen_days(self):
         names = [self.backup(age, hour) for age in range(20) for hour in (8, 12, 16)]
         protected = self.backup(30)
+        protected_snapshot = self.directory / (protected + ".hot-swap.sqlite")
+        protected_snapshot.write_bytes(b"recovery")
         snapshot = self.directory / (names[-1] + ".hot-swap.sqlite")
         snapshot.write_bytes(b"snapshot")
         all_full = sorted(names, reverse=True)
@@ -49,6 +51,7 @@ class RetentionTests(unittest.TestCase):
             self.assertLessEqual(len(result["removed"]), 32)
         self.assertEqual({p.name for p in self.directory.glob("*.zip")}, keep)
         self.assertFalse(snapshot.exists())
+        self.assertEqual(protected_snapshot.read_bytes(), b"recovery")
         journal = [json.loads(line) for line in (self.directory / ".retention-audit.jsonl").read_text().splitlines()]
         deleted = [r for r in journal if r["action"] == "backup.prune"]
         self.assertEqual(len(deleted), len(names) - len(keep) + 2)

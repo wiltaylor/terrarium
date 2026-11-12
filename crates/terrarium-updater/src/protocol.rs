@@ -48,7 +48,9 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
-    Retained { detail: serde_json::Value },
+    Retained {
+        detail: serde_json::Value,
+    },
     Status(Box<Status>),
     /// The run started; `status` shows its steps.
     Accepted {

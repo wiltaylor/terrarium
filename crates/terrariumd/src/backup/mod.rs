@@ -33,8 +33,8 @@
 //! (`terrariumd backup restore` refuses while a daemon answers on the
 //! socket or holds the state lock, and holds that lock while it runs).
 
-pub mod schedule;
 pub mod retention;
+pub mod schedule;
 pub mod seal;
 
 use std::collections::{BTreeMap, HashSet};
@@ -686,8 +686,13 @@ pub fn create(roots: &Roots, opts: &CreateOptions) -> anyhow::Result<Created> {
 
 pub fn retention_lock(dir: &Path) -> anyhow::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    let file = fs::OpenOptions::new().write(true).create(true).truncate(false)
-        .mode(0o600).custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK).open(dir.join(".retention.lock"))?;
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(dir.join(".retention.lock"))?;
     if !file.metadata()?.is_file() {
         bail!("backup lock is not a regular file");
     }
@@ -1229,7 +1234,6 @@ pub fn restore(path: &Path, roots: &Roots, opts: &RestoreOptions) -> anyhow::Res
         roots: done,
     })
 }
-
 
 /// The prefix of a drill dir in the backup dir. The walk of a backup
 /// skips the backup dir, and [`list`] skips names with a dot.

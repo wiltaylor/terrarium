@@ -155,7 +155,9 @@ impl Config {
 
     pub fn from_env() -> Result<Self, String> {
         if std::env::var_os(ENV_KEEP).is_some() {
-            tracing::warn!("{ENV_KEEP} is ignored for deletion: updater retention keeps five plus fourteen daily backups");
+            tracing::warn!(
+                "{ENV_KEEP} is ignored for deletion: updater retention keeps five plus fourteen daily backups"
+            );
         }
         Self::parse(|k| std::env::var(k).ok())
     }
