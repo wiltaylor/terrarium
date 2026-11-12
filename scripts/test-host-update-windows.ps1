@@ -5,6 +5,11 @@ $ErrorActionPreference='Stop'
 $cases=New-Object 'System.Collections.Generic.List[string]'
 $failed=0; $stubProcess=$null
 function Service { Get-CimInstance Win32_Service -Filter "Name='TerrariumHost'" }
+function Read-Log {
+    $stream=[IO.File]::Open($script:log,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+    $reader=New-Object IO.StreamReader($stream)
+    try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
+}
 function Wait-For([scriptblock]$condition,[int]$seconds) {
     $until=[DateTime]::UtcNow.AddSeconds($seconds)
     do { if (& $condition) { return }; Start-Sleep -Milliseconds 250 } while ([DateTime]::UtcNow -lt $until)
@@ -22,7 +27,7 @@ function Version([string]$image) {
 function Start-Stub([string]$asset,[string]$version,[string]$mode,[int]$port) {
     $script:log=Join-Path $root ($mode+'.log')
     $script:stubProcess=Start-Process -FilePath $Stub -ArgumentList @($port,('"'+$asset+'"'),$version,$mode) -PassThru -RedirectStandardOutput $script:log -RedirectStandardError (Join-Path $root ($mode+'.err'))
-    Wait-For { (Test-Path $script:log) -and [IO.File]::ReadAllText($script:log).Contains('READY') } 15
+    Wait-For { (Test-Path $script:log) -and (Read-Log).Contains('READY') } 15
     $config=Join-Path $root 'fixture.toml'
     # Public loopback fixture credential, not an enrolled host token.
     [IO.File]::WriteAllText($config,('daemon_url = "ws://127.0.0.1:'+$port+'"'+"`n"+'token = "local-loopback-fixture"'+"`n"+'name = "ter271-update-fixture"'+"`n"))
@@ -49,9 +54,9 @@ try {
     Set-Image ('"'+$baseline+'" --config "'+$config+'" service')
     Case 'offer_download_switch_restart_welcome' {
         Start-Service TerrariumHost
-        Wait-For { (Test-Path $journal) -and (Get-Content $journal -Raw | ConvertFrom-Json).confirmed -and (Service).PathName.Contains($goodImage) -and [IO.File]::ReadAllText($script:log).Contains(('WELCOME '+$good)) } 150
+        Wait-For { (Test-Path $journal) -and (Get-Content $journal -Raw | ConvertFrom-Json).confirmed -and (Service).PathName.Contains($goodImage) -and (Read-Log).Contains(('WELCOME '+$good)) } 150
         if ((Get-FileHash $goodImage -Algorithm SHA256).Hash -ne (Get-FileHash $GoodAsset -Algorithm SHA256).Hash) { throw 'Wrong installed bytes.' }
-        if (![IO.File]::ReadAllText($script:log).Contains(('DOWNLOAD '+$good))) { throw 'Download not observed.' }
+        if (!(Read-Log).Contains(('DOWNLOAD '+$good))) { throw 'Download not observed.' }
         if (!(Test-Path $baseline)) { throw 'Old image collected too early.' }
     }
     Case 'forced_exit_and_later_start_cleanup' {
@@ -67,7 +72,7 @@ try {
     Case 'failed_new_build_health_rolls_back' {
         Start-Service TerrariumHost
         $record=$goodImage+'.failed'
-        Wait-For { (Test-Path $record) -and !(Test-Path $journal) -and (Service).State -eq 'Running' -and (Service).PathName.Contains($goodImage) -and [IO.File]::ReadAllText($script:log).Contains(('HELLO '+$bad)) } 240
+        Wait-For { (Test-Path $record) -and !(Test-Path $journal) -and (Service).State -eq 'Running' -and (Service).PathName.Contains($goodImage) -and (Read-Log).Contains(('HELLO '+$bad)) } 240
         if ([IO.File]::ReadAllText($record).Trim() -ne $bad) { throw 'Wrong failed version.' }
     }
 } finally {
