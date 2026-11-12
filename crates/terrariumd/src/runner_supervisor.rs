@@ -2069,7 +2069,11 @@ impl RunnerSupervisor {
         // The instance bot identity deliberately overrides GIT_AUTHOR_* and
         // GIT_COMMITTER_* supplied by the harness or secret environment.
         spec.env.extend(litellm_env);
-        crate::git_identity::Identity::from_env().env(&mut spec.env);
+        // Local checkout identity must win over the instance fallback.
+        // GIT_AUTHOR_* and GIT_COMMITTER_* would override repo config.
+        for key in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] {
+            spec.env.remove(key);
+        }
         spec.env.insert(
             "TERRARIUM_GIT_TRAILERS_FILE".into(),
             layout

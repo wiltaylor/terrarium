@@ -9,6 +9,64 @@ use crate::store::agents;
 
 pub const TRAILERS_FILE: &str = ".terrarium-git-trailers";
 
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Settings {
+    pub provenance: Option<bool>,
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub warn_only: Option<bool>,
+}
+
+pub fn settings(c: &rusqlite::Connection, repo: bool, id: &str) -> ApiResult<Settings> {
+    use rusqlite::OptionalExtension as _;
+    let sql = if repo { "SELECT settings FROM repo_git_settings WHERE repo=?1" }
+        else { "SELECT settings FROM project_git_settings WHERE project=?1" };
+    let value: Option<String> = c.query_row(sql, [id], |r| r.get(0)).optional()?;
+    Ok(value.map(|v| serde_json::from_str(&v)).transpose()?.unwrap_or_default())
+}
+
+pub fn save_settings(t: &mut crate::db::Tx<'_>, repo: bool, id: &str, patch: Settings) -> ApiResult<Settings> {
+    for value in [&patch.name, &patch.email].into_iter().flatten() {
+        if value.trim().is_empty() || value.contains(['\n', '\r', '\0']) {
+            return Err(crate::error::ApiError::invalid("git identity must be nonempty and single-line"));
+        }
+    }
+    let mut value = settings(t, repo, id)?;
+    if patch.provenance.is_some() { value.provenance = patch.provenance; }
+    if patch.name.is_some() { value.name = patch.name; }
+    if patch.email.is_some() { value.email = patch.email; }
+    if patch.warn_only.is_some() { value.warn_only = patch.warn_only; }
+    let sql = if repo { "INSERT INTO repo_git_settings(repo,settings) VALUES(?1,?2) ON CONFLICT(repo) DO UPDATE SET settings=excluded.settings" }
+        else { "INSERT INTO project_git_settings(project,settings) VALUES(?1,?2) ON CONFLICT(project) DO UPDATE SET settings=excluded.settings" };
+    t.execute(sql, rusqlite::params![id, serde_json::to_string(&value)?])?;
+    Ok(value)
+}
+
+pub fn effective(c: &rusqlite::Connection, repo: &crate::store::repos::Repo) -> ApiResult<(bool, Identity, bool)> {
+    let project = settings(c, false, &repo.project)?;
+    let local = settings(c, true, &repo.id)?;
+    let own = repo.url.strip_prefix("git@github.com:")
+        .or_else(|| repo.url.strip_prefix("https://github.com/"))
+        .or_else(|| repo.url.strip_prefix("ssh://git@github.com/"))
+        .and_then(|s| s.split('/').next())
+        .is_some_and(|owner| owner.eq_ignore_ascii_case("wiltaylor"));
+    let mut identity = Identity::from_env();
+    if let Some(name) = local.name.or(project.name) { identity.name = name; }
+    if let Some(email) = local.email.or(project.email) { identity.email = email; }
+    Ok((local.provenance.or(project.provenance).unwrap_or(own), identity, local.warn_only.or(project.warn_only).unwrap_or(false)))
+}
+
+pub async fn for_repo(state: &Shared, id: &str, repo: &crate::store::repos::Repo) -> ApiResult<Provenance> {
+    let mut p = provenance(state, id).await?;
+    let repo = repo.clone();
+    let (enabled, identity, warn_only) = state.db.read(move |c| effective(c, &repo)).await?;
+    p.identity = identity;
+    p.warn_only = warn_only;
+    if !enabled { p.trailers.clear(); }
+    Ok(p)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     pub name: String,
@@ -40,6 +98,7 @@ impl Identity {
 /// A checkout fallback. Live sessions and target execs supply current values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provenance {
+    pub warn_only: bool,
     pub identity: Identity,
     pub trailers: String,
 }
@@ -59,18 +118,21 @@ pub async fn provenance(state: &Shared, id: &str) -> ApiResult<Provenance> {
             let session = agents::current_session(c, &id)?;
             let clean = |s: &str| s.replace(['\r', '\n'], " ");
             let mut trailers = format!(
-                "Terrarium-Session: {}\nTerrarium-Agent: {}/{}\nTerrarium-Harness: {} {}\nTerrarium-Model: {}\n",
+                "Terrarium-Session: {}\nTerrarium-Agent: {}/{}\nTerrarium-Harness: {} {}\n",
                 session.as_deref().unwrap_or("unknown"),
                 clean(&a.agent.project),
                 clean(&a.agent.name),
                 a.agent.harness,
                 clean(version.as_deref().unwrap_or("unknown")),
-                clean(a.agent.model.as_deref().unwrap_or("unknown")),
             );
+            if let Some(model) = a.agent.model.as_deref().filter(|m| !m.is_empty() && *m != "unknown") {
+                trailers.push_str(&format!("Terrarium-Model: {}\n", clean(model)));
+            }
             if let Some(card) = a.current_card {
                 trailers.push_str(&format!("Terrarium-Card: {}\n", clean(&card)));
             }
             Ok(Provenance {
+                warn_only: false,
                 identity: Identity::from_env(),
                 trailers,
             })
@@ -84,13 +146,16 @@ impl Provenance {
         format!(
             "#!/bin/sh\n# terrarium managed provenance hook\nset -eu\nrepo_hook=$(dirname \"$0\")/prepare-commit-msg.repo\nif [ -x \"$repo_hook\" ]; then \"$repo_hook\" \"$@\"; fi\n\
              trailers=${{TERRARIUM_GIT_TRAILERS-}}\n\
-             if [ -n \"${{TERRARIUM_GIT_TRAILERS_FILE-}}\" ] && [ -r \"$TERRARIUM_GIT_TRAILERS_FILE\" ]; then\n\
+             if [ {} = off ]; then exit 0; fi\n\
+             if [ \"${{TERRARIUM_GIT_TRAILERS+x}}\" = x ]; then :\n\
+             elif [ -n \"${{TERRARIUM_GIT_TRAILERS_FILE-}}\" ] && [ -r \"$TERRARIUM_GIT_TRAILERS_FILE\" ]; then\n\
                trailers=$(cat -- \"$TERRARIUM_GIT_TRAILERS_FILE\")\n\
              elif [ -z \"$trailers\" ]; then trailers={}; fi\n\
              printf '%s\\n' \"$trailers\" | while IFS= read -r trailer; do\n\
                [ -n \"$trailer\" ] || continue\n\
                git interpret-trailers --in-place --if-exists replace --if-missing add --trailer \"$trailer\" \"$1\" || exit $?\n\
              done\n",
+            if self.trailers.is_empty() { "off" } else { "on" },
             sh_quote(&self.trailers)
         )
     }
@@ -210,11 +275,39 @@ mod tests {
     }
 
     #[test]
+    fn explicitly_empty_trailers_disable_file_and_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Provenance {
+            warn_only: false,
+            identity: Identity::from_env(),
+            trailers: "Terrarium-Session: snapshot\n".into(),
+        };
+        git(tmp.path(), &["init", "-q"], &p);
+        let hook = tmp.path().join(".git/hooks/prepare-commit-msg");
+        std::fs::write(&hook, p.hook()).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = tmp.path().join("trailers");
+        std::fs::write(&file, "Terrarium-Session: live\n").unwrap();
+        let mut cmd = Command::new("git");
+        cmd.current_dir(tmp.path())
+            .args(["commit", "--allow-empty", "-m", "test: empty override"])
+            .env("TERRARIUM_GIT_TRAILERS", "")
+            .env("TERRARIUM_GIT_TRAILERS_FILE", &file);
+        let mut env = BTreeMap::new();
+        p.identity.env(&mut env);
+        let output = cmd.envs(env).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let message = git(tmp.path(), &["show", "-s", "--format=%B"], &p);
+        assert!(!message.contains("Terrarium-"), "{message}");
+    }
+
+    #[test]
     fn hook_parses_provenance_preserves_release_and_composes_repo_hook() {
         use std::io::Write as _;
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         let p = Provenance {
+            warn_only: false,
             identity: Identity { name: "Instance Bot".into(), email: "bot@example.test".into() },
             trailers: "Terrarium-Session: 01SESSION\nTerrarium-Agent: proj/agent\nTerrarium-Harness: codex 1.2.3\nTerrarium-Model: model-'$(false)'\nTerrarium-Card: TER-258\n".into(),
         };
@@ -296,6 +389,7 @@ mod tests {
         let origin = root.join("origin");
         std::fs::create_dir(&origin).unwrap();
         let p = Provenance {
+            warn_only: false,
             identity: Identity { name: "Target Bot".into(), email: "target@example.test".into() },
             trailers: "Terrarium-Session: 01TARGET\nTerrarium-Agent: proj/worker\nTerrarium-Harness: codex unknown\nTerrarium-Model: unknown\n".into(),
         };

@@ -210,7 +210,7 @@ const MAX_HOOKS: usize = 64;
 /// `terrarium_core::config::check_push_deny_glob`, so they are safe as
 /// shell `case` patterns.
 pub fn push_deny_hook(push_deny: &[String]) -> String {
-    let patterns = push_deny.join("|");
+    let patterns = if push_deny.is_empty() { "terrarium-no-branch-matches".into() } else { push_deny.join("|") };
     format!(
         r#"#!/bin/sh
 # Written by terrariumd from the repo's push_deny list. Each checkout by
@@ -233,6 +233,24 @@ done <<TERRARIUM_REFS
 $input
 TERRARIUM_REFS
 test -n "$refused" && exit 1
+if test "$(git config --get terrarium.provenance)" = false; then
+  while read -r local_ref local_oid remote_ref remote_oid; do
+    case "$local_oid" in ''|0000000000000000000000000000000000000000) continue;; esac
+    case "$remote_oid" in
+      0000000000000000000000000000000000000000)
+        commits=$(git rev-list "$local_oid" --not --remotes="$1") || exit 1;;
+      *) commits=$(git rev-list "$remote_oid..$local_oid") || exit 1;;
+    esac
+    for commit in $commits; do
+      if git show -s --format='%B%n%an%n%ae%n%cn%n%ce' "$commit" | grep -Eiq '^(Terrarium-[A-Za-z-]+:|Terrarium$|terrarium@localhost$)'; then
+        echo "Terrarium: provenance is off but outgoing commit $commit contains Terrarium trailers or the default identity; configure repo identity and remove metadata before pushing" >&2
+        test "$(git config --get terrarium.provenanceWarnOnly)" = true || exit 1
+      fi
+    done
+  done <<TERRARIUM_REFS
+$input
+TERRARIUM_REFS
+fi
 repo_hook="${{0%/*}}/{REPO_PRE_PUSH}"
 if test -x "$repo_hook"; then
   if test -n "$input"; then printf '%s\n' "$input"; fi | "$repo_hook" "$@"
@@ -271,7 +289,7 @@ fn install_hooks(c: &Checkout, r: &Runner) -> Result<Vec<String>, GitError> {
         terrarium_core::config::check_hooks_dir(dir).map_err(GitError::Refused)?;
         files = hook_files(c, r, dir)?;
     }
-    if !c.hooks.push_deny.is_empty() {
+    if !c.hooks.push_deny.is_empty() || c.hooks.provenance.is_some() {
         terrarium_core::config::check_push_deny(&c.hooks.push_deny).map_err(GitError::Refused)?;
         if let Some(f) = files.iter_mut().find(|(n, _)| n == "pre-push") {
             REPO_PRE_PUSH.clone_into(&mut f.0);
@@ -288,6 +306,8 @@ fn install_hooks(c: &Checkout, r: &Runner) -> Result<Vec<String>, GitError> {
         files.push(("prepare-commit-msg".into(), p.hook().into_bytes()));
         r.quiet(&c.dest, &["config", "user.name", &p.identity.name])?;
         r.quiet(&c.dest, &["config", "user.email", &p.identity.email])?;
+        r.quiet(&c.dest, &["config", "terrarium.provenance", if p.trailers.is_empty() { "false" } else { "true" }])?;
+        r.quiet(&c.dest, &["config", "terrarium.provenanceWarnOnly", if p.warn_only { "true" } else { "false" }])?;
     }
     let git_dir = open_git_dir(&c.dest, false)?;
     let shown = Path::new(".git");

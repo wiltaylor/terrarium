@@ -46,10 +46,38 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             ],
         )
         .route(
+            "/repos/{id}/git",
+            get(git_settings).patch(set_git_settings),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::PATCH, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
             "/repos/{id}/checkout",
             post(checkout),
             &[(axum::http::Method::POST, super::link_registry::Access::Link)],
         )
+}
+
+async fn git_settings(State(state): State<Shared>, actor: Actor, Path(id): Path<String>) -> ApiResult<Json<crate::git_identity::Settings>> {
+    let context = actor.project().map(str::to_owned);
+    state.db.read(move |c| {
+        let repo = repos::resolve(c, &id, context.as_deref())?;
+        policy::read_project(&actor, &repo.project)?;
+        Ok(Json(crate::git_identity::settings(c, true, &repo.id)?))
+    }).await
+}
+
+async fn set_git_settings(State(state): State<Shared>, actor: Actor, Path(id): Path<String>, ApiJson(patch): ApiJson<crate::git_identity::Settings>) -> ApiResult<Json<crate::git_identity::Settings>> {
+    let context = actor.project().map(str::to_owned);
+    let label = actor.label();
+    state.db.write(label, move |t| {
+        let repo = repos::resolve(t, &id, context.as_deref())?;
+        policy::admin_project(&actor, &repo.project, "changing repo git settings")?;
+        if patch.warn_only.is_some() { policy::operator_only(&actor, "changing the provenance push override")?; }
+        Ok(Json(crate::git_identity::save_settings(t, true, &repo.id, patch)?))
+    }).await
 }
 
 /// The credential helper answers at most this many times per agent in
@@ -275,7 +303,7 @@ async fn checkout_inner(
     };
     let mut hooks = repo.hooks();
     hooks.provenance =
-        Some(crate::git_identity::provenance(state, &agent.agent.id.to_string()).await?);
+        Some(crate::git_identity::for_repo(state, &agent.agent.id.to_string(), repo).await?);
     let c = Checkout {
         url: repo.url.clone(),
         dest: workspace.join(&dir),
@@ -443,6 +471,7 @@ async fn checkout_target(
         state,
         actor,
         &row,
+        repo,
         &repo.url,
         &dir,
         branch.as_deref(),

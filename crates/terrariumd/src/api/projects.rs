@@ -47,6 +47,14 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             ],
         )
         .route(
+            "/projects/{name}/git",
+            get(git_settings).patch(set_git_settings),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::PATCH, super::link_registry::Access::Link),
+            ],
+        )
+        .route(
             "/projects/{name}/agents",
             get(list_agents),
             &[(axum::http::Method::GET, super::link_registry::Access::Link)],
@@ -85,6 +93,23 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
                 (axum::http::Method::POST, super::link_registry::Access::Link),
             ],
         )
+}
+
+async fn git_settings(State(state): State<Shared>, actor: Actor, Path(name): Path<String>) -> ApiResult<Json<crate::git_identity::Settings>> {
+    policy::read_project(&actor, &name)?;
+    state.db.read(move |c| {
+        projects::get(c, &name)?;
+        Ok(Json(crate::git_identity::settings(c, false, &name)?))
+    }).await
+}
+
+async fn set_git_settings(State(state): State<Shared>, actor: Actor, Path(name): Path<String>, ApiJson(patch): ApiJson<crate::git_identity::Settings>) -> ApiResult<Json<crate::git_identity::Settings>> {
+    policy::admin_project(&actor, &name, "changing project git settings")?;
+    if patch.warn_only.is_some() { policy::operator_only(&actor, "changing the provenance push override")?; }
+    state.db.write(actor.label(), move |t| {
+        projects::get(t, &name)?;
+        Ok(Json(crate::git_identity::save_settings(t, false, &name, patch)?))
+    }).await
 }
 
 async fn list(

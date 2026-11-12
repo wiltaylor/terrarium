@@ -453,6 +453,12 @@ pub enum ProjectCmd {
     },
     /// Change a project (project_admin)
     Set {
+        #[arg(long, value_parser = ["on", "off"])]
+        provenance: Option<String>,
+        #[arg(long)]
+        git_name: Option<String>,
+        #[arg(long)]
+        git_email: Option<String>,
         name: Option<String>,
         #[arg(long, short = 'd')]
         description: Option<String>,
@@ -730,6 +736,19 @@ pub struct RepoAddArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum RepoCmd {
+    /// Change repo commit settings. Refresh checkouts after changing them.
+    Set {
+        repo: String,
+        #[arg(long, value_parser = ["on", "off"])]
+        provenance: Option<String>,
+        #[arg(long)]
+        git_name: Option<String>,
+        #[arg(long)]
+        git_email: Option<String>,
+        /// Operator only: warn rather than refuse metadata-bearing pushes
+        #[arg(long)]
+        warn_only: Option<bool>,
+    },
     /// Repositories attached to the project
     Ls,
     /// Clone or update a repo in the workspace, or on a target
