@@ -473,8 +473,14 @@ async fn workspace_sync_roundtrip(work_root: bool) {
     let session = response.ok()["session_id"].as_str().unwrap();
     let (stdout, end) = output(&td, "sync", session).await;
     assert_eq!(end["code"], 0, "{end}");
-    assert_eq!(stdout.trim(), base.join("p/worker/workspace/repo").to_str().unwrap());
-    assert_eq!(std::fs::read_to_string(local.join("repo/alias-output")).unwrap(), "source");
+    assert_eq!(
+        stdout.trim(),
+        base.join("p/worker/workspace/repo").to_str().unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(local.join("repo/alias-output")).unwrap(),
+        "source"
+    );
     if work_root {
         // Turn the holder into a bound card worker. Its first exec must not
         // adopt the directory made by the earlier non-card sync.

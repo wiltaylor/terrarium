@@ -449,9 +449,9 @@ impl Sync {
                     .components()
                     .any(|c| c == std::path::Component::ParentDir)
                 && rest[end..]
-                .chars()
-                .next()
-                .is_none_or(|c| c == '/' || c.is_whitespace() || "'\";:)=|&".contains(c))
+                    .chars()
+                    .next()
+                    .is_none_or(|c| c == '/' || c.is_whitespace() || "'\";:)=|&".contains(c))
             {
                 result.push_str(&remote);
             } else {
@@ -537,7 +537,10 @@ fn workspace_alias_translation_is_strict() {
         root,
     };
     for root in ["/configured/home/work", "/work/project/agent"] {
-        assert_eq!(sync.translate(&format!("{root}/repo")), "/remote/workspace/repo");
+        assert_eq!(
+            sync.translate(&format!("{root}/repo")),
+            "/remote/workspace/repo"
+        );
         for value in [
             format!("{root}-other/file"),
             format!("/outside{root}/file"),
@@ -549,7 +552,10 @@ fn workspace_alias_translation_is_strict() {
     }
     assert_eq!(sync.translate("/outside/file"), "/outside/file");
     sync.remote_root = sync.root.clone();
-    assert_eq!(sync.translate("/configured/home/work/repo"), "/work/project/agent/repo");
+    assert_eq!(
+        sync.translate("/configured/home/work/repo"),
+        "/work/project/agent/repo"
+    );
 }
 
 pub(super) fn finish_with(sess: &Arc<ExecSession>, sync: Option<Sync>) {
