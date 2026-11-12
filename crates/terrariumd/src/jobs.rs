@@ -3601,37 +3601,74 @@ async fn finish_recipe(
                 end_text(output.end.as_ref())
             )));
         }
-        let size = String::from_utf8_lossy(&output.stdout).trim().parse::<usize>()
+        let size = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<usize>()
             .map_err(|_| ApiError::invalid("cannot read release archive size"))?;
         if size > cap {
-            return Err(ApiError::invalid(format!("release artifacts exceed the per-job limit of {limit} bytes")));
+            return Err(ApiError::invalid(format!(
+                "release artifacts exceed the per-job limit of {limit} bytes"
+            )));
         }
         let mut archive_bytes = Vec::with_capacity(size);
         // Bounded sessions avoid overflowing the host's replay buffer. File
         // bytes bypass textual redaction and never enter a public exec session.
         for index in 0..size.div_ceil(crate::release_handoff::CHUNK_SIZE) {
-            if killed(&job.id) { return Err(ApiError::conflict("the job was cancelled")); }
+            if killed(&job.id) {
+                return Err(ApiError::conflict("the job was cancelled"));
+            }
             let cmd = RemoteCmd {
-                argv: low_priority(vec!["dd".into(), format!("if={archive}"), format!("bs={}", crate::release_handoff::CHUNK_SIZE), format!("skip={index}"), "count=1".into(), "status=none".into()], x.ionice),
+                argv: low_priority(
+                    vec![
+                        "dd".into(),
+                        format!("if={archive}"),
+                        format!("bs={}", crate::release_handoff::CHUNK_SIZE),
+                        format!("skip={index}"),
+                        "count=1".into(),
+                        "status=none".into(),
+                    ],
+                    x.ionice,
+                ),
                 holder: x.holder.clone(),
                 timeout_secs: Some(30),
                 ..RemoteCmd::default()
             };
             let admission = x.state.executor.target_admission(x.def).await?;
-            let (running, report) = crate::run_kill::start_named_locked(x.state, x.def, &cmd, crate::run_kill::job_pidfile(&job.id), &admission)?;
-            let running = crate::executor::track_resource_run(x.state, x.def, &cmd, running, report.clone())?;
+            let (running, report) = crate::run_kill::start_named_locked(
+                x.state,
+                x.def,
+                &cmd,
+                crate::run_kill::job_pidfile(&job.id),
+                &admission,
+            )?;
+            let running =
+                crate::executor::track_resource_run(x.state, x.def, &cmd, running, report.clone())?;
             set_control(&job.id, Some(running.ctl.clone()));
             drop(admission);
-            if killed(&job.id) { let _ = running.ctl.send(Control::Kill); }
-            let chunk = running.collect(crate::release_handoff::CHUNK_SIZE + 1).await;
-            if let Some(report) = report { let _ = crate::run_kill::report(report).await; }
+            if killed(&job.id) {
+                let _ = running.ctl.send(Control::Kill);
+            }
+            let chunk = running
+                .collect(crate::release_handoff::CHUNK_SIZE + 1)
+                .await;
+            if let Some(report) = report {
+                let _ = crate::run_kill::report(report).await;
+            }
             let expected = crate::release_handoff::CHUNK_SIZE.min(size - archive_bytes.len());
             if !chunk.end.as_ref().is_some_and(End::success) || chunk.stdout.len() != expected {
-                return Err(ApiError::conflict(format!("cannot read release archive chunk ({})", end_text(chunk.end.as_ref()))));
+                return Err(ApiError::conflict(format!(
+                    "cannot read release archive chunk ({})",
+                    end_text(chunk.end.as_ref())
+                )));
             }
             archive_bytes.extend_from_slice(&chunk.stdout);
         }
-        let cleanup = RemoteCmd { argv: vec!["rm".into(), "-f".into(), "--".into(), archive], holder: x.holder.clone(), timeout_secs: Some(30), ..RemoteCmd::default() };
+        let cleanup = RemoteCmd {
+            argv: vec!["rm".into(), "-f".into(), "--".into(), archive],
+            holder: x.holder.clone(),
+            timeout_secs: Some(30),
+            ..RemoteCmd::default()
+        };
         let _ = x.run(&cleanup, STEP_MAX, None).await;
         crate::release_handoff::publish(&x.state.state_dir, &job.id, &archive_bytes[..], limit)?;
     }
