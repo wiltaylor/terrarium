@@ -22,6 +22,12 @@ Insert-conflict guards reject replacement inserts and upserts on existing
 enrollment, reservation, registration, attachment and operation identities,
 including alternate unique keys. They work even with SQLite recursive triggers
 disabled. Daemon connections also enable recursive triggers as defence in depth.
+Identity-column UPDATE guards apply in every state, including revoked and
+destroyed history. A revoked attachment ID cannot be renamed to permit its reuse.
+Only explicit state edges are mutable: target verification follows pending
+reconciliation, destruction is terminal, and attachment revoke proceeds through
+authority-ended and pending before verified disappearance. Quarantine permits
+retry of revoke, never resurrection of an attachment.
 
 One stream per registration covers all lifecycle operations. Original requests
 are typed structs without maps. The v1 canonical hash is SHA-256 of compact

@@ -48,6 +48,12 @@ WHEN NEW.last_contiguous_revision < OLD.last_contiguous_revision
     OR NEW.allocated_revision < OLD.allocated_revision
     OR NEW.allocated_revision > OLD.allocated_revision + 1
 BEGIN SELECT RAISE(ABORT, 'revision barrier'); END;
+CREATE TRIGGER live_workspace_target_state BEFORE UPDATE OF state ON live_workspace_targets
+WHEN NOT (NEW.state = OLD.state
+    OR (OLD.state != 'destroyed' AND NEW.state IN ('quarantined', 'destroyed'))
+    OR (OLD.state IN ('quarantined', 'verified') AND NEW.state = 'reconcile_pending')
+    OR (OLD.state = 'reconcile_pending' AND NEW.state = 'verified'))
+BEGIN SELECT RAISE(ABORT, 'invalid registration state transition'); END;
 
 CREATE TABLE workspace_reservations (
     workspace_id TEXT PRIMARY KEY NOT NULL REFERENCES live_workspaces(workspace_id),
@@ -81,6 +87,9 @@ CREATE TABLE live_workspace_attachments (
 );
 CREATE INDEX live_workspace_attachments_registration ON live_workspace_attachments(registration_id, state, attachment_id);
 CREATE INDEX live_workspace_attachments_workspace ON live_workspace_attachments(workspace_id, attachment_id);
+CREATE TRIGGER live_workspace_attachment_identity BEFORE UPDATE OF
+    attachment_id, workspace_id, registration_id, agent_id ON live_workspace_attachments
+BEGIN SELECT RAISE(ABORT, 'attachment identity is immutable'); END;
 CREATE TRIGGER live_workspace_attachment_tombstone BEFORE UPDATE OF revoke_revision ON live_workspace_attachments
 WHEN OLD.revoke_revision IS NOT NULL AND NEW.revoke_revision IS NOT OLD.revoke_revision
 BEGIN SELECT RAISE(ABORT, 'revoke tombstone is permanent'); END;
@@ -89,6 +98,13 @@ BEGIN SELECT RAISE(ABORT, 'attachment history is permanent'); END;
 CREATE TRIGGER live_workspace_attachment_no_resurrect BEFORE UPDATE OF state ON live_workspace_attachments
 WHEN OLD.revoke_revision IS NOT NULL AND NEW.state = 'attached_verified'
 BEGIN SELECT RAISE(ABORT, 'attachment has been revoked'); END;
+CREATE TRIGGER live_workspace_attachment_state BEFORE UPDATE OF state ON live_workspace_attachments
+WHEN NOT (NEW.state = OLD.state
+    OR (OLD.state != 'path_revoked_verified' AND NEW.state = 'quarantined')
+    OR (OLD.state = 'attached_verified' AND NEW.state = 'authority_ended')
+    OR (OLD.state IN ('authority_ended', 'quarantined') AND NEW.state = 'revoke_pending')
+    OR (OLD.state = 'revoke_pending' AND NEW.state = 'path_revoked_verified'))
+BEGIN SELECT RAISE(ABORT, 'invalid attachment state transition'); END;
 
 CREATE TABLE live_workspace_operations (
     operation_id TEXT PRIMARY KEY NOT NULL,
