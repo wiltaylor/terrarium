@@ -13,6 +13,8 @@ use terrarium_core::live_workspace::{MountEvidence, RegistrationId, Reply, Sourc
 pub struct Mounted {
     directories: Directories,
     evidence: Scaffold,
+    registration: RegistrationId,
+    mount_ids: [u64; 3],
 }
 
 impl Mounted {
@@ -26,6 +28,52 @@ impl Mounted {
 
     pub fn publisher(&self) -> &ProtectedRoot {
         &self.directories.publisher
+    }
+
+    pub(crate) fn registration(&self) -> RegistrationId {
+        self.registration
+    }
+
+    /// Fresh empty-host evidence, not receiver or attachment evidence. Reopen
+    /// the complete fixed paths as well as the pinned parents, so an old FD
+    /// cannot conceal a detached mount or substituted ancestor/path.
+    pub fn recheck_empty(&self) -> Result<Vec<MountEvidence>, Reply> {
+        let roots = [
+            (&self.directories.publisher, "publishers", &self.evidence.publisher),
+            (&self.directories.staging, "staging", &self.evidence.staging),
+            (&self.directories.registration, "registrations", &self.evidence.state),
+        ];
+        for ((root, parent, expected), mount) in roots.into_iter().zip(self.mount_ids) {
+            let path = Path::new("/var/lib/terrarium-workspace-helper").join(parent).join(self.registration.0.to_string());
+            if kernel::path(&root.fd)? != path || source(root)? != *expected || mount_id(&root.fd)? != mount {
+                return Err(Reply::Quarantined);
+            }
+            let current = ProtectedRoot::open(&path)?;
+            let child = root.reopen_registration_child(self.registration)?;
+            for observed in [&current, &child] {
+                if source(observed)? != *expected || mount_id(&observed.fd)? != mount {
+                    return Err(Reply::Quarantined);
+                }
+                paths::empty(&observed.fd)?;
+            }
+        }
+        let view = kernel::host_view()?;
+        for (index, root) in [&self.directories.publisher, &self.directories.staging].into_iter().enumerate() {
+            let record = view.iter().find(|m| m.mount_id == self.mount_ids[index]).ok_or(Reply::Quarantined)?;
+            let (expected_root, device) = kernel::root_of(&root.fd, &view)?;
+            let mut restrictions = record.clone();
+            if index == 0 {
+                let [group] = record.optional_fields.as_slice() else { return Err(Reply::Quarantined) };
+                if !group.strip_prefix("shared:").is_some_and(|n| n.parse::<u64>().is_ok_and(|n| n > 0))
+                    || view.iter().filter(|m| m.optional_fields.contains(group)).count() != 1 {
+                    return Err(Reply::Quarantined);
+                }
+                restrictions.optional_fields.clear();
+            }
+            mountinfo::private_stage(&restrictions, &expected_root, &device)?;
+            mountinfo::exact_children(&view, record, &[])?;
+        }
+        Ok(view)
     }
 }
 
@@ -141,9 +189,12 @@ pub fn build(store: &Store, mut directories: Directories) -> Result<Mounted, Rep
             staging: source(&directories.staging)?,
             state: source(&directories.registration)?,
         };
+        let mount_ids = [mount_id(&directories.publisher.fd)?, mount_id(&directories.staging.fd)?, mount_id(&directories.registration.fd)?];
         Ok(Mounted {
             directories,
             evidence,
+            registration: id,
+            mount_ids,
         })
     })();
     if result.is_err() {

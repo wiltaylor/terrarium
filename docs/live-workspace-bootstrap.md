@@ -72,6 +72,13 @@ anything. The helper does not remount an inherited parent to make it acceptable.
 Each newly attached clone is explicitly made private, restricted and freshly
 checked before the empty publisher receives its unique shared group. Staging
 stays private. These checks are not receiver or attachment verification.
+Before receiver topology verification, retained scaffold FDs, pinned-parent
+children and freshly opened complete fixed paths must agree on source identity
+and mount ID. Empty directories, restrictions, publisher uniqueness and staging
+privacy are rechecked from fresh host mountinfo. Empty receiver propagation
+evidence is acquired only through that check and a repeatedly rechecked pinned
+runtime namespace, never from caller-supplied mountinfo. It remains separate
+from Docker configuration validation and is not attachment evidence.
 
 The initial request cannot contain a Docker container ID: that ID does not
 exist before create. A separate immutable binding records the full container ID

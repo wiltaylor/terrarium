@@ -1,10 +1,8 @@
 //! B3 scaffolding only. No host verb, registration RPC or enabled admission.
 //! Docker inspect is configuration evidence, never proof of an attachment.
-#[cfg(test)]
 use crate::workspace_helper::mountinfo;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-#[cfg(test)]
 use terrarium_core::live_workspace::MountEvidence;
 use terrarium_core::live_workspace::{
     Activation, OperationId, RegistrationId, Reply, RuntimeId, RuntimeIdentity,
@@ -192,10 +190,34 @@ pub struct VerifiedScaffold {
     publisher: String,
 }
 
-/// Verification primitive for a newly created, empty scaffold. Not a grant or
-/// registration entry point. Kept test-only until B4 supplies serialized fresh
-/// acquisition from the helper's pinned runtime and protected publisher FD.
-#[cfg(test)]
+/// Fresh acquisition from helper-created scaffold FDs and a pinned runtime.
+/// This checks empty propagation topology only. Configuration inspection and
+/// renewed daemon authority remain required before runtime/attachment commit.
+pub fn acquire_empty_scaffold(
+    registration: &Registration,
+    mounted: &crate::workspace_helper::scaffold::Mounted,
+    runtime: &crate::workspace_helper::runtime::PinnedRuntime,
+    inspector: &mut impl crate::workspace_helper::runtime::Inspector,
+) -> Result<VerifiedScaffold, Reply> {
+    if runtime.identity() != &registration.runtime
+        || mounted.registration() != registration.runtime.registration
+        || registration.publisher != format!("/var/lib/terrarium-workspace-helper/publishers/{}", registration.runtime.registration.0)
+    {
+        return Err(Reply::Quarantined);
+    }
+    runtime.recheck(inspector, &registration.runtime)?;
+    let host = mounted.recheck_empty()?;
+    let receiver = runtime.mountinfo(inspector)?;
+    verify_empty_scaffold(registration, &host, &receiver)?;
+    let host = mounted.recheck_empty()?;
+    let receiver = runtime.mountinfo(inspector)?;
+    let evidence = verify_empty_scaffold(registration, &host, &receiver)?;
+    runtime.recheck(inspector, &registration.runtime)?;
+    Ok(evidence)
+}
+
+/// Pure topology check. Only fresh acquisition above exposes a production
+/// constructor. Arbitrary deserialized mount records are not a public proof.
 fn verify_empty_scaffold(
     registration: &Registration,
     host: &[MountEvidence],
