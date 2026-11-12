@@ -106,9 +106,19 @@ jobs, and they do not run `ci::compat`.
 
 ### Target
 
-- Target: `terrarium-helios-build`
+- Target: `terrarium-helios-build2`
 - At most one heavy run of yours at a time. Run builds under
-  `ionice -c3 nice -n19` with your own `CARGO_TARGET_DIR`.
+  `ionice -c3 nice -n19`.
+- Full card checks and 20-run loops take one of four card-check slots.
+  Hold `/src/terrarium-cardcheck-<slot>.lock` for the entire check and set
+  `CARGO_TARGET_DIR=/src/terrarium-cardcheck-target-<slot>` inside that lock.
+  Reuse these shared directories across cards, never a private per-card
+  target directory. This bounds card-check output to four target directories
+  in addition to the lead's suite directory. Do not delete shared output.
+- Set `CARGO_BUILD_JOBS=8` in each slot. Small filtered runs (one test target)
+  need no slot, but use `CARGO_BUILD_JOBS=8` and `RUST_TEST_THREADS=8`.
+  The whole terrariumd lib or `it` binary must run inside a slot. Any run
+  using a slot's shared target directory must hold that slot's lock.
 
 ### Run it on a clean checkout of a pushed commit
 
@@ -118,15 +128,19 @@ Validate the pushed commit, not your working tree:
 2. Check out a clean copy on the target:
 
    ```sh
-   terrarium repo checkout terrarium --target terrarium-helios-build --branch <branch> --path /src/<agent>-<card>
+   terrarium repo checkout terrarium --target terrarium-helios-build2 --branch <branch> --path /src/<agent>-<card>
    ```
 
 3. Check that the checkout HEAD is the pushed commit.
 4. Run the check there, as a named run:
 
    ```sh
-   terrarium run terrarium-helios-build --name <name> -- sh -c 'cd /src/<agent>-<card> && git diff --name-only --no-renames "$(git merge-base origin/next HEAD)" HEAD > /tmp/<card>-changed.txt && TERRARIUM_CHANGED_FILES=/tmp/<card>-changed.txt ionice -c3 nice -n19 just ci::validate-affected'
+   terrarium run terrarium-helios-build2 --name <name> -- sh -c 'cd /src/<agent>-<card> && git diff --name-only --no-renames "$(git merge-base origin/next HEAD)" HEAD > /tmp/<card>-changed.txt && while :; do for s in 1 2 3 4; do flock -n -E 76 /src/terrarium-cardcheck-$s.lock env CARGO_BUILD_JOBS=8 CARGO_TARGET_DIR=/src/terrarium-cardcheck-target-$s TERRARIUM_CHANGED_FILES=/tmp/<card>-changed.txt ionice -c3 nice -n19 just ci::validate-affected; rc=$?; [ $rc -eq 76 ] || break 2; done; sleep 20; done; exit $rc'
    ```
+
+   The loop retries only lock contention (exit 76). A check's own exit code
+   is returned unchanged, and its target directory is selected only after
+   taking the matching lock.
 
 5. Push the results with `terrarium test push <file> --card <card-id>`.
 
