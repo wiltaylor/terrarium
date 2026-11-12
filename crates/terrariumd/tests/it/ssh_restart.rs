@@ -215,12 +215,33 @@ async fn durable_ssh_redefined_target_or_host_identity_is_not_contacted() {
     let conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
     conn.execute("UPDATE targets SET def=json_set(def,'$.address','root@127.0.0.1') WHERE name='redefined-ssh'", []).unwrap();
     drop(conn);
-    // Restore the target definition, but replace its cached host trust. The
-    // client's unrelated public key is a valid, different host fingerprint.
-    std::fs::write(td.state.join("ssh/known_hosts"), format!("[127.0.0.1]:{} {}", ssh.port, std::fs::read_to_string(ssh.key.with_extension("pub")).unwrap())).unwrap();
+    // The private sshd fixture reuses its host key for client authentication.
+    // Generate a separate replacement rather than copying that same key.
+    let replacement = td.dir.path().join("replacement-host");
+    assert!(std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&replacement)
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(
+        td.state.join("ssh/known_hosts"),
+        format!(
+            "[127.0.0.1]:{} {}",
+            ssh.port,
+            std::fs::read_to_string(replacement.with_extension("pub")).unwrap()
+        ),
+    )
+    .unwrap();
     td.boot(None, None).await;
     let (_, end) = super::exedev::output(&td, "redefined-ssh", &sid).await;
     assert_eq!(end["code"], "interrupted", "{end}");
-    assert!(end["message"].as_str().unwrap().contains("SSH host identity"), "{end}");
+    assert!(
+        end["message"]
+            .as_str()
+            .unwrap()
+            .contains("SSH host identity"),
+        "{end}"
+    );
     ssh.server.kill().await.unwrap();
 }

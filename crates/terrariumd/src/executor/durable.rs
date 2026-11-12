@@ -210,9 +210,16 @@ pub(super) fn start(
     }
     if recovering {
         let name = current.def.name.clone();
-        let vm = state.db.read_now(move |c| Ok(crate::exedev::record_of(c, &name)?.map(|vm| vm.name)))?;
-        if vm != saved.vm || (vm.is_none() && (saved.host_keys.is_empty() || saved.host_keys != host_keys(state, &saved.def)?)) {
-            return Err(ApiError::conflict("interrupted (target changed): remote identity differs or was not recorded"));
+        let vm = state
+            .db
+            .read_now(move |c| Ok(crate::exedev::record_of(c, &name)?.map(|vm| vm.name)))?;
+        if vm != saved.vm
+            || (vm.is_none()
+                && (saved.host_keys.is_empty() || saved.host_keys != host_keys(state, &saved.def)?))
+        {
+            return Err(ApiError::conflict(
+                "interrupted (target changed): remote identity differs or was not recorded",
+            ));
         }
     }
     // Never launch from an expired checkpoint, even if remote GC has removed
@@ -319,10 +326,20 @@ pub(super) fn start(
                     *arg = format!("UserKnownHostsFile={}", path.display());
                 }
             }
-            plan.args.splice(0..0, ["-o".into(), "GlobalKnownHostsFile=/dev/null".into(), "-o".into(), "VerifyHostKeyDNS=no".into()]);
+            plan.args.splice(
+                0..0,
+                [
+                    "-o".into(),
+                    "GlobalKnownHostsFile=/dev/null".into(),
+                    "-o".into(),
+                    "VerifyHostKeyDNS=no".into(),
+                ],
+            );
             pinned = Some(run);
         }
-        if state.executor.hosts.is_stopped() { return; }
+        if state.executor.hosts.is_stopped() {
+            return;
+        }
         let mut process = tokio::process::Command::new(&plan.program);
         process.args(&plan.args);
         let mut raw = pump_process(process, plan.stdin_prefix, None, guard);
@@ -672,18 +689,56 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join(".terrarium-runs/cleanup");
         let child = root.path().join("child");
-        let cmd = RemoteCmd { argv: vec!["sh".into(), "-c".into(), format!("echo $$ > '{}'; exec sleep 60", child.display())], timeout_secs: Some(30), ..RemoteCmd::default() };
-        let result = tokio::time::timeout(Duration::from_secs(12), tokio::process::Command::new("sh").arg("-c").arg(script_with_retention(path.to_str().unwrap(), &cmd, chrono::Utc::now().timestamp()-28, 1)).output()).await.unwrap().unwrap();
+        let cmd = RemoteCmd {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                format!("echo $$ > '{}'; exec sleep 60", child.display()),
+            ],
+            timeout_secs: Some(30),
+            ..RemoteCmd::default()
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(12),
+            tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(script_with_retention(
+                    path.to_str().unwrap(),
+                    &cmd,
+                    chrono::Utc::now().timestamp() - 28,
+                    1,
+                ))
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(String::from_utf8_lossy(&result.stdout).contains("X124\n"));
         let pid = std::fs::read_to_string(child).unwrap();
-        assert!(!std::process::Command::new("kill").args(["-0", pid.trim()]).status().unwrap().success());
+        assert!(
+            !std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .status()
+                .unwrap()
+                .success()
+        );
         assert!(path.join("out").exists());
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !path.join("expired").exists() || path.join("out").exists() { tokio::time::sleep(Duration::from_millis(10)).await; }
-        }).await.unwrap();
+            while !path.join("expired").exists() || path.join("out").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         // The tombstone outlives output, and the original child is already gone.
         assert!(path.exists());
         let janitor = std::fs::read_to_string(path.join("janitor")).unwrap();
-        assert!(std::process::Command::new("kill").args(["-KILL", "--", &format!("-{}", janitor.trim())]).status().unwrap().success());
+        assert!(
+            std::process::Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", janitor.trim())])
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 }

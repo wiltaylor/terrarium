@@ -374,11 +374,18 @@ async fn durable_startup_failures_end_promptly_with_reason() {
     let tools = td.dir.path().join("limited-tools");
     std::fs::create_dir(&tools).unwrap();
     // Keep every prerequisite except mkfifo. No remote command may start.
-    for tool in ["setsid", "nohup", "flock", "sh", "timeout", "date", "head", "tail", "base64", "tr", "wc", "cat", "mkdir", "mv", "rm", "rmdir", "sleep"] {
+    for tool in [
+        "setsid", "nohup", "flock", "sh", "timeout", "date", "head", "tail", "base64", "tr", "wc",
+        "cat", "mkdir", "mv", "rm", "rmdir", "sleep",
+    ] {
         std::os::unix::fs::symlink(format!("/usr/bin/{tool}"), tools.join(tool)).unwrap();
     }
     for (name, env, reason) in [
-        ("missing-tool-ex", json!({"PATH":tools}), "unsupported: mkfifo missing"),
+        (
+            "missing-tool-ex",
+            json!({"PATH":tools}),
+            "unsupported: mkfifo missing",
+        ),
         ("bad-spool-ex", json!({}), "spool error"),
     ] {
         let root = td.dir.path().join(name);
@@ -386,9 +393,16 @@ async fn durable_startup_failures_end_promptly_with_reason() {
         def["work_root"] = json!(root);
         td.post("/api/targets", def).await.ok();
         td.post_empty(&format!("/api/targets/{name}/up")).await.ok();
-        if name == "bad-spool-ex" { std::fs::write(&root, "not a directory").unwrap(); }
+        if name == "bad-spool-ex" {
+            std::fs::write(&root, "not a directory").unwrap();
+        }
         let began = tokio::time::Instant::now();
-        let opened = td.post(&format!("/api/targets/{name}/exec"), json!({"durable":true,"env":env,"cmd":["true"]})).await;
+        let opened = td
+            .post(
+                &format!("/api/targets/{name}/exec"),
+                json!({"durable":true,"env":env,"cmd":["true"]}),
+            )
+            .await;
         let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
         let (_, end) = output(&td, name, &sid).await;
         assert_eq!(end["code"], "unsupported", "{end}");
