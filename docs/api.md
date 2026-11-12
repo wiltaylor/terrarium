@@ -12751,7 +12751,7 @@ or the operator) read and set the config. The body is a JSON object:
 | `docker_ci` | public SSH settings: `destination`, `port`, `known_hosts`, `reset_destination`, `reset_port`, `reset_known_hosts` | none |
 | `release_target` | the release client target of release jobs (§35.6); it runs release jobs only | none: no releases |
 | `release_recipe` | the release command, run with `sh -c` in the root of the clone | `just release::publish` |
-| `release_secrets` | `GHCR_TOKEN`, `GH_TOKEN`, `COSIGN_PRIVATE_KEY`, `COSIGN_PASSWORD` mapped to `@secret:<name>[.<field>]`, the env of release jobs only | `{}` |
+| `release_secrets` | env names mapped to same-project `@secret:<name>[.<field>]` references, the env of release jobs only; names follow the rule below | `{}` |
 | `docker_release` | the release VM: `destination`, `port`, `known_hosts`, and `key` (`@secret:<name>[.<field>]`, used by the daemon only) | none |
 
 `merge_secrets` uses the project's `delivery:<project>` principal, never
@@ -13446,6 +13446,13 @@ queues a new one.
 
 The release secrets:
 
+- Names match `^[A-Z][A-Z0-9_]{0,63}$`. Job and tool environment names
+  are reserved: `PATH`, `HOME`, `USER`, `SHELL`, `PWD`, `IFS`, `ENV`,
+  `BASH_ENV`, `TMPDIR`, `LANG`, `NODE_OPTIONS`, `DOCKER_RELEASE_KEY`,
+  `DOCKER_HOST`, `DOCKER_CONFIG`, and prefixes `LD_`, `DYLD_`, `TERRARIUM_`,
+  `DOCKER_CI_`, `GIT_`, `SSH_`, `CARGO_`, `RUST`, `PYTHON`, `NPM_CONFIG_`,
+  `JUST_`. The secret grant name restrictions also apply. Values must be
+  references to secrets of this project, never literals or cross-project paths.
 - `release_secrets` resolve through the `delivery:<project>` principal
   with a `run` grant that names the release target, only for a release job,
   only on that target. A grant that names another target fails the job
