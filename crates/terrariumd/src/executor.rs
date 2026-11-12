@@ -5415,7 +5415,7 @@ pub async fn on_agent_stop(
 // ------------------------------------------------------- checkout on target
 
 /// The script of a checkout on a target. Positional args: URL, dest,
-/// branch, depth. The secret comes in the env: `TERRARIUM_GIT_USERNAME` and
+/// branch, depth, explicit hook mode. The secret comes in the env: `TERRARIUM_GIT_USERNAME` and
 /// `TERRARIUM_GIT_PASSWORD` for a token (a credential helper of `-c` reads
 /// them; the helper text holds no secret), or `TERRARIUM_GIT_SSH_KEY`
 /// (base64 on one line, [`checkout_script_env`]; decoded with `base64 -d`
@@ -5442,6 +5442,48 @@ pub async fn on_agent_stop(
 ///   run filters from the repo config.
 pub const CHECKOUT_SCRIPT: &str = r#"set -eu
 url=$1; dest=$2; branch=$3; depth=$4
+mode=${5:-}
+hook_stage=mode
+fail_hook() { echo "checkout managed hook failed: $hook_stage" >&2; exit 2; }
+case "$mode" in managed-required|unmanaged) ;; *) fail_hook ;; esac
+export LC_ALL=C
+hookdir=; hook_tmp=; push_tmp=
+cleanup_hooks() {
+  if [ -n "$hook_tmp" ]; then rm -f -- "$hook_tmp" || :; fi
+  if [ -n "$push_tmp" ]; then rm -f -- "$push_tmp" || :; fi
+  if [ -n "$hookdir" ]; then rm -rf -- "$hookdir" || :; fi
+}
+trap cleanup_hooks EXIT
+trap 'exit 2' HUP INT TERM
+if [ "$mode" = managed-required ]; then
+  umask 077
+  hook_stage=control
+  [ -n "${TERRARIUM_COMMIT_HOOK:-}" ] && [ -n "${TERRARIUM_PUSH_HOOK_B64:-}" ] || fail_hook
+  [ "${#TERRARIUM_PUSH_HOOK_B64}" -le 32768 ] || fail_hook
+  case "$TERRARIUM_PUSH_HOOK_B64" in *[!A-Za-z0-9+/=]*) fail_hook ;; esac
+  # Supported dialect: base64 -d and a wrapping base64 encoder, POSIX tr,
+  # cmp and wc. Unsupported tools fail closed. Never decode into a variable.
+  hook_stage=staging
+  hookdir=$(umask 077; mktemp -d) || fail_hook
+  (umask 077; printf '%s' "$TERRARIUM_PUSH_HOOK_B64" > "$hookdir/input") || fail_hook
+  hook_stage=decode
+  base64 -d < "$hookdir/input" > "$hookdir/push" 2>/dev/null || fail_hook
+  size=$(wc -c < "$hookdir/push") || fail_hook
+  [ "$size" -gt 0 ] && [ "$size" -le 24576 ] || fail_hook
+  hook_stage=bytes
+  tr -d '\012\040-\176' < "$hookdir/push" > "$hookdir/invalid" 2>/dev/null || fail_hook
+  [ ! -s "$hookdir/invalid" ] || fail_hook
+  hook_stage=encode
+  base64 < "$hookdir/push" > "$hookdir/wrapped" 2>/dev/null || fail_hook
+  tr -d '\012' < "$hookdir/wrapped" > "$hookdir/roundtrip" 2>/dev/null || fail_hook
+  hook_stage=canonical
+  cmp -s "$hookdir/input" "$hookdir/roundtrip" || fail_hook
+  hook_stage=header
+  IFS= read -r first < "$hookdir/push" || fail_hook
+  [ "$first" = '#!/bin/sh' ] || fail_hook
+  grep -q '^# Written by terrariumd from the repo' "$hookdir/push" || fail_hook
+fi
+unset TERRARIUM_PUSH_HOOK_B64 TERRARIUM_PUSH_HOOK
 case "$dest" in /*) ;; *) dest="$HOME/work/$dest" ;; esac
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
   GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_NAMESPACE GIT_CREDENTIAL_HELPER \
@@ -5468,7 +5510,7 @@ sshbase="ssh -F /dev/null -o UserKnownHostsFile=$sshdir/known_hosts -o GlobalKno
 export GIT_SSH_COMMAND="$sshbase"
 helper=
 keyfile=
-trap 'if [ -n "$keyfile" ]; then rm -f "$keyfile"; fi; if [ -n "$sshtmp" ]; then rm -rf "$sshtmp"; fi' EXIT
+trap 'cleanup_hooks; if [ -n "$keyfile" ]; then rm -f "$keyfile"; fi; if [ -n "$sshtmp" ]; then rm -rf "$sshtmp"; fi' EXIT
 if [ -n "${TERRARIUM_GIT_PASSWORD:-}" ]; then
   helper='!f() { test "$1" = get || exit 0; echo "username=$TERRARIUM_GIT_USERNAME"; echo "password=$TERRARIUM_GIT_PASSWORD"; }; f'
 fi
@@ -5516,12 +5558,14 @@ check_config() {
       credential.helper|credential.usehttppath|user.*|advice.*|color.*) ;;
       push.default|push.autosetupremote|push.followtags|pull.rebase|pull.ff) ;;
       init.defaultbranch|extensions.objectformat|commit.gpgsign) ;;
+      terrarium.provenance|terrarium.provenancewarnonly|terrarium.repoid) ;;
       *) echo "$k"; exit ;;
     esac
   done
 }
 note=
 safe=
+[ ! -L "$dest/.git" ] && [ ! -L "$dest/.git/hooks" ] || fail_hook
 if [ -d "$dest/.git" ]; then
   # Another UID can own the repo: on a native host the sessions of one
   # agent run as different pool UIDs (TER-635). Its config is checked
@@ -5554,34 +5598,42 @@ else
   forget
   action=cloned
 fi
-if [ -n "${TERRARIUM_COMMIT_HOOK:-}" ] && [ "$action" != not_updated ]; then
+if [ "$mode" = managed-required ] && [ "$action" != not_updated ]; then
+  hook_stage=install
   [ ! -L "$dest/.git" ] && [ ! -L "$dest/.git/hooks" ] || exit 2
   mkdir -p "$dest/.git/hooks"
   hook="$dest/.git/hooks/prepare-commit-msg"
+  push_hook="$dest/.git/hooks/pre-push"
+  for h in "$hook" "$push_hook"; do
+    [ ! -L "$h" ] && [ ! -L "$h.repo" ] || fail_hook
+    [ ! -e "$h" ] || [ -f "$h" ] || fail_hook
+    [ ! -e "$h.repo" ] || [ -f "$h.repo" ] || fail_hook
+  done
+  hook_tmp=$(mktemp "$dest/.git/hooks/.terrarium-commit.XXXXXX") || fail_hook
+  push_tmp=$(mktemp "$dest/.git/hooks/.terrarium-push.XXXXXX") || fail_hook
+  printf '%s' "$TERRARIUM_COMMIT_HOOK" > "$hook_tmp" || fail_hook
+  cp "$hookdir/push" "$push_tmp" || fail_hook
+  chmod 755 "$hook_tmp" "$push_tmp" || fail_hook
+  # Per-file replacement, not a transaction or a hostile same-UID race defense.
+  # A later failure may leave an original in .repo and requires recovery.
   if [ -e "$hook" ] && ! grep -q '^# terrarium managed provenance hook$' "$hook"; then
-    [ ! -e "$hook.repo" ] && [ ! -L "$hook.repo" ] || exit 2
-    mv "$hook" "$hook.repo"
+    [ ! -e "$hook.repo" ] || fail_hook
+    mv "$hook" "$hook.repo" || fail_hook
   fi
-  hook_tmp=$(mktemp "$dest/.git/hooks/.terrarium-commit.XXXXXX")
-  printf '%s' "$TERRARIUM_COMMIT_HOOK" > "$hook_tmp"
-  chmod 755 "$hook_tmp"
-  mv -f "$hook_tmp" "$dest/.git/hooks/prepare-commit-msg"
+  if [ -e "$push_hook" ] && ! grep -q '^# Written by terrariumd' "$push_hook"; then
+    [ ! -e "$push_hook.repo" ] || fail_hook
+    mv "$push_hook" "$push_hook.repo" || fail_hook
+  fi
+  mv -f "$hook_tmp" "$hook" || fail_hook
+  hook_tmp=
+  mv -f "$push_tmp" "$push_hook" || fail_hook
+  push_tmp=
+  [ -x "$hook" ] && [ -x "$push_hook" ] || fail_hook
   G -C "$dest" config user.name "$TERRARIUM_COMMIT_NAME"
   G -C "$dest" config user.email "$TERRARIUM_COMMIT_EMAIL"
-  if [ -n "${TERRARIUM_PUSH_HOOK:-}" ]; then
-    push_hook="$dest/.git/hooks/pre-push"
-    if [ -e "$push_hook" ] && ! grep -q '^# Written by terrariumd' "$push_hook"; then
-      [ ! -e "$push_hook.repo" ] && [ ! -L "$push_hook.repo" ] || exit 2
-      mv "$push_hook" "$push_hook.repo"
-    fi
-    push_tmp=$(mktemp "$dest/.git/hooks/.terrarium-push.XXXXXX")
-    printf '%s' "$TERRARIUM_PUSH_HOOK" > "$push_tmp"
-    chmod 755 "$push_tmp"
-    mv -f "$push_tmp" "$push_hook"
-    G -C "$dest" config terrarium.provenance "$TERRARIUM_PROVENANCE"
-    G -C "$dest" config terrarium.provenanceWarnOnly "$TERRARIUM_PROVENANCE_WARN_ONLY"
-    G -C "$dest" config terrarium.repoId "$TERRARIUM_REPO_ID"
-  fi
+  G -C "$dest" config terrarium.provenance "$TERRARIUM_PROVENANCE"
+  G -C "$dest" config terrarium.provenanceWarnOnly "$TERRARIUM_PROVENANCE_WARN_ONLY"
+  G -C "$dest" config terrarium.repoId "$TERRARIUM_REPO_ID"
 fi
 head=$(G -C "$dest" rev-parse -q --verify HEAD || true)
 cur=$(G -C "$dest" symbolic-ref --short -q HEAD || true)
@@ -5616,6 +5668,31 @@ pub fn checkout_script_env(secret: Option<&Secret>) -> BTreeMap<String, String> 
         *k = base64::engine::general_purpose::STANDARD.encode(format!("{k}\n"));
     }
     env
+}
+
+const CHECKOUT_PUSH_DECODED_MAX: usize = 24_576;
+const CHECKOUT_PUSH_ENCODED_MAX: usize = 32_768;
+
+fn encode_checkout_push_hook(hook: &str) -> ApiResult<String> {
+    if hook.is_empty() || hook.len() > CHECKOUT_PUSH_DECODED_MAX {
+        return Err(ApiError::invalid(
+            "checkout push hook exceeds its transport bound",
+        ));
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(hook);
+    if encoded.len() > CHECKOUT_PUSH_ENCODED_MAX {
+        return Err(ApiError::invalid(
+            "checkout push hook exceeds its transport bound",
+        ));
+    }
+    Ok(encoded)
+}
+
+/// Dedicated control transport, not authentication or a general decoder API.
+fn checkout_push_hook(deny: &[String]) -> ApiResult<String> {
+    terrarium_core::config::check_push_deny(deny)
+        .map_err(|_| ApiError::invalid("invalid checkout push deny list"))?;
+    encode_checkout_push_hook(&crate::git::push_deny_hook(deny))
 }
 
 /// The checkout command, without the secret: that goes in `env`.
@@ -5656,6 +5733,7 @@ pub fn checkout_cmd(
             dest.into(),
             branch.unwrap_or_default().into(),
             depth.map(|d| d.to_string()).unwrap_or_default(),
+            "unmanaged".into(),
         ],
         env: checkout_script_env(secret),
         timeout_secs: Some(VERB_TIMEOUT),
@@ -5709,12 +5787,11 @@ pub async fn checkout_on_target(
     let _root_guard = crate::target_roots::lock_card(state, actor, &row.def.name).await?;
     crate::target_roots::prepare(state, actor, &row.def, Some(dest)).await?;
     if let Some(a) = actor.agent() {
+        let push_hook = checkout_push_hook(&repo.push_deny)?;
+        cmd.argv[8] = "managed-required".into();
         let p = crate::git_identity::for_repo(state, &a.id, repo).await?;
         cmd.env.insert("TERRARIUM_REPO_ID".into(), repo.id.clone());
-        cmd.env.insert(
-            "TERRARIUM_PUSH_HOOK".into(),
-            crate::git::push_deny_hook(&repo.push_deny),
-        );
+        cmd.env.insert("TERRARIUM_PUSH_HOOK_B64".into(), push_hook);
         cmd.env.insert(
             "TERRARIUM_PROVENANCE".into(),
             (!p.trailers.is_empty()).to_string(),
@@ -5989,6 +6066,202 @@ mod tests {
     }
 
     #[test]
+    fn checkout_push_transport_is_bounded_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        for deny in [vec![], vec!["x".repeat(200); 64]] {
+            let hook = crate::git::push_deny_hook(&deny);
+            let encoded = checkout_push_hook(&deny).unwrap();
+            assert!(!encoded.contains(['\r', '\n']));
+            assert_eq!(base64::engine::general_purpose::STANDARD.decode(&encoded).unwrap(), hook.as_bytes());
+            assert!(hook.ends_with('\n'));
+            let dir = tempfile::tempdir().unwrap();
+            let req = serde_json::from_value(json!({
+                "session": 1, "container": "c1", "cmd": "sh",
+                "env": {"TERRARIUM_PUSH_HOOK_B64": encoded}
+            })).unwrap();
+            let plan = terrarium_host::docker::plan_exec(&req, "docker", dir.path()).unwrap();
+            assert!(plan.exec.env.is_empty());
+            assert!(!plan.exec.args.iter().any(|a| a.contains(&encoded)));
+            let file = plan.exec.private_file.as_ref().unwrap().path().to_owned();
+            assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), format!("TERRARIUM_PUSH_HOOK_B64={encoded}\n"));
+            drop(plan);
+            assert!(!file.exists());
+        }
+        assert!(checkout_push_hook(&vec!["x".into(); 65]).is_err());
+        assert!(checkout_push_hook(&["bad;pattern".into()]).is_err());
+        let at = "x".repeat(CHECKOUT_PUSH_DECODED_MAX);
+        assert_eq!(encode_checkout_push_hook(&at).unwrap().len(), CHECKOUT_PUSH_ENCODED_MAX);
+        assert!(encode_checkout_push_hook(&(at + "x")).is_err());
+        assert!(encode_checkout_push_hook("").is_err());
+    }
+
+    // Source fixtures only until target validation is explicitly authorized.
+    #[test]
+    fn checkout_required_decoder_rejects_invalid_control_before_git() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let git_seen = tmp.path().join("git-seen");
+        std::fs::write(bin.join("git"), "#!/bin/sh\ntouch \"$GIT_SEEN\"\nexit 1\n").unwrap();
+        std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let good = checkout_push_hook(&[]).unwrap();
+        let mut bad = vec![String::new(), "!".into(), "Zg".into(), "Zh==".into(), "Zg===".into(), "=".repeat(32769)];
+        for suffix in ["\n", "\r", " ", "\t"] {
+            bad.push(format!("{good}{suffix}"));
+        }
+        for byte in [0, 1, 13, 127, 128, 255] {
+            let mut bytes = crate::git::push_deny_hook(&[]).into_bytes();
+            bytes.push(byte);
+            bad.push(base64::engine::general_purpose::STANDARD.encode(bytes));
+        }
+        bad.push(base64::engine::general_purpose::STANDARD.encode("x".repeat(24577)));
+        for payload in bad.iter().map(Some).chain(std::iter::once(None)) {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", CHECKOUT_SCRIPT, "sh", "https://invalid/r", "/unused", "", "", "managed-required"])
+                .env_clear().env("PATH", &path).env("HOME", tmp.path()).env("TMPDIR", tmp.path())
+                .env("GIT_SEEN", &git_seen).env("TERRARIUM_COMMIT_HOOK", "commit-control");
+            if let Some(payload) = payload { cmd.env("TERRARIUM_PUSH_HOOK_B64", payload); }
+            let out = cmd.output().unwrap();
+            assert!(!out.status.success());
+            assert!(!git_seen.exists());
+            assert!(!String::from_utf8_lossy(&out.stdout).contains("TERRARIUM_CHECKOUT"));
+            assert!(!String::from_utf8_lossy(&out.stderr).contains("commit-control"));
+            assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+        }
+        for mode in [None, Some("unknown"), Some("managed-required")] {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", CHECKOUT_SCRIPT, "sh", "https://invalid/r", "/unused", "", ""]);
+            if let Some(mode) = mode { cmd.arg(mode); }
+            let out = cmd.env_clear().env("PATH", &path).env("GIT_SEEN", &git_seen)
+                .env("TERRARIUM_PUSH_HOOK_B64", &good).output().unwrap();
+            assert!(!out.status.success());
+            assert!(!git_seen.exists());
+            assert!(!String::from_utf8_lossy(&out.stdout).contains("TERRARIUM_CHECKOUT"));
+        }
+    }
+
+    #[test]
+    fn checkout_required_installation_and_failure_fixtures() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::process::Command;
+        for scenario in ["fresh", "update", "advanced", "dirty", "decode-fail", "encode-fail", "missing-decoder", "mktemp", "cp", "chmod", "mv", "config-fail", "commit-link", "push-link", "repo-link", "git-link", "hooks-link", "conflict", "directory"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let bin = tmp.path().join("bin");
+            let dest = tmp.path().join("dest");
+            let temps = tmp.path().join("temps");
+            std::fs::create_dir(&bin).unwrap();
+            std::fs::create_dir(&temps).unwrap();
+            let hooks = dest.join(".git/hooks");
+            let write_tool = |name: &str, body: &str| {
+                let file = bin.join(name);
+                std::fs::write(&file, body).unwrap();
+                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            // Only emulate git state transitions. The production script and
+            // utilities still perform all control validation and installation.
+            write_tool("git", r#"#!/bin/sh
+command=
+for arg do
+  case "$arg" in clone|fetch|merge|status|rev-parse|symbolic-ref|config) command=$arg; break ;; esac
+done
+case "$command" in
+  clone) mkdir -p "$DEST/.git/hooks" ;;
+  rev-parse)
+    if [ "$SCENARIO" = advanced ] && [ -f "$DEST/fetched" ]; then echo def; else echo abc; fi ;;
+  fetch) if [ "$SCENARIO" = advanced ]; then touch "$DEST/fetched"; fi ;;
+  symbolic-ref) echo main ;;
+  status) if [ "$SCENARIO" = dirty ]; then echo dirty; fi ;;
+  config)
+    case " $* " in *' --file '*) exit 0 ;; esac
+    [ "$SCENARIO" != config-fail ] || exit 1 ;;
+esac
+exit 0
+"#);
+            if scenario != "fresh" {
+                std::fs::create_dir_all(&hooks).unwrap();
+                std::fs::write(dest.join(".git/config"), "").unwrap();
+                for name in ["prepare-commit-msg", "pre-push"] {
+                    std::fs::write(hooks.join(name), "#!/bin/sh\nexit 9\n").unwrap();
+                }
+            }
+            match scenario {
+                "commit-link" | "push-link" => {
+                    let name = if scenario == "commit-link" { "prepare-commit-msg" } else { "pre-push" };
+                    std::fs::remove_file(hooks.join(name)).unwrap();
+                    symlink("absent", hooks.join(name)).unwrap();
+                }
+                "repo-link" => symlink("absent", hooks.join("pre-push.repo")).unwrap(),
+                "git-link" => {
+                    std::fs::rename(dest.join(".git"), dest.join("saved-git")).unwrap();
+                    symlink("absent", dest.join(".git")).unwrap();
+                }
+                "hooks-link" => {
+                    std::fs::rename(&hooks, dest.join("saved-hooks")).unwrap();
+                    symlink("absent", &hooks).unwrap();
+                }
+                "conflict" => std::fs::write(hooks.join("pre-push.repo"), "keep").unwrap(),
+                "directory" => {
+                    std::fs::remove_file(hooks.join("pre-push")).unwrap();
+                    std::fs::create_dir(hooks.join("pre-push")).unwrap();
+                }
+                "decode-fail" => write_tool("base64", "#!/bin/sh\nprintf partial\nexit 1\n"),
+                "encode-fail" => write_tool("base64", "#!/bin/sh\nif [ \"${1:-}\" = -d ]; then exec /usr/bin/base64 -d; fi\nprintf partial\nexit 1\n"),
+                "missing-decoder" => write_tool("base64", "#!/bin/sh\nexit 127\n"),
+                "cp" => write_tool("cp", "#!/bin/sh\nprintf partial > \"$2\"\nexit 1\n"),
+                "mktemp" | "chmod" => write_tool(scenario, "#!/bin/sh\nexit 1\n"),
+                // Fail replacement only, after the original was preserved.
+                "mv" => write_tool("mv", "#!/bin/sh\nif [ \"$1\" = -f ]; then exit 1; fi\nexec /bin/mv \"$@\"\n"),
+                _ => {}
+            }
+            let hook = format!("{}\n\n", crate::git::push_deny_hook(&["main".into()]));
+            let mut c = checkout_cmd("https://invalid/r", dest.to_str().unwrap(), None, None, None).unwrap();
+            c.argv[8] = "managed-required".into();
+            let out = Command::new("sh").args(&c.argv[1..]).env_clear()
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("HOME", tmp.path()).env("TMPDIR", &temps).env("DEST", &dest).env("SCENARIO", scenario)
+                .env("TERRARIUM_PUSH_HOOK_B64", encode_checkout_push_hook(&hook).unwrap())
+                .env("TERRARIUM_COMMIT_HOOK", "#!/bin/sh\n# terrarium managed provenance hook\nexit 0\n")
+                .env("TERRARIUM_COMMIT_NAME", "test").env("TERRARIUM_COMMIT_EMAIL", "test@invalid")
+                .env("TERRARIUM_PROVENANCE", "false").env("TERRARIUM_PROVENANCE_WARN_ONLY", "false")
+                .env("TERRARIUM_REPO_ID", "test").env("TERRARIUM_GIT_PASSWORD", "synthetic-secret")
+                .output().unwrap();
+            let success = matches!(scenario, "fresh" | "update" | "advanced" | "dirty");
+            assert_eq!(out.status.success(), success, "{scenario}: {out:?}");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(stdout.contains("TERRARIUM_CHECKOUT"), success, "{scenario}");
+            assert!(!stdout.contains("synthetic-secret"));
+            assert!(!String::from_utf8_lossy(&out.stderr).contains("synthetic-secret"));
+            assert_eq!(std::fs::read_dir(&temps).unwrap().count(), 0, "{scenario}");
+            if hooks.exists() {
+                assert!(!std::fs::read_dir(&hooks).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".terrarium-")), "{scenario}");
+            }
+            if matches!(scenario, "fresh" | "update" | "advanced") {
+                assert_eq!(std::fs::read(hooks.join("pre-push")).unwrap(), hook.as_bytes());
+                assert_eq!(std::fs::metadata(hooks.join("pre-push")).unwrap().permissions().mode() & 0o777, 0o755);
+                if scenario == "update" {
+                    assert_eq!(std::fs::read_to_string(hooks.join("pre-push.repo")).unwrap(), "#!/bin/sh\nexit 9\n");
+                    assert!(stdout.contains("action=up_to_date"));
+                }
+                if scenario == "advanced" {
+                    assert!(stdout.contains("action=updated"));
+                }
+            }
+            if scenario == "dirty" {
+                assert!(stdout.contains("action=not_updated"));
+                assert_eq!(std::fs::read_to_string(hooks.join("pre-push")).unwrap(), "#!/bin/sh\nexit 9\n");
+                assert!(!hooks.join("pre-push.repo").exists());
+            }
+            if scenario == "mv" || scenario == "config-fail" {
+                assert!(hooks.join("pre-push.repo").exists());
+            }
+        }
+    }
+
+    #[test]
     fn checkout_secret_is_env_only() {
         let s = Secret::Token {
             username: "x-access-token".into(),
@@ -5997,7 +6270,7 @@ mod tests {
         let c = checkout_cmd("https://h/r.git", "/r", Some("main"), Some(1), Some(&s)).unwrap();
         assert!(!c.argv.iter().any(|a| a.contains("ghp_SECRET")));
         assert_eq!(c.env["TERRARIUM_GIT_PASSWORD"], "ghp_SECRET");
-        assert_eq!(&c.argv[4..], ["https://h/r.git", "/r", "main", "1"]);
+        assert_eq!(&c.argv[4..], ["https://h/r.git", "/r", "main", "1", "unmanaged"]);
         assert!(checkout_cmd("ext::sh -c x", "/r", None, None, None).is_err());
         assert!(checkout_cmd("https://h/r", "/r", Some("-x"), None, None).is_err());
         assert!(checkout_cmd("https://h/r", "r", None, None, None).is_err());
@@ -6125,6 +6398,9 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let push = dest.join(".git/hooks/pre-push");
+        std::fs::write(&push, "#!/bin/sh\nexit 9\n").unwrap();
+        std::fs::set_permissions(&push, std::fs::Permissions::from_mode(0o755)).unwrap();
         let p = crate::git_identity::Provenance {
             repo: None,
             warn_only: false,
@@ -6132,7 +6408,7 @@ mod tests {
             trailers: "Terrarium-Agent: test/worker\n".into(),
         };
         for _ in 0..2 {
-            let c = checkout_cmd(
+            let mut c = checkout_cmd(
                 origin.to_str().unwrap(),
                 dest.to_str().unwrap(),
                 None,
@@ -6140,15 +6416,34 @@ mod tests {
                 None,
             )
             .unwrap();
+            c.argv[8] = "managed-required".into();
             let out = Command::new(&c.argv[0])
                 .args(&c.argv[1..])
                 .envs(c.env)
                 .env("TERRARIUM_COMMIT_HOOK", p.hook())
                 .env("TERRARIUM_COMMIT_NAME", &p.identity.name)
                 .env("TERRARIUM_COMMIT_EMAIL", &p.identity.email)
+                .env("TERRARIUM_PUSH_HOOK_B64", checkout_push_hook(&["protected".into()]).unwrap())
+                .env("TERRARIUM_PROVENANCE", "true")
+                .env("TERRARIUM_PROVENANCE_WARN_ONLY", "false")
+                .env("TERRARIUM_REPO_ID", "test")
                 .output()
                 .unwrap();
             assert!(out.status.success(), "{out:?}");
+            assert_eq!(std::fs::read(&push).unwrap(), crate::git::push_deny_hook(&["protected".into()]).as_bytes());
+            assert_eq!(std::fs::metadata(&push).unwrap().permissions().mode() & 0o777, 0o755);
+            assert!(String::from_utf8_lossy(&out.stdout).contains("action=up_to_date"));
+        }
+        // Future authorized fixture execution checks both local and remote
+        // protected refs, and the preserved repository hook's exact status.
+        use std::io::Write as _;
+        use std::process::Stdio;
+        for (local, remote, status) in [("protected", "feature", 1), ("feature", "protected", 1), ("feature", "feature", 9)] {
+            let mut child = Command::new(&push).current_dir(&dest).arg("origin").arg("unused")
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+            writeln!(child.stdin.take().unwrap(), "refs/heads/{local} 0000 refs/heads/{remote} 0000").unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert_eq!(out.status.code(), Some(status));
         }
         git(&dest, &["commit", "--allow-empty", "-m", "two"]);
         let message = git(&dest, &["show", "-s", "--format=%B"]);
