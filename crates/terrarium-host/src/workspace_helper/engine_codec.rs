@@ -168,17 +168,32 @@ pub struct Inventory {
     pub conflicting_ids: Vec<String>,
 }
 
+fn valid_name(name: &str) -> bool {
+    name.len() <= MAX_STRING
+        && name
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
+}
+
 pub fn inventory(
     response: &[u8],
     elapsed: Duration,
     identity: Identity<'_>,
 ) -> Result<Inventory, Refused> {
-    if identity.name.is_empty()
-        || identity.name.len() > MAX_STRING
+    let mut identity_keys = BTreeSet::new();
+    if !valid_name(identity.name)
         || identity.labels.is_empty()
         || identity.labels.len() > 256
         || identity.labels.iter().any(|(k, v)| {
-            k.is_empty() || v.is_empty() || k.len() > MAX_STRING || v.len() > MAX_STRING
+            k.is_empty()
+                || v.is_empty()
+                || k.len() > MAX_STRING
+                || v.len() > MAX_STRING
+                || !identity_keys.insert(*k)
         })
     {
         return Err(Refused);
@@ -227,12 +242,7 @@ pub fn inventory(
         for name in names {
             let name = name.as_str().ok_or(Refused)?;
             let bare = name.strip_prefix('/').ok_or(Refused)?;
-            if bare.is_empty()
-                || !bare
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
-                || !unique_names.insert(name)
-            {
+            if !valid_name(bare) || !unique_names.insert(name) {
                 return Err(Refused);
             }
             conflict |= bare == identity.name;

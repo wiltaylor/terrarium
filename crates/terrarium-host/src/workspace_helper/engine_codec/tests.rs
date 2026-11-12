@@ -235,6 +235,54 @@ fn missing_or_malformed_identity_fields_refuse() {
 }
 
 #[test]
+fn malformed_selector_cannot_report_absence() {
+    for name in ["", "/workspace-one", ".hidden", "-bad", "with space"] {
+        assert_eq!(
+            inventory(
+                &response(b"[]"),
+                Duration::ZERO,
+                Identity {
+                    name,
+                    labels: &[("k", "v")]
+                }
+            ),
+            Err(Refused)
+        );
+    }
+    for labels in [
+        &[][..],
+        &[("k", "")][..],
+        &[("", "v")][..],
+        &[("k", "one"), ("k", "two")][..],
+    ] {
+        assert_eq!(
+            inventory(
+                &response(b"[]"),
+                Duration::ZERO,
+                Identity { name: "n", labels }
+            ),
+            Err(Refused)
+        );
+    }
+}
+
+#[test]
+fn record_bound_is_inclusive_and_overflow_is_not_partial_absence() {
+    let mut rows = Vec::new();
+    for n in 0..MAX_RECORDS {
+        let mut r = record();
+        r["Id"] = format!("{n:064x}").into();
+        rows.push(r);
+    }
+    assert_eq!(decode(&records(rows.clone())).unwrap().records, MAX_RECORDS);
+    let mut extra = record();
+    extra["Id"] = format!("{:064x}", MAX_RECORDS).into();
+    extra["Names"] = serde_json::json!(["/workspace-one"]);
+    rows.push(extra);
+    assert_eq!(decode(&records(rows)), Err(Refused));
+}
+
+#[test]
 fn retained_utf8_whitespace_and_escaping_are_exact_in_decoded_security_opt() {
     // Synthetic opaque JSON, not an approved or runnable profile.
     let bytes = b" \n{ \"fixture\": \"quote=\\\" slash=\\\\ unicode=\\u00e9\", \"literal\": \"caf\xc3\xa9\" }\t";
