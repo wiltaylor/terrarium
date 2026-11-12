@@ -1338,7 +1338,10 @@ async fn supervised_recreate_pending_replacement_stages_share_the_drain_deadline
         cases.spawn(async move {
             let mut r = rig();
             Arc::get_mut(&mut r.updater).unwrap().hot_budget = (
-                Duration::from_secs(14), Duration::from_secs(7), Duration::from_secs(1));
+                Duration::from_secs(20),
+                Duration::from_secs(7),
+                Duration::from_secs(1),
+            );
             {
                 let mut s = r.fake.0.lock().unwrap();
                 s.supervised = true;
@@ -1349,13 +1352,19 @@ async fn supervised_recreate_pending_replacement_stages_share_the_drain_deadline
                 s.resume_hang = stage == "resume";
             }
             let started = tokio::time::Instant::now();
-            let run = tokio::time::timeout(Duration::from_secs(15),
-                r.updater.run_now(RunKind::Update, "latest", "operator")).await
-                .expect("replacement and recovery must share the original drain deadline");
+            let run = tokio::time::timeout(
+                Duration::from_secs(21),
+                r.updater.run_now(RunKind::Update, "latest", "operator"),
+            )
+            .await
+            .expect("replacement and recovery must share the original drain deadline");
             assert_eq!(run.outcome, Outcome::RecoveryFailed, "{stage}: {run:#?}");
-            assert!(started.elapsed() < Duration::from_secs(15), "{stage}");
+            assert!(started.elapsed() < Duration::from_secs(21), "{stage}");
             let calls = r.fake.calls();
-            assert!(calls.iter().any(|c| c.starts_with("stop-for-recovery ")), "{stage}: {calls:?}");
+            assert!(
+                calls.iter().any(|c| c.starts_with("stop-for-recovery ")),
+                "{stage}: {calls:?}"
+            );
             assert!(!calls.iter().any(|c| c == "hot:commit"), "{stage}");
             if stage == "resume" {
                 assert!(calls.iter().any(|c| c == "resume c1"));
@@ -1366,7 +1375,9 @@ async fn supervised_recreate_pending_replacement_stages_share_the_drain_deadline
             }
         });
     }
-    while let Some(result) = cases.join_next().await { result.unwrap(); }
+    while let Some(result) = cases.join_next().await {
+        result.unwrap();
+    }
 }
 
 #[tokio::test]
