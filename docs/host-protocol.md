@@ -38,6 +38,18 @@ one second before cancellation falls back to killing the local client.
 
 ## Connection
 
+`hello.path_kind` selects native host path syntax: `posix` (also the default
+when absent) or `windows`. Exec cwd and copy paths are opaque wire strings,
+not paths interpreted with the daemon's OS. Docker paths remain POSIX even
+on a Windows host. Windows paths accept absolute drive and UNC forms with
+either separator. Comparisons are ASCII case-insensitive and component-boundary
+checked. Parent/dot/empty components, device namespaces, reserved DOS names,
+alternate streams, trailing dots/spaces, controls and non-ASCII paths are
+refused. Restricting to ASCII avoids ambiguous filesystem case folding.
+An agent's Windows workspace is `C:\Terrarium\work\<project>\<agent>`.
+The daemon checks lexical scope only. Host-side ACLs, creation and real
+Windows execution/copy require the Windows host implementation.
+
 | Item | Value |
 |---|---|
 | URL | `wss://<daemon>:8082/hosts/connect`. `ws://` only to loopback, or with `allow_insecure`. |
