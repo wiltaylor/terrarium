@@ -230,7 +230,10 @@ fn crash(point: &str) {
         && std::env::var("TERRARIUM_B2_CRASH_POINT").as_deref() == Ok(point)
     {
         let _ = nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0);
-        eprintln!("B2_CRASH_POINT={point}");
+        // Bypass libtest's thread-local eprintln capture: abort intentionally
+        // cannot flush that buffer. The parent requires this exact OS-pipe
+        // marker as well as SIGABRT and the expected durable phase.
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), format!("B2_CRASH_POINT={point}\n").as_bytes());
         std::process::abort();
     }
 }
