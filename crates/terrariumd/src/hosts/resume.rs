@@ -39,7 +39,10 @@ impl Journal {
     /// Only registry callers require fail-fast locking. Other synchronous
     /// users may queue behind normal writes, as they do for Db::read_now.
     pub(crate) fn for_registry(state_dir: &Path, db: crate::db::Db) -> Self {
-        Self { wait: false, ..Self::with_db(state_dir, db) }
+        Self {
+            wait: false,
+            ..Self::with_db(state_dir, db)
+        }
     }
 
     pub fn load<T: DeserializeOwned>(&self, id: &str) -> ApiResult<Option<T>> {

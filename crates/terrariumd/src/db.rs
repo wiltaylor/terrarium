@@ -2650,16 +2650,18 @@ impl Db {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             }
-        } else { match self.conn.try_lock() {
-            Ok(g) => g,
-            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => {
-                return Err(ApiError::new(
-                    crate::error::Code::ResourceBusy,
-                    "host journal writer is busy",
-                ));
+        } else {
+            match self.conn.try_lock() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(ApiError::new(
+                        crate::error::Code::ResourceBusy,
+                        "host journal writer is busy",
+                    ));
+                }
             }
-        }};
+        };
         // Journal ACKs promise durable output, including across power loss.
         guard.pragma_update(None, "synchronous", "FULL")?;
         f(&mut guard)

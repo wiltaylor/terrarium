@@ -83,7 +83,10 @@ const JOURNAL_RETRY_BYTES: usize = 4 * 1024 * 1024;
 
 // Metadata calls do not have a host event to retain. Retry the whole
 // operation after its registry guard has gone, never sleeping under it.
-fn retry_metadata<T, E>(mut operation: impl FnMut() -> Result<T, E>, busy: impl Fn(&E) -> bool) -> Result<T, E> {
+fn retry_metadata<T, E>(
+    mut operation: impl FnMut() -> Result<T, E>,
+    busy: impl Fn(&E) -> bool,
+) -> Result<T, E> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut backoff = Duration::from_millis(1);
     loop {
@@ -97,7 +100,9 @@ fn retry_metadata<T, E>(mut operation: impl FnMut() -> Result<T, E>, busy: impl 
     }
 }
 
-fn retry_metadata_api<T>(operation: impl FnMut() -> crate::error::ApiResult<T>) -> crate::error::ApiResult<T> {
+fn retry_metadata_api<T>(
+    operation: impl FnMut() -> crate::error::ApiResult<T>,
+) -> crate::error::ApiResult<T> {
     retry_metadata(operation, |error| error.code == Code::ResourceBusy)
 }
 
@@ -959,7 +964,10 @@ impl HostRegistry {
         make: impl FnOnce(SessionId) -> DaemonFrame,
     ) -> Result<HostSession, HostError> {
         let mut make = Some(make);
-        retry_metadata(|| self.try_open_bound(host, binding, &mut make), |error| matches!(error, HostError::JournalBusy))
+        retry_metadata(
+            || self.try_open_bound(host, binding, &mut make),
+            |error| matches!(error, HostError::JournalBusy),
+        )
     }
 
     fn try_open_bound(
@@ -1000,9 +1008,15 @@ impl HostRegistry {
         );
         if let Err(error) = self.persist_bound(host, e, None, binding.map(|key| (key, id))) {
             e.sessions.remove(&id);
-            return Err(if error.code == Code::ResourceBusy { HostError::JournalBusy } else { HostError::Persistence });
+            return Err(if error.code == Code::ResourceBusy {
+                HostError::JournalBusy
+            } else {
+                HostError::Persistence
+            });
         }
-        let Some(make) = make.take() else { return Err(HostError::Persistence) };
+        let Some(make) = make.take() else {
+            return Err(HostError::Persistence);
+        };
         if let Some(c) = &e.conn {
             let _ = c.tx.send(Outgoing::frame(make(id)));
         }
