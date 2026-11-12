@@ -138,10 +138,17 @@ pub fn save_settings(
     t.execute(sql, rusqlite::params![id, serde_json::to_string(&value)?])?;
     let project = if repo {
         crate::store::repos::resolve(t, id, None)?.project
-    } else { id.to_owned() };
-    t.audit("git.settings_update", id, Some(&project), serde_json::json!({
-        "scope": if repo { "repo" } else { "project" }, "old": before, "new": value
-    }))?;
+    } else {
+        id.to_owned()
+    };
+    t.audit(
+        "git.settings_update",
+        id,
+        Some(&project),
+        serde_json::json!({
+            "scope": if repo { "repo" } else { "project" }, "old": before, "new": value
+        }),
+    )?;
     Ok(value)
 }
 
