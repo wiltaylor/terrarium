@@ -3322,7 +3322,10 @@ mod tests {
         );
         reg.lock().get_mut("lab1").unwrap().resume_token = Some("websocket-replay".into());
         for offset in 0..8u32 {
-            reg.on_data("lab1", DataFrame::new(session_id, StreamTag::Stdout, offset.to_le_bytes().to_vec()));
+            reg.on_data(
+                "lab1",
+                DataFrame::new(session_id, StreamTag::Stdout, offset.to_le_bytes().to_vec()),
+            );
             session.recv().await.unwrap();
         }
         reg.detach("lab1", 1).unwrap();
@@ -3335,11 +3338,27 @@ mod tests {
                     let (tx, rx) = mpsc::unbounded_channel();
                     let mut hello = lost_test_hello("websocket-replay", &[session_id]);
                     hello.resume.as_mut().unwrap().sessions[0].sent = 512;
-                    let (welcome, _, resumed, _) = registry.attach(&host_row(), &hello, Conn { id: 77, tx: tx.clone() }).unwrap();
+                    let (welcome, _, resumed, _) = registry
+                        .attach(
+                            &host_row(),
+                            &hello,
+                            Conn {
+                                id: 77,
+                                tx: tx.clone(),
+                            },
+                        )
+                        .unwrap();
                     assert_eq!(resumed, 1);
                     assert_eq!(welcome.resume[0].received, 32);
                     upgrade.on_upgrade(move |mut socket| async move {
-                        socket.send(WsMessage::Text(encode_control(&DaemonFrame::Welcome(welcome)).unwrap().into())).await.unwrap();
+                        socket
+                            .send(WsMessage::Text(
+                                encode_control(&DaemonFrame::Welcome(welcome))
+                                    .unwrap()
+                                    .into(),
+                            ))
+                            .await
+                            .unwrap();
                         drive_link(socket, &registry, "lab1", 77, tx, rx).await;
                     })
                 }
@@ -3352,7 +3371,9 @@ mod tests {
             .await
             .unwrap();
         let welcome = ws.next().await.unwrap().unwrap();
-        assert!(matches!(welcome, Message::Text(text) if matches!(decode_control::<DaemonFrame>(&text).unwrap(), DaemonFrame::Welcome(_))));
+        assert!(
+            matches!(welcome, Message::Text(text) if matches!(decode_control::<DaemonFrame>(&text).unwrap(), DaemonFrame::Welcome(_)))
+        );
         let writer_db = db.clone();
         let (acquired, ready) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
@@ -3455,16 +3476,27 @@ mod tests {
         if expire {
             // Simulate expiration of the 60 s no-progress bound while the
             // writer remains held and the receive gate remains closed.
-            reg.lock().get_mut("lab1").unwrap().pending_journal.get_mut(&session_id).unwrap().deadline = Instant::now();
+            reg.lock()
+                .get_mut("lab1")
+                .unwrap()
+                .pending_journal
+                .get_mut(&session_id)
+                .unwrap()
+                .deadline = Instant::now();
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
                     match ws.next().await.unwrap().unwrap() {
-                        Message::Text(text) => assert!(matches!(decode_control::<DaemonFrame>(&text).unwrap(), DaemonFrame::Ping { .. })),
+                        Message::Text(text) => assert!(matches!(
+                            decode_control::<DaemonFrame>(&text).unwrap(),
+                            DaemonFrame::Ping { .. }
+                        )),
                         Message::Close(_) => break,
                         other => panic!("unexpected frame at deadline: {other:?}"),
                     }
                 }
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             assert!(reg.lock()["lab1"].pending_journal[&session_id].exhausted);
             let mut closes = 0;
             let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3472,7 +3504,9 @@ mod tests {
             for _ in 0..3 {
                 reg.retry_journal("lab1", 77);
                 while let Ok(frame) = rx.try_recv() {
-                    if matches!(frame, Outgoing::Close(_)) { closes += 1; }
+                    if matches!(frame, Outgoing::Close(_)) {
+                        closes += 1;
+                    }
                 }
             }
             assert_eq!(closes, 0, "expired queue emits only the first close");
@@ -3556,7 +3590,12 @@ mod tests {
         let db = crate::db::Db::new(conn, crate::events::EventHub::default());
         let reg = Arc::new(registry("lab1", true));
         reg.restore_with_db(dir.path(), db.clone()).unwrap();
-        let mut sessions: Vec<_> = (0..3).map(|_| reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap()).collect();
+        let mut sessions: Vec<_> = (0..3)
+            .map(|_| {
+                reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+                    .unwrap()
+            })
+            .collect();
         let (tx, mut outgoing) = mpsc::unbounded_channel();
         {
             let mut g = reg.lock();
@@ -3565,9 +3604,19 @@ mod tests {
             for session in &sessions {
                 let mut pending = PendingJournal::new();
                 pending.next = Instant::now();
-                pending.push(SessionEvent::Data { stream: StreamTag::Stdout, bytes: b"first".to_vec() });
-                pending.push(SessionEvent::Data { stream: StreamTag::Stderr, bytes: b"second".to_vec() });
-                pending.push(SessionEvent::Exit { code: Some(0), signal: None, reason: ExitReason::Exited });
+                pending.push(SessionEvent::Data {
+                    stream: StreamTag::Stdout,
+                    bytes: b"first".to_vec(),
+                });
+                pending.push(SessionEvent::Data {
+                    stream: StreamTag::Stderr,
+                    bytes: b"second".to_vec(),
+                });
+                pending.push(SessionEvent::Exit {
+                    code: Some(0),
+                    signal: None,
+                    reason: ExitReason::Exited,
+                });
                 entry.pending_journal.insert(session.id(), pending);
             }
         }
@@ -3578,20 +3627,37 @@ mod tests {
             Ok(())
         }).unwrap();
         reg.retry_journal("lab1", 77);
-        assert!(matches!(outgoing.try_recv().unwrap(), Outgoing::Close(None)));
-        assert!(outgoing.try_recv().is_err(), "no ACK or Release after failed commit");
+        assert!(matches!(
+            outgoing.try_recv().unwrap(),
+            Outgoing::Close(None)
+        ));
+        assert!(
+            outgoing.try_recv().is_err(),
+            "no ACK or Release after failed commit"
+        );
         let journal = resume::Journal::with_db(dir.path(), db);
-        assert!(journal.scan::<SessionEvent>("event/lab1/").unwrap().is_empty());
+        assert!(
+            journal
+                .scan::<SessionEvent>("event/lab1/")
+                .unwrap()
+                .is_empty()
+        );
         let saved = journal.load::<SavedHost>("host/lab1").unwrap().unwrap();
         for session in &mut sessions {
-            assert!(session.rx.try_recv().is_err(), "failed batch is not delivered");
+            assert!(
+                session.rx.try_recv().is_err(),
+                "failed batch is not delivered"
+            );
             let g = reg.lock();
             let entry = &g["lab1"];
             let slot = &entry.sessions[&session.id()];
             assert_eq!((slot.received, slot.events, slot.terminal), (0, 0, false));
             let pending = &entry.pending_journal[&session.id()];
             assert_eq!(pending.events.len(), 3);
-            assert!(matches!(pending.events.back(), Some(SessionEvent::Exit { .. })));
+            assert!(matches!(
+                pending.events.back(),
+                Some(SessionEvent::Exit { .. })
+            ));
             let slot = &saved.sessions[&session.id()];
             assert_eq!((slot.received, slot.events, slot.terminal), (0, 0, false));
         }
