@@ -140,6 +140,8 @@ pub enum HostError {
     Busy(String, u32),
     #[error("cannot persist host session state")]
     Persistence,
+    #[error("Windows run-as requires a Windows host with the windows_run_as capability")]
+    WindowsRunAsUnsupported,
 }
 
 impl From<HostError> for ApiError {
@@ -148,6 +150,7 @@ impl From<HostError> for ApiError {
             HostError::Offline(_) => ApiError::conflict(e.to_string()),
             HostError::Busy(..) => ApiError::new(Code::RateLimited, e.to_string()),
             HostError::Persistence => ApiError::internal(e.to_string()),
+            HostError::WindowsRunAsUnsupported => ApiError::invalid(e.to_string()),
         }
     }
 }
@@ -834,6 +837,15 @@ impl HostRegistry {
             .and_then(|e| e.info.as_ref().map(|i| i.capabilities.clone()))
     }
 
+    pub fn supports_windows_run_as(&self, host: &str) -> bool {
+        self.lock().get(host).is_some_and(|e| {
+            e.conn.is_some()
+                && e.info
+                    .as_ref()
+                    .is_some_and(|i| i.os == "windows" && i.capabilities.windows_run_as)
+        })
+    }
+
     /// Native path syntax from the last hello. Container paths stay POSIX.
     pub fn path_kind(&self, host: &str) -> terrarium_host::protocol::PathKind {
         self.lock()
@@ -880,6 +892,21 @@ impl HostRegistry {
             }
         };
         let (tx, rx) = mpsc::unbounded_channel();
+        let frame = make(id);
+        let has_run_as = match &frame {
+            DaemonFrame::Exec(req) => req.windows_run_as.is_some(),
+            DaemonFrame::CpPush(req) => req.windows_run_as.is_some(),
+            DaemonFrame::CpPull(req) => req.windows_run_as.is_some(),
+            _ => false,
+        };
+        if has_run_as
+            && !e
+                .info
+                .as_ref()
+                .is_some_and(|i| i.os == "windows" && i.capabilities.windows_run_as)
+        {
+            return Err(HostError::WindowsRunAsUnsupported);
+        }
         e.sessions.insert(
             id,
             Slot {
@@ -902,7 +929,7 @@ impl HostRegistry {
             return Err(HostError::Persistence);
         }
         if let Some(c) = &e.conn {
-            let _ = c.tx.send(Outgoing::frame(make(id)));
+            let _ = c.tx.send(Outgoing::frame(frame));
         }
         Ok(HostSession {
             registry: self.clone(),
@@ -1871,6 +1898,7 @@ async fn serve_link(
     welcome.update = offer;
     match encode_control(&DaemonFrame::Welcome(welcome.clone())) {
         Ok(t) => {
+            tracing::trace!("host transport frame send");
             if socket.send(WsMessage::Text(t.into())).await.is_err() {
                 reg.detach(&row.name, conn_id);
                 return;
@@ -1996,6 +2024,7 @@ async fn serve_link(
                     }
                     None => break "no sender",
                 };
+                tracing::trace!("host transport frame send");
                 if sink.send(msg).await.is_err() {
                     break "send failed";
                 }

@@ -6825,6 +6825,27 @@ Host metrics:
 
 ### 17.2 Targets
 
+A `host` target may name a Windows logon account and a daemon-side `login`
+secret (the secret's username is ignored):
+
+```toml
+[windows_run_as]
+account = 'DOMAIN\NAME' # or a local NAME
+password_secret = "windows-login"
+```
+
+Both fields are required together. Account names have 1 to 256 characters,
+no control characters, and either one nonempty name or two nonempty parts
+separated by a backslash. Other target kinds refuse this table. At each
+session start the connected host must report Windows and the
+`windows_run_as` capability. An absent capability fails closed, including
+on older hosts. Only then does the daemon open the secret, using the target's
+normal project/global secret grant rules. Missing, ungranted, or non-login
+secrets refuse the session. Neither API target responses nor audit records
+contain the password. The host receives it only in that session's `exec`
+frame (or `cp_push`/`cp_pull` for a transfer). This protocol support does not
+implement Windows logon itself.
+
 A target comes from `targets/<name>.toml` (`source: "file"`), from
 `POST /api/targets` (`source: "api"`), or from a fleet file
 (`source: "fleet:<name>"`, §18.1). Target names are one namespace for

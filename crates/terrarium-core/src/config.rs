@@ -1141,6 +1141,9 @@ impl TargetKind {
 /// A target definition, `targets/<name>.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetDef {
+    /// Windows host account and the daemon-side login secret used at exec start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_run_as: Option<WindowsRunAs>,
     /// Card-agent build roots live under `<work_root>/<project>/<agent>`.
     /// Shared project caches must live outside these roots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1231,6 +1234,13 @@ pub struct TargetDef {
     /// `exedev`: the VM settings (`[exedev]`). Default: [`ExedevSettings`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exedev: Option<ExedevSettings>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsRunAs {
+    pub account: String,
+    pub password_secret: String,
 }
 
 /// The `[exedev]` table of an `exedev` target (TER-294). Each `up` makes a

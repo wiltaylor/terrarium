@@ -831,6 +831,7 @@ fn host_frame_paths(
         | TargetKind::Vnc
         | TargetKind::Rdp
         | TargetKind::Desktop => DaemonFrame::Exec(ExecRequest {
+            windows_run_as: None,
             session,
             cmd: program,
             args,
@@ -2043,6 +2044,7 @@ pub(crate) fn start_cmd_locked(
         _ => {
             let host = host_of(def)?;
             let caps = ex.hosts.capabilities(host);
+            let run_as = windows_run_as(state, def)?;
             if cmd.prepare_root.is_some()
                 && caps
                     .as_ref()
@@ -2075,9 +2077,44 @@ pub(crate) fn start_cmd_locked(
             Ok(pump_host(ex.hosts.open_bound(
                 host,
                 cmd.resume_key.as_deref(),
-                make,
+                move |id| {
+                    let mut frame = make(id);
+                    if let DaemonFrame::Exec(req) = &mut frame {
+                        req.windows_run_as = run_as;
+                    }
+                    frame
+                },
             )?))
         }
+    }
+}
+
+fn windows_run_as(
+    state: &Shared,
+    def: &TargetDef,
+) -> ApiResult<Option<terrarium_host::protocol::WindowsRunAs>> {
+    let Some(config) = &def.windows_run_as else {
+        return Ok(None);
+    };
+    crate::links::refuse_for_link("use a Windows run-as target")?;
+    crate::store::targets::validate(def)?;
+    if !state.executor.hosts.supports_windows_run_as(host_of(def)?) {
+        return Err(ApiError::invalid(
+            "windows_run_as requires a Windows host with the windows_run_as capability",
+        ));
+    }
+    match crate::secrets::load_now(
+        state,
+        crate::store::targets::owner(def),
+        &config.password_secret,
+    )? {
+        Secret::Login { password, .. } => Ok(Some(terrarium_host::protocol::WindowsRunAs {
+            account: config.account.clone(),
+            password: password.to_string(),
+        })),
+        _ => Err(ApiError::invalid(
+            "windows_run_as.password_secret must name a login secret",
+        )),
     }
 }
 
@@ -2824,10 +2861,12 @@ pub async fn start_cp(
     match def.kind {
         TargetKind::Host => {
             let host = host_of(&def)?;
+            let run_as = windows_run_as(state, &def)?;
             let (path, mode) = (PathBuf::from(&body.path), body.mode);
             let hs = if push {
                 state.executor.hosts.open(host, move |session| {
                     DaemonFrame::CpPush(CpPush {
+                        windows_run_as: run_as,
                         session,
                         path,
                         mode,
@@ -2836,7 +2875,11 @@ pub async fn start_cp(
                 })?
             } else {
                 state.executor.hosts.open(host, move |session| {
-                    DaemonFrame::CpPull(CpPull { session, path })
+                    DaemonFrame::CpPull(CpPull {
+                        session,
+                        path,
+                        windows_run_as: run_as,
+                    })
                 })?
             };
             tokio::spawn(attach(pump_host(hs), sess.clone(), ctl, push, !push));
@@ -2932,6 +2975,7 @@ async fn vmlab_cp(
     };
     let cleanup = |state: Shared, host: String, stage: PathBuf| async move {
         let rm = ExecRequest {
+            windows_run_as: None,
             session: 0,
             cmd: "rm".into(),
             args: vec!["-f".into(), "--".into(), stage.display().to_string()],
@@ -2951,6 +2995,7 @@ async fn vmlab_cp(
         let stage2 = stage.clone();
         let hs = state.executor.hosts.open(&host, move |session| {
             DaemonFrame::CpPush(CpPush {
+                windows_run_as: None,
                 session,
                 path: stage2,
                 mode,
@@ -2999,6 +3044,7 @@ async fn vmlab_cp(
         let stage2 = stage.clone();
         match state.executor.hosts.open(&host, move |session| {
             DaemonFrame::CpPull(CpPull {
+                windows_run_as: None,
                 session,
                 path: stage2,
             })
