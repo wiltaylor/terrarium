@@ -11324,7 +11324,7 @@ layout) and `crates/terrariumd/src/store/monitors.rs` (the rows).
 ### 30.0 Project pages
 
 Project pages use the rights in §30.1. `GET /api/projects/{name}/pages`
-returns `{"items": [page, ...], "can_edit": true}` ordered by position, then slug (at most 10).
+returns `{"items": [page, ...], "can_edit": true, "dashboard_slug": "dashboard"}` ordered by position, then slug (at most 10, or 11 immediately after dashboard migration).
 `can_edit` reports the caller's project-page write right. Clients hide edit controls when false.
 `GET /api/projects/{name}/pages/{slug}` returns one page. `PUT` at that
 path creates or completely replaces it. `DELETE` removes it (204).
@@ -11341,7 +11341,7 @@ Unknown projects or pages return 404. A PUT body is:
 A returned page adds `project`, `slug`, `updated_at`, and `updated_by`.
 Slugs are 1–64 lowercase ASCII letters, digits, hyphens or underscores,
 starting with a letter or digit. Titles are nonempty, at most 120 characters.
-Position is a nonnegative integer. Widgets (at most 100) have unique IDs
+Position is a nonnegative integer. Widgets (at most 104, allowing 100 legacy blocks plus four system panels) have unique IDs
 (1–40 ASCII letters, digits, hyphens or underscores). Optional `title` is
 at most 120 characters. Grid coordinates are integers: x 0–11, y 0–9999,
 w 1–12 with x+w <= 12, h 1–10000 with y+h <= 10000. Rectangles cannot
@@ -11350,7 +11350,9 @@ monitors) lets markdown/wiki content
 grow beyond its minimum h. Otherwise h is the scrolling height limit.
 The daemon stores cells, not pixel heights.
 
-Kinds are `markdown`, `wiki`, `stat`, `status`, `chart`, `text`, `table`.
+Kinds are `markdown`, `wiki`, `stat`, `status`, `chart`, `text`, `table`,
+`actions`, `monitor_summary`, `job_queue`, `eta_accuracy`. The last four
+are system widgets with no source fields.
 Markdown requires `text` (at most 16384 UTF-8 bytes). Wiki requires `wiki`,
 a wiki path in this project (the wiki's path rules: up to 200 bytes,
 lowercase letters, digits, hyphens, underscores, dots and slashes, no empty,
@@ -11362,6 +11364,19 @@ with the block kind, and accept dashboard `options` (§30.4). Other source
 fields are rejected. Unknown fields are rejected. Invalid input returns 422.
 Writes produce `page.set` or `page.remove` audit rows and a `page.updated`
 event with `{project, slug, deleted}`. Reading never drops stale references.
+
+The former Dashboard is migrated to a custom page, with actions, monitor
+summary, job queue and ETA accuracy widgets first, followed by saved blocks
+in order. S/M/L widths become 3/6/12 grid columns. New projects receive the
+same four system widgets. If `dashboard` is taken, the migrated page uses
+`dashboard-legacy`, then `dashboard-legacy-2`, and so on, without changing
+user pages. `dashboard_slug` records this choice. Migration may add one
+page beyond the limit, but creates remain refused until below 10.
+The old Dashboard route redirects to that page. `?tab=monitors` redirects
+to project Settings, Monitors. GET/PUT `/api/projects/{name}/dashboard`
+and the dashboard CLI remain compatibility aliases for at least one release.
+The alias reads an empty layout if the mapped page was deleted. Saving it
+replaces monitor/Markdown widgets and preserves system and wiki widgets.
 
 ### 30.1 Rights
 

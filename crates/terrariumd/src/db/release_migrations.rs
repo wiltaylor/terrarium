@@ -149,19 +149,65 @@ fn dashboard_page_migrates_saved_sml_order_and_defaults() {
         {"id":"large","kind":"note","size":"l","text":"large"},
         {"id":"last","kind":"note","size":"s","text":"last"}
     ]});
-    conn.execute("UPDATE dashboards SET layout=?1", [blocks.to_string()]).unwrap();
+    conn.execute("UPDATE dashboards SET layout=?1", [blocks.to_string()])
+        .unwrap();
     migrate(&mut conn).unwrap();
-    let widgets: String = conn.query_row("SELECT widgets FROM project_pages WHERE slug='dashboard' LIMIT 1", [], |r| r.get(0)).unwrap();
+    let widgets: String = conn
+        .query_row(
+            "SELECT widgets FROM project_pages WHERE slug='dashboard' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     let widgets: Vec<Value> = serde_json::from_str(&widgets).unwrap();
-    assert_eq!(widgets.iter().map(|w| w["kind"].as_str().unwrap()).collect::<Vec<_>>(),
-        ["actions","monitor_summary","job_queue","eta_accuracy","markdown","markdown","markdown","markdown"]);
-    assert_eq!(widgets[4..].iter().map(|w| (w["id"].as_str().unwrap(), w["w"].as_u64().unwrap(), w["x"].as_u64().unwrap(), w["y"].as_u64().unwrap())).collect::<Vec<_>>(),
-        [("small",3,0,14),("medium",6,3,14),("large",12,0,18),("last",3,0,22)]);
+    assert_eq!(
+        widgets
+            .iter()
+            .map(|w| w["kind"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "actions",
+            "monitor_summary",
+            "job_queue",
+            "eta_accuracy",
+            "markdown",
+            "markdown",
+            "markdown",
+            "markdown"
+        ]
+    );
+    assert_eq!(
+        widgets[4..]
+            .iter()
+            .map(|w| (
+                w["id"].as_str().unwrap(),
+                w["w"].as_u64().unwrap(),
+                w["x"].as_u64().unwrap(),
+                w["y"].as_u64().unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("small", 3, 0, 14),
+            ("medium", 6, 3, 14),
+            ("large", 12, 0, 18),
+            ("last", 3, 0, 22)
+        ]
+    );
     assert_eq!(widgets[4]["text"], "small");
-    conn.execute("INSERT INTO projects(name,created_at,updated_at) VALUES('new-page-project','now','now')", []).unwrap();
-    let count: i64 = conn.query_row("SELECT json_array_length(widgets) FROM project_pages WHERE project='new-page-project'", [], |r| r.get(0)).unwrap();
-    assert_eq!(count,4);
-    assert_eq!(migrate(&mut conn).unwrap(),0);
+    conn.execute(
+        "INSERT INTO projects(name,created_at,updated_at) VALUES('new-page-project','now','now')",
+        [],
+    )
+    .unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT json_array_length(widgets) FROM project_pages WHERE project='new-page-project'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 4);
+    assert_eq!(migrate(&mut conn).unwrap(), 0);
     check_database(&conn);
 }
 
@@ -186,4 +232,51 @@ fn fixture_rejects_unfixed_v057_card_wait_migration() {
         !conn.table_exists(None, "card_waits").unwrap(),
         "failed migration must roll back"
     );
+}
+
+#[test]
+fn dashboard_migration_preserves_taken_slugs_and_full_projects() {
+    for (taken, full) in [(true, false), (false, true), (true, true)] {
+        let mut conn = seeded_previous_release();
+        let before: Vec<_> = NAMED_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|(name, _)| *name != "ter-981-dashboard-page.sql")
+            .collect();
+        migrate_named(&mut conn, &before).unwrap();
+        let count = if full { 10 } else { 2 };
+        for n in 0..count {
+            let slug = if taken && n == 0 {
+                "dashboard".to_string()
+            } else if taken && n == 1 {
+                "dashboard-legacy".to_string()
+            } else {
+                format!("custom-{n}")
+            };
+            conn.execute("INSERT INTO project_pages(project,slug,title,position,widgets,updated_at,updated_by) VALUES('projects_name_1',?1,'User page',1,'[]','before','user')", [&slug]).unwrap();
+        }
+        migrate(&mut conn).unwrap();
+        let slug = crate::store::pages::dashboard_slug(&conn, "projects_name_1").unwrap();
+        assert_eq!(
+            slug,
+            if taken {
+                "dashboard-legacy-2"
+            } else {
+                "dashboard"
+            }
+        );
+        let pages = crate::store::pages::list(&conn, "projects_name_1").unwrap();
+        assert_eq!(pages.len(), count + 1);
+        assert_eq!(
+            pages
+                .iter()
+                .filter(|p| p.content.title == "User page" && p.content.widgets.is_empty())
+                .count(),
+            count
+        );
+        let (layout, meta) = crate::store::monitors::layout_of(&conn, "projects_name_1").unwrap();
+        assert!(layout.blocks.is_empty());
+        assert!(meta.is_some());
+        check_database(&conn);
+    }
 }

@@ -89,10 +89,20 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectPage> {
 
 const COLS: &str = "project, slug, title, position, widgets, updated_at, updated_by";
 
+pub fn dashboard_slug(c: &Connection, project: &str) -> ApiResult<String> {
+    Ok(c.query_row(
+        "SELECT slug FROM project_dashboard_pages WHERE project=?1",
+        [project],
+        |r| r.get(0),
+    )
+    .optional()?
+    .unwrap_or_else(|| "dashboard".into()))
+}
+
 pub fn list(c: &Connection, project: &str) -> ApiResult<Vec<ProjectPage>> {
     projects::get(c, project)?;
     let mut s = c.prepare(&format!(
-        "SELECT {COLS} FROM project_pages WHERE project=?1 ORDER BY position, slug LIMIT 10"
+        "SELECT {COLS} FROM project_pages WHERE project=?1 ORDER BY position, slug LIMIT 11"
     ))?;
     Ok(s.query_map([project], row)?
         .collect::<Result<Vec<_>, _>>()?)
@@ -126,8 +136,25 @@ fn check(c: &Connection, project: &str, slug: &str, input: &PageInput) -> ApiRes
     if input.title.trim().is_empty() || input.title.chars().count() > 120 {
         return Err(ApiError::invalid("page title must be 1-120 characters"));
     }
-    if input.widgets.len() > 104 {
-        return Err(ApiError::invalid("at most 104 widgets"));
+    if input.widgets.len() > 104
+        || input
+            .widgets
+            .iter()
+            .filter(|w| {
+                !matches!(
+                    w.kind,
+                    WidgetKind::Actions
+                        | WidgetKind::MonitorSummary
+                        | WidgetKind::JobQueue
+                        | WidgetKind::EtaAccuracy
+                )
+            })
+            .count()
+            > 100
+    {
+        return Err(ApiError::invalid(
+            "at most 100 content widgets and 104 widgets in total",
+        ));
     }
     let mut ids = HashSet::new();
     let mut blocks = Vec::new();
@@ -160,7 +187,10 @@ fn check(c: &Connection, project: &str, slug: &str, input: &PageInput) -> ApiRes
             return Err(bad("decimals must be 0-6"));
         }
         match w.kind {
-            WidgetKind::Actions | WidgetKind::MonitorSummary | WidgetKind::JobQueue | WidgetKind::EtaAccuracy => {
+            WidgetKind::Actions
+            | WidgetKind::MonitorSummary
+            | WidgetKind::JobQueue
+            | WidgetKind::EtaAccuracy => {
                 if w.monitor.is_some() || w.wiki.is_some() || w.text.is_some() {
                     return Err(bad("system widgets have no source"));
                 }

@@ -18,17 +18,25 @@ async fn dashboard_alias_reads_writes_and_missing_page() {
     let page = td.get(path).await;
     assert_eq!(page.ok()["widgets"].as_array().unwrap().len(), 4);
     let layout = json!({"blocks":[{"id":"note","kind":"note","size":"m","text":"old client"}]});
-    td.put("/api/projects/p/dashboard",layout).await.ok();
+    td.put("/api/projects/p/dashboard", layout).await.ok();
     let page = td.get(path).await;
     assert_eq!(page.ok()["widgets"][4]["kind"], "markdown");
-    assert_eq!(page.body["widgets"][4]["w"],6);
+    assert_eq!(page.body["widgets"][4]["w"], 6);
     let mut input = page.body.clone();
-    for field in ["project","slug","updated_at","updated_by"] { input.as_object_mut().unwrap().remove(field); }
+    for field in ["project", "slug", "updated_at", "updated_by"] {
+        input.as_object_mut().unwrap().remove(field);
+    }
     input["widgets"][4]["text"] = json!("new editor");
-    td.put(path,input).await.ok();
-    assert_eq!(td.get("/api/projects/p/dashboard").await.ok()["blocks"][0]["text"],"new editor");
+    td.put(path, input).await.ok();
+    assert_eq!(
+        td.get("/api/projects/p/dashboard").await.ok()["blocks"][0]["text"],
+        "new editor"
+    );
     td.delete(path).await;
-    assert_eq!(td.get("/api/projects/p/dashboard").await.ok()["blocks"],json!([]));
+    assert_eq!(
+        td.get("/api/projects/p/dashboard").await.ok()["blocks"],
+        json!([])
+    );
 }
 
 #[tokio::test]

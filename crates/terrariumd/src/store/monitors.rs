@@ -859,7 +859,7 @@ pub fn layout_of(
 ) -> ApiResult<(Layout, Option<(String, String)>)> {
     let row: Option<(String, String, String)> = conn
         .query_row(
-            "SELECT widgets, updated_at, updated_by FROM project_pages WHERE project = ?1 AND slug='dashboard'",
+            "SELECT widgets, updated_at, updated_by FROM project_pages WHERE project = ?1 AND slug=COALESCE((SELECT slug FROM project_dashboard_pages WHERE project=?1),'dashboard')",
             [project],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -868,16 +868,37 @@ pub fn layout_of(
         None => Ok((Layout::default(), None)),
         Some((l, at, by)) => {
             let widgets: Vec<super::pages::Widget> = serde_json::from_str(&l)?;
-            let blocks = widgets.into_iter().filter_map(|w| {
-                let mut v = serde_json::to_value(&w).ok()?;
-                let kind = v["kind"].as_str()?;
-                if !matches!(kind, "markdown" | "stat" | "status" | "chart" | "text" | "table") { return None; }
-                if kind == "markdown" { v["kind"] = json!("note"); }
-                let o = v.as_object_mut()?;
-                for k in ["x", "y", "w", "h", "auto_height", "wiki"] { o.remove(k); }
-                o.insert("size".into(), json!(if w.w <= 3 { "s" } else if w.w <= 6 { "m" } else { "l" }));
-                serde_json::from_value(v).ok()
-            }).collect();
+            let blocks = widgets
+                .into_iter()
+                .filter_map(|w| {
+                    let mut v = serde_json::to_value(&w).ok()?;
+                    let kind = v["kind"].as_str()?;
+                    if !matches!(
+                        kind,
+                        "markdown" | "stat" | "status" | "chart" | "text" | "table"
+                    ) {
+                        return None;
+                    }
+                    if kind == "markdown" {
+                        v["kind"] = json!("note");
+                    }
+                    let o = v.as_object_mut()?;
+                    for k in ["x", "y", "w", "h", "auto_height", "wiki"] {
+                        o.remove(k);
+                    }
+                    o.insert(
+                        "size".into(),
+                        json!(if w.w <= 3 {
+                            "s"
+                        } else if w.w <= 6 {
+                            "m"
+                        } else {
+                            "l"
+                        }),
+                    );
+                    serde_json::from_value(v).ok()
+                })
+                .collect();
             Ok((Layout { blocks }, Some((at, by))))
         }
     }
@@ -885,24 +906,65 @@ pub fn layout_of(
 
 fn write_layout(t: &mut Tx<'_>, project: &str, l: &Layout, by: &str) -> ApiResult<()> {
     use super::pages::{self, PageInput, Widget, WidgetKind};
-    let old = pages::list(t, project)?.into_iter().find(|p| p.slug == "dashboard");
-    let mut widgets = old.as_ref().map(|p| p.content.widgets.iter().filter(|w| matches!(w.kind,
-        WidgetKind::Actions | WidgetKind::MonitorSummary | WidgetKind::JobQueue | WidgetKind::EtaAccuracy | WidgetKind::Wiki)).cloned().collect::<Vec<_>>()).unwrap_or_default();
-    let mut y = widgets.iter().map(|w| w.y+w.h).max().unwrap_or(0);
+    let slug = pages::dashboard_slug(t, project)?;
+    let old = pages::list(t, project)?
+        .into_iter()
+        .find(|p| p.slug == slug);
+    let mut widgets = old
+        .as_ref()
+        .map(|p| {
+            p.content
+                .widgets
+                .iter()
+                .filter(|w| {
+                    matches!(
+                        w.kind,
+                        WidgetKind::Actions
+                            | WidgetKind::MonitorSummary
+                            | WidgetKind::JobQueue
+                            | WidgetKind::EtaAccuracy
+                            | WidgetKind::Wiki
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut y = widgets.iter().map(|w| w.y + w.h).max().unwrap_or(0);
     let mut x = 0;
     for b in &l.blocks {
-        let w = match b.size { layout::Size::S => 3, layout::Size::M => 6, layout::Size::L => 12 };
-        if x+w > 12 { x=0; y+=4; }
+        let w = match b.size {
+            layout::Size::S => 3,
+            layout::Size::M => 6,
+            layout::Size::L => 12,
+        };
+        if x + w > 12 {
+            x = 0;
+            y += 4;
+        }
         let mut v = serde_json::to_value(b)?;
-        let o = v.as_object_mut().ok_or_else(|| ApiError::internal("invalid block"))?;
+        let o = v
+            .as_object_mut()
+            .ok_or_else(|| ApiError::internal("invalid block"))?;
         o.remove("size");
-        if b.kind == layout::BlockKind::Note { o.insert("kind".into(), json!("markdown")); }
-        for (k,n) in [("x",x),("y",y),("w",w),("h",4)] { o.insert(k.into(),json!(n)); }
+        if b.kind == layout::BlockKind::Note {
+            o.insert("kind".into(), json!("markdown"));
+        }
+        for (k, n) in [("x", x), ("y", y), ("w", w), ("h", 4)] {
+            o.insert(k.into(), json!(n));
+        }
         widgets.push(serde_json::from_value::<Widget>(v)?);
-        x+=w;
+        x += w;
     }
-    let input = PageInput { title: old.as_ref().map(|p| p.content.title.clone()).unwrap_or_else(|| "Dashboard".into()), position: old.as_ref().map(|p| p.content.position).unwrap_or(0), widgets };
-    pages::set(t, project, "dashboard", &input, by)?;
+    let input = PageInput {
+        title: old
+            .as_ref()
+            .map(|p| p.content.title.clone())
+            .unwrap_or_else(|| "Dashboard".into()),
+        position: old.as_ref().map(|p| p.content.position).unwrap_or(0),
+        widgets,
+    };
+    pages::set(t, project, &slug, &input, by)?;
     Ok(())
 }
 
