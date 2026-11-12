@@ -662,7 +662,9 @@ async fn a_thread_with_cards_of_two_projects_wakes_and_closes_after_works() {
     assert_eq!(lab.wakes(&tid).await, ["blocked", "review"]);
 
     // A move between two columns of review or later wakes nothing more.
-    lab.mv(&pc, "merge_queue", None).await;
+    lab.mv(&pc, "review", None).await;
+    assert_eq!(lab.wakes(&tid).await, ["blocked", "review"]);
+    lab.mv(&pc, "done", None).await;
     assert_eq!(lab.wakes(&tid).await, ["blocked", "review"]);
 
     // The test loop (D5): the agent posts the test steps and asks; the
@@ -698,7 +700,7 @@ async fn a_thread_with_cards_of_two_projects_wakes_and_closes_after_works() {
         turn.contains(&format!("- p:{bug} [done] Cache page is empty")),
         "{turn}"
     );
-    assert!(turn.contains(&format!("- p:{pc} [merge_queue]")), "{turn}");
+    assert!(turn.contains(&format!("- p:{pc} [done]")), "{turn}");
     lab.td.wait_status(&eph, "idle").await;
     assert_eq!(lab.wakes(&tid).await, ["blocked", "review", "review"]);
 
@@ -756,7 +758,6 @@ async fn tracking_ready_cards_and_archiving_unfinished_cards_wake_review() {
             .await;
         assert_eq!(r.status, 200, "{}", r.body);
         if let Some(card) = dropped {
-            lab.parked(&eph).await;
             let r = lab.td.delete(&format!("/api/cards/{card}")).await;
             assert!(r.status.is_success(), "{} {}", r.status, r.body);
         }
