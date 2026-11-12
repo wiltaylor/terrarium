@@ -290,16 +290,29 @@ fn still_authorized(t: &Tx<'_>, holder: &Holder, registration: &str) -> ApiResul
     super::identity(t, &holder.enrollment)?;
     let reserved: bool = t.query_row("SELECT EXISTS(SELECT 1 FROM workspace_reservations WHERE workspace_id = ?1 AND trust_domain_id = ?2 AND current_registration_id = ?3)",
         params![holder.enrollment.workspace.0.to_string(), holder.domain.0.to_string(), registration], |r| r.get(0))?;
-    Ok(reserved && !revoked(t, holder)? && super::current_authority(t, &holder.enrollment, registration)?)
+    Ok(reserved
+        && !revoked(t, holder)?
+        && super::current_authority(t, &holder.enrollment, registration)?)
 }
 
 fn cancel_grant(t: &Tx<'_>, stored: &DaemonOperation) -> ApiResult<()> {
-    let holder = stored.envelope.original.holder.as_ref().ok_or_else(conflict)?;
+    let holder = stored
+        .envelope
+        .original
+        .holder
+        .as_ref()
+        .ok_or_else(conflict)?;
     if !revoked(t, holder)? {
-        allocate_revoke(t, &Provenance {
-            daemon_instance: stored.envelope.original.provenance.daemon_instance,
-            caller: Caller::LocalOperator,
-        }, OperationId(Ulid::new()), stored.envelope.original.runtime.registration, holder.attachment)?;
+        allocate_revoke(
+            t,
+            &Provenance {
+                daemon_instance: stored.envelope.original.provenance.daemon_instance,
+                caller: Caller::LocalOperator,
+            },
+            OperationId(Ulid::new()),
+            stored.envelope.original.runtime.registration,
+            holder.attachment,
+        )?;
     }
     // Never rewrite a helper-committed request or an original body/hash.
     t.execute("UPDATE live_workspace_operations SET delivery = 'superseded' WHERE operation_id = ?1 AND phase = 'intent' AND delivery = 'apply'",
@@ -318,18 +331,32 @@ pub fn next(t: &Tx<'_>, registration: RegistrationId) -> ApiResult<Option<Daemon
         "SELECT last_contiguous_revision,allocated_revision,state FROM live_workspace_targets WHERE registration_id = ?1",
         [&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    if state != "verified" { return Err(conflict()); }
-    if last == allocated { return Ok(None); }
+    if state != "verified" {
+        return Err(conflict());
+    }
+    if last == allocated {
+        return Ok(None);
+    }
     let revision = last.checked_add(1).ok_or_else(conflict)?;
     let operation: String = t.query_row("SELECT operation_id FROM live_workspace_operations WHERE registration_id = ?1 AND revision = ?2",
         params![id, revision], |r| r.get(0))?;
     let stored = load(t, &operation)?;
-    if !matches!(stored.phase, DaemonPhase::Intent | DaemonPhase::HelperCommitted) {
+    if !matches!(
+        stored.phase,
+        DaemonPhase::Intent | DaemonPhase::HelperCommitted
+    ) {
         return Err(conflict());
     }
     if stored.envelope.original.kind == Kind::Grant {
-        let holder = stored.envelope.original.holder.as_ref().ok_or_else(conflict)?;
-        if !still_authorized(t, holder, &id)? { cancel_grant(t, &stored)?; }
+        let holder = stored
+            .envelope
+            .original
+            .holder
+            .as_ref()
+            .ok_or_else(conflict)?;
+        if !still_authorized(t, holder, &id)? {
+            cancel_grant(t, &stored)?;
+        }
     }
     Ok(Some(load(t, &operation)?))
 }
@@ -349,11 +376,16 @@ pub fn commit_runtime(t: &Tx<'_>, operation: OperationId) -> ApiResult<()> {
     if stored.phase == DaemonPhase::RuntimeCommitted && request.revision <= last {
         return Ok(());
     }
-    if state != "verified" || last.checked_add(1) != Some(request.revision)
+    if state != "verified"
+        || last.checked_add(1) != Some(request.revision)
         || stored.phase != DaemonPhase::HelperCommitted
-    { return Err(conflict()); }
+    {
+        return Err(conflict());
+    }
     let mut verified = stored.clone();
-    verified.acknowledge(&stored.envelope, stored.helper_result.ok_or_else(conflict)?).map_err(|_| conflict())?;
+    verified
+        .acknowledge(&stored.envelope, stored.helper_result.ok_or_else(conflict)?)
+        .map_err(|_| conflict())?;
     match (request.kind, stored.envelope.delivery) {
         (Kind::Grant, Delivery::Apply) => {
             let holder = request.holder.as_ref().ok_or_else(conflict)?;
@@ -368,18 +400,25 @@ pub fn commit_runtime(t: &Tx<'_>, operation: OperationId) -> ApiResult<()> {
         }
         (Kind::Grant, Delivery::Superseded) => {
             let holder = request.holder.as_ref().ok_or_else(conflict)?;
-            if !revoked(t, holder)? { return Err(conflict()); }
+            if !revoked(t, holder)? {
+                return Err(conflict());
+            }
         }
         (Kind::Revoke, Delivery::Apply) => {
             let holder = request.holder.as_ref().ok_or_else(conflict)?;
             let updated = t.execute("UPDATE live_workspace_attachments SET state = 'path_revoked_verified' WHERE attachment_id = ?1 AND registration_id = ?2 AND revoke_revision = ?3 AND state = 'revoke_pending'",
                 params![holder.attachment.0.to_string(), registration, request.revision])?;
-            if updated != 1 { return Err(conflict()); }
+            if updated != 1 {
+                return Err(conflict());
+            }
         }
         _ => return Err(conflict()), // Lifecycle runtime commits need their own verified integration.
     }
     verified.commit_runtime().map_err(|_| conflict())?;
-    t.execute("UPDATE live_workspace_operations SET phase = 'daemon_committed' WHERE operation_id = ?1", [&id])?;
+    t.execute(
+        "UPDATE live_workspace_operations SET phase = 'daemon_committed' WHERE operation_id = ?1",
+        [&id],
+    )?;
     t.execute("UPDATE live_workspace_targets SET last_contiguous_revision = ?2 WHERE registration_id = ?1",
         params![registration, request.revision])?;
     Ok(())
