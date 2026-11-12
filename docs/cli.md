@@ -5,6 +5,16 @@
 that agents use is in [agent-rpc.md](agent-rpc.md). The design is in
 [PLAN.md](PLAN.md) §9, §10, and §12 to §17.
 
+## Project pages
+
+`terrarium -p <project> page ls` lists custom pages in tab order.
+`page show <slug>` prints the page JSON. `page set <slug> --from-file <file>`
+creates or replaces a page (`-` reads stdin). The file contains `title`,
+`position`, and `widgets`, as specified in [api.md §30.0](api.md#300-project-pages).
+`page rm <slug>` deletes it. Use `--json` for machine-readable results.
+Members and project agents read pages. Only the operator, sysadmins, and
+the project's project_admin write them. At most 10 pages per project.
+
 ## 1. Modes
 
 The CLI selects its mode from the environment.

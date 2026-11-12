@@ -11298,6 +11298,47 @@ blocks. With the triggers (§19.4), the results become alerts. The code is
 in `crates/terrariumd/src/monitors/` (the runs, the output parse, the
 layout) and `crates/terrariumd/src/store/monitors.rs` (the rows).
 
+### 30.0 Project pages
+
+Project pages use the rights in §30.1. `GET /api/projects/{name}/pages`
+returns `{"items": [page, ...]}` ordered by position, then slug (at most 10).
+`GET /api/projects/{name}/pages/{slug}` returns one page. `PUT` at that
+path creates or completely replaces it. `DELETE` removes it (204).
+Unknown projects or pages return 404. A PUT body is:
+
+```json
+{"title":"Overview","position":0,"widgets":[
+  {"id":"intro","kind":"markdown","x":0,"y":0,"w":12,"h":2,"text":"# Welcome"},
+  {"id":"guide","kind":"wiki","x":0,"y":2,"w":6,"h":4,"wiki":"guide"},
+  {"id":"load","kind":"stat","x":6,"y":2,"w":6,"h":4,"monitor":"MONITOR_ID","options":{"sparkline":true}}
+]}
+```
+
+A returned page adds `project`, `slug`, `updated_at`, and `updated_by`.
+Slugs are 1–64 lowercase ASCII letters, digits, hyphens or underscores,
+starting with a letter or digit. Titles are nonempty, at most 120 characters.
+Position is a nonnegative integer. Widgets (at most 100) have unique IDs
+(1–40 ASCII letters, digits, hyphens or underscores). Optional `title` is
+at most 120 characters. Grid coordinates are integers: x 0–11, y 0–9999,
+w 1–12 with x+w <= 12, h 1–10000 with y+h <= 10000. Rectangles cannot
+overlap. Optional `auto_height` (default true for markdown/wiki, false for
+monitors) lets markdown/wiki content
+grow beyond its minimum h. Otherwise h is the scrolling height limit.
+The daemon stores cells, not pixel heights.
+
+Kinds are `markdown`, `wiki`, `stat`, `status`, `chart`, `text`, `table`.
+Markdown requires `text` (at most 16384 UTF-8 bytes). Wiki requires `wiki`,
+a wiki path in this project (the wiki's path rules: up to 200 bytes,
+lowercase letters, digits, hyphens, underscores, dots and slashes, no empty,
+`.` or `..` segments). It is always resolved
+relative to this project, never another project. Missing wiki
+pages remain valid references so clients can show “page not found”. Monitor
+kinds require `monitor`, an existing monitor ID in this project compatible
+with the block kind, and accept dashboard `options` (§30.4). Other source
+fields are rejected. Unknown fields are rejected. Invalid input returns 422.
+Writes produce `page.set` or `page.remove` audit rows and a `page.updated`
+event with `{project, slug, deleted}`. Reading never drops stale references.
+
 ### 30.1 Rights
 
 | Action | Who |

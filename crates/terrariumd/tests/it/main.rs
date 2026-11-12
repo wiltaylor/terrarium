@@ -8,6 +8,7 @@ mod common;
 mod exedev;
 mod host_restart;
 mod live_workspace;
+mod pages;
 mod read_positions;
 mod remotes;
 mod ssh_restart;

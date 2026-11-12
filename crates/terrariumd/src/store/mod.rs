@@ -24,6 +24,7 @@ pub mod links;
 pub mod mail;
 pub mod memory;
 pub mod monitors;
+pub mod pages;
 pub mod pins;
 pub mod pipelines;
 pub mod pointers;
