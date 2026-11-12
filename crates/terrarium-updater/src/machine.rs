@@ -196,6 +196,7 @@ pub struct Updater {
     registry: Arc<dyn Registry>,
     verifier: Arc<dyn Verifier>,
     store: Store,
+    front: tokio::sync::watch::Sender<Option<Run>>,
     cfg: Config,
     /// The run in progress, with its steps so far.
     running: Mutex<Option<Run>>,
@@ -209,6 +210,27 @@ fn now() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+type FrontWriter = Arc<dyn Fn(&Run) -> std::io::Result<()> + Send + Sync>;
+
+fn front_publisher(writer: FrontWriter) -> tokio::sync::watch::Sender<Option<Run>> {
+    let (sender, mut receiver) = tokio::sync::watch::channel::<Option<Run>>(None);
+    tokio::spawn(async move {
+        while receiver.changed().await.is_ok() {
+            let Some(run) = receiver.borrow_and_update().clone() else {
+                continue;
+            };
+            let writer = writer.clone();
+            // One writer at a time preserves order, even while newer snapshots
+            // replace the pending slot. A stalled write never blocks updates.
+            match tokio::task::spawn_blocking(move || writer(&run)).await {
+                Ok(Ok(())) => (),
+                result => tracing::warn!(?result, "cannot export maintenance progress"),
+            }
+        }
+    });
+    sender
+}
+
 /// A failure of a step: the name and the reason.
 struct Fail(String);
 
@@ -220,11 +242,14 @@ impl Updater {
         store: Store,
         cfg: Config,
     ) -> Self {
+        let export_store = store.clone();
+        let front = front_publisher(Arc::new(move |run| export_store.export_front(run)));
         Self {
             engine,
             registry,
             verifier,
             store,
+            front,
             cfg,
             #[cfg(test)]
             hot_budget: (
@@ -379,9 +404,9 @@ impl Updater {
     }
 
     fn export_front(&self, run: &Run) {
-        if let Err(error) = self.store.export_front(run) {
-            tracing::warn!(%error, "cannot export maintenance progress");
-        }
+        // Memory-only, latest-wins publication. No filesystem work or await
+        // on the updater's safety-critical path or under its running mutex.
+        self.front.send_replace(Some(run.clone()));
     }
 
     fn begin_step(&self, name: &str) -> usize {

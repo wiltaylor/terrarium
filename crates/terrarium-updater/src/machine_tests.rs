@@ -467,8 +467,19 @@ fn rig() -> Rig {
     rig_with("gh", true)
 }
 
-#[test]
-fn front_export_tracks_steps_and_survives_a_mid_step_stop() {
+async fn wait_front(store: &Store, matches: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(bytes) = std::fs::read(store.dir().join("front/current-run.json"))
+                && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                && matches(&value) { return value; }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.unwrap()
+}
+
+#[tokio::test]
+async fn front_export_tracks_steps_and_survives_a_mid_step_stop() {
     let r = rig();
     let (_, guard) = r
         .updater
@@ -477,8 +488,9 @@ fn front_export_tracks_steps_and_survives_a_mid_step_stop() {
     let path = r.store.dir().join("front/current-run.json");
     let read =
         || serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(read()["outcome"], "running");
+    wait_front(&r.store, |v| v["outcome"] == "running").await;
     let idx = r.updater.begin_step("snapshot-database");
+    wait_front(&r.store, |v| v["steps"][idx]["state"] == "running").await;
     assert_eq!(read()["steps"][idx]["state"], "running");
     // A new reader after an updater crash sees a complete last transition.
     let reopened = Store::new(r.store.dir(), 10);
@@ -489,6 +501,7 @@ fn front_export_tracks_steps_and_survives_a_mid_step_stop() {
     assert_eq!(value["steps"][idx]["name"], "snapshot-database");
     r.updater
         .end_step(idx, StepState::Failed, "private-command-output");
+    wait_front(&r.store, |v| v["steps"][idx]["state"] == "failed").await;
     assert_eq!(read()["steps"][idx]["state"], "failed");
     assert!(!read().to_string().contains("private-"));
     drop(guard);
@@ -501,12 +514,64 @@ async fn front_export_retains_the_completed_run() {
         .updater
         .run_now(RunKind::Update, "latest", "operator")
         .await;
+    wait_front(&r.store, |v| v["ended_at"].is_string()).await;
     let value: serde_json::Value = serde_json::from_slice(
         &std::fs::read(r.store.dir().join("front/current-run.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(value["outcome"], run.outcome.as_str());
     assert_eq!(value["ended_at"], run.ended_at.unwrap());
+    assert_eq!(value["steps"].as_array().unwrap().len(), run.steps.len());
+}
+
+#[tokio::test]
+async fn stalled_front_writer_cannot_delay_hold_deadline_recovery() {
+    struct Release(Arc<(Mutex<bool>, std::sync::Condvar)>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            *self.0.0.lock().unwrap() = true;
+            self.0.1.notify_all();
+        }
+    }
+    let mut r = rig();
+    let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let release = Release(gate.clone());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let signal = entered.clone();
+    let store = r.store.clone();
+    let updater = Arc::get_mut(&mut r.updater).unwrap();
+    updater.front = front_publisher(Arc::new(move |run| {
+        signal.notify_one();
+        let (lock, wake) = &*gate;
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = wake.wait(released).unwrap();
+        }
+        store.export_front(run)
+    }));
+    updater.hot_budget = (Duration::from_secs(12), Duration::from_secs(6), Duration::from_secs(1));
+    updater.cfg.health_timeout = Duration::from_secs(240);
+    {
+        let mut state = r.fake.0.lock().unwrap();
+        state.hot = true;
+        state.startup_crash = true;
+        state.pending_once = Some("restore-database".into());
+    }
+    let started = tokio::time::Instant::now();
+    let updater = r.updater.clone();
+    let work = tokio::spawn(async move { updater.run_now(RunKind::Update, "latest", "operator").await });
+    tokio::time::timeout(Duration::from_secs(3), entered.notified()).await.unwrap();
+    let run = tokio::time::timeout(Duration::from_secs(13), work).await
+        .expect("stalled projection must not delay recovery").unwrap();
+    assert!(started.elapsed() < Duration::from_millis(12500));
+    assert_eq!(run.outcome, Outcome::RecoveryFailed);
+    assert!(r.fake.calls().iter().any(|call| call == "stop-for-recovery c0"));
+    // No timeout or automatic release exists in the writer. It stays blocked
+    // until after the safety-critical update/recovery has finished.
+    assert!(!*release.0.0.lock().unwrap());
+    drop(release);
+    let value = wait_front(&r.store, |v| v["ended_at"].is_string()).await;
+    assert_eq!(value["outcome"], "recovery_failed");
     assert_eq!(value["steps"].as_array().unwrap().len(), run.steps.len());
 }
 

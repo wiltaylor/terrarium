@@ -16,6 +16,35 @@ use tokio::time::timeout;
 
 const DEADLINE: Duration = Duration::from_secs(2);
 
+// Signal completion without buffering or setting a deadline on an upload.
+struct UploadBody {
+    body: Body,
+    sent: Option<tokio::sync::oneshot::Sender<()>>,
+}
+impl axum::body::HttpBody for UploadBody {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        let result = std::pin::Pin::new(&mut this.body).poll_frame(cx);
+        if (matches!(result, std::task::Poll::Ready(None)) || this.body.is_end_stream())
+            && let Some(sent) = this.sent.take()
+        {
+            let _ = sent.send(());
+        }
+        result
+    }
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.body.size_hint()
+    }
+}
+
 pub struct Front {
     pub upstream: String,
     pub status: PathBuf,
@@ -57,19 +86,34 @@ async fn proxy(State(front): State<Arc<Front>>, mut req: Request) -> Response {
         .unwrap_or("")
         .to_owned();
     let upgrade = hyper::upgrade::on(&mut req);
-    let response = timeout(DEADLINE, async {
-        let stream = TcpStream::connect(&front.upstream).await?;
+    let response = async {
+        let stream = timeout(DEADLINE, TcpStream::connect(&front.upstream)).await??;
         let (mut sender, connection) =
             hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
         tokio::spawn(async move {
             let _ = connection.with_upgrades().await;
         });
-        let response = sender.send_request(req).await?;
+        use axum::body::HttpBody;
+        let (sent, uploaded) = tokio::sync::oneshot::channel();
+        let (parts, body) = req.into_parts();
+        let sent = if body.is_end_stream() {
+            let _ = sent.send(());
+            None
+        } else {
+            Some(sent)
+        };
+        let req = Request::from_parts(parts, Body::new(UploadBody { body, sent }));
+        let response = sender.send_request(req);
+        tokio::pin!(response);
+        let response = tokio::select! {
+            response = &mut response => response?,
+            _ = uploaded => timeout(DEADLINE, &mut response).await??,
+        };
         Ok::<_, anyhow::Error>(response)
-    })
+    }
     .await;
     match response {
-        Ok(Ok(mut response)) => {
+        Ok(mut response) => {
             if let Ok(mut outage) = front.outage.lock() {
                 *outage = None;
             }
