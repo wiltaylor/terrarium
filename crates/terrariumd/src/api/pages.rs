@@ -41,8 +41,9 @@ async fn list(
     Path(project): Path<String>,
 ) -> ApiResult<Json<Value>> {
     policy::read_project(&actor, &project)?;
+    let can_edit = policy::admin_project(&actor, &project, "editing project pages").is_ok();
     let items = s.db.read(move |c| pages::list(c, &project)).await?;
-    Ok(Json(json!({"items": items})))
+    Ok(Json(json!({"items": items, "can_edit": can_edit})))
 }
 
 async fn show(

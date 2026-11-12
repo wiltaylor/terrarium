@@ -4014,6 +4014,7 @@ dependencies = [
  "png",
  "portable-pty",
  "rcgen",
+ "rustix",
  "rustls",
  "rustls-native-certs",
  "serde",
@@ -4021,6 +4022,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "terrarium-core",
+ "terrarium-sys",
  "terrarium-version",
  "thiserror 2.0.21",
  "tokio",
@@ -4057,6 +4059,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vt100",
+]
+
+[[package]]
+name = "terrarium-sys"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.13.2",
+ "libc",
 ]
 
 [[package]]
