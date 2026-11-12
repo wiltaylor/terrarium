@@ -475,6 +475,19 @@ fn write_exec(path: &Path, text: &str) {
 /// and rollback events through the same protocol.
 #[tokio::test]
 async fn a_stale_dev_host_refuses_unsigned_updates_and_reports_manual_updates() {
+    self_update_signature_flow(false).await;
+}
+
+/// Run separately with TERRARIUM_RELEASE_PUBKEY set at compile time and
+/// TERRARIUM_TEST_SIGNING_KEY naming its ephemeral OpenSSL private key at run time.
+#[tokio::test]
+#[ignore = "requires a dedicated ephemeral test-key build"]
+async fn a_release_key_host_updates_and_confirms_a_signed_asset() {
+    assert!(terrarium_host::update_signature::RELEASE_KEY.is_some());
+    self_update_signature_flow(true).await;
+}
+
+async fn self_update_signature_flow(signed: bool) {
     if terrarium_version::this().git_ref.is_none() {
         return; // no git: nothing is stale, so nothing is offered
     }
@@ -549,6 +562,29 @@ async fn a_stale_dev_host_refuses_unsigned_updates_and_reports_manual_updates() 
         reqwest::get(&bundle_url).await.unwrap().status(),
         reqwest::StatusCode::NOT_FOUND
     );
+    if signed {
+        let private_key = std::env::var_os("TERRARIUM_TEST_SIGNING_KEY").expect("ephemeral signing key path");
+        let asset = dist.path().join(format!("terrarium-host-{}-linux", std::env::consts::ARCH));
+        let signature = std::process::Command::new("openssl")
+            .args(["dgst", "-sha256", "-sign"])
+            .arg(private_key).arg(&asset).output().unwrap();
+        assert!(signature.status.success(), "test asset signing failed");
+        let bundle = json!({
+            "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+            "messageSignature": {
+                "messageDigest": {"algorithm": "SHA2_256", "digest": B64.encode(Sha256::digest(served.as_bytes()))},
+                "signature": B64.encode(signature.stdout)
+            }
+        });
+        let cache = format!("terrarium-host-{}-linux.{}.sigstore.json", std::env::consts::ARCH, sha(served.as_bytes()));
+        std::fs::write(dist.path().join(cache), serde_json::to_vec(&bundle).unwrap()).unwrap();
+        tokio::time::timeout(Duration::from_secs(30), Client::new(options("0.0.9+0000000")).run())
+            .await.expect("the host agent stops after the signed update");
+        assert_eq!(std::fs::read_to_string(&bin).unwrap(), served);
+        assert_eq!(std::fs::read_to_string(sidecar(&bin, PREV)).unwrap(), old);
+        assert_eq!(std::fs::read_to_string(sidecar(&bin, PENDING)).unwrap(), format!("{}\n", terrarium_version::FULL));
+        assert!(!sidecar(&bin, NEW).exists());
+    } else {
     for cached in [false, true] {
         if cached {
             let name = format!(
@@ -597,6 +633,7 @@ async fn a_stale_dev_host_refuses_unsigned_updates_and_reports_manual_updates() 
         format!("{}\n", terrarium_version::FULL),
     )
     .unwrap();
+    }
 
     // "systemd" starts the new build: it confirms the update, and the
     // daemon records it.

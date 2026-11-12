@@ -1311,6 +1311,15 @@ release-key authentication only, not transparency-log verification or rollback
 protection. Dev builds without `TERRARIUM_RELEASE_PUBKEY` at compile time have
 no key and refuse self-update with an instruction to install manually.
 
+The positive integration test requires a dedicated test-key build: generate an
+ephemeral P-256 private key with OpenSSL, set `TERRARIUM_RELEASE_PUBKEY` to its
+public PEM at compile time, and `TERRARIUM_TEST_SIGNING_KEY` to the private key's
+path at run time. Run `cargo test -p terrariumd --test it
+hosts::a_release_key_host_updates_and_confirms_a_signed_asset -- --ignored`.
+It serves a signed asset through the host listener and checks staging, swap,
+confirmation, and update records. Ordinary no-key builds run the refusal test.
+Never use a production private key for this test.
+
 1. It checks that it may update. It does not update when:
    - `auto_update = false` is in its config;
    - it does not run under systemd (no `INVOCATION_ID`), because then
