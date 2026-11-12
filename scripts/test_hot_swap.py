@@ -282,10 +282,16 @@ class HotSwapTests(unittest.TestCase):
         (self.run / "upgrade-pause").unlink()
         wait(lambda: len(log.read_text().splitlines()) == 3)
         recovery_seconds = time.monotonic() - recovery_started
+        rollback_hold_seconds = time.monotonic() - started
+        # Match the updater's 15-minute hold minus its one-minute safety
+        # margin, counted from the original pause, not a fresh recovery timer.
+        self.assertLess(rollback_hold_seconds, 15 * 60 - 60,
+                        "rollback exceeded the runner hold safety deadline")
         print(f"hot-swap seed_bytes={db.stat().st_size} state_file_bytes={state_mib * 1048576} "
               f"snapshot_seconds={copy_seconds:.3f} "
               f"pause_seconds={pause_seconds:.3f} restore_seconds={restore_seconds:.3f} "
-              f"rollback_pause_seconds={recovery_seconds:.3f}")
+              f"rollback_pause_seconds={recovery_seconds:.3f} "
+              f"rollback_hold_seconds={rollback_hold_seconds:.3f}")
         self.assertEqual(len(set(log.read_text().splitlines())), 3)
         HOT.main(["commit", backup])
 
