@@ -130,43 +130,23 @@ async fn transfer_verifies_checksum_and_replaces_destination() {
 }
 
 #[test]
-fn service_update_replacement_never_removes_current_path() {
-    use terrarium_host::selfupdate::{self, sidecar};
+fn versioned_update_preserves_both_images_across_rollback() {
+    use terrarium_host::update_journal::Journal;
     let root = tempfile::tempdir().unwrap();
     let binary = root.path().join("host.exe");
+    let verified = root.path().join("verified.exe");
     std::fs::write(&binary, b"old").unwrap();
-    std::fs::write(sidecar(&binary, selfupdate::NEW), b"new").unwrap();
-    selfupdate::windows_prepare_replacement(&binary, "test-new").unwrap();
+    std::fs::write(&verified, b"new").unwrap();
+    let transaction = Journal::stage(&verified, &binary, root.path(), "test-new").unwrap();
+    let mut selected = binary.clone();
+    transaction.activate(&root.path().join("pending.json"), |next| {
+        selected = next.to_owned(); Ok(())
+    }).unwrap();
+    assert_eq!(std::fs::read(&selected).unwrap(), b"new");
     assert_eq!(std::fs::read(&binary).unwrap(), b"old");
-    assert_eq!(
-        std::fs::read(sidecar(&binary, selfupdate::PREV)).unwrap(),
-        b"old"
-    );
-    assert_eq!(selfupdate::confirm(&binary), None);
-    selfupdate::windows_replace(&sidecar(&binary, selfupdate::NEW), &binary).unwrap();
-    assert_eq!(std::fs::read(&binary).unwrap(), b"new");
-    selfupdate::windows_replace(&sidecar(&binary, selfupdate::PREV), &binary).unwrap();
-    assert_eq!(std::fs::read(&binary).unwrap(), b"old");
-}
-
-#[test]
-fn service_update_journal_and_rollback() {
-    use terrarium_host::selfupdate::{self, sidecar};
-    let root = tempfile::tempdir().unwrap();
-    let binary = root.path().join("host.exe");
-    std::fs::write(&binary, b"old").unwrap();
-    std::fs::write(sidecar(&binary, selfupdate::NEW), b"new").unwrap();
-    selfupdate::swap(&binary, "test-new").unwrap();
-    assert_eq!(std::fs::read(&binary).unwrap(), b"new");
-    assert_eq!(std::fs::read(sidecar(&binary, "old")).unwrap(), b"old");
-    assert_eq!(selfupdate::confirm(&binary), None);
-    selfupdate::windows_rollback(&binary).unwrap();
-    assert_eq!(std::fs::read(&binary).unwrap(), b"old");
-    assert_eq!(
-        selfupdate::failed_version(&binary).as_deref(),
-        Some("test-new")
-    );
-    assert!(!sidecar(&binary, selfupdate::PENDING).exists());
+    transaction.rollback(|old| { selected = old.to_owned(); Ok(()) }).unwrap();
+    assert_eq!(std::fs::read(&selected).unwrap(), b"old");
+    assert_eq!(std::fs::read(&transaction.next).unwrap(), b"new");
 }
 
 #[tokio::test]
@@ -185,10 +165,16 @@ async fn bare_program_resolves_from_request_path() {
 async fn delayed_stdin_reader_receives_more_than_eight_chunks() {
     let running = spawn(plan("Start-Sleep -Seconds 2; $data=[Console]::In.ReadToEnd(); [Console]::WriteLine($data.Length); exit 23"), Arc::new(Outbox::new(20, 65536))).unwrap();
     for _ in 0..64 {
-        running.input.send(SessionInput::Stdin(vec![b'a'; 4096])).unwrap();
+        running
+            .input
+            .send(SessionInput::Stdin(vec![b'a'; 4096]))
+            .unwrap();
     }
     running.input.send(SessionInput::Eof).unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(20), running.done).await.unwrap().unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(20), running.done)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(result.code, Some(23));
     assert_eq!(result.reason, ExitReason::Exited);
     assert!(String::from_utf8_lossy(&result.stdout).contains("262144"));
@@ -196,12 +182,25 @@ async fn delayed_stdin_reader_receives_more_than_eight_chunks() {
 
 #[tokio::test]
 async fn kill_bypasses_full_stdin_queue() {
-    let running = spawn(plan("Start-Sleep -Seconds 120"), Arc::new(Outbox::new(21, 65536))).unwrap();
+    let running = spawn(
+        plan("Start-Sleep -Seconds 120"),
+        Arc::new(Outbox::new(21, 65536)),
+    )
+    .unwrap();
     for _ in 0..64 {
-        running.input.send(SessionInput::Stdin(vec![b'a'; 4096])).unwrap();
+        running
+            .input
+            .send(SessionInput::Stdin(vec![b'a'; 4096]))
+            .unwrap();
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
-    running.input.send(SessionInput::Kill(ExitReason::Timeout)).unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), running.done).await.unwrap().unwrap();
+    running
+        .input
+        .send(SessionInput::Kill(ExitReason::Timeout))
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), running.done)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(result.reason, ExitReason::Timeout);
 }

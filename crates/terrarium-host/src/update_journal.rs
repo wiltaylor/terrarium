@@ -30,29 +30,54 @@ impl Journal {
     /// protected ACL. An interrupted copy cannot be selected by SCM.
     pub fn stage(source: &Path, previous: &Path, root: &Path, version: &str) -> io::Result<Self> {
         if version.is_empty()
-            || !version.bytes().all(|b| b.is_ascii_alphanumeric() || b".+_-".contains(&b))
+            || !version
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b".+_-".contains(&b))
         {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid version directory"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid version directory",
+            ));
         }
         if !previous.is_file() {
-            return Err(io::Error::new(io::ErrorKind::NotFound, "previous executable missing"));
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "previous executable missing",
+            ));
         }
         let directory = root.join(version);
         std::fs::create_dir(&directory)?;
         let next = directory.join("terrarium-host.exe");
         std::fs::copy(source, &next)?;
-        std::fs::OpenOptions::new().write(true).open(&next)?.sync_all()?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&next)?
+            .sync_all()?;
         if std::fs::read(source)? != std::fs::read(&next)? {
-            return Err(io::Error::other("staged executable differs from verified source"));
+            return Err(io::Error::other(
+                "staged executable differs from verified source",
+            ));
         }
-        Ok(Self { previous: previous.to_owned(), next, version: version.to_owned(), confirmed: false })
+        Ok(Self {
+            previous: previous.to_owned(),
+            next,
+            version: version.to_owned(),
+            confirmed: false,
+        })
     }
 
     /// The callback performs exactly one atomic ImagePath switch. Persist the
     /// recovery record first. A failure leaves the previous image untouched.
-    pub fn activate(&self, path: &Path, switch: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+    pub fn activate(
+        &self,
+        path: &Path,
+        switch: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<()> {
         if !self.previous.is_file() || !self.next.is_file() {
-            return Err(io::Error::new(io::ErrorKind::NotFound, "transaction image missing"));
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "transaction image missing",
+            ));
         }
         self.persist(path)?;
         switch(&self.next)
@@ -62,7 +87,10 @@ impl Journal {
     /// switch is distinguishable on restart by its configured image path.
     pub fn rollback(&self, switch: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
         if !self.previous.is_file() {
-            return Err(io::Error::new(io::ErrorKind::NotFound, "rollback image missing"));
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "rollback image missing",
+            ));
         }
         switch(&self.previous)
     }
@@ -90,17 +118,26 @@ mod tests {
         assert_eq!(Journal::read(&journal)?, transaction);
         assert!(previous.is_file());
         let mut configured = previous.clone();
-        transaction.activate(&journal, |next| { configured = next.to_owned(); Ok(()) })?;
+        transaction.activate(&journal, |next| {
+            configured = next.to_owned();
+            Ok(())
+        })?;
         // After the switch and after process exit, the same path still exists.
         assert_eq!(configured, transaction.next);
         assert!(configured.is_file());
         let recovered = Journal::read(&journal)?;
-        recovered.rollback(|old| { configured = old.to_owned(); Ok(()) })?;
+        recovered.rollback(|old| {
+            configured = old.to_owned();
+            Ok(())
+        })?;
         // Power loss during rollback is safe even before journal cleanup.
         assert_eq!(configured, previous);
         assert!(configured.is_file());
         assert_eq!(Journal::read(&journal)?, transaction);
-        recovered.rollback(|old| { assert!(old.is_file()); Ok(()) })?;
+        recovered.rollback(|old| {
+            assert!(old.is_file());
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -112,7 +149,11 @@ mod tests {
         std::fs::write(&previous, b"verified")?;
         let transaction = Journal::stage(&previous, &previous, root, "next")?;
         let path = root.join("pending.json");
-        assert!(transaction.activate(&path, |_| Err(io::Error::other("SCM denied"))).is_err());
+        assert!(
+            transaction
+                .activate(&path, |_| Err(io::Error::other("SCM denied")))
+                .is_err()
+        );
         assert!(previous.is_file());
         assert_eq!(Journal::read(&path)?, transaction);
         assert!(Journal::stage(&previous, &previous, root, "../escape").is_err());

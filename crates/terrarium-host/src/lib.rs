@@ -51,16 +51,16 @@ pub mod outbox;
 pub mod prepare;
 pub mod protocol;
 pub mod selfupdate;
-pub mod update_journal;
-#[cfg(windows)]
-pub mod windows_update;
 pub mod session;
 #[cfg(windows)]
 mod session_windows;
 pub mod tls;
 pub mod transfer;
+pub mod update_journal;
 pub mod verb;
 pub mod vmlab;
+#[cfg(windows)]
+pub mod windows_update;
 pub mod workspace;
 
 pub use client::{Client, ClientOptions, SelfUpdateOptions};
