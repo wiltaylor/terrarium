@@ -636,7 +636,7 @@ async fn front_export_retains_the_completed_run() {
     assert_eq!(value["steps"].as_array().unwrap().len(), run.steps.len());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn stalled_front_writer_cannot_delay_hold_deadline_recovery() {
     struct Release(Arc<(Mutex<bool>, std::sync::Condvar)>);
     impl Drop for Release {
@@ -673,13 +673,17 @@ async fn stalled_front_writer_cannot_delay_hold_deadline_recovery() {
         state.startup_crash = true;
         state.pending_once = Some("restore-database".into());
     }
-    let started = tokio::time::Instant::now();
+    // The publisher runs on an OS thread. Let that handshake use real time
+    // rather than auto-advancing the budget while the thread is scheduled.
+    tokio::time::resume();
     let updater = r.updater.clone();
     let work =
         tokio::spawn(async move { updater.run_now(RunKind::Update, "latest", "operator").await });
     tokio::time::timeout(Duration::from_secs(3), entered.notified())
         .await
         .unwrap();
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
     let run = tokio::time::timeout(Duration::from_secs(13), work)
         .await
         .expect("stalled projection must not delay recovery")
@@ -696,6 +700,8 @@ async fn stalled_front_writer_cannot_delay_hold_deadline_recovery() {
     // until after the safety-critical update/recovery has finished.
     assert!(!*release.0.0.lock().unwrap());
     drop(release);
+    // Publication is OS-thread/file IO, not part of the virtual hold budget.
+    tokio::time::resume();
     let value = wait_front(&r.store, |v| v["ended_at"].is_string()).await;
     assert_eq!(value["outcome"], "recovery_failed");
     assert_eq!(value["steps"].as_array().unwrap().len(), run.steps.len());
