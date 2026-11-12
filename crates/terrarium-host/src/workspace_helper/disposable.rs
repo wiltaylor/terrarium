@@ -1006,11 +1006,13 @@ fn control_state_aliases_refused_before_receiver_export() {
         // Model the export gate: no receiver construction or store mutation is
         // allowed until this exact read-only startup preflight has succeeded.
         if admission.is_ok() {
-            let source = File::open(if matches!(case, "bound_into_workspace" | "bound_control_file") {
-                root.path().join("source/project/agent")
-            } else {
-                root.path().join("publisher")
-            })
+            let source = File::open(
+                if matches!(case, "bound_into_workspace" | "bound_control_file") {
+                    root.path().join("source/project/agent")
+                } else {
+                    root.path().join("publisher")
+                },
+            )
             .unwrap();
             let slot = File::open(root.path().join("receiver")).unwrap();
             mounts::attach(&mounts::clone_nonrecursive(&source).unwrap(), &slot).unwrap();
