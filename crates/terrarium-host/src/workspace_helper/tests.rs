@@ -383,7 +383,9 @@ fn docker_nsfs_records_do_not_qualify_as_publishers() {
         "uts",
     ] {
         let accepted = evidence(&line.replace("net:[", &format!("{kind}:[")), 1);
-        assert!(mountinfo::publisher(&accepted, &receiver, std::slice::from_ref(&accepted)).is_err());
+        assert!(
+            mountinfo::publisher(&accepted, &receiver, std::slice::from_ref(&accepted)).is_err()
+        );
         let mut host_publisher = accepted.clone();
         host_publisher.root = "/directory".into();
         // A namespace pseudo-root cannot serve as a receiver either.
