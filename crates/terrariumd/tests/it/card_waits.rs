@@ -684,7 +684,10 @@ async fn reopened_dependency_resets_only_unacted_waits() {
         set(&td, id, wait(&[(&dep, None)], Mode::All, Action::default())).await;
     }
     move_to(&td, &dep, "accepted").await;
+    move_to(&td, &dep, "done").await;
+    assert!(met(&td, &pending).await);
     let p = pending.clone();
+    let d = dep.clone();
     // Model completion queued for the rules action, including a seeded legacy wait.
     td.daemon
         .as_ref()
@@ -693,13 +696,11 @@ async fn reopened_dependency_resets_only_unacted_waits() {
         .db
         .write("operator", move |t| {
             t.execute("UPDATE card_waits SET acted_at=NULL WHERE card=?1", [&p])?;
+            terrariumd::store::board::move_card(t, &Actor::Operator, &d, "working", None, None)?;
             Ok(())
         })
         .await
         .unwrap();
-    move_to(&td, &dep, "done").await;
-    assert!(met(&td, &pending).await);
-    move_to(&td, &dep, "working").await;
     assert!(!met(&td, &pending).await);
     assert!(met(&td, &acted).await);
     for id in [&pending, &acted] {
@@ -709,8 +710,9 @@ async fn reopened_dependency_resets_only_unacted_waits() {
                 .as_str()
                 .is_some_and(|s| s.contains("moved back out"))
         }));
-        assert_eq!(result.ok()["blocked_by"], json!([dep]));
     }
+    assert_eq!(td.get(&format!("/api/cards/{pending}")).await.ok()["blocked_by"], json!([dep]));
+    assert_eq!(td.get(&format!("/api/cards/{acted}")).await.ok()["blocked_by"], json!([]));
     move_to(&td, &dep, "accepted").await;
     assert!(met(&td, &pending).await);
 }

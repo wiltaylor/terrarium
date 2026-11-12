@@ -276,7 +276,23 @@ pub(super) fn on_dependency_reopened(t: &mut Tx<'_>, id: &str) -> ApiResult<()> 
             break;
         }
         for card in &page {
-            if unmet(t, card)?.is_empty() {
+            // The blocked-by view deliberately hides latched waits. Check the
+            // live conditions directly before deciding whether to unlatch one.
+            let pending: bool = t.query_row(
+                "SELECT CASE w.mode WHEN 'any' THEN min(NOT (
+                   CASE WHEN d.target IS NULL THEN coalesce(k.role,k.name) IN ('accepted','done')
+                   ELSE k.name=d.target OR coalesce(k.role=d.target,0) END))
+                 ELSE max(NOT (
+                   CASE WHEN d.target IS NULL THEN coalesce(k.role,k.name) IN ('accepted','done')
+                   ELSE k.name=d.target OR coalesce(k.role=d.target,0) END)) END
+                 FROM card_waits w JOIN card_deps d ON d.card=w.card
+                 JOIN cards c ON c.id=d.depends_on
+                 JOIN board_columns k ON k.id=c.column_id
+                 WHERE w.card=?1 AND c.archived=0",
+                [card],
+                |r| Ok(r.get::<_, Option<bool>>(0)?.unwrap_or(false)),
+            )?;
+            if !pending {
                 continue;
             }
             let cleared = t.execute(
