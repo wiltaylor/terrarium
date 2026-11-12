@@ -342,31 +342,32 @@ impl Docker {
             .ok(Method::POST, "/containers/create", Some(body))
             .await?;
         let id = made["Id"].as_str().unwrap_or_default().to_owned();
-        let r = async {
-            self.ok(Method::POST, &format!("/containers/{id}/start"), None)
-                .await?;
-            let w = self
-                .ok(Method::POST, &format!("/containers/{id}/wait"), None)
-                .await?;
-            let (_, logs) = self
-                .call(
-                    Method::GET,
-                    &format!("/containers/{id}/logs?stdout=1&stderr=1"),
-                    None,
-                )
-                .await?;
-            let (stdout, stderr) = demux(&logs);
-            Ok(ExecOut {
-                code: w["StatusCode"].as_i64().unwrap_or(-1),
-                stdout,
-                stderr,
-            })
-        }
-        .await;
+        let r = self.run_created(&id).await;
         let _ = self
             .call(Method::DELETE, &format!("/containers/{id}?force=1"), None)
             .await;
         r
+    }
+
+    async fn run_created(&self, id: &str) -> Res<ExecOut> {
+        self.ok(Method::POST, &format!("/containers/{id}/start"), None)
+            .await?;
+        let w = self
+            .ok(Method::POST, &format!("/containers/{id}/wait"), None)
+            .await?;
+        let (_, logs) = self
+            .call(
+                Method::GET,
+                &format!("/containers/{id}/logs?stdout=1&stderr=1"),
+                None,
+            )
+            .await?;
+        let (stdout, stderr) = demux(&logs);
+        Ok(ExecOut {
+            code: w["StatusCode"].as_i64().unwrap_or(-1),
+            stdout,
+            stderr,
+        })
     }
 }
 
@@ -742,6 +743,25 @@ pub fn health_of(c: &Value) -> Health {
 }
 
 impl Engine for Docker {
+    fn supervised_snapshot<'a>(&'a self, cur: &'a Container) -> BoxFut<'a, Res<bool>> {
+        Box::pin(async move {
+            let physical = cur.spec["container"]["Image"].as_str().unwrap_or_default();
+            let old = self
+                .inspect_image(physical)
+                .await?
+                .ok_or_else(|| "cannot inspect source image".to_owned())?;
+            if old["Config"]["Labels"]["io.terrarium.hot-swap-layout"] != "1" {
+                return Ok(false);
+            }
+            let out = self
+                .exec(&cur.id, crate::machine::hot_argv("probe", &[]))
+                .await?;
+            if out.code != 0 {
+                return Err(out.reason());
+            }
+            Ok(true)
+        })
+    }
     fn can_hot_swap<'a>(&'a self, cur: &'a Container, to: &'a Image) -> BoxFut<'a, Res<bool>> {
         Box::pin(async move {
             let physical = cur.spec["container"]["Image"].as_str().unwrap_or_default();
@@ -1059,6 +1079,62 @@ impl Engine for Docker {
             }
             self.run_body(once_body(&spec.spec, &image.reference, &argv))
                 .await
+        })
+    }
+
+    fn prepare_once<'a>(
+        &'a self,
+        spec: &'a Container,
+        image: &'a Image,
+        mut argv: Vec<String>,
+    ) -> BoxFut<'a, Res<String>> {
+        Box::pin(async move {
+            let executable = if argv.first().is_some_and(|s| s == "timeout") {
+                3
+            } else {
+                0
+            };
+            if argv.get(executable).is_some_and(|s| s == "terrariumd")
+                && let Some(img) = self.inspect_image(&image.id).await?
+                && img["Config"]["Labels"]["io.terrarium.hot-swap-layout"] == "1"
+            {
+                argv[executable] = "/opt/terrarium/bundled/bin/terrariumd".into();
+            }
+            let made = self
+                .ok(
+                    Method::POST,
+                    "/containers/create",
+                    Some(once_body(&spec.spec, &image.reference, &argv)),
+                )
+                .await?;
+            made["Id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| "Docker helper create returned no ID".into())
+        })
+    }
+
+    fn run_prepared_once<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<ExecOut>> {
+        Box::pin(async move { self.run_created(&enc(id)).await })
+    }
+
+    fn remove_once<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
+        Box::pin(async move {
+            let id = enc(id);
+            // Inspect even if delete's answer was lost. Only absence proves
+            // this helper cannot still be writing the database.
+            let _ = self
+                .call(Method::DELETE, &format!("/containers/{id}?force=1"), None)
+                .await;
+            let (status, _) = self
+                .call(Method::GET, &format!("/containers/{id}/json"), None)
+                .await?;
+            if status == StatusCode::NOT_FOUND {
+                Ok(())
+            } else {
+                Err("restore helper termination unverified".into())
+            }
         })
     }
 
@@ -1491,6 +1567,105 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn helper_termination_removes_exact_id_and_requires_inspect_not_found() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for inspect_status in [404, 200, 500] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("docker.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let server = tokio::spawn(async move {
+                for expected in [
+                    "DELETE /containers/owned-helper?force=1 HTTP/1.1",
+                    "GET /containers/owned-helper/json HTTP/1.1",
+                ] {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut header = Vec::new();
+                    while !header.ends_with(b"\r\n\r\n") {
+                        header.push(stream.read_u8().await.unwrap());
+                    }
+                    assert!(String::from_utf8(header).unwrap().starts_with(expected));
+                    let status = if expected.starts_with("DELETE") {
+                        204
+                    } else {
+                        inspect_status
+                    };
+                    stream.write_all(format!("HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                }
+            });
+            let docker = Docker {
+                socket,
+                target: None,
+            };
+            let result =
+                tokio::time::timeout(Duration::from_secs(5), docker.remove_once("owned-helper"))
+                    .await
+                    .unwrap();
+            assert_eq!(result.is_ok(), inspect_status == 404);
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_helper_delete_or_inspect_does_not_prevent_reserved_daemon_stop() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for phase in ["delete", "inspect"] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("docker.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let server = tokio::spawn(async move {
+                // Keep the pending HTTP answer open, including while accepting
+                // the independent final stop request after cancellation.
+                let mut pending = Vec::new();
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut header = Vec::new();
+                    while !header.ends_with(b"\r\n\r\n") {
+                        header.push(stream.read_u8().await.unwrap());
+                    }
+                    let header = String::from_utf8(header).unwrap();
+                    let stopping = header.starts_with("POST /containers/daemon/stop?t=0 HTTP/1.1");
+                    if stopping
+                        || (phase == "inspect"
+                            && header
+                                .starts_with("DELETE /containers/owned-helper?force=1 HTTP/1.1"))
+                    {
+                        stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                        if stopping {
+                            break;
+                        }
+                    } else {
+                        let expected = if phase == "delete" {
+                            "DELETE /containers/owned-helper?force=1 HTTP/1.1"
+                        } else {
+                            "GET /containers/owned-helper/json HTTP/1.1"
+                        };
+                        assert!(header.starts_with(expected), "{header}");
+                        pending.push(stream);
+                    }
+                }
+            });
+            let docker = Docker {
+                socket,
+                target: None,
+            };
+            let end = tokio::time::Instant::now() + Duration::from_secs(3);
+            assert!(
+                tokio::time::timeout_at(
+                    end - Duration::from_secs(2),
+                    docker.remove_once("owned-helper")
+                )
+                .await
+                .is_err()
+            );
+            tokio::time::timeout_at(end, docker.stop_for_recovery("daemon"))
+                .await
+                .unwrap()
+                .unwrap();
+            server.await.unwrap();
         }
     }
 

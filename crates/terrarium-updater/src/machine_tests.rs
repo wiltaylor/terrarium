@@ -24,11 +24,21 @@ struct State {
     jobs_hang: bool,
     fail_once: HashSet<String>,
     hot: bool,
+    supervised: bool,
+    database: u32,
+    snapshot_database: u32,
     startup_crash: bool,
     pending_exec: Option<String>,
     pending_once: Option<String>,
     pending_old_health: bool,
     pending_stop: bool,
+    pending_engine: Option<&'static str>,
+    jobs_delay: Duration,
+    helpers: HashMap<String, (Container, Image, Vec<String>)>,
+    helper_next: u32,
+    helper_remove_fail: Option<String>,
+    pending_helper_termination: Option<&'static str>,
+    recovery_stop_delay: Duration,
     staged: Option<Image>,
     /// The containers by name.
     containers: HashMap<String, Container>,
@@ -115,6 +125,9 @@ fn old_image() -> Image {
 }
 
 impl Engine for Fake {
+    fn supervised_snapshot<'a>(&'a self, _cur: &'a Container) -> BoxFut<'a, Res<bool>> {
+        Box::pin(async { Ok(self.0.lock().unwrap().supervised) })
+    }
     fn can_hot_swap<'a>(&'a self, _cur: &'a Container, _to: &'a Image) -> BoxFut<'a, Res<bool>> {
         Box::pin(async { Ok(self.0.lock().unwrap().hot) })
     }
@@ -245,22 +258,32 @@ impl Engine for Fake {
                 _ => format!("status:{}", self.image_of(id).unwrap_or_default()),
             };
             let failed = self.call(format!("{what} {id}"));
+            if what == "drain" && self.0.lock().unwrap().supervised {
+                // A completed write after the online ZIP, before quiescence.
+                self.0.lock().unwrap().database = 2;
+            }
             if what == "resume" && self.0.lock().unwrap().resume_hang {
                 std::future::pending::<()>().await;
             }
             if what == "drain-jobs" {
+                let delay = self.0.lock().unwrap().jobs_delay;
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
                 let hang = self.0.lock().unwrap().jobs_hang;
                 if hang {
                     std::future::pending::<()>().await;
                 }
             }
             let stdout = if what == "update-status" {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .resume_status
-                    .clone()
-                    .unwrap_or_default()
+                let s = self.0.lock().unwrap();
+                s.resume_status.clone().unwrap_or_else(|| {
+                    if s.supervised {
+                        r#"{"drain":{"on":false,"jobs_drain":null}}"#.into()
+                    } else {
+                        String::new()
+                    }
+                })
             } else if what == "backup" {
                 format!(r#"{{"name": "terrarium-backup-1.zip", "path": "{BACKUP}"}}"#)
             } else if what == "drain-jobs" {
@@ -342,6 +365,10 @@ impl Engine for Fake {
     fn remove<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
         Box::pin(async move {
             self.call(format!("remove {id}"));
+            if self.0.lock().unwrap().pending_engine == Some("remove") {
+                self.call("pending-remove".into());
+                std::future::pending::<()>().await;
+            }
             self.0.lock().unwrap().containers.retain(|_, c| c.id != id);
             Ok(())
         })
@@ -355,6 +382,11 @@ impl Engine for Fake {
                 self.call("pending-stop".into());
                 std::future::pending::<()>().await;
             }
+            let delay = self.0.lock().unwrap().recovery_stop_delay;
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+                self.call(format!("stop-confirmed {id}"));
+            }
             Ok(())
         })
     }
@@ -363,6 +395,10 @@ impl Engine for Fake {
         Box::pin(async move {
             if self.call(format!("create:{} new", image.reference)) {
                 return Err("create refused".into());
+            }
+            if self.0.lock().unwrap().pending_engine == Some("create") {
+                self.call("pending-create".into());
+                std::future::pending::<()>().await;
             }
             let mut s = self.0.lock().unwrap();
             s.next += 1;
@@ -418,6 +454,15 @@ impl Engine for Fake {
                 if command == "stage" {
                     self.0.lock().unwrap().staged = Some(image.clone());
                 }
+                if !failed {
+                    let mut s = self.0.lock().unwrap();
+                    if command == "snapshot" {
+                        s.snapshot_database = s.database;
+                    }
+                    if command == "restore-database" {
+                        s.database = s.snapshot_database;
+                    }
+                }
                 return Ok(ExecOut {
                     code: i64::from(failed),
                     stdout: if command == "stage" {
@@ -437,6 +482,10 @@ impl Engine for Fake {
                 });
             }
             let failed = self.call(format!("restore {} {}", image.reference, argv[3]));
+            if self.0.lock().unwrap().pending_once.as_deref() == Some("restore") {
+                self.call("pending-restore".into());
+                std::future::pending::<()>().await;
+            }
             Ok(ExecOut {
                 code: i64::from(failed),
                 stdout: String::new(),
@@ -446,6 +495,53 @@ impl Engine for Fake {
                     String::new()
                 },
             })
+        })
+    }
+
+    fn prepare_once<'a>(
+        &'a self,
+        spec: &'a Container,
+        image: &'a Image,
+        argv: Vec<String>,
+    ) -> BoxFut<'a, Res<String>> {
+        Box::pin(async move {
+            let mut s = self.0.lock().unwrap();
+            s.helper_next += 1;
+            let id = format!("helper{}", s.helper_next);
+            s.calls.push(format!("helper-created {id}"));
+            s.helpers
+                .insert(id.clone(), (spec.clone(), image.clone(), argv));
+            Ok(id)
+        })
+    }
+
+    fn run_prepared_once<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<ExecOut>> {
+        Box::pin(async move {
+            self.call(format!("helper-start {id}"));
+            let (spec, image, argv) = self.0.lock().unwrap().helpers.get(id).unwrap().clone();
+            self.run_once(&spec, &image, argv).await
+        })
+    }
+
+    fn remove_once<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
+        Box::pin(async move {
+            let pending = self.0.lock().unwrap().pending_helper_termination;
+            if id == "helper2" && pending == Some("delete") {
+                self.call(format!("helper-delete-pending {id}"));
+                std::future::pending::<()>().await;
+            }
+            if self.call(format!("helper-remove {id}"))
+                || self.0.lock().unwrap().helper_remove_fail.as_deref() == Some(id)
+            {
+                return Err("helper termination unverified".into());
+            }
+            self.0.lock().unwrap().helpers.remove(id);
+            if id == "helper2" && pending == Some("inspect") {
+                self.call(format!("helper-inspect-pending {id}"));
+                std::future::pending::<()>().await;
+            }
+            self.call(format!("helper-gone {id}"));
+            Ok(())
         })
     }
 
@@ -1590,6 +1686,401 @@ fn new_ref() -> String {
 }
 
 #[tokio::test]
+async fn supervised_recreate_backs_up_before_both_drains_and_snapshots_before_replacement() {
+    let r = rig();
+    r.fake.0.lock().unwrap().supervised = true;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Succeeded, "{run:#?}");
+    let calls = r.fake.calls();
+    let expected = [
+        "backup c0",
+        "drain-jobs c0",
+        "drain c0",
+        "hot:probe",
+        "hot:begin",
+        "hot:pause",
+        "hot:snapshot",
+        "stop c0",
+        "remove c0",
+    ];
+    let positions: Vec<_> = expected
+        .iter()
+        .map(|name| calls.iter().position(|s| s == name).unwrap())
+        .collect();
+    assert!(positions.windows(2).all(|p| p[0] < p[1]), "{calls:?}");
+    assert!(calls.iter().any(|c| c == "hot:commit"));
+    assert_eq!(r.fake.0.lock().unwrap().snapshot_database, 2);
+}
+
+#[tokio::test]
+async fn supervised_recreate_rollback_keeps_the_post_zip_write() {
+    let r = rig();
+    r.fake.0.lock().unwrap().supervised = true;
+    r.fake.fail(&format!("health:{}", new_ref()));
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::RolledBack, "{run:#?}");
+    let calls = r.fake.calls();
+    assert!(
+        calls.iter().any(|c| c == "hot:restore-database"),
+        "{calls:?}"
+    );
+    assert!(!calls.iter().any(|c| c.starts_with("restore ")));
+    assert_eq!(r.fake.0.lock().unwrap().database, 2);
+    assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
+}
+
+#[tokio::test]
+async fn supervised_recreate_snapshot_failure_resumes_without_replacing() {
+    let r = rig();
+    r.fake.0.lock().unwrap().supervised = true;
+    r.fake.fail("hot:snapshot");
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Failed, "{run:#?}");
+    let calls = r.fake.calls();
+    assert!(calls.iter().any(|c| c == "hot:cancel-pause"));
+    assert!(calls.iter().any(|c| c == "resume c0"));
+    assert!(!calls.iter().any(|c| c.starts_with("remove ")));
+}
+
+#[tokio::test]
+async fn supervised_recreate_backup_failure_never_drains() {
+    let r = rig();
+    r.fake.0.lock().unwrap().supervised = true;
+    r.fake.fail("backup");
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Failed);
+    assert!(
+        !r.fake
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("drain") || c == "hot:pause")
+    );
+}
+
+#[tokio::test]
+async fn supervised_recreate_uncertain_restore_never_starts_old_daemon_or_cleans_snapshot() {
+    let r = rig();
+    r.fake.0.lock().unwrap().supervised = true;
+    r.fake.fail(&format!("health:{}", new_ref()));
+    r.fake.fail("hot:restore-database");
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::RecoveryFailed, "{run:#?}");
+    let calls = r.fake.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c == &format!("create:{OLD} new") || c == "hot:commit")
+    );
+    assert!(r.fake.running_image().is_none());
+}
+
+#[tokio::test]
+async fn supervised_recreate_pending_snapshot_recovers_within_original_hold_budget() {
+    let mut r = rig();
+    Arc::get_mut(&mut r.updater).unwrap().hot_budget = (
+        Duration::from_secs(12),
+        Duration::from_secs(6),
+        Duration::from_secs(1),
+    );
+    {
+        let mut s = r.fake.0.lock().unwrap();
+        s.supervised = true;
+        s.pending_once = Some("snapshot".into());
+    }
+    let run = tokio::time::timeout(
+        Duration::from_secs(13),
+        r.updater.run_now(RunKind::Update, "latest", "operator"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(run.outcome, Outcome::Failed, "{run:#?}");
+    let calls = r.fake.calls();
+    assert!(calls.iter().any(|c| c == "pending-once"));
+    assert!(calls.iter().any(|c| c == "hot:cancel-pause"));
+    assert!(calls.iter().any(|c| c == "resume c0"));
+    assert!(!calls.iter().any(|c| c.starts_with("remove ")));
+}
+
+#[tokio::test]
+async fn supervised_recreate_pending_replacement_stages_share_the_drain_deadline() {
+    let mut cases = tokio::task::JoinSet::new();
+    for stage in ["remove", "create", "resume"] {
+        cases.spawn(async move {
+            let mut r = rig();
+            Arc::get_mut(&mut r.updater).unwrap().hot_budget = (
+                Duration::from_secs(20),
+                Duration::from_secs(7),
+                Duration::from_secs(1),
+            );
+            {
+                let mut s = r.fake.0.lock().unwrap();
+                s.supervised = true;
+                // Consume budget before snapshot. A clock reset there would
+                // add these seconds back and miss this test's total bound.
+                s.jobs_delay = Duration::from_secs(3);
+                s.pending_engine = if stage == "resume" { None } else { Some(stage) };
+                s.resume_hang = stage == "resume";
+            }
+            let run = tokio::time::timeout(
+                Duration::from_secs(21),
+                r.updater.run_now(RunKind::Update, "latest", "operator"),
+            )
+            .await
+            .expect("replacement and recovery must share the original drain deadline");
+            assert_eq!(run.outcome, Outcome::RecoveryFailed, "{stage}: {run:#?}");
+            let calls = r.fake.calls();
+            assert!(
+                calls.iter().any(|c| c.starts_with("stop-for-recovery ")),
+                "{stage}: {calls:?}"
+            );
+            assert!(!calls.iter().any(|c| c == "hot:commit"), "{stage}");
+            if stage == "resume" {
+                assert!(calls.iter().any(|c| c == "resume c1"));
+                assert!(!calls.iter().any(|c| c == "hot:restore-database"));
+                assert_eq!(calls.last().unwrap(), "stop-for-recovery c1");
+            } else {
+                assert!(calls.iter().any(|c| c == &format!("pending-{stage}")));
+            }
+        });
+    }
+    while let Some(result) = cases.join_next().await {
+        result.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn supervised_recreate_local_resume_timeout_never_commits_or_rewinds() {
+    let mut cases = tokio::task::JoinSet::new();
+    for recovering in [false, true] {
+        cases.spawn(async move {
+            let mut r = rig();
+            let updater = Arc::get_mut(&mut r.updater).unwrap();
+            updater.cfg.health_poll = Duration::from_millis(100);
+            updater.hot_budget = (
+                Duration::from_secs(100),
+                Duration::from_secs(35),
+                Duration::from_secs(5),
+            );
+            {
+                let mut s = r.fake.0.lock().unwrap();
+                s.supervised = true;
+                // Resume commands succeed, but status never proves admission.
+                s.resume_status = Some(r#"{"drain":{"on":true,"jobs_drain":{}}}"#.into());
+            }
+            if recovering {
+                r.fake.fail(&format!("health:{}", new_ref()));
+            }
+            let run = tokio::time::timeout(
+                Duration::from_secs(45),
+                r.updater.run_now(RunKind::Update, "latest", "operator"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                run.outcome,
+                Outcome::RecoveryFailed,
+                "{recovering}: {run:#?}"
+            );
+            let calls = r.fake.calls();
+            let restored = calls
+                .iter()
+                .filter(|c| *c == "hot:restore-database")
+                .count();
+            assert_eq!(restored, usize::from(recovering));
+            assert!(!calls.iter().any(|c| c == "hot:commit"));
+            assert!(calls.last().unwrap().starts_with("stop-for-recovery "));
+            assert!(
+                run.steps
+                    .iter()
+                    .any(|s| s.name == "resume" && s.state == StepState::Failed)
+            );
+            assert!(
+                !run.error.unwrap().contains("hold safety deadline"),
+                "must exhaust the local 30-second timeout before switch expiry"
+            );
+        });
+    }
+    while let Some(result) = cases.join_next().await {
+        result.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn supervised_explicit_rollback_verifies_pending_restore_helper_before_recovery() {
+    let mut cases = tokio::task::JoinSet::new();
+    for verified in [true, false] {
+        cases.spawn(async move {
+            let mut r = rig();
+            Arc::get_mut(&mut r.updater).unwrap().hot_budget = (
+                Duration::from_secs(35),
+                Duration::from_secs(17),
+                Duration::from_secs(2),
+            );
+            r.store
+                .set_previous(&Previous {
+                    image: old_image(),
+                    spec: Some(serde_json::json!({"Name":"/terrarium"})),
+                    backup: Some("/state/backups/previous.zip".into()),
+                })
+                .unwrap();
+            {
+                let mut s = r.fake.0.lock().unwrap();
+                s.supervised = true;
+                s.pending_once = Some("restore".into());
+                s.helper_remove_fail = (!verified).then(|| "helper2".into());
+            }
+            let run = tokio::time::timeout(
+                Duration::from_secs(36),
+                r.updater.run_now(RunKind::Rollback, "previous", "operator"),
+            )
+            .await
+            .unwrap();
+            let calls = r.fake.calls();
+            assert!(calls.iter().any(|c| c == "pending-restore"));
+            assert!(calls.iter().any(|c| c == "helper-remove helper2"));
+            let created = calls
+                .iter()
+                .position(|c| c == "helper-created helper2")
+                .unwrap();
+            let started = calls
+                .iter()
+                .position(|c| c == "helper-start helper2")
+                .unwrap();
+            assert!(created < started);
+            assert!(
+                run.steps
+                    .iter()
+                    .any(|s| s.detail.contains("recorded helper helper2 before start"))
+            );
+            if verified {
+                assert_eq!(run.outcome, Outcome::RolledBack, "{run:#?}");
+                let gone = calls
+                    .iter()
+                    .position(|c| c == "helper-gone helper2")
+                    .unwrap();
+                assert!(
+                    gone < calls
+                        .iter()
+                        .position(|c| c == "hot:restore-database")
+                        .unwrap()
+                );
+                assert!(
+                    gone < calls
+                        .iter()
+                        .position(|c| c == &format!("create:{OLD} new"))
+                        .unwrap()
+                );
+                assert!(r.fake.0.lock().unwrap().helpers.is_empty());
+            } else {
+                assert_eq!(run.outcome, Outcome::RecoveryFailed, "{run:#?}");
+                assert!(!calls.iter().any(|c| c == "hot:restore-database"
+                    || c.starts_with("create:")
+                    || c == "hot:commit"));
+                assert!(calls.last().unwrap().starts_with("stop-for-recovery "));
+            }
+        });
+    }
+    while let Some(result) = cases.join_next().await {
+        result.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn hot_rollback_unverified_restore_helper_never_restarts_old_release() {
+    let r = rig();
+    {
+        let mut s = r.fake.0.lock().unwrap();
+        s.hot = true;
+        s.helper_remove_fail = Some("helper2".into());
+    }
+    r.fake.fail(&format!("health:{}", new_ref()));
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::RecoveryFailed, "{run:#?}");
+    let calls = r.fake.calls();
+    assert!(calls.iter().any(|c| c == "helper-remove helper2"));
+    assert_eq!(calls.iter().filter(|c| *c == "hot:start").count(), 1);
+    assert!(!calls.iter().any(|c| c == "hot:commit"));
+    assert_eq!(calls.last().unwrap(), "stop-for-recovery c0");
+}
+
+#[tokio::test]
+async fn pending_helper_delete_or_inspect_leaves_final_stop_reserve_on_both_paths() {
+    let mut cases = tokio::task::JoinSet::new();
+    for hot in [false, true] {
+        for phase in ["delete", "inspect"] {
+            cases.spawn(async move {
+                let mut r = rig();
+                Arc::get_mut(&mut r.updater).unwrap().hot_budget = (
+                    Duration::from_secs(20),
+                    Duration::from_secs(8),
+                    Duration::from_secs(2),
+                );
+                {
+                    let mut s = r.fake.0.lock().unwrap();
+                    s.hot = hot;
+                    s.supervised = !hot;
+                    s.pending_helper_termination = Some(phase);
+                    // A stop must actually finish, not merely be polled at an
+                    // expired deadline after helper termination used its time.
+                    s.recovery_stop_delay = Duration::from_millis(250);
+                }
+                r.fake.fail(&format!("health:{}", new_ref()));
+                let run = tokio::time::timeout(
+                    Duration::from_secs(21),
+                    r.updater.run_now(RunKind::Update, "latest", "operator"),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    run.outcome,
+                    Outcome::RecoveryFailed,
+                    "hot={hot} phase={phase}: {run:#?}"
+                );
+                let calls = r.fake.calls();
+                assert!(
+                    calls
+                        .iter()
+                        .any(|c| c == &format!("helper-{phase}-pending helper2")),
+                    "{calls:?}"
+                );
+                assert!(
+                    calls.last().unwrap().starts_with("stop-confirmed "),
+                    "{calls:?}"
+                );
+                assert!(!calls.iter().any(|c| c == "hot:commit"));
+                assert_eq!(
+                    calls.iter().filter(|c| *c == "hot:start").count(),
+                    usize::from(hot)
+                );
+                assert!(!calls.iter().any(|c| c == &format!("create:{OLD} new")));
+                assert!(run.error.unwrap().contains("termination deadline elapsed"));
+            });
+        }
+    }
+    while let Some(result) = cases.join_next().await {
+        result.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn an_update_drains_backs_up_and_switches_the_image() {
     let r = rig();
     let run = r
@@ -1635,6 +2126,11 @@ async fn an_update_drains_backs_up_and_switches_the_image() {
     assert_eq!(run.from.unwrap().reference, OLD);
     assert_eq!(run.to.unwrap().version.as_deref(), Some("0.2.0"));
     assert_eq!(run.backup.as_deref(), Some(BACKUP));
+    assert!(
+        run.steps
+            .iter()
+            .any(|s| s.detail.contains("legacy recreate: backup after drain"))
+    );
     // The way back and the image for the deploy wrapper.
     let prev = r.store.previous().unwrap();
     assert_eq!(prev.image.reference, OLD);
