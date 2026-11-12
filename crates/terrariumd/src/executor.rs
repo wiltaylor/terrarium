@@ -1512,6 +1512,36 @@ impl Executor {
         }
     }
 
+    /// Wait for reconnect enforcement without holding the lock it needs.
+    /// Return the admission guard so callers retain the existing atomic
+    /// budget check and session registration boundary.
+    pub(crate) async fn target_admission(
+        &self,
+        def: &TargetDef,
+    ) -> ApiResult<tokio::sync::OwnedMutexGuard<()>> {
+        let lock = self.target_resource_lock(def);
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let guard = lock.clone().lock_owned().await;
+                if !def
+                    .host
+                    .as_deref()
+                    .is_some_and(|h| self.resource_pending(h))
+                {
+                    return guard;
+                }
+                drop(guard);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            ApiError::conflict(
+                "host reservation reconciliation is pending; retry after enforcement is restored",
+            )
+        })
+    }
+
     pub fn resource_verb_idle(&self, host: &str) -> ApiResult<()> {
         if let Some(count) = self
             .resource_verbs
@@ -2290,7 +2320,7 @@ async fn start_exec_secrets(
     if let Some(sync) = &sync {
         sync.translate_cmd(&mut cmd);
     }
-    let resources = state.executor.target_resource_lock(&def).lock_owned().await;
+    let resources = state.executor.target_admission(&def).await?;
     let (run, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     // The output is redacted for the caller (PLAN §16b.6, TER-33).
     let view = match actor {
@@ -2408,7 +2438,7 @@ pub async fn start_tool_exec(
     cmd.pty = None;
     cmd.holder = holder_of(actor);
     cmd.operator = actor.is_operator();
-    let resources = state.executor.target_resource_lock(&def).lock_owned().await;
+    let resources = state.executor.target_admission(&def).await?;
     let (running, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     let (sess, ctl) = ExecSession::new(
         name,
@@ -3522,7 +3552,11 @@ pub async fn lifecycle(
     // changes refuse this host while a verb runs, without holding a mutex
     // across image pulls or blocking work on any other host.
     let _resource_verb = if def.kind == TargetKind::Docker {
-        let _admission = state.executor.target_resource_lock(def).lock_owned().await;
+        let _admission = if verb_kind == V::Up {
+            state.executor.target_admission(def).await?
+        } else {
+            state.executor.target_resource_lock(def).lock_owned().await
+        };
         if verb_kind == V::Up {
             crate::reservations::lifecycle_admission(state, def)?;
         }
@@ -3531,6 +3565,7 @@ pub async fn lifecycle(
         None
     };
     if verb_kind == V::Up && def.kind != TargetKind::Docker {
+        let _admission = state.executor.target_admission(def).await?;
         crate::reservations::lifecycle_admission(state, def)?;
     }
     let mut add_snapshot = None;
@@ -5636,6 +5671,52 @@ pub async fn checkout_on_target(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn target_admission_waits_for_reconciliation_without_holding_its_lock() {
+        let executor = Arc::new(Executor::default());
+        let def: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
+        executor.set_resource_pending("h", true);
+        let waiting = {
+            let executor = executor.clone();
+            tokio::spawn(async move { executor.target_admission(&def).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        let reconcile = executor.resource_lock("h").try_lock_owned().unwrap();
+        let epoch = executor.resource_epoch("h");
+        assert!(executor.finish_resource_reconcile("h", epoch.as_deref()));
+        drop(reconcile);
+        tokio::time::advance(Duration::from_millis(50)).await;
+        let guard = waiting.await.unwrap().unwrap();
+        assert!(executor.resource_lock("h").try_lock_owned().is_err());
+        drop(guard);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn target_admission_refuses_when_reconciliation_deadline_passes() {
+        let executor = Executor::default();
+        let def: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
+        executor.set_resource_pending("h", true);
+        let started = tokio::time::Instant::now();
+        let error = executor.target_admission(&def).await.unwrap_err();
+        assert!(error.to_string().contains("reconciliation is pending"));
+        assert_eq!(started.elapsed(), Duration::from_secs(60));
+        assert!(executor.resource_pending("h"));
+        assert!(executor.resource_lock("h").try_lock_owned().is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn target_admission_deadline_includes_the_reconciliation_lock() {
+        let executor = Executor::default();
+        let def: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
+        executor.set_resource_pending("h", true);
+        let _reconcile = executor.resource_lock("h").lock_owned().await;
+        let started = tokio::time::Instant::now();
+        assert!(executor.target_admission(&def).await.is_err());
+        assert_eq!(started.elapsed(), Duration::from_secs(60));
+        assert!(executor.resource_pending("h"));
+    }
+
     #[test]
     fn own_key_redaction_covers_individual_pem_lines() {
         let body = "dummy-base64-private-key-line-for-redaction";
