@@ -131,7 +131,12 @@ mod tests {
         let r = request();
         drop(Bootstrap::allocate(&roots, r.clone(), Fake { calls: 0, fail: 0 }).unwrap());
         assert!(Bootstrap::allocate(&roots, r.clone(), Fake { calls: 0, fail: 0 }).is_err());
-        let store = Store::fixture(&dir.path().join("bootstrap").join(r.registration.0.to_string())).unwrap();
+        let store = Store::fixture(
+            &dir.path()
+                .join("bootstrap")
+                .join(r.registration.0.to_string()),
+        )
+        .unwrap();
         let mut recovered = Bootstrap::new(store, Fake { calls: 0, fail: 0 });
         assert_eq!(recovered.create_prepared(), Err(Reply::Conflict));
         assert_eq!(recovered.retry(&r), Err(Reply::Quarantined));
@@ -205,7 +210,12 @@ impl<B: Backend> Bootstrap<B> {
         Journal::new(request.clone())?;
         backend.check_absent(&request)?;
         let store = roots.begin(request.clone())?;
-        Ok(Self { store, backend, fenced: false, prepared: Some(request) })
+        Ok(Self {
+            store,
+            backend,
+            fenced: false,
+            prepared: Some(request),
+        })
     }
 
     pub fn create_prepared(&mut self) -> Result<(), Reply> {

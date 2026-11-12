@@ -61,9 +61,18 @@ impl Roots {
             identities.push(identity);
         }
         // Inode inequality alone does not reject ancestry or bind aliases.
-        let roots = [&self.publisher, &self.staging, &self.registration, &self.bootstrap];
+        let roots = [
+            &self.publisher,
+            &self.staging,
+            &self.registration,
+            &self.bootstrap,
+        ];
         for (i, root) in roots.iter().enumerate() {
-            let others: Vec<_> = roots.iter().enumerate().filter_map(|(j, other)| (i != j).then_some(*other)).collect();
+            let others: Vec<_> = roots
+                .iter()
+                .enumerate()
+                .filter_map(|(j, other)| (i != j).then_some(*other))
+                .collect();
             super::confinement::validate(&[*root], &others)?;
         }
         Ok(())
@@ -219,6 +228,11 @@ mod tests {
         std::fs::create_dir(&nested).unwrap();
         roots.staging = ProtectedRoot::fixture(&nested);
         assert!(roots.begin(request()).is_err());
-        assert_eq!(std::fs::read_dir(dir.path().join("bootstrap")).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("bootstrap"))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 }
