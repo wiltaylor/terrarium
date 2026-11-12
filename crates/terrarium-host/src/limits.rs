@@ -176,6 +176,7 @@ pub fn wrap(plan: &mut ExecPlan, slice: &str, scope: &str) {
 /// have it. Then it is `/run/user/<uid>`, when that exists.
 pub fn user_bus_env() -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
+    #[cfg(unix)]
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
         let dir = format!("/run/user/{}", nix::unistd::getuid());
         if Path::new(&dir).is_dir() {

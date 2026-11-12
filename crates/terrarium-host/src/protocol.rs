@@ -1187,20 +1187,39 @@ impl HostFrame {
 }
 
 /// Parse a signal name from a `signal` frame.
-pub fn parse_signal(name: &str) -> Option<nix::sys::signal::Signal> {
-    use nix::sys::signal::Signal as S;
+#[cfg(unix)]
+pub use nix::sys::signal::Signal as SessionSignal;
+
+/// Windows has no POSIX signals. Only termination requests are accepted.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSignal {
+    SIGINT = 2,
+    SIGKILL = 9,
+    SIGTERM = 15,
+}
+
+pub fn parse_signal(name: &str) -> Option<SessionSignal> {
+    use SessionSignal as S;
     let upper = name.trim().to_ascii_uppercase();
     let name = upper.strip_prefix("SIG").unwrap_or(&upper);
     Some(match name {
         "INT" => S::SIGINT,
         "TERM" => S::SIGTERM,
         "KILL" => S::SIGKILL,
+        #[cfg(unix)]
         "HUP" => S::SIGHUP,
+        #[cfg(unix)]
         "QUIT" => S::SIGQUIT,
+        #[cfg(unix)]
         "USR1" => S::SIGUSR1,
+        #[cfg(unix)]
         "USR2" => S::SIGUSR2,
+        #[cfg(unix)]
         "WINCH" => S::SIGWINCH,
+        #[cfg(unix)]
         "CONT" => S::SIGCONT,
+        #[cfg(unix)]
         "STOP" => S::SIGSTOP,
         _ => return None,
     })

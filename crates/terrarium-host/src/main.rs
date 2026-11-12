@@ -486,12 +486,19 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         Err(e) => tracing::warn!(error = %e, "self-update is off: cannot find the running binary"),
     }
     let client = Client::new(opts);
+    #[cfg(unix)]
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("install the SIGTERM handler")?;
+    let terminated = async {
+        #[cfg(unix)]
+        term.recv().await;
+        #[cfg(windows)]
+        std::future::pending::<()>().await;
+    };
     tokio::select! {
         () = client.run() => {}
         _ = tokio::signal::ctrl_c() => tracing::info!("interrupted"),
-        _ = term.recv() => tracing::info!("terminated"),
+        _ = terminated => tracing::info!("terminated"),
     }
     Ok(())
 }

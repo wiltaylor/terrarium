@@ -131,6 +131,7 @@ impl PushFile {
         let r = async {
             self.file.flush().await.map_err(io("flush", &self.tmp))?;
             self.file.sync_all().await.map_err(io("sync", &self.tmp))?;
+            #[cfg(unix)]
             if let Some(mode) = self.mode {
                 use std::os::unix::fs::PermissionsExt;
                 tokio::fs::set_permissions(&self.tmp, std::fs::Permissions::from_mode(mode))

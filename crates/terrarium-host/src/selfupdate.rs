@@ -24,6 +24,7 @@
 //! `hello.update_failed`.
 
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -372,17 +373,19 @@ pub async fn stage(bin: &Path, data: &[u8], want_version: &str) -> Result<PathBu
 }
 
 fn write_file(path: &Path, data: &[u8], mode: u32) -> Result<(), UpdateError> {
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(mode)
-        .open(path)
-        .map_err(io_err(path))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(mode);
+    #[cfg(windows)]
+    let _ = mode;
+    let mut f = options.open(path).map_err(io_err(path))?;
     f.write_all(data).map_err(io_err(path))?;
     f.sync_all().map_err(io_err(path))?;
     drop(f);
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(io_err(path))
+    #[cfg(unix)]
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(io_err(path))?;
+    Ok(())
 }
 
 /// Run `<path> --version`: it must exit 0 and print the version `want`
@@ -446,7 +449,7 @@ async fn run_version(path: &Path) -> std::io::Result<std::process::Output> {
             .await;
         match r {
             Err(e)
-                if e.raw_os_error() == Some(nix::errno::Errno::ETXTBSY as i32)
+                if cfg!(unix) && e.raw_os_error() == Some(26)
                     && began.elapsed() < BUSY_RETRY =>
             {
                 tokio::time::sleep(BUSY_PAUSE).await;

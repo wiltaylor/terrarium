@@ -254,9 +254,11 @@ fn credential(
     }
     if let Some(k) = env.get("TERRARIUM_GIT_SSH_KEY") {
         use std::io::Write;
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let mut f = tempfile::NamedTempFile::new_in(tmp_dir)
             .map_err(|e| io(format!("cannot write the key file: {e}")))?;
+        #[cfg(unix)]
         f.as_file()
             .set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(|e| io(format!("cannot set the key file mode: {e}")))?;

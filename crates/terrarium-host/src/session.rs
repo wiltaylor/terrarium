@@ -11,8 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nix::sys::signal::{Signal, killpg};
+#[cfg(unix)]
+use nix::sys::signal::killpg;
+#[cfg(unix)]
 use nix::unistd::Pid;
+use crate::protocol::SessionSignal as Signal;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -60,12 +63,14 @@ impl PrivateFile {
     /// Write `data` to a new file `<prefix><random>` in `dir`. The dir is
     /// checked with [`private_dir`] first.
     pub fn new(dir: &Path, prefix: &str, data: &[u8]) -> std::io::Result<Self> {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         private_dir(dir)?;
-        let mut f = tempfile::Builder::new()
-            .prefix(prefix)
-            .permissions(std::fs::Permissions::from_mode(0o600))
-            .tempfile_in(dir)?;
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(prefix);
+        #[cfg(unix)]
+        builder.permissions(std::fs::Permissions::from_mode(0o600));
+        let mut f = builder.tempfile_in(dir)?;
         f.write_all(data)?;
         f.flush()?;
         Ok(Self(Arc::new(f.into_temp_path())))
@@ -88,6 +93,7 @@ impl Eq for PrivateFile {}
 /// it is private: `dir` must be a real dir (not a symlink) of this user, and
 /// its parent a real dir of this user or a sticky dir of root (like `/tmp`,
 /// where no other user can rename or delete `dir`). `dir` gets mode 0700.
+#[cfg(unix)]
 pub fn private_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     std::fs::DirBuilder::new()
@@ -113,8 +119,46 @@ pub fn private_dir(dir: &Path) -> std::io::Result<()> {
 
 /// The ownership rule of [`private_dir`] for one dir: a real dir of `euid`,
 /// or for the parent also a sticky (`S_ISVTX`) dir of root.
+#[cfg(unix)]
 fn owned_ok(is_dir: bool, uid: u32, mode: u32, euid: u32, is_parent: bool) -> bool {
     is_dir && (uid == euid || (is_parent && uid == 0 && mode & 0o1000 != 0))
+}
+
+/// Windows service private storage: reject reparse points and grant only
+/// LocalSystem and local administrators. The installer protects its parent.
+#[cfg(windows)]
+pub fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    for ancestor in dir.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(m) if !m.is_dir() || m.file_attributes() & 0x400 != 0 => {
+                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "private directory has a reparse point or non-directory ancestor"));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    std::fs::create_dir_all(dir)?;
+    let script = r#"$ErrorActionPreference = 'Stop';
+        $acl = New-Object System.Security.AccessControl.DirectorySecurity;
+        $acl.SetAccessRuleProtection($true, $false);
+        foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+            $id = New-Object System.Security.Principal.SecurityIdentifier($sid);
+            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow');
+            $acl.AddAccessRule($rule);
+        }
+        Set-Acl -LiteralPath $env:TERRARIUM_PRIVATE_DIR -AclObject $acl;
+    "#;
+    let status = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("TERRARIUM_PRIVATE_DIR", dir)
+        .stdout(std::process::Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "cannot protect private directory ACL"));
+    }
+    Ok(())
 }
 
 /// Delete the files in `dir` whose name starts with `prefix`: the private
@@ -256,12 +300,24 @@ impl Capture {
     }
 }
 
+#[cfg(unix)]
 fn signal_group(pid: Option<u32>, sig: Signal) {
     let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) else {
         return;
     };
     if let Err(e) = killpg(Pid::from_raw(pid), sig) {
         tracing::debug!(pid, ?sig, error = %e, "killpg failed");
+    }
+}
+
+#[cfg(windows)]
+fn signal_group(pid: Option<u32>, _sig: Signal) {
+    if let Some(pid) = pid {
+        let _ = std::process::Command::new("taskkill.exe")
+            .args(["/F", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
 }
 
@@ -312,8 +368,9 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .process_group(0)
         .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
     if let Some(cwd) = &plan.cwd {
         cmd.current_dir(cwd);
     }
@@ -418,8 +475,13 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
         }
         let (code, signal) = match &status {
             Ok(st) => {
+                #[cfg(unix)]
                 use std::os::unix::process::ExitStatusExt;
-                (st.code(), st.signal())
+                #[cfg(unix)]
+                let signal = st.signal();
+                #[cfg(windows)]
+                let signal = None;
+                (st.code(), signal)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "wait failed");

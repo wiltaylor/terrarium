@@ -119,8 +119,9 @@ impl Runner for SystemRunner {
                 })
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .process_group(0);
+                .kill_on_drop(true);
+            #[cfg(unix)]
+            c.process_group(0);
             if let Some(d) = &cmd.cwd {
                 c.current_dir(d);
             }
