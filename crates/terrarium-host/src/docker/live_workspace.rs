@@ -3,6 +3,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::live_workspace::{Activation, Reply, RuntimeIdentity};
+#[cfg(test)]
+use terrarium_core::live_workspace::MountEvidence;
+#[cfg(test)]
+use crate::workspace_helper::mountinfo;
 
 /// Exact versions and topology must be measured again by B5 on any change.
 /// There is deliberately no production profile or default approved version.
@@ -16,6 +20,8 @@ pub struct Profile {
     pub rootful: bool,
     pub same_mount_namespace: bool,
     pub propagation_proven: bool,
+    pub userns_remap: bool,
+    pub namespace_creation_blocked: bool,
 }
 
 impl Profile {
@@ -24,6 +30,8 @@ impl Profile {
             || !self.rootful
             || !self.same_mount_namespace
             || !self.propagation_proven
+            || self.userns_remap
+            || !self.namespace_creation_blocked
             || [&self.kernel, &self.engine, &self.runc, &self.seccomp_digest]
                 .iter().any(|s| s.is_empty())
         {
@@ -66,12 +74,12 @@ fn create_flags(req: &Create, registration: &Registration, pinned: &Profile) -> 
     }
     let mut args: Vec<String> = ["create", "--name", &req.name, "--restart=no",
         "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
-        "--network=none", "--ipc=private", "--pid=private",
+        "--network=none", "--ipc=private", "--pid=private", "--cgroupns=private",
         "--mount"].into_iter().map(str::to_owned).collect();
     // Admission must reject userns-remap engines. The pinned default seccomp
     // profile must deny namespace creation. No caller security opts are allowed.
     args.push(format!("type=bind,src={},dst=/work,readonly,bind-propagation=rslave", registration.publisher));
-    args.extend(["--label".into(), format!("terrarium.workspace.registration={:?}", registration.runtime.registration)]);
+    args.extend(["--label".into(), format!("terrarium.workspace.registration={}", registration.runtime.registration.0)]);
     args.push(req.image.clone());
     args.extend(req.command.clone());
     Ok(args)
@@ -97,18 +105,43 @@ pub struct VerifiedScaffold {
     publisher: String,
 }
 
+/// Verification primitive for a newly created, empty scaffold. Not a grant or
+/// registration entry point. Kept test-only until B4 supplies serialized fresh
+/// acquisition from the helper's pinned runtime and protected publisher FD.
+#[cfg(test)]
+fn verify_empty_scaffold(
+    registration: &Registration,
+    host: &[MountEvidence],
+    receiver: &[MountEvidence],
+) -> Result<VerifiedScaffold, Reply> {
+    fn unique<'a>(view: &'a [MountEvidence], path: &str) -> Result<&'a MountEvidence, Reply> {
+        let mut found = view.iter().filter(|m| m.mountpoint == path);
+        let record = found.next().ok_or(Reply::Quarantined)?;
+        if found.next().is_some() { return Err(Reply::Quarantined); }
+        Ok(record)
+    }
+    if !safe_publisher(&registration.publisher) { return Err(Reply::Quarantined); }
+    let publisher = unique(host, &registration.publisher)?;
+    let work = unique(receiver, "/work")?;
+    if work.namespace != registration.runtime.namespace { return Err(Reply::Quarantined); }
+    mountinfo::publisher(publisher, work, host)?;
+    mountinfo::exact_children(host, publisher, &[])?;
+    mountinfo::exact_children(receiver, work, &[])?;
+    Ok(VerifiedScaffold { runtime:registration.runtime.clone(), publisher:registration.publisher.clone() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     fn fixture() -> (Registration, Create, Value) {
-        let profile = Profile { kernel: "synthetic-kernel".into(), engine: "synthetic-engine".into(), runc: "synthetic-runc".into(), seccomp_digest: "synthetic-profile".into(), rootful: true, same_mount_namespace: true, propagation_proven: true };
+        let profile = Profile { kernel: "synthetic-kernel".into(), engine: "synthetic-engine".into(), runc: "synthetic-runc".into(), seccomp_digest: "synthetic-profile".into(), rootful: true, same_mount_namespace: true, propagation_proven: true, userns_remap:false, namespace_creation_blocked:true };
         let registration: Registration = serde_json::from_value(json!({
             "runtime": {"registration":"01ARZ3NDEKTSV4RRFFQ69G5FAV", "incarnation":"01ARZ3NDEKTSV4RRFFQ69G5FAW", "container_id":"a".repeat(64), "namespace":{"device":1,"inode":2}},
             "publisher":"/var/lib/terrarium-workspace-helper/publishers/01ARZ3NDEKTSV4RRFFQ69G5FAV", "profile":profile
         })).unwrap();
         let req = Create { name: "synthetic".into(), image: "synthetic@sha256:abc".into(), command: vec!["sleep".into(), "600".into()] };
         let row = json!({"Id":"a".repeat(64), "State":{"Running":true}, "HostConfig":{
-            "Privileged":false, "RestartPolicy":{"Name":"no"}, "NetworkMode":"none", "IpcMode":"private", "PidMode":"private", "UsernsMode":"", "CapAdd":[], "CapDrop":["ALL"], "SecurityOpt":["no-new-privileges:true"]
+            "Privileged":false, "RestartPolicy":{"Name":"no"}, "NetworkMode":"none", "IpcMode":"private", "PidMode":"private", "CgroupnsMode":"private", "UsernsMode":"", "CapAdd":[], "CapDrop":["ALL"], "SecurityOpt":["no-new-privileges:true"], "Devices":[], "DeviceRequests":[], "Binds":null, "VolumesFrom":null, "Runtime":"runc", "ReadonlyPaths":["/proc/bus","/proc/fs","/proc/irq","/proc/sys","/proc/sysrq-trigger"], "MaskedPaths":["/proc/acpi","/proc/asound","/proc/interrupts","/proc/kcore","/proc/keys","/proc/latency_stats","/proc/timer_list","/proc/timer_stats","/proc/sched_debug","/proc/scsi","/sys/firmware","/sys/devices/virtual/powercap"]
         }, "Mounts":[{"Type":"bind", "Source":registration.publisher, "Destination":"/work", "RW":false, "Propagation":"rslave"}]});
         (registration, req, row)
     }
@@ -122,6 +155,28 @@ mod tests {
         assert_eq!(plan_create(Activation::Disabled, &req, &r, &r.profile), Err(Reply::Unsupported));
         assert!(serde_json::from_str::<Activation>("\"enabled\"").is_err());
         assert!(!crate::workspace_helper::service::capability().ready);
+    }
+    #[test]
+    fn kernel_evidence_is_required_and_exact() {
+        use terrarium_core::live_workspace::NamespaceIdentity;
+        let (r, _, _) = fixture();
+        let host = mountinfo::parse(format!("10 1 0:9 / {} rw,nosuid,nodev shared:42 - tmpfs tmpfs rw\n", r.publisher).as_bytes(), NamespaceIdentity {device:1,inode:1}).unwrap();
+        let receiver = mountinfo::parse(b"20 1 0:9 / /work ro,nosuid,nodev master:42 - tmpfs tmpfs rw\n", r.runtime.namespace.clone()).unwrap();
+        assert!(verify_empty_scaffold(&r, &host, &receiver).is_ok());
+        assert!(verify_empty_scaffold(&r, &[], &receiver).is_err());
+        assert!(verify_empty_scaffold(&r, &host, &[]).is_err());
+        for kind in 0..6 {
+            let mut h = host.clone(); let mut c = receiver.clone();
+            match kind {
+                0 => c[0].optional_fields.clear(),
+                1 => c[0].vfs_flags = vec!["rw".into()],
+                2 => c[0].namespace.inode = 99,
+                3 => h[0].root = "/foreign".into(),
+                4 => { let mut foreign = c[0].clone(); foreign.mountpoint = "/work/foreign".into(); c.push(foreign); },
+                _ => { let mut alias = h[0].clone(); alias.mountpoint = "/another-target".into(); h.push(alias); },
+            }
+            assert!(verify_empty_scaffold(&r, &h, &c).is_err(), "{kind}");
+        }
     }
     #[test]
     fn create_only_closed_configuration() {
@@ -142,9 +197,9 @@ mod tests {
     #[test]
     fn profile_changes_refuse() {
         let (r, _, _) = fixture();
-        for key in ["kernel", "engine", "runc", "seccomp_digest", "rootful", "same_mount_namespace", "propagation_proven"] {
+        for key in ["kernel", "engine", "runc", "seccomp_digest", "rootful", "same_mount_namespace", "propagation_proven", "userns_remap", "namespace_creation_blocked"] {
             let mut value = serde_json::to_value(&r.profile).unwrap();
-            value[key] = if value[key].is_boolean() { json!(false) } else { json!("other") };
+            value[key] = if let Some(b) = value[key].as_bool() { json!(!b) } else { json!("other") };
             let changed: Profile = serde_json::from_value(value).unwrap();
             assert!(changed.check(&r.profile).is_err(), "{key}");
         }
@@ -183,6 +238,7 @@ mod tests {
 /// Separate from the legacy rprivate workspace parser. Missing evidence fails
 /// closed. This result intentionally never contains workspace_mounts/attached.
 pub fn parse_verified_inspect(stdout: &str, registration: &Registration, pinned: &Profile, evidence: Option<&VerifiedScaffold>) -> Result<Value, Reply> {
+    if stdout.len() > 4 * 1024 * 1024 { return Err(Reply::Failed); }
     registration.profile.check(pinned)?;
     let evidence = evidence.ok_or(Reply::Quarantined)?;
     if evidence.runtime != registration.runtime || evidence.publisher != registration.publisher {
@@ -200,8 +256,14 @@ pub fn parse_verified_inspect(stdout: &str, registration: &Registration, pinned:
         || h["NetworkMode"] != "none"
         || h["IpcMode"] != "private"
         || h["PidMode"] != "private"
+        || h["CgroupnsMode"] != "private"
         || h["UsernsMode"] != ""
-        || h["CapAdd"] != json!([])
+        || !empty_list(&h["CapAdd"])
+        || !empty_list(&h["Devices"])
+        || !empty_list(&h["DeviceRequests"])
+        || !empty_list(&h["VolumesFrom"])
+        || !empty_list(&h["Binds"])
+        || h["Runtime"] != "runc"
         || h["CapDrop"] != json!(["ALL"])
         || h["SecurityOpt"] != json!(["no-new-privileges:true"])
         || mounts.len() != 1
@@ -212,4 +274,8 @@ pub fn parse_verified_inspect(stdout: &str, registration: &Registration, pinned:
         || mounts[0]["Propagation"] != "rslave"
     { return Err(Reply::Quarantined); }
     Ok(json!({"id": registration.runtime.container_id, "scaffold_verified": true}))
+}
+
+fn empty_list(value: &Value) -> bool {
+    value.is_null() || value.as_array().is_some_and(Vec::is_empty)
 }
