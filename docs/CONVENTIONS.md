@@ -40,7 +40,12 @@ Rules for dependencies:
   on both. Return an error, or handle the case. Tests may use them.
 - Libraries define their errors with `thiserror`. Binaries use `anyhow` and add
   context with `.context(...)`.
-- Do not write `unsafe` code. The workspace forbids it.
+- Do not write `unsafe` code outside the operator-approved boundaries. The
+  workspace forbids it. `terrarium-winapi` is Windows-only (empty on Linux)
+  and may wrap process creation, Job Objects, ConPTY, tokens/logon, and ACLs.
+  `terrarium-sys` is the separately approved Linux syscall boundary for
+  `mount_setattr`. Both exceptions require `// SAFETY:` comments, a small
+  safe public API, owned resources, and no exposed raw handles.
 - Log with `tracing`. Do not use `println!` in the daemon.
 - Serde names are `snake_case` for enums and fields, except restart policies,
   which are `kebab-case` (`on-failure`), as in the plan.
