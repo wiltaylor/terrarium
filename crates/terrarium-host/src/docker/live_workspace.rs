@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 #[cfg(test)]
 use terrarium_core::live_workspace::MountEvidence;
-use terrarium_core::live_workspace::{Activation, OperationId, RegistrationId, Reply, RuntimeId, RuntimeIdentity};
+use terrarium_core::live_workspace::{
+    Activation, OperationId, RegistrationId, Reply, RuntimeId, RuntimeIdentity,
+};
 
 /// Exact versions and topology must be measured again by B5 on any change.
 /// There is deliberately no production profile or default approved version.
@@ -71,8 +73,14 @@ fn create_flags(
     registration: &Registration,
     pinned: &Profile,
 ) -> Result<Vec<String>, Reply> {
-    fixed_create_flags(req, &registration.publisher, registration.runtime.registration,
-        registration.runtime.incarnation, &registration.profile, pinned)
+    fixed_create_flags(
+        req,
+        &registration.publisher,
+        registration.runtime.registration,
+        registration.runtime.incarnation,
+        &registration.profile,
+        pinned,
+    )
 }
 
 fn fixed_create_flags(
@@ -117,17 +125,11 @@ fn fixed_create_flags(
     ));
     args.extend([
         "--label".into(),
-        format!(
-            "terrarium.workspace.registration={}",
-            registration.0
-        ),
+        format!("terrarium.workspace.registration={}", registration.0),
     ]);
     args.extend([
         "--label".into(),
-        format!(
-            "terrarium.workspace.runtime={}",
-            incarnation.0
-        ),
+        format!("terrarium.workspace.runtime={}", incarnation.0),
     ]);
     args.push(req.image.clone());
     args.extend(req.command.clone());
@@ -147,7 +149,13 @@ pub(crate) fn bootstrap_create_flags(
 ) -> Result<Vec<String>, Reply> {
     let mut flags = fixed_create_flags(req, publisher, registration, incarnation, profile, pinned)?;
     let before_image = flags.len() - req.command.len() - 1;
-    flags.splice(before_image..before_image, ["--label".into(), format!("terrarium.workspace.bootstrap={}", operation.0)]);
+    flags.splice(
+        before_image..before_image,
+        [
+            "--label".into(),
+            format!("terrarium.workspace.bootstrap={}", operation.0),
+        ],
+    );
     Ok(flags)
 }
 

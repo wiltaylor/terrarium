@@ -27,13 +27,26 @@ impl Specification {
     }
 
     fn valid(&self) -> Result<(), Reply> {
-        let (name, digest) = self.image.split_once("@sha256:").ok_or(Reply::Unauthorized)?;
-        if name.is_empty() || name.starts_with('-') || name.len() > 512
-            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._:-".contains(&b))
+        let (name, digest) = self
+            .image
+            .split_once("@sha256:")
+            .ok_or(Reply::Unauthorized)?;
+        if name.is_empty()
+            || name.starts_with('-')
+            || name.len() > 512
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"/._:-".contains(&b))
             || digest.len() != 64
-            || !digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            || self.command.is_empty() || self.command.len() > 64
-            || self.command.iter().any(|v| v.len() > 4096 || v.as_bytes().contains(&0))
+            || !digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || self.command.is_empty()
+            || self.command.len() > 64
+            || self
+                .command
+                .iter()
+                .any(|v| v.len() > 4096 || v.as_bytes().contains(&0))
             || self.command.iter().map(String::len).sum::<usize>() > 16384
         {
             return Err(Reply::Unauthorized);
@@ -56,16 +69,33 @@ impl Specification {
         self.profile.check(measured)
     }
 
-    pub fn create_flags(&self, request: &Request, measured: &Profile) -> Result<Vec<String>, Reply> {
+    pub fn create_flags(
+        &self,
+        request: &Request,
+        measured: &Profile,
+    ) -> Result<Vec<String>, Reply> {
         self.verify(request, measured)?;
-        let publisher = format!("/var/lib/terrarium-workspace-helper/publishers/{}", request.registration.0);
+        let publisher = format!(
+            "/var/lib/terrarium-workspace-helper/publishers/{}",
+            request.registration.0
+        );
         let create = Create {
-            name: format!("terrarium-live-{}-{}", request.registration.0, request.incarnation.0),
+            name: format!(
+                "terrarium-live-{}-{}",
+                request.registration.0, request.incarnation.0
+            ),
             image: self.image.clone(),
             command: self.command.clone(),
         };
-        live_workspace::bootstrap_create_flags(&create, &publisher, request.registration,
-            request.incarnation, request.operation, &self.profile, measured)
+        live_workspace::bootstrap_create_flags(
+            &create,
+            &publisher,
+            request.registration,
+            request.incarnation,
+            request.operation,
+            &self.profile,
+            measured,
+        )
     }
 }
 
@@ -79,9 +109,15 @@ mod tests {
             image: format!("synthetic@sha256:{}", "a".repeat(64)),
             command: vec!["/bin/sleep".into(), "infinity".into()],
             profile: Profile {
-                kernel: "synthetic".into(), engine: "synthetic".into(), runc: "synthetic".into(),
-                seccomp_digest: "synthetic".into(), rootful: true, same_mount_namespace: true,
-                propagation_proven: true, userns_remap: false, namespace_creation_blocked: true,
+                kernel: "synthetic".into(),
+                engine: "synthetic".into(),
+                runc: "synthetic".into(),
+                seccomp_digest: "synthetic".into(),
+                rootful: true,
+                same_mount_namespace: true,
+                propagation_proven: true,
+                userns_remap: false,
+                namespace_creation_blocked: true,
             },
         }
     }
@@ -125,9 +161,15 @@ mod tests {
         assert_eq!(flags[0], "create");
         assert!(flags.iter().any(|f| f == "--pull=never"));
         assert!(flags.contains(&format!("terrarium.workspace.bootstrap={}", r.operation.0)));
-        assert!(flags.contains(&format!("terrarium.workspace.registration={}", r.registration.0)));
+        assert!(flags.contains(&format!(
+            "terrarium.workspace.registration={}",
+            r.registration.0
+        )));
         assert!(flags.contains(&format!("terrarium.workspace.runtime={}", r.incarnation.0)));
-        assert_eq!(&flags[flags.len() - 3..], &[spec.image.clone(), "/bin/sleep".into(), "infinity".into()]);
+        assert_eq!(
+            &flags[flags.len() - 3..],
+            &[spec.image.clone(), "/bin/sleep".into(), "infinity".into()]
+        );
     }
 
     #[test]
