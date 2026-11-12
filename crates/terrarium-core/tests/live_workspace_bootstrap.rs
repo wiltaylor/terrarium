@@ -56,6 +56,17 @@ fn steps(r: &Request) -> Vec<Step> {
 }
 
 #[test]
+fn missing_and_zero_configuration_digests_are_not_bootstrap_requests() {
+    let r = request();
+    let mut value = serde_json::to_value(&r).unwrap();
+    value.as_object_mut().unwrap().remove("configuration");
+    assert!(serde_json::from_value::<Request>(value).is_err());
+    let mut zero = r;
+    zero.configuration = [0; 32];
+    assert!(Journal::new(zero).is_err());
+}
+
+#[test]
 fn every_skipped_repeated_and_reordered_step_is_refused() {
     let r = request();
     let all = steps(&r);

@@ -21,6 +21,16 @@ intent or side effect. A caller supplies no image, command or profile override.
 Changing the helper specification requires a new operation, never replay under
 the old identity. A configured profile alone is not B5 approval or activation.
 
+Canonical receiver encoding is fixed-field-order compact JSON with domain and
+format `terrarium.workspace.receiver/v1`, no maps. It contains the specification
+and the effective fixed security options, receiver bind policy, administrative
+parents, receiver-name template, identity-label keys and host-mount policy
+version. The same security-option and bind-policy constants drive create flags.
+An effective policy or encoding change must update its digest contract and
+negative tests. Every retry and recovery must recheck protected configuration,
+even when returning a stored bootstrap result. Digest equality alone supplies
+neither fresh runtime evidence nor runtime-profile approval.
+
 The daemon first commits a FULL-synchronous immediate transaction recording its
 intent and reservation. The helper then syncs its immutable bootstrap intent
 and containing directory before creating anything. Every externally observed

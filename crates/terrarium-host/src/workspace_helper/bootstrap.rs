@@ -8,6 +8,9 @@ use terrarium_core::live_workspace::{Reply, RuntimeIdentity};
 /// Implementations must retain pinned scaffold/runtime FDs for the entire
 /// operation. Paths and Docker options are helper-selected, never request data.
 pub trait Backend {
+    /// Recompute from protected configuration and current runtime profile.
+    /// Required for retries too, including a previously committed result.
+    fn check_configuration(&mut self, request: &Request) -> Result<(), Reply>;
     /// Match the protected specification digest and measured runtime profile,
     /// then refuse existing children/runtimes, including apparently empty ones.
     /// This check is not ownership proof and must precede the initial intent.
@@ -38,9 +41,13 @@ mod tests {
     struct Fake {
         calls: usize,
         fail: usize,
+        configuration_changed: bool,
     }
 
     impl Fake {
+        fn fresh(fail: usize) -> Self {
+            Self { calls: 0, fail, configuration_changed: false }
+        }
         fn action(&mut self) -> Result<(), Reply> {
             self.calls += 1;
             if self.calls == self.fail {
@@ -52,6 +59,13 @@ mod tests {
     }
 
     impl Backend for Fake {
+        fn check_configuration(&mut self, r: &Request) -> Result<(), Reply> {
+            if self.configuration_changed || r.configuration != [1; 32] {
+                Err(Reply::Conflict)
+            } else {
+                Ok(())
+            }
+        }
         fn check_absent(&mut self, _: &Request) -> Result<(), Reply> {
             Ok(())
         }
@@ -113,12 +127,53 @@ mod tests {
     }
 
     #[test]
+    fn configuration_drift_fences_committed_retry_and_recovery() {
+        for complete in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::fixture(dir.path()).unwrap();
+            let r = request();
+            let mut b = Bootstrap::new(store, Fake::fresh(0));
+            if complete {
+                b.create(r.clone()).unwrap();
+            } else {
+                b.store.begin_bootstrap(&Journal::new(r.clone()).unwrap()).unwrap();
+            }
+            let calls = b.backend.calls;
+            b.backend.configuration_changed = true;
+            assert_eq!(b.retry(&r), Err(Reply::Quarantined));
+            assert!(b.store.load_bootstrap().unwrap().quarantined());
+            assert_eq!(b.backend.calls, calls);
+            drop(b);
+            let mut recovered = Bootstrap::new(Store::fixture(dir.path()).unwrap(), Fake::fresh(0));
+            // Restoring the old configuration cannot clear durable quarantine.
+            assert_eq!(recovered.retry(&r), Err(Reply::Quarantined));
+            assert_eq!(recovered.backend.calls, 0);
+        }
+    }
+
+    #[test]
+    fn configuration_drift_before_and_after_intent_never_creates_scaffold() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = super::super::registration_roots::Roots::fixture(dir.path());
+        let r = request();
+        let mut changed = Fake::fresh(0);
+        changed.configuration_changed = true;
+        assert!(Bootstrap::allocate(&roots, r.clone(), changed).is_err());
+        assert_eq!(std::fs::read_dir(dir.path().join("bootstrap")).unwrap().count(), 0);
+        let mut b = Bootstrap::allocate(&roots, r, Fake::fresh(0)).unwrap();
+        b.backend.configuration_changed = true;
+        assert_eq!(b.create_prepared(), Err(Reply::Quarantined));
+        assert_eq!(b.backend.calls, 0);
+        assert!(b.store.load_bootstrap().unwrap().quarantined());
+    }
+
+    #[test]
     fn fresh_metadata_mints_only_one_create_continuation() {
         let dir = tempfile::tempdir().unwrap();
         let roots = super::super::registration_roots::Roots::fixture(dir.path());
         let r = request();
-        let mut b = Bootstrap::allocate(&roots, r.clone(), Fake { calls: 0, fail: 0 }).unwrap();
-        assert!(Bootstrap::allocate(&roots, r.clone(), Fake { calls: 0, fail: 0 }).is_err());
+        let mut b = Bootstrap::allocate(&roots, r.clone(), Fake::fresh(0)).unwrap();
+        assert!(Bootstrap::allocate(&roots, r.clone(), Fake::fresh(0)).is_err());
         b.create_prepared().unwrap();
         assert_eq!(b.backend.calls, 4);
         assert_eq!(b.create_prepared(), Err(Reply::Conflict));
@@ -131,15 +186,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let roots = super::super::registration_roots::Roots::fixture(dir.path());
         let r = request();
-        drop(Bootstrap::allocate(&roots, r.clone(), Fake { calls: 0, fail: 0 }).unwrap());
-        assert!(Bootstrap::allocate(&roots, r.clone(), Fake { calls: 0, fail: 0 }).is_err());
+        drop(Bootstrap::allocate(&roots, r.clone(), Fake::fresh(0)).unwrap());
+        assert!(Bootstrap::allocate(&roots, r.clone(), Fake::fresh(0)).is_err());
         let store = Store::fixture(
             &dir.path()
                 .join("bootstrap")
                 .join(r.registration.0.to_string()),
         )
         .unwrap();
-        let mut recovered = Bootstrap::new(store, Fake { calls: 0, fail: 0 });
+        let mut recovered = Bootstrap::new(store, Fake::fresh(0));
         assert_eq!(recovered.create_prepared(), Err(Reply::Conflict));
         assert_eq!(recovered.retry(&r), Err(Reply::Quarantined));
         assert_eq!(recovered.backend.calls, 0);
@@ -151,7 +206,7 @@ mod tests {
         for fail in 1..=4 {
             let dir = tempfile::tempdir().unwrap();
             let store = Store::fixture(dir.path()).unwrap();
-            let mut b = Bootstrap::new(store, Fake { calls: 0, fail });
+            let mut b = Bootstrap::new(store, Fake::fresh(fail));
             let r = request();
             assert_eq!(b.create(r.clone()), Err(Reply::Quarantined));
             assert!(b.store.load_bootstrap().unwrap().quarantined());
@@ -167,7 +222,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = Store::fixture(dir.path()).unwrap();
             let r = request();
-            let mut b = Bootstrap::new(store, Fake { calls: 0, fail: 0 });
+            let mut b = Bootstrap::new(store, Fake::fresh(0));
             if complete {
                 b.create(r.clone()).unwrap();
             } else {
@@ -210,6 +265,7 @@ impl<B: Backend> Bootstrap<B> {
         mut backend: B,
     ) -> Result<Self, Reply> {
         Journal::new(request.clone())?;
+        backend.check_configuration(&request)?;
         backend.check_absent(&request)?;
         let store = roots.begin(request.clone())?;
         Ok(Self {
@@ -243,6 +299,7 @@ impl<B: Backend> Bootstrap<B> {
         if journal.original() != request {
             return Err(Reply::Conflict);
         }
+        self.check_configuration(&mut journal)?;
         journal.recover_without_evidence();
         self.store.save_bootstrap(&journal)?;
         journal.retry(request)
@@ -251,6 +308,16 @@ impl<B: Backend> Bootstrap<B> {
     fn advance(&mut self, journal: &mut Journal, step: Step) -> Result<(), Reply> {
         journal.advance(step)?;
         self.store.save_bootstrap(journal)
+    }
+
+    fn check_configuration(&mut self, journal: &mut Journal) -> Result<(), Reply> {
+        if self.backend.check_configuration(journal.original()).is_err() {
+            self.fenced = true;
+            journal.quarantine();
+            self.store.save_bootstrap(journal).map_err(|_| Reply::Quarantined)?;
+            return Err(Reply::Quarantined);
+        }
+        Ok(())
     }
 
     /// The caller has already authenticated the peer and admitted authority.
@@ -264,6 +331,7 @@ impl<B: Backend> Bootstrap<B> {
             return Err(Reply::Conflict);
         }
         let journal = Journal::new(request.clone())?;
+        self.backend.check_configuration(&request)?;
         self.backend.check_absent(&request)?;
         self.fenced = true;
         self.store.begin_bootstrap(&journal)?;
@@ -271,6 +339,7 @@ impl<B: Backend> Bootstrap<B> {
     }
 
     fn execute(&mut self, request: Request, mut journal: Journal) -> Result<(), Reply> {
+        self.check_configuration(&mut journal)?;
         let result = (|| {
             let scaffold = self.backend.create_scaffold(&request, &self.store)?;
             self.advance(&mut journal, Step::ScaffoldVerified(scaffold.clone()))?;

@@ -126,6 +126,12 @@ impl Journal {
         self.quarantined
     }
 
+    /// A failed fresh identity/configuration check fences even a previously
+    /// committed bootstrap. Stored success is not permission to ignore drift.
+    pub fn quarantine(&mut self) {
+        self.quarantined = true;
+    }
+
     pub fn committed(&self) -> bool {
         !self.quarantined && self.steps.last() == Some(&Step::Committed) && self.valid()
     }

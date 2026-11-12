@@ -14,6 +14,20 @@ pub struct Specification {
     profile: Profile,
 }
 
+/// Fixed field order, no maps and an explicit format/domain version. A change
+/// in effective fixed policy changes the digest too, not just config edits.
+#[derive(Serialize)]
+struct Canonical<'a> {
+    format: &'static str,
+    specification: &'a Specification,
+    security_options: &'static [&'static str],
+    receiver_bind_policy: &'static str,
+    administrative_parents: [&'static str; 4],
+    name_template: &'static str,
+    identity_labels: [&'static str; 3],
+    host_mount_policy: &'static str,
+}
+
 impl Specification {
     /// The caller reads these bytes from its pinned protected configuration,
     /// never from the bootstrap request or the unprivileged host forwarder.
@@ -56,7 +70,25 @@ impl Specification {
 
     pub fn digest(&self) -> Result<[u8; 32], Reply> {
         self.valid()?;
-        Ok(Sha256::digest(serde_json::to_vec(self).map_err(|_| Reply::Failed)?).into())
+        Ok(Sha256::digest(self.canonical_bytes()?).into())
+    }
+
+    fn canonical_bytes(&self) -> Result<Vec<u8>, Reply> {
+        serde_json::to_vec(&Canonical {
+            format: "terrarium.workspace.receiver/v1",
+            specification: self,
+            security_options: live_workspace::RECEIVER_SECURITY_OPTIONS,
+            receiver_bind_policy: live_workspace::RECEIVER_BIND_POLICY,
+            administrative_parents: [
+                "/var/lib/terrarium-workspace-helper/publishers",
+                "/var/lib/terrarium-workspace-helper/staging",
+                "/var/lib/terrarium-workspace-helper/registrations",
+                "/var/lib/terrarium-workspace-helper/bootstrap",
+            ],
+            name_template: "terrarium-live-{registration}-{incarnation}",
+            identity_labels: ["terrarium.workspace.registration", "terrarium.workspace.runtime", "terrarium.workspace.bootstrap"],
+            host_mount_policy: "v1:nonrecursive,private-surrounding,private-before-restrict,nosuid,nodev,exec-preserved,publisher-rw-unique-shared,staging-private",
+        }).map_err(|_| Reply::Failed)
     }
 
     /// Matching protected configuration and a measured profile is necessary,
@@ -132,6 +164,24 @@ mod tests {
             "incarnation": "00000000000000000000000005",
             "domain": "00000000000000000000000006"
         })).unwrap()
+    }
+
+    #[test]
+    fn canonical_v1_binds_effective_policy_and_rejects_old_digest() {
+        let spec = specification();
+        let bytes = spec.canonical_bytes().unwrap();
+        assert!(bytes.starts_with(b"{\"format\":\"terrarium.workspace.receiver/v1\",\"specification\":"));
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["security_options"], serde_json::json!(live_workspace::RECEIVER_SECURITY_OPTIONS));
+        assert_eq!(body["receiver_bind_policy"], live_workspace::RECEIVER_BIND_POLICY);
+        assert_eq!(body["administrative_parents"].as_array().unwrap().len(), 4);
+        let reordered = serde_json::to_vec(&serde_json::to_value(&spec).unwrap()).unwrap();
+        assert_eq!(Specification::from_config(&reordered).unwrap().digest(), spec.digest());
+        let mut r = request(&spec);
+        r.configuration = Sha256::digest(serde_json::to_vec(&spec).unwrap()).into();
+        assert_eq!(spec.verify(&r, &spec.profile), Err(Reply::Conflict));
+        r.configuration = [0; 32];
+        assert_eq!(spec.verify(&r, &spec.profile), Err(Reply::Unauthorized));
     }
 
     #[test]

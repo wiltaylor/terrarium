@@ -68,6 +68,14 @@ pub struct Create {
     pub command: Vec<String>,
 }
 
+// Included verbatim in the versioned protected receiver configuration digest.
+pub(crate) const RECEIVER_SECURITY_OPTIONS: &[&str] = &[
+    "--restart=no", "--pull=never", "--cap-drop=ALL",
+    "--security-opt=no-new-privileges:true", "--network=none",
+    "--ipc=private", "--cgroupns=private",
+];
+pub(crate) const RECEIVER_BIND_POLICY: &str = "dst=/work,readonly,bind-propagation=rslave";
+
 fn create_flags(
     req: &Create,
     registration: &Registration,
@@ -101,26 +109,16 @@ fn fixed_create_flags(
     {
         return Err(Reply::Unauthorized);
     }
-    let mut args: Vec<String> = [
-        "create",
-        "--name",
-        &req.name,
-        "--restart=no",
-        "--pull=never",
-        "--cap-drop=ALL",
-        "--security-opt=no-new-privileges:true",
-        "--network=none",
-        "--ipc=private",
-        "--cgroupns=private",
-        "--mount",
-    ]
+    let mut args: Vec<String> = ["create", "--name", &req.name]
     .into_iter()
     .map(str::to_owned)
     .collect();
+    args.extend(RECEIVER_SECURITY_OPTIONS.iter().map(|s| (*s).to_owned()));
+    args.push("--mount".into());
     // Admission must reject userns-remap engines. The pinned default seccomp
     // profile must deny namespace creation. No caller security opts are allowed.
     args.push(format!(
-        "type=bind,src={},dst=/work,readonly,bind-propagation=rslave",
+        "type=bind,src={},{RECEIVER_BIND_POLICY}",
         publisher
     ));
     args.extend([
