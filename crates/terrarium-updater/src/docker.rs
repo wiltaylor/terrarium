@@ -73,39 +73,67 @@ impl Docker {
         path: &str,
         body: Option<Value>,
     ) -> Res<(StatusCode, Bytes)> {
-        let stream = tokio::net::UnixStream::connect(&self.socket)
-            .await
-            .map_err(|e| format!("cannot reach Docker at {}: {e}", self.socket.display()))?;
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
-            .await
-            .map_err(|e| format!("Docker handshake: {e}"))?;
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
-        let mut b = Request::builder()
-            .method(method.clone())
-            .uri(path)
-            .header(header::HOST, "docker");
-        let bytes = match body {
-            Some(v) => {
-                b = b.header(header::CONTENT_TYPE, "application/json");
-                Bytes::from(serde_json::to_vec(&v).map_err(|e| e.to_string())?)
+        // Pulls and online backups may be long, but no transport operation
+        // may wait forever. Hot-swap recovery has a tighter outer deadline.
+        self.call_until(
+            method,
+            path,
+            body,
+            tokio::time::Instant::now() + Duration::from_secs(900),
+        )
+        .await
+    }
+
+    async fn call_until(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        deadline: tokio::time::Instant,
+    ) -> Res<(StatusCode, Bytes)> {
+        tokio::time::timeout_at(deadline, async {
+            let stream = tokio::net::UnixStream::connect(&self.socket)
+                .await
+                .map_err(|e| format!("cannot reach Docker at {}: {e}", self.socket.display()))?;
+            let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+                .await
+                .map_err(|e| format!("Docker handshake: {e}"))?;
+            struct Connection(tokio::task::JoinHandle<()>);
+            impl Drop for Connection {
+                fn drop(&mut self) {
+                    self.0.abort();
+                }
             }
-            None => Bytes::new(),
-        };
-        let req = b.body(Full::new(bytes)).map_err(|e| e.to_string())?;
-        let resp = sender
-            .send_request(req)
-            .await
-            .map_err(|e| format!("Docker {method} {path}: {e}"))?;
-        let status = resp.status();
-        let body = resp
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| format!("Docker {method} {path}: {e}"))?
-            .to_bytes();
-        Ok((status, body))
+            let _connection = Connection(tokio::spawn(async move {
+                let _ = conn.await;
+            }));
+            let mut b = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .header(header::HOST, "docker");
+            let bytes = match body {
+                Some(v) => {
+                    b = b.header(header::CONTENT_TYPE, "application/json");
+                    Bytes::from(serde_json::to_vec(&v).map_err(|e| e.to_string())?)
+                }
+                None => Bytes::new(),
+            };
+            let req = b.body(Full::new(bytes)).map_err(|e| e.to_string())?;
+            let resp = sender
+                .send_request(req)
+                .await
+                .map_err(|e| format!("Docker {method} {path}: {e}"))?;
+            let status = resp.status();
+            let body = resp
+                .into_body()
+                .collect()
+                .await
+                .map_err(|e| format!("Docker {method} {path}: {e}"))?
+                .to_bytes();
+            Ok((status, body))
+        })
+        .await
+        .map_err(|_| "Docker request deadline exceeded (values hidden)".to_owned())?
     }
 
     /// A call that must succeed; the JSON answer (or `null`).
@@ -861,6 +889,20 @@ impl Engine for Docker {
         })
     }
 
+    fn stop_for_recovery<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
+        Box::pin(async move {
+            // A manual Docker stop suppresses automatic restart. Do not wait
+            // the normal 650-second graceful stop on an unverified database.
+            self.ok(
+                Method::POST,
+                &format!("/containers/{}/stop?t=0", enc(id)),
+                None,
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
     fn remove<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
         Box::pin(async move {
             let (status, bytes) = self
@@ -1313,6 +1355,86 @@ mod tests {
         // Do not report an older error category when the last error differs.
         let changed = daemon_exit_reason("", "FOREIGN KEY constraint failed\npassword=do-not-record\nentrypoint: terrariumd ended (status 1)\n").unwrap();
         assert!(!changed.contains("FOREIGN KEY"));
+    }
+
+    #[tokio::test]
+    async fn docker_request_deadline_covers_headers_and_the_full_body_and_closes_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for stalled_body in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("docker.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    header.push(stream.read_u8().await.unwrap());
+                }
+                if stalled_body {
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx")
+                        .await
+                        .unwrap();
+                }
+                // Cancellation must also abort the detached hyper connection,
+                // not leave it reading an incomplete body indefinitely.
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).await.unwrap();
+            });
+            let docker = Docker {
+                socket,
+                target: None,
+            };
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                docker.call_until(
+                    Method::GET,
+                    "/pending",
+                    None,
+                    tokio::time::Instant::now() + Duration::from_millis(50),
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(result.unwrap_err().contains("request deadline exceeded"));
+            tokio::time::timeout(Duration::from_secs(1), server)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn uncertain_recovery_stops_without_normal_grace_or_restart() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("docker.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                header.push(stream.read_u8().await.unwrap());
+            }
+            assert!(
+                String::from_utf8(header)
+                    .unwrap()
+                    .starts_with("POST /containers/daemon/stop?t=0 HTTP/1.1")
+            );
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let docker = Docker {
+            socket,
+            target: None,
+        };
+        tokio::time::timeout(Duration::from_secs(1), docker.stop_for_recovery("daemon"))
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]

@@ -87,6 +87,10 @@ pub trait Engine: Send + Sync {
     fn exec<'a>(&'a self, id: &'a str, argv: Vec<String>) -> BoxFut<'a, Res<ExecOut>>;
     /// Stop the container gracefully (its stop timeout).
     fn stop<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>>;
+    /// Stop without allowing a daemon to restart on an unverified database.
+    fn stop_for_recovery<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
+        self.stop(id)
+    }
     /// Remove the container (and kill it when it runs).
     fn remove<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>>;
     /// Make a new container with the settings and the name of `spec` and

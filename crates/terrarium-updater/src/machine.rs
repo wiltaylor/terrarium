@@ -59,6 +59,16 @@ pub struct Config {
 pub const DEFAULT_REPOSITORY: &str = "ghcr.io/wiltaylor/terrarium";
 const HOT_SWAP_HOLD_LIMIT: Duration = Duration::from_secs(900);
 const HOT_SWAP_RECOVERY_RESERVE: Duration = Duration::from_secs(60);
+const HOT_SWAP_STOP_RESERVE: Duration = Duration::from_secs(5);
+
+async fn recovery_before_deadline<T>(
+    deadline: tokio::time::Instant,
+    work: impl std::future::Future<Output = Res<T>>,
+) -> Res<T> {
+    tokio::time::timeout_at(deadline, work).await.map_err(|_| {
+        "recovery exceeded the remaining runner hold budget; completion uncertain".to_owned()
+    })?
+}
 
 fn budget_left(deadline: tokio::time::Instant, reserve: Duration) -> Res<Duration> {
     deadline
@@ -191,6 +201,8 @@ pub struct Updater {
     running: Mutex<Option<Run>>,
     /// Held while a run runs.
     busy: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    hot_budget: (Duration, Duration, Duration),
 }
 
 fn now() -> String {
@@ -214,6 +226,12 @@ impl Updater {
             verifier,
             store,
             cfg,
+            #[cfg(test)]
+            hot_budget: (
+                HOT_SWAP_HOLD_LIMIT,
+                HOT_SWAP_RECOVERY_RESERVE,
+                HOT_SWAP_STOP_RESERVE,
+            ),
             running: Mutex::new(None),
             busy: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -601,8 +619,12 @@ impl Updater {
             let result = self.hot_swap(&cur, &to).await;
             // Healthy recovery and early failures must release job admission
             // too. Do not resume a daemon whose recovery failed.
-            if !matches!(&result, Err((Outcome::RollbackFailed, _))) {
-                self.resume(&cur).await;
+            if !matches!(
+                &result,
+                Err((Outcome::RollbackFailed | Outcome::RecoveryFailed, _))
+            ) {
+                // Recovery leaves this final reserve for ending jobs drain.
+                let _ = tokio::time::timeout(HOT_SWAP_STOP_RESERVE, self.resume(&cur)).await;
             }
             return result;
         }
@@ -709,8 +731,17 @@ impl Updater {
             .map_err(|e| failed(Fail(e)))?;
         // Staging is outside the hold window. Reserve one minute for recovery
         // rather than adding a fresh 15-minute health wait after a long drain.
-        let hold_deadline = tokio::time::Instant::now() + HOT_SWAP_HOLD_LIMIT;
-        let switch_deadline = hold_deadline - HOT_SWAP_RECOVERY_RESERVE;
+        #[cfg(not(test))]
+        let (hold_limit, recovery_reserve, stop_reserve) = (
+            HOT_SWAP_HOLD_LIMIT,
+            HOT_SWAP_RECOVERY_RESERVE,
+            HOT_SWAP_STOP_RESERVE,
+        );
+        #[cfg(test)]
+        let (hold_limit, recovery_reserve, stop_reserve) = self.hot_budget;
+        let hold_deadline = tokio::time::Instant::now() + hold_limit;
+        let switch_deadline = hold_deadline - recovery_reserve;
+        let recovery_deadline = hold_deadline - stop_reserve;
         if let Err(f) = self
             .step(
                 "pause-daemon",
@@ -728,22 +759,27 @@ impl Updater {
             )
             .await
         {
-            let recovery = async {
-                let left = budget_left(hold_deadline, Duration::ZERO)?
+            let recovery = recovery_before_deadline(recovery_deadline, async {
+                let left = budget_left(recovery_deadline, Duration::ZERO)?
                     .as_secs_f64()
                     .to_string();
                 self.exec_ok(&cur.id, hot_argv("cancel-pause", &[&left]))
                     .await?;
-                self.wait_hot_healthy_until(&cur.id, hold_deadline, None)
+                self.wait_hot_healthy_until(&cur.id, recovery_deadline, None)
                     .await
-            }
+            })
             .await;
             return Err(match recovery {
                 Ok(_) => failed(f),
-                Err(e) => (
-                    Outcome::RollbackFailed,
-                    Fail(format!("{}; cancel pause: {e}", f.0)),
-                ),
+                Err(e) => {
+                    self.failed_hot_recovery(
+                        cur,
+                        &backup,
+                        hold_deadline,
+                        format!("{}; cancel pause: {e}", f.0),
+                    )
+                    .await
+                }
             });
         }
 
@@ -779,25 +815,29 @@ impl Updater {
             Ok(_) => (),
             Err(f) => {
                 // No new code or migrations have run. Resume the original release.
-                let recovery = async {
-                    let left = budget_left(hold_deadline, Duration::ZERO)?
+                let recovery = recovery_before_deadline(recovery_deadline, async {
+                    let left = budget_left(recovery_deadline, Duration::ZERO)?
                         .as_secs_f64()
                         .to_string();
                     self.exec_ok(&cur.id, hot_argv("start", &[old.trim(), &left]))
                         .await?;
-                    self.wait_hot_healthy_until(&cur.id, hold_deadline, None)
+                    self.wait_hot_healthy_until(&cur.id, recovery_deadline, None)
                         .await?;
                     self.commit_with_retry(&cur.id, &[]).await
-                }
+                })
                 .await;
-                return Err((
-                    if recovery.is_ok() {
-                        Outcome::Failed
-                    } else {
-                        Outcome::RollbackFailed
-                    },
-                    f,
-                ));
+                return Err(match recovery {
+                    Ok(()) => (Outcome::Failed, f),
+                    Err(e) => {
+                        self.failed_hot_recovery(
+                            cur,
+                            &backup,
+                            hold_deadline,
+                            format!("{}; snapshot failure recovery: {e}", f.0),
+                        )
+                        .await
+                    }
+                });
             }
         };
         let attempt = async {
@@ -881,8 +921,8 @@ impl Updater {
                         }
                     }
                 });
-                let recovery = async {
-                    let left = budget_left(hold_deadline, Duration::ZERO)?
+                let recovery = recovery_before_deadline(recovery_deadline, async {
+                    let left = budget_left(recovery_deadline, Duration::ZERO)?
                         .as_secs_f64()
                         .to_string();
                     self.exec_ok(&cur.id, hot_argv("pause", &[&left])).await?;
@@ -894,36 +934,64 @@ impl Updater {
                             &cur.image,
                             bounded_command(
                                 hot_argv("restore-database", &[&backup]),
-                                hold_deadline,
+                                recovery_deadline,
                             )?,
                         )
                         .await?;
                     if out.code != 0 {
                         return Err(out.reason());
                     }
-                    let left = budget_left(hold_deadline, Duration::ZERO)?
+                    let left = budget_left(recovery_deadline, Duration::ZERO)?
                         .as_secs_f64()
                         .to_string();
                     self.exec_ok(&cur.id, hot_argv("start", &[old.trim(), &left]))
                         .await?;
-                    self.wait_hot_healthy_until(&cur.id, hold_deadline, None)
+                    self.wait_hot_healthy_until(&cur.id, recovery_deadline, None)
                         .await?;
                     self.store
                         .set_image(&cur.image.reference)
                         .map_err(|e| e.to_string())?;
                     self.commit_with_retry(&cur.id, &[&backup]).await?;
                     Ok::<_, String>(())
-                }
+                })
                 .await;
                 match recovery {
                     Ok(()) => Err((Outcome::RolledBack, f)),
-                    Err(e) => Err((
-                        Outcome::RollbackFailed,
-                        Fail(format!("{}; recovery: {e}; runners remain held", f.0)),
-                    )),
+                    Err(e) => Err(self
+                        .failed_hot_recovery(
+                            cur,
+                            &backup,
+                            hold_deadline,
+                            format!("{}; recovery: {e}", f.0),
+                        )
+                        .await),
                 }
             }
         }
+    }
+
+    async fn failed_hot_recovery(
+        &self,
+        cur: &Container,
+        backup: &str,
+        deadline: tokio::time::Instant,
+        reason: String,
+    ) -> (Outcome, Fail) {
+        // A cancelled/failed restore may still have changed pages. Never
+        // start or admit a daemon, or attempt a second restore, on uncertainty.
+        let stopped =
+            recovery_before_deadline(deadline, self.engine.stop_for_recovery(&cur.id)).await;
+        let stop = if stopped.is_ok() {
+            "container stopped"
+        } else {
+            "container stop unconfirmed; operator must stop it"
+        };
+        (
+            Outcome::RecoveryFailed,
+            Fail(format!(
+                "{reason}; recovery_failed: {stop}; do not restart on an unverified database; manual restore required: paused snapshot {backup}.hot-swap.sqlite (if created and retained), pre-update ZIP {backup}; verify any outstanding restore helper has stopped"
+            )),
+        )
     }
 
     async fn wait_hot_healthy_until(

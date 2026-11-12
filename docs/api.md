@@ -12648,6 +12648,21 @@ on the next poll (normally within two seconds), even if the container stays
 healthy while its entrypoint restarts the child. The run records an allowlisted
 error category from the last daemon error line, with all other values hidden.
 It never copies raw daemon logs into update history.
+Every Docker request has an absolute deadline covering connect, handshake,
+request write and complete response read (at most 15 minutes outside the
+shorter hot-swap budget). Recovery uses the original hold deadline, not a new
+timer. The final five seconds are reserved for an emergency container stop
+or ending jobs drain after verified recovery.
+
+If recovery fails or its completion is uncertain, the update outcome is
+`recovery_failed`. The updater requests an immediate manual Docker stop
+(`stop?t=0`, which prevents automatic restart), records the paused SQLite
+snapshot path and pre-update ZIP path, and never starts a daemon on an
+unverified database. If Docker does not acknowledge the stop within the hold
+budget, the run explicitly says the stop is unconfirmed and the operator must
+stop the container. Verify any outstanding restore helper is stopped, then
+verify/restore the database by hand before restarting. This outcome is a
+failure and produces an ACTION NEEDED report, not a successful update.
 
 The daemon sends the operator Inbox mail (from `system`):
 
