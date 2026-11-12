@@ -274,21 +274,27 @@ fn open_owned_workspace(workspace: &Path) -> Result<std::fs::File, Refusal> {
     use std::fs::File;
     use std::path::Component;
 
-    let invalid = |path: &Path, reason: String| Refusal::invalid(format!(
-        "unsafe workspace ancestor {}: {reason}; administrator migration required: every ancestor must be a real root-owned directory without group/other write permission",
-        path.display()
-    ));
+    let invalid = |path: &Path, reason: String| {
+        Refusal::invalid(format!(
+            "unsafe workspace ancestor {}: {reason}; administrator migration required: every ancestor must be a real root-owned directory without group/other write permission",
+            path.display()
+        ))
+    };
     if !workspace.is_absolute() {
         return Err(invalid(workspace, "expected an absolute path".into()));
     }
     let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
     let mut path = PathBuf::from("/");
-    let mut fd = File::from(open(path.as_path(), flags, Mode::empty())
-        .map_err(|e| invalid(&path, e.to_string()))?);
+    let mut fd = File::from(
+        open(path.as_path(), flags, Mode::empty()).map_err(|e| invalid(&path, e.to_string()))?,
+    );
     let check = |fd: &File, path: &Path| -> Result<(), Refusal> {
         let meta = fd.metadata().map_err(|e| invalid(path, e.to_string()))?;
         if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
-            return Err(invalid(path, "not root-owned or writable by group/others".into()));
+            return Err(invalid(
+                path,
+                "not root-owned or writable by group/others".into(),
+            ));
         }
         Ok(())
     };
@@ -298,8 +304,10 @@ fn open_owned_workspace(workspace: &Path) -> Result<std::fs::File, Refusal> {
             Component::RootDir => continue,
             Component::Normal(name) => {
                 path.push(name);
-                fd = File::from(openat(&fd, name, flags, Mode::empty())
-                    .map_err(|e| invalid(&path, e.to_string()))?);
+                fd = File::from(
+                    openat(&fd, name, flags, Mode::empty())
+                        .map_err(|e| invalid(&path, e.to_string()))?,
+                );
                 check(&fd, &path)?;
             }
             _ => return Err(invalid(&path, "dot or parent component".into())),

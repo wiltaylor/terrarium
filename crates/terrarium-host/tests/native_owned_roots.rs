@@ -131,7 +131,9 @@ fn cleanup_removes_only_empty_matching_root_and_preserves_sibling() {
 
 #[test]
 fn unsafe_ancestor_rename_and_symlink_swap_never_provision_or_remove() {
-    if !nix::unistd::geteuid().is_root() { return; }
+    if !nix::unistd::geteuid().is_root() {
+        return;
+    }
     let tmp = workspace();
     let pool = tmp.path().join("pool");
     let branch = pool.join("branch");
@@ -144,7 +146,10 @@ fn unsafe_ancestor_rename_and_symlink_swap_never_provision_or_remove() {
     for (uid, mode) in [(23001, 0o755), (0, 0o775)] {
         std::os::unix::fs::chown(&pool, Some(uid), None).unwrap();
         std::fs::set_permissions(&pool, std::fs::Permissions::from_mode(mode)).unwrap();
-        for error in [provision_root(&base, &fresh).unwrap_err(), remove_empty_root(&base, &existing).unwrap_err()] {
+        for error in [
+            provision_root(&base, &fresh).unwrap_err(),
+            remove_empty_root(&base, &existing).unwrap_err(),
+        ] {
             assert!(error.message.contains(pool.to_str().unwrap()), "{error:?}");
         }
         assert!(!base.join("project/fresh").exists());
@@ -156,18 +161,28 @@ fn unsafe_ancestor_rename_and_symlink_swap_never_provision_or_remove() {
     let out = Command::new("python3")
         .args(["-c", "import os,sys; p,t=sys.argv[1:]; os.rename(p+'/branch',p+'/old'); os.symlink(t,p+'/branch')"])
         .arg(&pool).arg(other.path()).uid(23001).gid(23000).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(provision_root(&base, &fresh).is_err());
     // Even if the pool parent becomes safe again, the intermediate
     // symlink itself must be refused rather than followed by root.
     std::os::unix::fs::chown(&pool, Some(0), None).unwrap();
     std::fs::set_permissions(&pool, std::fs::Permissions::from_mode(0o755)).unwrap();
     let error = provision_root(&base, &fresh).unwrap_err();
-    assert!(error.message.contains(branch.to_str().unwrap()), "{error:?}");
+    assert!(
+        error.message.contains(branch.to_str().unwrap()),
+        "{error:?}"
+    );
     assert!(remove_empty_root(&base, &existing).is_err());
     assert!(!other.path().join("base/project").exists());
     assert!(!pool.join("old/base/project/fresh").exists());
-    assert!(pool.join("old/base/project/existing/.terrarium-owner").exists());
+    assert!(
+        pool.join("old/base/project/existing/.terrarium-owner")
+            .exists()
+    );
 }
 
 #[test]
