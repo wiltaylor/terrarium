@@ -109,6 +109,7 @@ fn create_flags(
             registration.runtime.registration.0
         ),
     ]);
+    args.extend(["--label".into(), format!("terrarium.workspace.runtime={}", registration.runtime.incarnation.0)]);
     args.push(req.image.clone());
     args.extend(req.command.clone());
     Ok(args)
@@ -162,9 +163,6 @@ fn verify_empty_scaffold(
         }
         Ok(record)
     }
-    if !safe_publisher(&registration.publisher) {
-        return Err(Reply::Quarantined);
-    }
     let publisher = unique(host, &registration.publisher)?;
     let work = unique(receiver, "/work")?;
     if work.namespace != registration.runtime.namespace {
@@ -182,7 +180,7 @@ fn verify_empty_scaffold(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fixture() -> (Registration, Create, Value) {
+    pub(super) fn fixture() -> (Registration, Create, Value) {
         let profile = Profile {
             kernel: "synthetic-kernel".into(),
             engine: "synthetic-engine".into(),
@@ -383,6 +381,10 @@ mod tests {
         assert!(parse(foreign, &r).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "live_workspace_disposable.rs"]
+mod disposable;
 
 /// Separate from the legacy rprivate workspace parser. Missing evidence fails
 /// closed. This result intentionally never contains workspace_mounts/attached.
