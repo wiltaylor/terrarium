@@ -1085,14 +1085,18 @@ fn queue_entries(conn: &Connection, state: &str) -> ApiResult<Vec<QueueEntry>> {
     let mut st = conn.prepare(&format!(
         "SELECT {QUEUE_COLS} FROM jobs WHERE state = ?1 ORDER BY {order}"
     ))?;
-    let mut entries = st.query_map([state], |r| {
-        let kind: String = r.get(2)?;
-        Ok(QueueEntry {
-            id: r.get(0)?, project: r.get(1)?,
-            kind: JobKind::parse(&kind).unwrap_or(JobKind::Validate),
-            host: r.get(3)?, slot: r.get(4)?,
-        })
-    })?.collect::<Result<Vec<_>, _>>()?;
+    let mut entries = st
+        .query_map([state], |r| {
+            let kind: String = r.get(2)?;
+            Ok(QueueEntry {
+                id: r.get(0)?,
+                project: r.get(1)?,
+                kind: JobKind::parse(&kind).unwrap_or(JobKind::Validate),
+                host: r.get(3)?,
+                slot: r.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     for entry in &mut entries {
         if let Some(host) = &entry.host {
             entry.host = Some(canonical_key(conn, host)?);
@@ -3091,7 +3095,8 @@ mod tests {
                     't', '2026-11-01', '2026-11-01', hex(zeroblob(2000)) FROM n;
              DROP INDEX jobs_state_created;
              DROP INDEX jobs_state_started;",
-        ).unwrap();
+        )
+        .unwrap();
         let before = std::time::Instant::now();
         for _ in 0..20 {
             assert_eq!(queued(&conn).unwrap().len(), 1);
@@ -3101,22 +3106,34 @@ mod tests {
         conn.execute_batch(
             "CREATE INDEX jobs_state_created ON jobs(state, created_at);
              CREATE INDEX jobs_state_started ON jobs(state, started_at); ANALYZE;",
-        ).unwrap();
+        )
+        .unwrap();
         let after = std::time::Instant::now();
         for _ in 0..20 {
             assert_eq!(queue_entries(&conn, "queued").unwrap()[0].id, "job-19999");
             assert_eq!(queue_entries(&conn, "running").unwrap()[0].id, "job-20000");
         }
-        eprintln!("20 ticks, 20000 jobs with 4000-byte tails: before={before:?}, after={:?}", after.elapsed());
+        eprintln!(
+            "20 ticks, 20000 jobs with 4000-byte tails: before={before:?}, after={:?}",
+            after.elapsed()
+        );
         for (state, order, index) in [
-            ("queued", "created_at, attempt DESC, split_path, id", "jobs_state_created"),
+            (
+                "queued",
+                "created_at, attempt DESC, split_path, id",
+                "jobs_state_created",
+            ),
             ("running", "started_at", "jobs_state_started"),
         ] {
             let mut st = conn.prepare(&format!(
                 "EXPLAIN QUERY PLAN SELECT {QUEUE_COLS} FROM jobs WHERE state = ?1 ORDER BY {order}"
             )).unwrap();
-            let plan = st.query_map([state], |r| r.get::<_, String>(3)).unwrap()
-                .collect::<Result<Vec<_>, _>>().unwrap().join("\n");
+            let plan = st
+                .query_map([state], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n");
             assert!(plan.contains(index) && plan.contains("SEARCH"), "{plan}");
             assert!(!plan.contains("SCAN jobs"), "{plan}");
         }
