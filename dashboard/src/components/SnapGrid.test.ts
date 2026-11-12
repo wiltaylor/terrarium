@@ -61,7 +61,7 @@ it("handles pointer move, corner resize, and cancellation through captured contr
   pointer(move, "pointerdown", 0, 0);
   pointer(move, "pointerup", 151, 73);
   expect(widgets()[0]).toMatchObject({ x: 2, y: 1 });
-  const resize = root.querySelectorAll('button')[1]!;
+  const resize = root.querySelector('[aria-label="Resize a"]')!;
   pointer(resize, "pointerdown", 0, 0);
   pointer(resize, "pointerup", 100, 72);
   expect(widgets()[0]).toMatchObject({ w: 4, h: 3 });
