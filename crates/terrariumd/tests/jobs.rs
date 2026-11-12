@@ -3160,8 +3160,7 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
     std::fs::write(&go, "go").unwrap();
     let spool = std::fs::read_dir(spool_root.join(".terrarium-runs"))
         .unwrap()
-        .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
-        .next()
+        .find(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
         .unwrap()
         .unwrap()
         .path();

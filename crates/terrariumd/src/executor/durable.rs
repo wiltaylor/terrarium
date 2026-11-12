@@ -14,15 +14,26 @@ struct Spool {
 }
 
 fn spool(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Spool> {
-    if let Some((project, name)) = cmd.holder.as_deref().and_then(|holder| holder.split_once('/')) {
+    if let Some((project, name)) = cmd
+        .holder
+        .as_deref()
+        .and_then(|holder| holder.split_once('/'))
+    {
         let (project, name, target) = (project.to_owned(), name.to_owned(), def.name.clone());
         let owned = state.db.read_now(move |c| {
             use rusqlite::OptionalExtension;
             Ok(c.query_row("SELECT base, project, name, agent FROM agent_target_roots WHERE project=?1 AND name=?2 AND target=?3", rusqlite::params![project, name, target], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))).optional()?)
         })?;
         if let Some((base, project, name, agent)) = owned {
-            let base = base.as_deref().or(def.work_root.as_deref()).unwrap_or(crate::target_roots::DEFAULT_BASE);
-            return Ok(Spool { root: format!("{base}/{project}/{name}"), owner: agent, card: true });
+            let base = base
+                .as_deref()
+                .or(def.work_root.as_deref())
+                .unwrap_or(crate::target_roots::DEFAULT_BASE);
+            return Ok(Spool {
+                root: format!("{base}/{project}/{name}"),
+                owner: agent,
+                card: true,
+            });
         }
     }
     let journal = journal(state);
@@ -35,12 +46,28 @@ fn spool(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Spool> {
             owner
         }
     };
-    Ok(Spool { root: def.work_root.as_deref().unwrap_or(crate::target_roots::DEFAULT_BASE).to_owned(), owner, card: false })
+    Ok(Spool {
+        root: def
+            .work_root
+            .as_deref()
+            .unwrap_or(crate::target_roots::DEFAULT_BASE)
+            .to_owned(),
+        owner,
+        card: false,
+    })
 }
 
 fn checked_paths(spool: &Spool, token: &str, mode: &str, script: &str) -> String {
-    format!("command -v python3 >/dev/null 2>&1 || {{ printf 'Bunsupported: python3 missing\\n'; exit 1; }}; exec python3 -S -c {} {} {} {} {} {} {}",
-        sh_quote(PATHS), sh_quote(&spool.root), sh_quote(&spool.owner), if spool.card { "1" } else { "0" }, sh_quote(token), sh_quote(mode), sh_quote(script))
+    format!(
+        "command -v python3 >/dev/null 2>&1 || {{ printf 'Bunsupported: python3 missing\\n'; exit 1; }}; exec python3 -S -c {} {} {} {} {} {} {}",
+        sh_quote(PATHS),
+        sh_quote(&spool.root),
+        sh_quote(&spool.owner),
+        if spool.card { "1" } else { "0" },
+        sh_quote(token),
+        sh_quote(mode),
+        sh_quote(script)
+    )
 }
 
 /// A launch can be journaled just before the daemon dies, without acquiring
@@ -268,7 +295,10 @@ pub(super) fn start(
     if chrono::Utc::now().timestamp() - saved.created > (MAX_RUN + RETAIN) as i64 {
         return Err(ApiError::conflict("durable SSH checkpoint expired"));
     }
-    let spool = saved.spool.as_ref().ok_or_else(|| ApiError::conflict("durable checkpoint has no owned spool binding"))?;
+    let spool = saved
+        .spool
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("durable checkpoint has no owned spool binding"))?;
     crate::target_roots::check_base(&spool.root)?;
     let path = format!("{}/.terrarium-runs/{}", spool.root, saved.token);
     let script = script_for_spool(&path, &saved.cmd, saved.created, RETAIN, spool);
@@ -460,11 +490,29 @@ fn script(path: &str, cmd: &RemoteCmd, created: i64) -> String {
 
 #[cfg(test)]
 fn script_with_retention(path: &str, cmd: &RemoteCmd, created: i64, retain: u64) -> String {
-    let (root, _) = path.rsplit_once("/.terrarium-runs/").expect("test spool path");
-    script_for_spool(path, cmd, created, retain, &Spool { root: root.into(), owner: "test-owner".into(), card: false })
+    let (root, _) = path
+        .rsplit_once("/.terrarium-runs/")
+        .unwrap_or((path, ""));
+    script_for_spool(
+        path,
+        cmd,
+        created,
+        retain,
+        &Spool {
+            root: root.into(),
+            owner: "test-owner".into(),
+            card: false,
+        },
+    )
 }
 
-fn script_for_spool(path: &str, cmd: &RemoteCmd, created: i64, retain: u64, spool: &Spool) -> String {
+fn script_for_spool(
+    path: &str,
+    cmd: &RemoteCmd,
+    created: i64,
+    retain: u64,
+    spool: &Spool,
+) -> String {
     let command = format!(
         "{}exec {}",
         cmd.cwd
@@ -487,16 +535,21 @@ fn script_for_spool(path: &str, cmd: &RemoteCmd, created: i64, retain: u64, spoo
     // Keep a leader in the command's group until the supervisor kills it.
     // Otherwise a foreground exit can strand inherited FIFO descriptors in
     // grandchildren, or release the group ID before teardown uses it.
-    let group = format!(r#"
+    let group = format!(
+        r#"
 p=.
 trap ':' TERM
 sh -c {command} &
 f=$!
+# The coordinator anchors the group identity, not the output streams.
+exec >/dev/null 2>&1
 wait "$f"; code=$?
 printf '%s\n' "$code" > "$p/foreground.part"
 mv "$p/foreground.part" "$p/foreground"
 while :; do sleep 60; done
-"#, command = sh_quote(&command));
+"#,
+        command = sh_quote(&command)
+    );
     let janitor = format!(
         r#"
 p=.
@@ -509,13 +562,15 @@ sleep {retain}
 exec 9> "$p/live"
 flock -x 9
 : > "$p/expired"
-rm -f "$p/o" "$p/e" "$p/out" "$p/err" "$p/pid" "$p/exit" "$p/exit.part" "$p/cancel" "$p/ready" "$p/startup-error" "$p/foreground" "$p/foreground.part"
+rm -f "$p/o" "$p/e" "$p/out" "$p/err" "$p/pid" "$p/exit" "$p/exit.part" "$p/cancel" "$p/ready" "$p/startup-error" "$p/foreground" "$p/foreground.part" "$p/out-done" "$p/err-done"
 left=$(({expires}-$(date +%s)+120))
 test "$left" -le 0 || sleep "$left"
 rm -f "$p/expired" "$p/janitor" "$p/live" "$p/.terrarium-owner"
 python3 -S -c {remove_claim} {token}
 "#,
-        remove_claim = sh_quote("import os,sys; a=os.stat(sys.argv[1],dir_fd=8,follow_symlinks=False); b=os.fstat(7); assert (a.st_dev,a.st_ino)==(b.st_dev,b.st_ino), 'claim identity changed'; os.rmdir(sys.argv[1],dir_fd=8)"),
+        remove_claim = sh_quote(
+            "import os,sys; a=os.stat(sys.argv[1],dir_fd=8,follow_symlinks=False); b=os.fstat(7); assert (a.st_dev,a.st_ino)==(b.st_dev,b.st_ino), 'claim identity changed'; os.rmdir(sys.argv[1],dir_fd=8)"
+        ),
         token = sh_quote(path.rsplit('/').next().unwrap_or(""))
     );
     // Each logger retains at most 64 MiB and then drains the rest. Output
@@ -545,9 +600,9 @@ if test "$left" -le 0; then
   exit
 fi
 : > "$p/ready"
-setsid sh -c 'head -c 67108864 > "$1/out"; cat > /dev/null; while :; do sleep 60; done' sh "$p" < "$p/o" 9>&- &
+setsid sh -c 'head -c 67108864 > "$1/out"; cat > /dev/null; : > "$1/out-done"; while :; do sleep 60; done' sh "$p" < "$p/o" 9>&- &
 o=$!
-setsid sh -c 'head -c 67108864 > "$1/err"; cat > /dev/null; while :; do sleep 60; done' sh "$p" < "$p/e" 9>&- &
+setsid sh -c 'head -c 67108864 > "$1/err"; cat > /dev/null; : > "$1/err-done"; while :; do sleep 60; done' sh "$p" < "$p/e" 9>&- &
 e=$!
 setsid sh -c {group} > "$p/o" 2> "$p/e" 9>&- &
 c=$!
@@ -562,6 +617,15 @@ kill -TERM "-$c" 2>/dev/null
 sleep 5
 kill -KILL "-$c" 2>/dev/null
 wait "$c" 2>/dev/null
+# Most loggers finish during TERM grace. Give a KILL-closed pipe one bounded
+# final drain interval before stopping its logger, rather than truncating a
+# buffered final write in the same scheduling turn as KILL.
+n=0
+while test ! -f "$p/out-done" || test ! -f "$p/err-done"; do
+  test "$n" -lt 10 || break
+  sleep 0.1
+  n=$((n+1))
+done
 # Logger groups cannot retain the slot beyond teardown, even if a child
 # escaped the command group while keeping inherited stream descriptors.
 kill -TERM "-$o" "-$e" 2>/dev/null
@@ -621,7 +685,10 @@ done"#,
     );
     // Check prerequisites before invoking the path helper, preserving clear
     // failures even when PATH lacks both the helper and framing tools.
-    format!("{env}\nfor tool in setsid nohup flock sh mkfifo timeout date head tail base64 tr wc cat mkdir mv rm rmdir sleep; do command -v \"$tool\" >/dev/null 2>&1 || {{ printf 'Bunsupported: %s missing\\n' \"$tool\"; exit 1; }}; done\n{}", checked_paths(spool, path.rsplit('/').next().unwrap_or(""), "run", &reader))
+    format!(
+        "{env}\nfor tool in setsid nohup flock sh mkfifo timeout date head tail base64 tr wc cat mkdir mv rm rmdir sleep; do command -v \"$tool\" >/dev/null 2>&1 || {{ printf 'Bunsupported: %s missing\\n' \"$tool\"; exit 1; }}; done\n{}",
+        checked_paths(spool, path.rsplit('/').next().unwrap_or(""), "run", &reader)
+    )
 }
 
 #[cfg(test)]
@@ -635,8 +702,17 @@ mod tests {
         let root = temp.path().join("owned");
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-        if card { std::fs::write(root.join(".terrarium-owner"), "test-owner").unwrap(); }
-        (temp, Spool { root: root.to_str().unwrap().into(), owner: "test-owner".into(), card })
+        if card {
+            std::fs::write(root.join(".terrarium-owner"), "test-owner").unwrap();
+        }
+        (
+            temp,
+            Spool {
+                root: root.to_str().unwrap().into(),
+                owner: "test-owner".into(),
+                card,
+            },
+        )
     }
 
     async fn path_refusal(attack: &str) {
@@ -652,49 +728,101 @@ mod tests {
             } else {
                 std::fs::create_dir(&parent).unwrap();
                 if attack == "permissions" {
-                    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o770)).unwrap();
+                    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o770))
+                        .unwrap();
                 } else {
                     // Foreign ownership is exercised by the root card check.
                     // An unprivileged extra gate cannot manufacture that owner.
-                    if std::fs::metadata(&parent).unwrap().uid() != 0 { continue; }
+                    if std::fs::metadata(&parent).unwrap().uid() != 0 {
+                        continue;
+                    }
                     std::os::unix::fs::chown(&parent, Some(65534), None).unwrap();
                 }
             }
-            let cmd = RemoteCmd { argv: vec!["touch".into(), outside.join("executed").to_str().unwrap().into()], ..RemoteCmd::default() };
+            let cmd = RemoteCmd {
+                argv: vec![
+                    "touch".into(),
+                    outside.join("executed").to_str().unwrap().into(),
+                ],
+                ..RemoteCmd::default()
+            };
             let path = format!("{}/.terrarium-runs/claim", spool.root);
-            let output = tokio::process::Command::new("sh").arg("-c").arg(script_for_spool(&path, &cmd, chrono::Utc::now().timestamp(), 1, &spool)).output().await.unwrap();
+            let output = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(script_for_spool(
+                    &path,
+                    &cmd,
+                    chrono::Utc::now().timestamp(),
+                    1,
+                    &spool,
+                ))
+                .output()
+                .await
+                .unwrap();
             assert!(!output.status.success());
             let message = String::from_utf8_lossy(&output.stdout);
             assert!(message.starts_with("Bspool error:"), "{message}");
-            if attack == "permissions" { assert!(message.contains("group/other writable")); }
-            if attack == "owner" { assert!(message.contains("foreign owner")); }
-            assert_eq!(std::fs::read_to_string(outside.join("keep")).unwrap(), "untouched");
+            if attack == "permissions" {
+                assert!(message.contains("group/other writable"));
+            }
+            if attack == "owner" {
+                assert!(message.contains("foreign owner"));
+            }
+            assert_eq!(
+                std::fs::read_to_string(outside.join("keep")).unwrap(),
+                "untouched"
+            );
             assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
         }
     }
 
     #[tokio::test]
-    async fn durable_refuses_symlink_parent_for_both_root_kinds() { path_refusal("symlink").await; }
+    async fn durable_refuses_symlink_parent_for_both_root_kinds() {
+        path_refusal("symlink").await;
+    }
 
     #[tokio::test]
-    async fn durable_refuses_writable_parent_for_both_root_kinds() { path_refusal("permissions").await; }
+    async fn durable_refuses_writable_parent_for_both_root_kinds() {
+        path_refusal("permissions").await;
+    }
 
     #[tokio::test]
-    async fn durable_refuses_foreign_parent_for_both_root_kinds() { path_refusal("owner").await; }
+    async fn durable_refuses_foreign_parent_for_both_root_kinds() {
+        path_refusal("owner").await;
+    }
 
     #[tokio::test]
     async fn durable_refuses_swapped_claim_for_both_root_kinds() {
         for card in [false, true] {
             let (temp, spool) = secure_root(card);
             let path = format!("{}/.terrarium-runs/claim", spool.root);
-            let cmd = RemoteCmd { argv: vec!["true".into()], ..RemoteCmd::default() };
-            let script = script_for_spool(&path, &cmd, chrono::Utc::now().timestamp(), RETAIN, &spool);
-            let output = tokio::time::timeout(Duration::from_secs(12), tokio::process::Command::new("sh").arg("-c").arg(&script).output()).await.unwrap().unwrap();
+            let cmd = RemoteCmd {
+                argv: vec!["true".into()],
+                ..RemoteCmd::default()
+            };
+            let script =
+                script_for_spool(&path, &cmd, chrono::Utc::now().timestamp(), RETAIN, &spool);
+            let output = tokio::time::timeout(
+                Duration::from_secs(12),
+                tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&script)
+                    .output(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
             assert!(String::from_utf8_lossy(&output.stdout).contains("X0\n"));
             let claim = std::path::Path::new(&path);
             for _ in 0..100 {
                 if let Ok(pid) = std::fs::read_to_string(claim.join("janitor")) {
-                    assert!(std::process::Command::new("kill").args(["-KILL", "--", &format!("-{}", pid.trim())]).status().unwrap().success());
+                    assert!(
+                        std::process::Command::new("kill")
+                            .args(["-KILL", "--", &format!("-{}", pid.trim())])
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -704,13 +832,26 @@ mod tests {
             std::fs::write(outside.join("keep"), "untouched").unwrap();
             std::fs::rename(claim, claim.with_file_name("old-claim")).unwrap();
             std::os::unix::fs::symlink(&outside, claim).unwrap();
-            let output = tokio::process::Command::new("sh").arg("-c").arg(&script).output().await.unwrap();
+            let output = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .await
+                .unwrap();
             assert!(!output.status.success());
             assert!(String::from_utf8_lossy(&output.stdout).starts_with("Bspool error:"));
-            assert_eq!(std::fs::read_to_string(outside.join("keep")).unwrap(), "untouched");
+            assert_eq!(
+                std::fs::read_to_string(outside.join("keep")).unwrap(),
+                "untouched"
+            );
             assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
             // Cancellation also goes through no-follow descriptors.
-            let output = tokio::process::Command::new("sh").arg("-c").arg(checked_paths(&spool, "claim", "cancel", "")).output().await.unwrap();
+            let output = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(checked_paths(&spool, "claim", "cancel", ""))
+                .output()
+                .await
+                .unwrap();
             assert!(!output.status.success());
             assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
         }
@@ -856,8 +997,14 @@ mod tests {
                 "sh".into(),
                 "-c".into(),
                 if background {
-                    format!("sleep 600 & echo $! > '{}'; {}", child.display(), if deadline { "wait" } else { "exit 0" })
-                } else { format!("echo $$ > '{}'; exec sleep 60", child.display()) },
+                    format!(
+                        "sleep 600 & echo $! > '{}'; {}",
+                        child.display(),
+                        if deadline { "wait" } else { "exit 0" }
+                    )
+                } else {
+                    format!("echo $$ > '{}'; exec sleep 60", child.display())
+                },
             ],
             timeout_secs: Some(30),
             ..RemoteCmd::default()
@@ -877,12 +1024,26 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert!(String::from_utf8_lossy(&result.stdout).contains(if deadline { "X124\n" } else { "X0\n" }));
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains(if deadline {
+                "X124\n"
+            } else {
+                "X0\n"
+            })
+        );
         let pid = std::fs::read_to_string(child).unwrap();
         if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())) {
             // An orphan may await the target init's reap, but cannot execute
             // or retain stream descriptors once it has become a zombie.
-            assert_eq!(status.rsplit_once(") ").unwrap().1.split_whitespace().next(), Some("Z"));
+            assert_eq!(
+                status
+                    .rsplit_once(") ")
+                    .unwrap()
+                    .1
+                    .split_whitespace()
+                    .next(),
+                Some("Z")
+            );
         }
         assert!(path.join("out").exists());
         tokio::time::timeout(Duration::from_secs(5), async {

@@ -34,13 +34,18 @@ fn copy_python(jail: &Path) {
     // interpreter's encodings package. Copy only that package into the jail.
     let encodings = std::process::Command::new("/usr/bin/python3")
         .args(["-S", "-c", "import encodings; print(encodings.__path__[0])"])
-        .output().unwrap();
+        .output()
+        .unwrap();
     assert!(encodings.status.success());
     let path = PathBuf::from(String::from_utf8(encodings.stdout).unwrap().trim());
     let dest = jail.join(path.strip_prefix("/").unwrap());
     std::fs::create_dir_all(&dest).unwrap();
     for entry in std::fs::read_dir(path).unwrap().flatten() {
-        if entry.path().extension().is_some_and(|extension| extension == "py") {
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "py")
+        {
             std::fs::copy(entry.path(), dest.join(entry.file_name())).unwrap();
         }
     }

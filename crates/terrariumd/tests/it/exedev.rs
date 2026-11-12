@@ -270,8 +270,7 @@ async fn durable_exedev_finishes_offline_once_with_real_exit() {
     std::fs::write(root.join("go"), "go").unwrap();
     let spool = std::fs::read_dir(root.join(".terrarium-runs"))
         .unwrap()
-        .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
-        .next()
+        .find(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
         .unwrap()
         .unwrap()
         .path();
@@ -308,8 +307,7 @@ async fn durable_expired_checkpoint_does_not_relaunch_or_prevent_boot() {
     assert_eq!(end["code"], 17);
     let spool = std::fs::read_dir(root.join(".terrarium-runs"))
         .unwrap()
-        .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
-        .next()
+        .find(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
         .unwrap()
         .unwrap()
         .path();
@@ -416,12 +414,22 @@ async fn durable_startup_failures_end_promptly_with_reason() {
     let mut def = target("missing-python-ex", 8 * 3600);
     def["work_root"] = json!(root);
     td.post("/api/targets", def).await.ok();
-    td.post_empty("/api/targets/missing-python-ex/up").await.ok();
-    let opened = td.post("/api/targets/missing-python-ex/exec", json!({"durable":true,"env":{"PATH":tools},"cmd":["true"]})).await;
+    td.post_empty("/api/targets/missing-python-ex/up")
+        .await
+        .ok();
+    let opened = td
+        .post(
+            "/api/targets/missing-python-ex/exec",
+            json!({"durable":true,"env":{"PATH":tools},"cmd":["true"]}),
+        )
+        .await;
     let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
     let (_, end) = output(&td, "missing-python-ex", &sid).await;
     assert_eq!(end["code"], "unsupported", "{end}");
-    assert!(end["message"].as_str().unwrap().contains("python3 missing"), "{end}");
+    assert!(
+        end["message"].as_str().unwrap().contains("python3 missing"),
+        "{end}"
+    );
 }
 
 fn db(td: &TestDaemon) -> rusqlite::Connection {
