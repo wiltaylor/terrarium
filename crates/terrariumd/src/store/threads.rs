@@ -667,6 +667,24 @@ fn all_review_or_later(conn: &Connection, thread: &str) -> ApiResult<bool> {
 }
 
 /// Link only monitors in a project the caller can read. The API transaction
+pub fn poll_test_ready(t: &mut Tx<'_>, after: &str) -> ApiResult<String> {
+    let ids: Vec<String> = {
+        let mut st = t.prepare("SELECT id FROM threads WHERE tracking_at IS NOT NULL AND status != 'closed' AND id > ?1 ORDER BY id LIMIT 64")?;
+        st.query_map([after], |r| r.get(0))?.collect::<Result<_, _>>()?
+    };
+    for id in &ids {
+        if all_review_or_later(t, id)? {
+            let (cards, reasons) = super::thread_test_ready::readiness(t, id, terrarium_version::VERSION)?;
+            let previous: Option<String> = t.query_row("SELECT test_ready_cards FROM threads WHERE id = ?1", [id], |r| r.get(0))?;
+            if reasons.is_empty() && previous.as_deref() != Some(&cards) {
+                wake(t, id, WAKE_REVIEW)?;
+            }
+        }
+    }
+    Ok(if ids.len() == 64 { ids.last().cloned().unwrap_or_default() } else { String::new() })
+}
+
+/// Link only monitors in a project the caller can read. The API transaction
 /// rolls back the link if tracking or another link fails.
 pub fn link_monitor(t: &mut Tx<'_>, actor: &Actor, id: &str, key: &str) -> ApiResult<()> {
     // An explicit empty reference unlinks even a renamed/deleted monitor.
@@ -779,6 +797,11 @@ pub fn on_card_moved(
         return Ok(());
     }
     let cols = board::column_roles(t, project)?;
+    for id in &ids {
+        if all_review_or_later(t, id)? {
+            wake(t, id, WAKE_REVIEW)?;
+        }
+    }
     if !review_or_later(&cols, to) {
         for id in &ids {
             t.execute("UPDATE threads SET monitor_done = 0 WHERE id = ?1", [id])?;
@@ -811,6 +834,12 @@ pub fn on_card_moved(
 /// carries only the reason, not the card: a reader of the thread's events
 /// need not read the card's project (TER-146).
 fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
+    if reason == WAKE_REVIEW && !super::thread_test_ready::claim(t, id)? {
+        // Review is only a status event, never an invitation to test.
+        let th = get_bare(t, id)?;
+        emit_with(t, &th, "cards_status", json!({"reason": "review"}))?;
+        return Ok(());
+    }
     if reason == WAKE_REVIEW {
         t.execute(
             "UPDATE threads SET monitor_done = 1 WHERE id = ?1 AND monitor IS NOT NULL",
