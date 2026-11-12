@@ -2194,8 +2194,19 @@ pub async fn usable(state: &Shared, actor: &Actor, name: &str) -> ApiResult<Targ
     let agent = actor.agent().map(|a| a.id.clone());
     let (row, lease) = state
         .db
-        .read(move |c| {
+        .write_full(actor.label(), move |c| {
             let row = targets::get(c, &n)?;
+            // Until typed dispatch-to-exec serialization is wired, never
+            // route a live registration through the legacy backend. The
+            // disabled production gate also applies to operator exec.
+            let live: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM live_workspace_targets WHERE target_id = ?1 AND state != 'destroyed')",
+                [&n], |r| r.get(0),
+            )?;
+            if live {
+                return Err(ApiError::new(Code::Conflict, "live workspace exec activation is disabled"));
+            }
+            crate::store::live_workspaces::admit_target_exec(c, agent.as_deref(), &n)?;
             let lease = match &agent {
                 Some(a) => {
                     // TER-623: a release target is for the release job

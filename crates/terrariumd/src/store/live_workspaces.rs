@@ -68,6 +68,45 @@ pub fn admit_generic_agent(t: &Tx<'_>, agent: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// Resolve registration and enrollment from durable identity, never from a
+/// caller's workspace pathname or Docker inspect workspace list. This is an
+/// admission barrier, not a substitute for dispatch-to-exec serialization.
+pub fn admit_target_exec(t: &Tx<'_>, agent: Option<&str>, target: &str) -> ApiResult<()> {
+    durable(t)?;
+    let registration: Option<(String, String, String)> = t.query_row(
+        "SELECT registration_id, trust_domain_id, host_id FROM live_workspace_targets
+         WHERE target_id = ?1 AND state != 'destroyed'",
+        [target], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).optional()?;
+    let Some((registration, domain, host)) = registration else {
+        return match agent {
+            Some(agent) => admit_generic_agent(t, agent),
+            None => Ok(()),
+        };
+    };
+    no_link(t)?;
+    let agent = agent.ok_or_else(|| ApiError::new(Code::Conflict, "live exec requires an enrolled holder"))?;
+    let row: Option<(String, String, String, String, String)> = t.query_row(
+        "SELECT workspace_id, project_hint, agent_hint, source_dev, source_ino
+         FROM live_workspaces WHERE host_id = ?1 AND agent_id = ?2",
+        params![host, agent], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    ).optional()?;
+    let (workspace, project, name, device, inode) = row.ok_or_else(|| ApiError::new(Code::Conflict, "exec holder has no verified workspace identity"))?;
+    let invalid = || ApiError::internal("invalid stored live workspace identity");
+    let enrollment = Enrollment {
+        workspace: terrarium_core::live_workspace::WorkspaceId(workspace.parse().map_err(|_| invalid())?),
+        host: host.parse().map_err(|_| invalid())?,
+        agent: agent.parse().map_err(|_| invalid())?,
+        project,
+        name,
+        source: terrarium_core::live_workspace::SourceIdentity {
+            device: device.parse().map_err(|_| invalid())?,
+            inode: inode.parse().map_err(|_| invalid())?,
+        },
+    };
+    record_workspace_use(t, &enrollment, WorkspaceUse::Live { registration: &registration, domain: &domain })
+}
+
 fn identity(t: &Tx<'_>, e: &Enrollment) -> ApiResult<String> {
     let row = t
         .query_row(
@@ -662,11 +701,18 @@ mod tests {
         let (_dir, db, e) = fixture().await;
         db.write_full("system", move |t| {
             reserve(t, &e, "r1", "d1", "sandbox")?;
-            let check = |t: &Tx<'_>| admit_workspace_use(t, &e, WorkspaceUse::Live { registration: "r1", domain: "d1" });
+            let check = |t: &Tx<'_>| {
+                admit_workspace_use(t, &e, WorkspaceUse::Live { registration: "r1", domain: "d1" })?;
+                admit_target_exec(t, Some(&e.agent.to_string()), "target1")
+            };
             assert!(check(t).is_err());
             t.execute("INSERT INTO live_workspace_attachments VALUES ('attachment', ?1, 'r1', ?2, 'attached_verified', NULL)",
                 params![e.workspace.0.to_string(), e.agent.to_string()])?;
             check(t)?;
+            assert!(admit_target_exec(t, None, "target1").is_err());
+            assert!(admit_target_exec(t, Some(&terrarium_core::AgentId::new().to_string()), "target1").is_err());
+            assert!(admit_target_exec(t, Some(&e.agent.to_string()), "target2").is_err());
+            assert!(admit_target_exec(t, Some(&e.agent.to_string()), "ordinary").is_err());
             t.execute("UPDATE agents SET status = 'stopped' WHERE id = ?1", [e.agent.to_string()])?;
             assert!(check(t).is_err());
             t.execute("UPDATE agents SET status = 'idle' WHERE id = ?1", [e.agent.to_string()])?;
