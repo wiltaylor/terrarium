@@ -3598,66 +3598,75 @@ async fn finish_recipe(
         // Bounded sessions avoid overflowing the host's replay buffer. File
         // bytes bypass textual redaction and never enter a public exec session.
         for (name, size) in sources {
-        let path = format!("{}/{directory}/{name}", x.dir);
-        let mut bytes = Vec::with_capacity(size);
-        for index in 0..size.div_ceil(crate::release_handoff::CHUNK_SIZE) {
-            if killed(&job.id) {
-                return Err(ApiError::conflict("the job was cancelled"));
+            let path = format!("{}/{directory}/{name}", x.dir);
+            let mut bytes = Vec::with_capacity(size);
+            for index in 0..size.div_ceil(crate::release_handoff::CHUNK_SIZE) {
+                if killed(&job.id) {
+                    return Err(ApiError::conflict("the job was cancelled"));
+                }
+                let cmd = RemoteCmd {
+                    argv: low_priority(
+                        vec![
+                            "dd".into(),
+                            format!("if={path}"),
+                            "iflag=nofollow".into(),
+                            format!("bs={}", crate::release_handoff::CHUNK_SIZE),
+                            format!("skip={index}"),
+                            "count=1".into(),
+                            "status=none".into(),
+                        ],
+                        x.ionice,
+                    ),
+                    holder: x.holder.clone(),
+                    timeout_secs: Some(30),
+                    ..RemoteCmd::default()
+                };
+                let admission = x.state.executor.target_admission(x.def).await?;
+                let (running, report) = crate::run_kill::start_named_locked(
+                    x.state,
+                    x.def,
+                    &cmd,
+                    crate::run_kill::job_pidfile(&job.id),
+                    &admission,
+                )?;
+                let running = crate::executor::track_resource_run(
+                    x.state,
+                    x.def,
+                    &cmd,
+                    running,
+                    report.clone(),
+                )?;
+                set_control(&job.id, Some(running.ctl.clone()));
+                drop(admission);
+                if killed(&job.id) {
+                    let _ = running.ctl.send(Control::Kill);
+                }
+                let chunk = running
+                    .collect(crate::release_handoff::CHUNK_SIZE + 1)
+                    .await;
+                if let Some(report) = report {
+                    let _ = crate::run_kill::report(report).await;
+                }
+                let expected = crate::release_handoff::CHUNK_SIZE.min(size - bytes.len());
+                if !chunk.end.as_ref().is_some_and(End::success) || chunk.stdout.len() != expected {
+                    return Err(ApiError::conflict(format!(
+                        "cannot read release output chunk ({})",
+                        end_text(chunk.end.as_ref())
+                    )));
+                }
+                bytes.extend_from_slice(&chunk.stdout);
             }
-            let cmd = RemoteCmd {
-                argv: low_priority(
-                    vec![
-                        "dd".into(),
-                        format!("if={path}"),
-                        "iflag=nofollow".into(),
-                        format!("bs={}", crate::release_handoff::CHUNK_SIZE),
-                        format!("skip={index}"),
-                        "count=1".into(),
-                        "status=none".into(),
-                    ],
-                    x.ionice,
-                ),
-                holder: x.holder.clone(),
-                timeout_secs: Some(30),
-                ..RemoteCmd::default()
-            };
-            let admission = x.state.executor.target_admission(x.def).await?;
-            let (running, report) = crate::run_kill::start_named_locked(
-                x.state,
-                x.def,
-                &cmd,
-                crate::run_kill::job_pidfile(&job.id),
-                &admission,
-            )?;
-            let running =
-                crate::executor::track_resource_run(x.state, x.def, &cmd, running, report.clone())?;
-            set_control(&job.id, Some(running.ctl.clone()));
-            drop(admission);
-            if killed(&job.id) {
-                let _ = running.ctl.send(Control::Kill);
-            }
-            let chunk = running
-                .collect(crate::release_handoff::CHUNK_SIZE + 1)
-                .await;
-            if let Some(report) = report {
-                let _ = crate::run_kill::report(report).await;
-            }
-            let expected = crate::release_handoff::CHUNK_SIZE.min(size - bytes.len());
-            if !chunk.end.as_ref().is_some_and(End::success) || chunk.stdout.len() != expected {
-                return Err(ApiError::conflict(format!(
-                    "cannot read release output chunk ({})",
-                    end_text(chunk.end.as_ref())
-                )));
-            }
-            bytes.extend_from_slice(&chunk.stdout);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(size as u64);
+            header.set_mode(0o600);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, &name, &bytes[..])
+                .map_err(|e| ApiError::internal(format!("cannot stage release output: {e}")))?;
         }
-        let mut header = tar::Header::new_gnu();
-        header.set_size(size as u64);
-        header.set_mode(0o600);
-        header.set_cksum();
-        archive.append_data(&mut header, &name, &bytes[..]).map_err(|e| ApiError::internal(format!("cannot stage release output: {e}")))?;
-        }
-        let archive_bytes = archive.into_inner().map_err(|e| ApiError::internal(format!("cannot finish release output staging: {e}")))?;
+        let archive_bytes = archive.into_inner().map_err(|e| {
+            ApiError::internal(format!("cannot finish release output staging: {e}"))
+        })?;
         crate::release_handoff::publish(&x.state.state_dir, &job.id, &archive_bytes[..], limit)?;
     }
     // TER-196: a run that the infrastructure lost is no red; [`run`]

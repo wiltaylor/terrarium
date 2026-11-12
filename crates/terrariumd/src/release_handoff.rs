@@ -18,22 +18,39 @@ pub const CHUNK_SIZE: usize = 1024 * 1024;
 /// NUL-delimited filename/type/size/link-count records, bounded before any read.
 pub fn sources(bytes: &[u8], limit: u64) -> ApiResult<Vec<(String, usize)>> {
     if bytes.len() > 262144 || (!bytes.is_empty() && bytes.last() != Some(&0)) {
-        return Err(ApiError::invalid("release output manifest exceeds its limit or is truncated"));
+        return Err(ApiError::invalid(
+            "release output manifest exceeds its limit or is truncated",
+        ));
     }
-    let text = std::str::from_utf8(bytes).map_err(|_| ApiError::invalid("release output names must be UTF-8"))?;
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| ApiError::invalid("release output names must be UTF-8"))?;
     let fields: Vec<_> = text.split_terminator('\0').collect();
-    if fields.len() % 4 != 0 { return Err(ApiError::invalid("invalid release output manifest")); }
+    if fields.len() % 4 != 0 {
+        return Err(ApiError::invalid("invalid release output manifest"));
+    }
     let mut files = Vec::new();
     let mut total = 0_u64;
     for record in fields.chunks_exact(4) {
         name(record[0])?;
-        if record[1] != "f" || record[3] != "1" { return Err(ApiError::invalid("release outputs must be regular files, not directories or links")); }
-        let size = record[2].parse::<u64>().map_err(|_| ApiError::invalid("invalid release output size"))?;
-        total = total.checked_add(size).ok_or_else(|| ApiError::invalid("release output size overflow"))?;
-        if total > limit || files.len() >= 1024 || size > usize::MAX as u64 {
-            return Err(ApiError::invalid(format!("release artifacts exceed the per-job limit of {limit} bytes or 1024 files")));
+        if record[1] != "f" || record[3] != "1" {
+            return Err(ApiError::invalid(
+                "release outputs must be regular files, not directories or links",
+            ));
         }
-        if files.iter().any(|(n, _)| n == record[0]) { return Err(ApiError::invalid("duplicate release artifact name")); }
+        let size = record[2]
+            .parse::<u64>()
+            .map_err(|_| ApiError::invalid("invalid release output size"))?;
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| ApiError::invalid("release output size overflow"))?;
+        if total > limit || files.len() >= 1024 || size > usize::MAX as u64 {
+            return Err(ApiError::invalid(format!(
+                "release artifacts exceed the per-job limit of {limit} bytes or 1024 files"
+            )));
+        }
+        if files.iter().any(|(n, _)| n == record[0]) {
+            return Err(ApiError::invalid("duplicate release artifact name"));
+        }
         files.push((record[0].to_owned(), size as usize));
     }
     Ok(files)
@@ -422,8 +439,17 @@ mod tests {
 
     #[test]
     fn output_manifest_is_bounded_and_rejects_links() {
-        assert_eq!(sources(b"file\x00f\x003\x001\x00", 3).unwrap(), vec![("file".into(), 3)]);
-        for invalid in [b"file\x00l\x003\x001\x00".as_slice(), b"file\x00f\x003\x002\x00", b"../file\x00f\x003\x001\x00", b"file\x00f\x003\x001", b"file\x00f\x003\x001\x00file\x00f\x003\x001\x00"] {
+        assert_eq!(
+            sources(b"file\x00f\x003\x001\x00", 3).unwrap(),
+            vec![("file".into(), 3)]
+        );
+        for invalid in [
+            b"file\x00l\x003\x001\x00".as_slice(),
+            b"file\x00f\x003\x002\x00",
+            b"../file\x00f\x003\x001\x00",
+            b"file\x00f\x003\x001",
+            b"file\x00f\x003\x001\x00file\x00f\x003\x001\x00",
+        ] {
             assert!(sources(invalid, 100).is_err());
         }
         assert!(sources(b"file\x00f\x004\x001\x00", 3).is_err());
