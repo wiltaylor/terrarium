@@ -664,14 +664,27 @@ impl Updater {
             None
         };
 
+        #[cfg(not(test))]
+        let (hold, reserve, stop) = (HOT_SWAP_HOLD_LIMIT, HOT_SWAP_RECOVERY_RESERVE, HOT_SWAP_STOP_RESERVE);
+        #[cfg(test)]
+        let (hold, reserve, stop) = self.hot_budget;
+        // One clock starts with admission drain, not after the snapshot.
+        let deadlines = supervised.then(|| {
+            let end = tokio::time::Instant::now() + hold;
+            (end, end - reserve, end - stop)
+        });
+
         // Older daemons may not support jobs-only drain. Never prevent an
         // update for that reason, and never record their error values.
         let idx = self.begin_step("drain-jobs");
-        match tokio::time::timeout(
+        let jobs = tokio::time::timeout(
             self.cfg.drain_wait + Duration::from_secs(5),
             self.exec_ok(&cur.id, drain_jobs_argv(self.cfg.drain_wait)),
-        )
-        .await
+        );
+        let jobs = if let Some((_, switch, _)) = deadlines {
+            tokio::time::timeout_at(switch, jobs).await.unwrap_or_else(|e| Err(e))
+        } else { jobs.await };
+        match jobs
         {
             Ok(Ok(out)) => {
                 let detail = serde_json::from_str::<serde_json::Value>(&out)
@@ -704,14 +717,21 @@ impl Updater {
         }
 
         // Drain and back up. A failure here changes nothing.
-        if let Err(f) = self
+        let drain = self
             .step(
                 "drain",
                 self.exec_ok(&cur.id, drain_argv(self.cfg.drain_wait)),
                 |out| last_line(out, "no new turns; the running turns ended or waited"),
-            )
-            .await
+            );
+        let drained = if let Some((_, switch, _)) = deadlines {
+            tokio::time::timeout_at(switch, drain).await
+                .unwrap_or_else(|_| Err(Fail("recreate drain exceeded the hold safety deadline".into())))
+        } else { drain.await };
+        if let Err(f) = drained
         {
+            if let Some((end, _, recovery)) = deadlines {
+                return Err(self.recreate_early_failure(&cur, online_backup.as_deref().unwrap_or_default(), end, recovery, false, f).await);
+            }
             self.resume(&cur).await;
             return Err(failed(f));
         }
@@ -738,18 +758,22 @@ impl Updater {
         };
         self.with_run(|r| r.backup = Some(backup.clone()));
 
-        if supervised {
-            self.recreate_snapshot(&cur, &backup).await?;
+        if let Some((end, switch, recovery)) = deadlines {
+            self.recreate_snapshot(&cur, &backup, end, switch, recovery).await?;
         }
 
         // From here the container changes: a failure goes back.
-        match self
-            .replace(&prepared, &to, restore.as_deref(), supervised)
-            .await
+        let mut admission_attempted = false;
+        let replace = self.replace(&prepared, &to, restore.as_deref(), supervised, &mut admission_attempted);
+        let replaced = if let Some((_, switch, _)) = deadlines {
+            tokio::time::timeout_at(switch, replace).await
+                .unwrap_or_else(|_| Err(Fail("recreate replacement exceeded the hold safety deadline".into())))
+        } else { replace.await };
+        match replaced
         {
             Ok(()) => {
-                if supervised {
-                    self.finish_recreate(&cur, &backup).await;
+                if let Some((_, switch, _)) = deadlines {
+                    self.finish_recreate(&cur, &backup, switch).await;
                 }
                 let prev = Previous {
                     image: cur.image.clone(),
@@ -764,18 +788,23 @@ impl Updater {
                 }
                 Ok(Outcome::Succeeded)
             }
-            Err(f) => match self.recover(&cur, &backup, supervised).await {
+            Err(f) => {
+                if admission_attempted && let Some((end, _, _)) = deadlines {
+                    // Resume may have admitted writes. Never rewind that journal.
+                    return Err(self.stop_recreate(&cur, &backup, end, f.0).await);
+                }
+                match self.recover(&cur, &backup, deadlines.map(|(end, _, recovery)| (end, recovery))).await {
                 Ok(()) => {
-                    if supervised {
-                        self.finish_recreate(&cur, &backup).await;
+                    if let Some((_, _, recovery)) = deadlines {
+                        self.finish_recreate(&cur, &backup, recovery).await;
                     }
                     Err((Outcome::RolledBack, f))
                 }
                 Err(Fail(e)) => Err((
-                    Outcome::RollbackFailed,
+                    if supervised { Outcome::RecoveryFailed } else { Outcome::RollbackFailed },
                     Fail(format!("{}; the way back failed too: {e}", f.0)),
                 )),
-            },
+            }},
         }
     }
 
@@ -791,8 +820,7 @@ impl Updater {
         ).await
     }
 
-    async fn finish_recreate(&self, cur: &Container, backup: &str) {
-        let deadline = tokio::time::Instant::now() + HOT_SWAP_RECOVERY_RESERVE;
+    async fn finish_recreate(&self, cur: &Container, backup: &str, deadline: tokio::time::Instant) {
         // Use the source helper even when the destination is a legacy image.
         if let Err(e) = self
             .step(
@@ -825,17 +853,10 @@ impl Updater {
         &self,
         cur: &Container,
         backup: &str,
+        deadline: tokio::time::Instant,
+        switch_deadline: tokio::time::Instant,
+        recovery_deadline: tokio::time::Instant,
     ) -> Result<(), (Outcome, Fail)> {
-        #[cfg(not(test))]
-        let (hold, reserve, stop) = (
-            HOT_SWAP_HOLD_LIMIT,
-            HOT_SWAP_RECOVERY_RESERVE,
-            HOT_SWAP_STOP_RESERVE,
-        );
-        #[cfg(test)]
-        let (hold, reserve, stop) = self.hot_budget;
-        let deadline = tokio::time::Instant::now() + hold;
-        let switch_deadline = deadline - reserve;
         let work = self
             .step(
                 "snapshot-database",
@@ -873,20 +894,30 @@ impl Updater {
             )
             .await;
         if let Err(f) = work {
-            let recovery_deadline = deadline - stop;
+            return Err(self.recreate_early_failure(cur, backup, deadline, recovery_deadline, true, f).await);
+        }
+        Ok(())
+    }
+
+    async fn recreate_early_failure(&self, cur: &Container, backup: &str,
+        deadline: tokio::time::Instant, recovery_deadline: tokio::time::Instant,
+        paused: bool, f: Fail) -> (Outcome, Fail) {
             let recovery = recovery_before_deadline(recovery_deadline, async {
+                if paused {
                 let left = budget_left(recovery_deadline, Duration::ZERO)?
                     .as_secs_f64()
                     .to_string();
                 self.exec_ok(&cur.id, hot_argv("cancel-pause", &[&left]))
                     .await?;
+                }
                 self.wait_hot_healthy_until(&cur.id, recovery_deadline, None)
-                    .await
+                    .await?;
+                self.resume(cur).await;
+                Ok(())
             })
             .await;
-            return Err(match recovery {
+            match recovery {
                 Ok(_) => {
-                    let _ = tokio::time::timeout_at(deadline, self.resume(cur)).await;
                     (Outcome::Failed, f)
                 }
                 Err(e) => {
@@ -898,9 +929,7 @@ impl Updater {
                     )
                     .await
                 }
-            });
-        }
-        Ok(())
+            }
     }
 
     async fn hot_swap(&self, cur: &Container, to: &Image) -> Result<Outcome, (Outcome, Fail)> {
@@ -1305,6 +1334,7 @@ impl Updater {
         to: &Image,
         restore: Option<&str>,
         already_stopped: bool,
+        admission_attempted: &mut bool,
     ) -> Result<(), Fail> {
         if !already_stopped {
             self.step("stop", self.engine.stop(&cur.id), |()| {
@@ -1338,6 +1368,7 @@ impl Updater {
             .await?;
         self.step("health", self.wait_healthy(&new.id), Clone::clone)
             .await?;
+        *admission_attempted = true;
         self.resume(&new).await;
         Ok(())
     }
@@ -1385,38 +1416,39 @@ impl Updater {
 
     /// Go back to `cur`: remove what runs under its name, restore
     /// `backup` with the old image, and start the old image.
-    async fn recover(&self, cur: &Container, backup: &str, snapshot: bool) -> Result<(), Fail> {
-        if !snapshot {
+    async fn recover(&self, cur: &Container, backup: &str, deadlines: Option<(tokio::time::Instant, tokio::time::Instant)>) -> Result<(), Fail> {
+        let Some((deadline, recovery_deadline)) = deadlines else {
             return self.recover_inner(cur, backup, None).await;
-        }
-        let deadline = tokio::time::Instant::now() + HOT_SWAP_RECOVERY_RESERVE;
+        };
         let recovered = tokio::time::timeout_at(
-            deadline - HOT_SWAP_STOP_RESERVE,
-            self.recover_inner(cur, backup, Some(deadline - HOT_SWAP_STOP_RESERVE)),
+            recovery_deadline,
+            self.recover_inner(cur, backup, Some(recovery_deadline)),
         )
         .await;
         match recovered {
             Ok(Ok(())) => Ok(()),
             failure => {
-                // A timed-out restore helper is bounded independently. Stop any
-                // uncertain old startup too, never admit it on a failed restore.
-                let stop = tokio::time::timeout_at(deadline, async {
-                    if let Ok(now) = self.engine.target().await {
-                        self.engine.stop_for_recovery(&now.id).await?;
-                    }
-                    Ok::<(), String>(())
-                })
-                .await;
                 let reason = match failure {
                     Ok(Err(Fail(e))) => e,
                     _ => "recreate recovery deadline elapsed".into(),
                 };
-                Err(Fail(format!(
-                    "{reason}; recreate recovery failed; stop confirmed: {}; manual restore required: {backup}.hot-swap.sqlite; verify any outstanding helper has stopped",
-                    matches!(stop, Ok(Ok(())))
-                )))
+                Err(self.stop_recreate(cur, backup, deadline, reason).await.1)
             }
         }
+    }
+
+    async fn stop_recreate(&self, cur: &Container, backup: &str, deadline: tokio::time::Instant, reason: String) -> (Outcome, Fail) {
+        // The source may have been removed. Resolve the current target so an
+        // uncertain destination or recovered daemon is stopped, not just c0.
+        let stop = tokio::time::timeout_at(deadline, async {
+            let now = self.engine.target().await;
+            let id = now.as_ref().map_or(cur.id.as_str(), |c| c.id.as_str());
+            self.engine.stop_for_recovery(id).await
+        }).await;
+        (Outcome::RecoveryFailed, Fail(format!(
+            "{reason}; recreate recovery failed; stop confirmed: {}; manual restore required: {backup}.hot-swap.sqlite; verify any outstanding helper has stopped",
+            matches!(stop, Ok(Ok(())))
+        )))
     }
 
     async fn recover_inner(

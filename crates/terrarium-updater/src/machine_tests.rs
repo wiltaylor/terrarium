@@ -30,6 +30,8 @@ struct State {
     pending_once: Option<String>,
     pending_old_health: bool,
     pending_stop: bool,
+    pending_engine: Option<&'static str>,
+    jobs_delay: Duration,
     staged: Option<Image>,
     /// The containers by name.
     containers: HashMap<String, Container>,
@@ -222,6 +224,8 @@ impl Engine for Fake {
                 std::future::pending::<()>().await;
             }
             if what == "drain-jobs" {
+                let delay = self.0.lock().unwrap().jobs_delay;
+                tokio::time::sleep(delay).await;
                 let hang = self.0.lock().unwrap().jobs_hang;
                 if hang {
                     std::future::pending::<()>().await;
@@ -270,6 +274,10 @@ impl Engine for Fake {
     fn remove<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<()>> {
         Box::pin(async move {
             self.call(format!("remove {id}"));
+            if self.0.lock().unwrap().pending_engine == Some("remove") {
+                self.call("pending-remove".into());
+                std::future::pending::<()>().await;
+            }
             self.0.lock().unwrap().containers.retain(|_, c| c.id != id);
             Ok(())
         })
@@ -291,6 +299,10 @@ impl Engine for Fake {
         Box::pin(async move {
             if self.call(format!("create:{} new", image.reference)) {
                 return Err("create refused".into());
+            }
+            if self.0.lock().unwrap().pending_engine == Some("create") {
+                self.call("pending-create".into());
+                std::future::pending::<()>().await;
             }
             let mut s = self.0.lock().unwrap();
             s.next += 1;
@@ -1282,7 +1294,7 @@ async fn supervised_recreate_uncertain_restore_never_starts_old_daemon_or_cleans
         .updater
         .run_now(RunKind::Update, "latest", "operator")
         .await;
-    assert_eq!(run.outcome, Outcome::RollbackFailed, "{run:#?}");
+    assert_eq!(run.outcome, Outcome::RecoveryFailed, "{run:#?}");
     let calls = r.fake.calls();
     assert!(
         !calls
@@ -1317,6 +1329,44 @@ async fn supervised_recreate_pending_snapshot_recovers_within_original_hold_budg
     assert!(calls.iter().any(|c| c == "hot:cancel-pause"));
     assert!(calls.iter().any(|c| c == "resume c0"));
     assert!(!calls.iter().any(|c| c.starts_with("remove ")));
+}
+
+#[tokio::test]
+async fn supervised_recreate_pending_replacement_stages_share_the_drain_deadline() {
+    let mut cases = tokio::task::JoinSet::new();
+    for stage in ["remove", "create", "resume"] {
+        cases.spawn(async move {
+            let mut r = rig();
+            Arc::get_mut(&mut r.updater).unwrap().hot_budget = (
+                Duration::from_secs(14), Duration::from_secs(7), Duration::from_secs(1));
+            {
+                let mut s = r.fake.0.lock().unwrap();
+                s.supervised = true;
+                // Consume budget before snapshot. A clock reset there would
+                // add these seconds back and miss this test's total bound.
+                s.jobs_delay = Duration::from_secs(3);
+                s.pending_engine = if stage == "resume" { None } else { Some(stage) };
+                s.resume_hang = stage == "resume";
+            }
+            let started = tokio::time::Instant::now();
+            let run = tokio::time::timeout(Duration::from_secs(15),
+                r.updater.run_now(RunKind::Update, "latest", "operator")).await
+                .expect("replacement and recovery must share the original drain deadline");
+            assert_eq!(run.outcome, Outcome::RecoveryFailed, "{stage}: {run:#?}");
+            assert!(started.elapsed() < Duration::from_secs(15), "{stage}");
+            let calls = r.fake.calls();
+            assert!(calls.iter().any(|c| c.starts_with("stop-for-recovery ")), "{stage}: {calls:?}");
+            assert!(!calls.iter().any(|c| c == "hot:commit"), "{stage}");
+            if stage == "resume" {
+                assert!(calls.iter().any(|c| c == "resume c1"));
+                assert!(!calls.iter().any(|c| c == "hot:restore-database"));
+                assert_eq!(calls.last().unwrap(), "stop-for-recovery c1");
+            } else {
+                assert!(calls.iter().any(|c| c == &format!("pending-{stage}")));
+            }
+        });
+    }
+    while let Some(result) = cases.join_next().await { result.unwrap(); }
 }
 
 #[tokio::test]
