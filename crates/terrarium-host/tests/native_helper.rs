@@ -451,6 +451,61 @@ async fn a_session_starts_in_its_device_policy_and_relays_stdio() {
 }
 
 #[tokio::test]
+async fn reserved_gpu_uses_its_minor_number_not_its_index() {
+    let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
+    // Helios (TER-954): enumeration index 0 has minor 1, index 1 has minor 0.
+    let first = "GPU-cfe1df42-789e-7d5a-3df7-bded6b36e2eb";
+    let second = "GPU-1b303823-5ac9-74a6-1072-3c4e16f729a4";
+    script(
+        &f.dir.path().join("nvidia-smi"),
+        &format!(
+            "case \"$*\" in\n\
+             -L) printf 'GPU 0: NVIDIA GPU (UUID: {first})\\nGPU 1: NVIDIA GPU (UUID: {second})\\n' ;;\n\
+             -q) printf 'GPU 00000000:01:00.0\\n    GPU UUID : {first}\\n    Minor Number : 1\\nGPU 00000000:05:00.0\\n    GPU UUID : {second}\\n    Minor Number : 0\\n' ;;\n\
+             *) exit 2 ;;\n\
+             esac\n"
+        ),
+    );
+    for (uuid, minor, index) in [(first, 1, 0), (second, 0, 1)] {
+        f.write("run.log", "");
+        let mut req = f.start("p/a", Some("L1"), &[uuid], &[uuid], &["true"]);
+        // The daemon supplies CUDA visibility by UUID. The helper must carry
+        // it unchanged, independently of the device node's minor number.
+        req.env = BTreeMap::from([("CUDA_VISIBLE_DEVICES".into(), uuid.into())]);
+        let (s, r) = send(&f.socket, &Request::Start(req)).await;
+        assert!(matches!(r, Reply::Started { .. }), "{r:?}");
+        let (mut rd, _wr) = s.into_split();
+        loop {
+            match native::read_frame(&mut rd).await.unwrap() {
+                Some((Kind::Exit, d)) => {
+                    assert_eq!(serde_json::from_slice::<Exit>(&d).unwrap().code, Some(0));
+                    break;
+                }
+                Some(_) => {}
+                None => panic!("no exit"),
+            }
+        }
+        let run = f.log("run.log");
+        let devices: Vec<_> = run
+            .lines()
+            .filter(|line| line.starts_with("DeviceAllow="))
+            .collect();
+        assert!(
+            devices.contains(&format!("DeviceAllow=/dev/nvidia{minor} rw").as_str()),
+            "{uuid}: {devices:?}"
+        );
+        assert!(devices.contains(&"DeviceAllow=/dev/nvidiactl rw"));
+        assert_eq!(devices.len(), 2, "{uuid}: {devices:?}");
+        assert!(!run.contains(&format!("DeviceAllow=/dev/nvidia{index} rw")));
+        assert_eq!(
+            f.log("env.copy"),
+            format!("CUDA_VISIBLE_DEVICES=\"{uuid}\"\n")
+        );
+        f.wait_idle().await;
+    }
+}
+
+#[tokio::test]
 async fn a_caller_that_goes_away_kills_the_unit() {
     let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
     let req = f.start("p/a", None, &[], &[], &["sleep", "1"]);
