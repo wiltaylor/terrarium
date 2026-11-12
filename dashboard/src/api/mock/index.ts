@@ -2187,20 +2187,38 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const sock: typeof mockSocket = (path, make) => mockSocket(path, make, wsAuth());
 
   const customPages = new Map<string, import("../types").ProjectPage>();
+  const pageCanEdit = (p: string) => !opts.scheduleCaller || opts.scheduleCaller.role === "operator" || opts.scheduleCaller.role === "sysadmin" || (opts.scheduleCaller.role === "project_admin" && opts.scheduleCaller.project === p);
+  const pageRead = (p: string) => {
+    project(p);
+    const c = opts.scheduleCaller;
+    if (c && (c.role === "member" || c.role === "project_admin") && c.project !== p) fail(403, "forbidden", "page belongs to another project");
+  };
+  const pageWrite = (p: string) => { pageRead(p); if (!pageCanEdit(p)) fail(403, "forbidden", "editing project pages needs project_admin"); };
   const api: Api & { world: MockWorld } = {
     pages: {
-      list: (project) => reply(() => ({ items: [...customPages.values()].filter(p => p.project === project).sort((a, b) => a.position - b.position || a.slug.localeCompare(b.slug)), can_edit: true })),
+      list: (project) => reply(() => { pageRead(project); return { items: structuredClone([...customPages.values()].filter(p => p.project === project).sort((a, b) => a.position - b.position || a.slug.localeCompare(b.slug))), can_edit: pageCanEdit(project) }; }),
       get: (project, slug) => reply(() => {
+        pageRead(project);
         const page = customPages.get(`${project}/${slug}`);
         if (!page) throw new ApiError(404, "page not found");
         return structuredClone(page);
       }),
       save: (project, slug, body) => reply(() => {
+        pageWrite(project);
+        if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(slug) || !body.title?.trim() || body.title.length > 120 || !Number.isInteger(body.position) || body.position < 0) fail(422, "invalid", "invalid page title, slug, or position");
+        if (!customPages.has(`${project}/${slug}`) && [...customPages.values()].filter(p => p.project === project).length >= 10) fail(422, "invalid", "at most 10 pages");
+        if (body.widgets.length > 100) fail(422, "invalid", "at most 100 widgets");
+        for (const widget of body.widgets) {
+          if (widget.x < 0 || widget.x + widget.w > 12 || widget.y < 0 || widget.y + widget.h > 10000 || widget.w < 1 || widget.h < 1) fail(422, "invalid", "widget exceeds grid bounds (12 columns, 10000 rows)");
+          if (widget.kind === "markdown" && new TextEncoder().encode(widget.text ?? "").length > 16384) fail(422, "invalid", "Markdown exceeds 16384 bytes");
+          if (widget.kind === "wiki" && !/^[a-z0-9_.-]+(?:\/[a-z0-9_.-]+)*$/.test(widget.wiki ?? "")) fail(422, "invalid", "invalid wiki path");
+        }
         const page = { ...structuredClone(body), project, slug, updated_at: new Date().toISOString(), updated_by: "operator" };
         customPages.set(`${project}/${slug}`, page);
+        emit({ kind: "page.updated", actor: "operator", project, summary: `page ${slug} saved`, data: { project, slug, deleted: false } });
         return structuredClone(page);
       }),
-      remove: (project, slug) => reply(() => { customPages.delete(`${project}/${slug}`); }),
+      remove: (project, slug) => reply(() => { pageWrite(project); if (!customPages.delete(`${project}/${slug}`)) fail(404, "not_found", "page not found"); emit({ kind: "page.updated", actor: "operator", project, summary: `page ${slug} removed`, data: { project, slug, deleted: true } }); }),
     },
     world: w,
     session: {

@@ -18,10 +18,12 @@ export function WikiWidget(props: { project: string; path: string }) {
   });
   const [tree] = createResource(() => props.project, p => api.wiki.tree(p));
   const [artifacts] = createResource(() => props.project, p => api.artifacts.list(p));
+  const [urls] = createResource(() => ({ body: page.latest?.body ?? "", artifacts: artifacts.latest ?? [] }), async ({ body, artifacts }) =>
+    Object.fromEntries(await Promise.all(artifacts.filter(a => body.includes(`artifact:${a.id}`)).map(async a => [a.id, (await api.artifacts.url(a.uid)).url]))));
   const off = events.on(e => { if (e.project === props.project && e.kind.startsWith("wiki")) void refetch(); });
   onCleanup(off);
   return <><ErrorBanner error={page.error} /><Show when={page.latest} fallback={<p>{page.loading && page.latest === undefined ? "Loading wiki page…" : "page not found"}</p>}>{p => <>
     <h3>{p().title}</h3><A href={wikiHref(props.project, props.path)}>Open in wiki</A><span class="small muted"> Revision {p().rev}</span>
-    <Markdown project={props.project} artifacts={Object.fromEntries((artifacts.latest ?? []).map(a => [a.id, a]))} html={renderWiki(p().body, { project: props.project, pages: new Set((tree.latest ?? []).map(p => p.path)), cardPrefixes: new Set(Object.keys(projects.prefixes())) })} />
+    <Markdown project={props.project} artifacts={Object.fromEntries((artifacts.latest ?? []).map(a => [a.id, a]))} html={renderWiki(p().body, { project: props.project, pages: new Set((tree.latest ?? []).map(p => p.path)), cardPrefixes: new Set(Object.keys(projects.prefixes())), prefixProject: projects.prefixes(), artifactUrl: id => urls.latest?.[id] })} />
   </>}</Show></>;
 }

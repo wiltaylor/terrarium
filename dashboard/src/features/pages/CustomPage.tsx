@@ -96,7 +96,7 @@ export default function CustomPage() {
       <Show when={w.title}><h3>{w.title}</h3></Show>
       <Show when={w.kind === "markdown"}><Markdown html={renderMarkdown(w.text ?? "", params.project)} project={params.project} /></Show>
       <Show when={w.kind === "wiki"}><WikiWidget project={params.project} path={w.wiki ?? ""} /></Show>
-      <Show when={w.kind !== "wiki" && w.kind !== "markdown"}><BlockView block={{ ...w, kind: w.kind as "stat", size: "l", options: w.options ?? {} }} monitor={monitors.latest?.find(m => m.id === w.monitor)} project={params.project} now={now()} version={Date.parse(monitors.latest?.find(m => m.id === w.monitor)?.last?.at ?? "") || 0} /></Show>
+      <Show when={w.kind !== "wiki" && w.kind !== "markdown"}><BlockView block={{ id: w.id, title: w.title, monitor: w.monitor, kind: w.kind as "stat", size: "l", options: w.options ?? {} }} monitor={monitors.latest?.find(m => m.id === w.monitor)} project={params.project} now={now()} version={Date.parse(monitors.latest?.find(m => m.id === w.monitor)?.last?.at ?? "") || 0} /></Show>
     </>; }} />
     <Show when={page.latest && !widgets().length && !draft()}><p>This page has no widgets.</p></Show>
     <A href={`/p/${encodeURIComponent(params.project)}/board`}>Board</A>

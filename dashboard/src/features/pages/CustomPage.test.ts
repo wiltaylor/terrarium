@@ -77,3 +77,21 @@ it("keeps the loaded page visible while a live refresh is pending", async () => 
     await waitFor(() => expect(host.textContent).toContain("Overview"));
   } finally { dispose(); }
 });
+
+it("keeps widget input mounted and focused while typing and moving", async () => {
+  const { host, dispose } = await mount();
+  try {
+    await waitFor(() => expect(host.textContent).toContain("Edit page")); click(host, "Edit page"); click(host, "Add widget");
+    const input = host.querySelector("textarea")!; input.focus();
+    input.value = "First line"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(host.querySelector("textarea")).toBe(input);
+    expect(document.activeElement).toBe(input);
+    input.value += " and more"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    host.querySelector('[aria-label^="Move "]')!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    expect(host.querySelector("textarea")).toBe(input);
+    expect(input.value).toBe("First line and more");
+    click(host, "Save page");
+    await waitFor(() => expect(host.textContent).not.toContain("Save page"));
+    expect((await api.pages.get("terrarium", "overview")).widgets[0]?.text).toBe("First line and more");
+  } finally { dispose(); }
+});
