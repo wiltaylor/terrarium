@@ -16,9 +16,9 @@ pub struct Roots {
 
 /// Pinned directories only, NOT verified mount-scaffold evidence.
 pub struct Directories {
-    pub publisher: ProtectedRoot,
-    pub staging: ProtectedRoot,
-    pub registration: ProtectedRoot,
+    pub(super) publisher: ProtectedRoot,
+    pub(super) staging: ProtectedRoot,
+    pub(super) registration: ProtectedRoot,
 }
 
 impl Roots {

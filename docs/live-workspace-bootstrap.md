@@ -28,6 +28,13 @@ child or runtime is created. A crash before intent leaves an unknown child:
 subsequent allocation refuses it, even if it is empty. No automatic adoption or
 repair is permitted. This makes the metadata-creation crash window fail closed.
 
+The first scaffold attachment also requires a private surrounding host mount.
+Shared, slave and unbindable surrounding mounts are refused before attaching
+anything. The helper does not remount an inherited parent to make it acceptable.
+Each newly attached clone is explicitly made private, restricted and freshly
+checked before the empty publisher receives its unique shared group. Staging
+stays private. These checks are not receiver or attachment verification.
+
 The initial request cannot contain a Docker container ID: that ID does not
 exist before create. A separate immutable binding records the full container ID
 after create and before start. The registration and incarnation IDs must appear

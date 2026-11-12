@@ -43,6 +43,27 @@ fn directory(parent: &File, path: &Path, no_xdev: bool) -> Result<File, Reply> {
 }
 
 impl ProtectedRoot {
+    /// Reopen the same helper-created child after a mount operation. The
+    /// pinned parent is retained and the underlying inode may not change.
+    pub(super) fn reopen_registration_child(
+        &self,
+        registration: terrarium_core::live_workspace::RegistrationId,
+    ) -> Result<Self, Reply> {
+        let parent = self.ancestors.last().ok_or(Reply::Quarantined)?;
+        protected(parent)?;
+        let name = registration.0.to_string();
+        let fd = directory(parent, Path::new(&name), false)?;
+        protected(&fd)?;
+        let old = self.fd.metadata().map_err(|_| Reply::Failed)?;
+        let new = fd.metadata().map_err(|_| Reply::Failed)?;
+        if (old.dev(), old.ino()) != (new.dev(), new.ino()) {
+            return Err(Reply::Quarantined);
+        }
+        let mut root = self.try_clone()?;
+        root.fd = fd;
+        Ok(root)
+    }
+
     /// An administrative child is created once, never adopted. Registration
     /// IDs are typed, not caller paths. Sync both child and parent before use.
     pub(super) fn create_registration_child(
@@ -219,7 +240,7 @@ impl RevokePoint {
     }
 }
 
-fn empty(fd: &File) -> Result<(), Reply> {
+pub(super) fn empty(fd: &File) -> Result<(), Reply> {
     let reopened = directory(fd, Path::new("."), true)?;
     let mut dir = nix::dir::Dir::from_fd(reopened.into()).map_err(|_| Reply::Failed)?;
     for entry in dir.iter() {

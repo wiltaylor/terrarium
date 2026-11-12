@@ -12,6 +12,7 @@ pub mod mounts;
 mod paths;
 pub mod registration_roots;
 pub mod runtime;
+pub mod scaffold;
 pub mod service;
 mod store;
 
