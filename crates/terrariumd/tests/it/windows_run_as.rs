@@ -148,8 +148,16 @@ impl Lab {
         let r = self
             .td
             .req(
-                if value == ROTATED { hyper::Method::PUT } else { hyper::Method::POST },
-                if value == ROTATED { "/api/secrets/global/win-login" } else { "/api/secrets" },
+                if value == ROTATED {
+                    hyper::Method::PUT
+                } else {
+                    hyper::Method::POST
+                },
+                if value == ROTATED {
+                    "/api/secrets/global/win-login"
+                } else {
+                    "/api/secrets"
+                },
                 Some(json!({"name": "win-login", "kind": "login",
             "fields": {"username": "ignored", "password": value}})),
                 None,
