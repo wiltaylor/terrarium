@@ -1130,7 +1130,7 @@ impl HostRegistry {
             e.next_id = previous_next;
             return Err(HostError::Persistence);
         }
-        let has_run_as = match &frame {
+        let has_run_as = match frame {
             DaemonFrame::Exec(req) => req.windows_run_as.is_some(),
             DaemonFrame::CpPush(req) => req.windows_run_as.is_some(),
             DaemonFrame::CpPull(req) => req.windows_run_as.is_some(),
@@ -3339,9 +3339,12 @@ mod tests {
         let journal = resume::Journal::with_db(dir.path(), db.clone());
         let (release, writer) = hold_writer(db.clone());
         let r = reg.clone();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frame_calls = calls.clone();
         let opening = std::thread::spawn(move || {
-            r.open_bound("lab1", Some("test/open"), |_| DaemonFrame::Ping {
-                nonce: 42,
+            r.open_bound("lab1", Some("test/open"), |_| {
+                frame_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                DaemonFrame::Ping { nonce: 42 }
             })
         });
         metadata_retry_started(&reg);
@@ -3351,6 +3354,7 @@ mod tests {
         release.send(()).unwrap();
         writer.join().unwrap();
         let session = opening.join().unwrap().unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(matches!(outgoing.try_recv().unwrap(), Outgoing::Frame(_)));
         assert_eq!(
             journal.load::<(String, u32)>("bound/test/open").unwrap(),
