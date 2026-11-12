@@ -73,11 +73,14 @@ pub fn admit_generic_agent(t: &Tx<'_>, agent: &str) -> ApiResult<()> {
 /// admission barrier, not a substitute for dispatch-to-exec serialization.
 pub fn admit_target_exec(t: &Tx<'_>, agent: Option<&str>, target: &str) -> ApiResult<()> {
     durable(t)?;
-    let registration: Option<(String, String, String)> = t.query_row(
-        "SELECT registration_id, trust_domain_id, host_id FROM live_workspace_targets
+    let registration: Option<(String, String, String)> = t
+        .query_row(
+            "SELECT registration_id, trust_domain_id, host_id FROM live_workspace_targets
          WHERE target_id = ?1 AND state != 'destroyed'",
-        [target], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).optional()?;
+            [target],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
     let Some((registration, domain, host)) = registration else {
         return match agent {
             Some(agent) => admit_generic_agent(t, agent),
@@ -85,16 +88,27 @@ pub fn admit_target_exec(t: &Tx<'_>, agent: Option<&str>, target: &str) -> ApiRe
         };
     };
     no_link(t)?;
-    let agent = agent.ok_or_else(|| ApiError::new(Code::Conflict, "live exec requires an enrolled holder"))?;
-    let row: Option<(String, String, String, String, String)> = t.query_row(
-        "SELECT workspace_id, project_hint, agent_hint, source_dev, source_ino
+    let agent = agent
+        .ok_or_else(|| ApiError::new(Code::Conflict, "live exec requires an enrolled holder"))?;
+    let row: Option<(String, String, String, String, String)> = t
+        .query_row(
+            "SELECT workspace_id, project_hint, agent_hint, source_dev, source_ino
          FROM live_workspaces WHERE host_id = ?1 AND agent_id = ?2",
-        params![host, agent], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-    ).optional()?;
-    let (workspace, project, name, device, inode) = row.ok_or_else(|| ApiError::new(Code::Conflict, "exec holder has no verified workspace identity"))?;
+            params![host, agent],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+    let (workspace, project, name, device, inode) = row.ok_or_else(|| {
+        ApiError::new(
+            Code::Conflict,
+            "exec holder has no verified workspace identity",
+        )
+    })?;
     let invalid = || ApiError::internal("invalid stored live workspace identity");
     let enrollment = Enrollment {
-        workspace: terrarium_core::live_workspace::WorkspaceId(workspace.parse().map_err(|_| invalid())?),
+        workspace: terrarium_core::live_workspace::WorkspaceId(
+            workspace.parse().map_err(|_| invalid())?,
+        ),
         host: host.parse().map_err(|_| invalid())?,
         agent: agent.parse().map_err(|_| invalid())?,
         project,
@@ -104,7 +118,14 @@ pub fn admit_target_exec(t: &Tx<'_>, agent: Option<&str>, target: &str) -> ApiRe
             inode: inode.parse().map_err(|_| invalid())?,
         },
     };
-    record_workspace_use(t, &enrollment, WorkspaceUse::Live { registration: &registration, domain: &domain })
+    record_workspace_use(
+        t,
+        &enrollment,
+        WorkspaceUse::Live {
+            registration: &registration,
+            domain: &domain,
+        },
+    )
 }
 
 fn identity(t: &Tx<'_>, e: &Enrollment) -> ApiResult<String> {
