@@ -600,7 +600,8 @@ pub struct DeliverySetArgs {
     #[arg(long)]
     pub release_recipe: Option<String>,
     /// A secret of the release recipe's env, NAME=@secret:name[.field]
-    /// (GHCR_TOKEN, GH_TOKEN, COSIGN_PRIVATE_KEY, COSIGN_PASSWORD).
+    /// Name: upper-case letter, then upper-case letters, digits or underscores
+    /// (at most 64). Job and tool environment names are reserved.
     /// Repeat it; replaces the list
     #[arg(long = "release-secret")]
     pub release_secrets: Vec<String>,
