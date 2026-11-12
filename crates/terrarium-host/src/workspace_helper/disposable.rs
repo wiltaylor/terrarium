@@ -24,6 +24,54 @@ impl Drop for Cleanup {
     }
 }
 
+fn docker(args: &[&str]) -> Vec<u8> {
+    let output = Command::new("/usr/bin/docker").args(["--host", "unix:///var/run/docker.sock"]).args(args).env_clear().output().unwrap();
+    assert!(output.status.success(), "synthetic Docker fixture command failed");
+    output.stdout
+}
+
+struct Container(String);
+impl Drop for Container {
+    fn drop(&mut self) {
+        let _ = Command::new("/usr/bin/docker").args(["--host", "unix:///var/run/docker.sock", "rm", "--force", &self.0]).env_clear().output();
+    }
+}
+
+#[test]
+#[ignore = "requires explicit disposable Docker VM"]
+fn docker_runtime_identity_and_restart() {
+    use runtime::Inspector;
+    assert_eq!(std::env::var("TERRARIUM_B2_DISPOSABLE").as_deref(), Ok("1"));
+    assert!(nix::unistd::geteuid().is_root());
+    let image = String::from_utf8(docker(&["image", "inspect", "busybox:1.37.0", "--format", "{{.Id}}"])).unwrap();
+    let image = image.trim();
+    assert!(image.starts_with("sha256:") && image.len() == 71);
+    let request = super::tests::envelope(1, Kind::Grant).original;
+    let registration = format!("terrarium.workspace.registration={}", request.runtime.registration.0);
+    let incarnation = format!("terrarium.workspace.runtime={}", request.runtime.incarnation.0);
+    let id = String::from_utf8(docker(&["run", "--detach", "--pull", "never", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "65534:65534", "--memory", "64m", "--pids-limit", "16", "--label", &registration, "--label", &incarnation, image, "/bin/sleep", "600"])).unwrap();
+    let container = Container(id.trim().to_owned());
+    assert_eq!(container.0.len(), 64);
+    let mut inspector = runtime::DockerInspector;
+    let snapshot = inspector.inspect(&container.0).unwrap();
+    assert_eq!(snapshot.identity.registration, request.runtime.registration);
+    assert_eq!(snapshot.identity.incarnation, request.runtime.incarnation);
+    let pin = runtime::PinnedRuntime::acquire(&mut inspector, &snapshot.identity).unwrap();
+    assert!(!pin.mountinfo(&mut inspector).unwrap().is_empty());
+    assert!(inspector.inspect(&container.0[..12]).is_err());
+    let mut wrong = snapshot.identity.clone(); wrong.namespace.inode += 1;
+    assert!(runtime::PinnedRuntime::acquire(&mut inspector, &wrong).is_err());
+    docker(&["pause", &container.0]);
+    assert!(pin.recheck(&mut inspector, &snapshot.identity).is_err());
+    docker(&["unpause", &container.0]);
+    docker(&["restart", "--time", "1", &container.0]);
+    assert!(pin.recheck(&mut inspector, &snapshot.identity).is_err());
+    let restarted = inspector.inspect(&container.0).unwrap();
+    assert_ne!(snapshot.started_at, restarted.started_at);
+    assert_ne!(snapshot.identity.namespace, restarted.identity.namespace);
+    drop(container); // delete only the exact container created by this test
+}
+
 fn ns(path: &str) -> NamespaceIdentity {
     let m = std::fs::metadata(path).unwrap();
     NamespaceIdentity {

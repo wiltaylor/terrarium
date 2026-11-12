@@ -12,7 +12,7 @@ async fn main() -> std::io::Result<()> {
     terrarium_host::workspace_helper::service::run().await
 }
 
-#[cfg(not(all(target_os = "linux", target_env = "gnu"))))]
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn main() {
     eprintln!("workspace helper requires supported Linux GNU mount APIs");
     std::process::exit(1);
