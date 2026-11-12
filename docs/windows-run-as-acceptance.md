@@ -60,6 +60,25 @@ uid 1009, inventory `/home/winlab/win-lab/vmlab.wcl`. SSH recovery is
 `terrarium@10.3.0.2:2254` using the pinned fingerprint reference MEM-588.
 Never bypass verification. Refresh readiness and exclusive use before the run.
 
+Meta's 18:13:23 UTC rollback metadata (source message
+`01M78FFS378XWCM8CNX5EJ606K`) records `TerrariumHost` Running, LocalSystem,
+Auto/Start2, no delayed start. Exact original ImagePath:
+
+```text
+"C:\Program Files\Terrarium\host\versions\0.1.0+7cdc823\terrarium-host.exe" --config "C:\ProgramData\Terrarium\host\config.toml" service
+```
+
+Original executable SHA256:
+`44d9864df32ffe488aa19648f30429db88e9a6a112c13773358ba415db5317b7`.
+FileVersion was null, so the directory name is not executable version proof.
+Failure reset 86400 seconds, restart delays 5000/15000/30000 milliseconds,
+noncrash TRUE, empty command/reboot fields. Exact service SDDL is retained in
+that Meta source and must accompany the expanded approved manifest. Protected
+paths were SYSTEM/Administrators full only. This metadata is neither backup/
+restore proof nor switch authorization. Fixed-path existence/type/owner/SDDL/
+size/mtime and safe journal-status inventory remain pending. Unknown update
+status is a stop condition. Never read config/token contents to fill this gap.
+
 Let `COMMIT` be the final 40-hex pushed commit and `RUN_ID` the full UTC
 `YYYYMMDDTHHMMSSZ` execution ID. The fixture namespace is
 `ter272_<COMMIT[:8]>_<RUN_ID>`. A SAM name is
@@ -92,6 +111,33 @@ phase that disables disposable C only after positive tests. That requires a
 phase-specific fixture/runner adjustment, not a silent skip of the current D case.
 
 ## Isolated endpoint and credential flow proposal
+
+**Network blocked:** Meta reports no assigned VM-only Linux bind IP or guest.
+Private ranges are blocked except the existing severus:8182 route, with no
+18482 exception. Do not reuse that endpoint, assume a 10.79.x Linux address,
+bind wildcard, widen LAN access, or add a tunnel around the control. Ports below
+are proposals, not reservations. No daemon/listener is started by this document.
+
+Required allocation for Meta's separate design/security review:
+
+- N0a: one owned Linux test-daemon peer and unprivileged UID/scratch directory,
+  with the CLI/test runner colocated. If the peer is not the inventoried uid1009
+  lab host, replace the proposed root/UID explicitly in the approved manifest.
+  No user, VM, NIC or segment is created automatically.
+- N0b: one explicit WINHOST-to-test-peer TCP WSS route on a dedicated isolated
+  segment or equivalent reviewed boundary. Only WINHOST is allowed to reach the
+  assigned peer/port. Other lab peers, DC management, LAN and public networks
+  must be denied in both directions unless an exact separately approved rule
+  is required. Keep WINHOST's existing DC/SMB route unchanged. Meta owns any
+  future interface/routing/firewall allocation, none is authorized here.
+- N0c: Meta records exact interface/IP/port, WINHOST positive reachability and
+  independent other-network denial checks, plus negative access to daemon API
+  and unrelated ports. Binding a private address alone is not isolation proof.
+  TLS SAN names exactly the allocated peer IP/name. A new dedicated key/cert is
+  owned by the allocated UID (private directory 0700, key 0600), never a shared
+  production key. Verify its SHA256 pin out-of-band and protected host config
+  ACLs before connection. Record exact key lifecycle/teardown and never print
+  private key/token material. No trust-store/DNS change or skipped verification.
 
 - N1: run the matching Linux daemon as uid 1009 on the lab Linux host, with
   API **only** `http://127.0.0.1:18480` and private Unix socket
