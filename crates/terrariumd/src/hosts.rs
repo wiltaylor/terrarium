@@ -140,6 +140,8 @@ pub enum HostError {
     Busy(String, u32),
     #[error("cannot persist host session state")]
     Persistence,
+    #[error("Windows run-as requires a Windows host with the windows_run_as capability")]
+    WindowsRunAsUnsupported,
 }
 
 impl From<HostError> for ApiError {
@@ -148,6 +150,7 @@ impl From<HostError> for ApiError {
             HostError::Offline(_) => ApiError::conflict(e.to_string()),
             HostError::Busy(..) => ApiError::new(Code::RateLimited, e.to_string()),
             HostError::Persistence => ApiError::internal(e.to_string()),
+            HostError::WindowsRunAsUnsupported => ApiError::invalid(e.to_string()),
         }
     }
 }
@@ -865,6 +868,12 @@ impl HostRegistry {
             }
         };
         let (tx, rx) = mpsc::unbounded_channel();
+        let frame = make(id);
+        if matches!(&frame, DaemonFrame::Exec(req) if req.windows_run_as.is_some())
+            && !e.info.as_ref().is_some_and(|i| i.os == "windows" && i.capabilities.windows_run_as)
+        {
+            return Err(HostError::WindowsRunAsUnsupported);
+        }
         e.sessions.insert(
             id,
             Slot {
@@ -887,7 +896,7 @@ impl HostRegistry {
             return Err(HostError::Persistence);
         }
         if let Some(c) = &e.conn {
-            let _ = c.tx.send(Outgoing::frame(make(id)));
+            let _ = c.tx.send(Outgoing::frame(frame));
         }
         Ok(HostSession {
             registry: self.clone(),
