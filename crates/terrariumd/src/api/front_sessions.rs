@@ -119,6 +119,7 @@ pub(super) fn clear(op: &OperatorAuth) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::super::session::SessionKey;
     use super::*;
