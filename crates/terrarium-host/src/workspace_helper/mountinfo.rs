@@ -75,12 +75,23 @@ pub fn parse(bytes: &[u8], namespace: NamespaceIdentity) -> Result<Vec<MountEvid
         // Docker pins namespaces with nsfs. These kernel pseudo-roots
         // are not directory paths and must never qualify as workspace roots.
         let namespace_root = parts[dash + 1] == "nsfs"
-            && root
-                .split_once(":[")
-                .is_some_and(|(kind, tail)| {
-                    matches!(kind, "cgroup" | "ipc" | "mnt" | "net" | "pid" | "pid_for_children" | "time" | "time_for_children" | "user" | "uts")
-                        && tail.strip_suffix(']').is_some_and(|s| number(s).is_ok_and(|n| n > 0))
-                });
+            && root.split_once(":[").is_some_and(|(kind, tail)| {
+                matches!(
+                    kind,
+                    "cgroup"
+                        | "ipc"
+                        | "mnt"
+                        | "net"
+                        | "pid"
+                        | "pid_for_children"
+                        | "time"
+                        | "time_for_children"
+                        | "user"
+                        | "uts"
+                ) && tail
+                    .strip_suffix(']')
+                    .is_some_and(|s| number(s).is_ok_and(|n| n > 0))
+            });
         if (!root.starts_with('/') && !namespace_root) || !mountpoint.starts_with('/') {
             return Err(Reply::Failed);
         }
