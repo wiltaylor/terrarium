@@ -8,6 +8,46 @@ use crate::executor::sh_quote;
 use crate::store::agents;
 
 pub const TRAILERS_FILE: &str = ".terrarium-git-trailers";
+pub const CONFIG_FILE: &str = ".terrarium-gitconfig";
+
+pub fn write_fallback_config(workspace: &std::path::Path, identity: &Identity) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let quote = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\t', "\\t").replace('\r', "");
+    let mut temp = tempfile::NamedTempFile::new_in(workspace)?;
+    write!(temp, "[user]\nname = \"{}\"\nemail = \"{}\"\n", quote(&identity.name), quote(&identity.email))?;
+    temp.persist(workspace.join(CONFIG_FILE)).map_err(|e| e.error)?;
+    Ok(())
+}
+
+type PushMarkers = std::collections::HashMap<(String, String, String), std::time::Instant>;
+fn markers() -> &'static std::sync::Mutex<PushMarkers> {
+    static MARKERS: std::sync::OnceLock<std::sync::Mutex<PushMarkers>> = std::sync::OnceLock::new();
+    MARKERS.get_or_init(Default::default)
+}
+
+/// An authenticated, one-shot marker. It is not a security boundary: hooks
+/// can be skipped and the agent can call the endpoint itself.
+pub fn mark_push(repo: &str, agent: &str, updates: &str) -> ApiResult<()> {
+    if updates.len() > 65536 { return Err(crate::error::ApiError::invalid("too many push updates")); }
+    let mut refs = Vec::new();
+    for line in updates.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() != 4 { return Err(crate::error::ApiError::invalid("invalid push update")); }
+        refs.push(format!("{} {} {}", fields[2], fields[3], fields[1]));
+    }
+    refs.sort();
+    let mut markers = markers().lock().map_err(|_| crate::error::ApiError::internal("push marker lock"))?;
+    markers.retain(|_, at| at.elapsed().as_secs() < 60);
+    if markers.len() >= 256 { return Err(crate::error::ApiError::invalid("too many pending push checks")); }
+    markers.insert((repo.into(), agent.into(), refs.join("\n")), std::time::Instant::now());
+    Ok(())
+}
+
+pub fn take_push_marker(repo: &str, agent: &str, mut refs: Vec<String>) -> bool {
+    refs.sort();
+    markers().lock().ok().and_then(|mut m| m.remove(&(repo.into(), agent.into(), refs.join("\n"))))
+        .is_some_and(|at| at.elapsed().as_secs() < 60)
+}
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,9 +99,11 @@ pub fn effective(c: &rusqlite::Connection, repo: &crate::store::repos::Repo) -> 
 
 pub async fn for_repo(state: &Shared, id: &str, repo: &crate::store::repos::Repo) -> ApiResult<Provenance> {
     let mut p = provenance(state, id).await?;
+    let repo_id = repo.id.clone();
     let repo = repo.clone();
     let (enabled, identity, warn_only) = state.db.read(move |c| effective(c, &repo)).await?;
     p.identity = identity;
+    p.repo = Some(repo_id);
     p.warn_only = warn_only;
     if !enabled { p.trailers.clear(); }
     Ok(p)
@@ -98,6 +140,7 @@ impl Identity {
 /// A checkout fallback. Live sessions and target execs supply current values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provenance {
+    pub repo: Option<String>,
     pub warn_only: bool,
     pub identity: Identity,
     pub trailers: String,
@@ -132,6 +175,7 @@ pub async fn provenance(state: &Shared, id: &str) -> ApiResult<Provenance> {
                 trailers.push_str(&format!("Terrarium-Card: {}\n", clean(&card)));
             }
             Ok(Provenance {
+                repo: None,
                 warn_only: false,
                 identity: Identity::from_env(),
                 trailers,
@@ -278,6 +322,7 @@ mod tests {
     fn explicitly_empty_trailers_disable_file_and_snapshot() {
         let tmp = tempfile::tempdir().unwrap();
         let p = Provenance {
+            repo: None,
             warn_only: false,
             identity: Identity::from_env(),
             trailers: "Terrarium-Session: snapshot\n".into(),
@@ -307,6 +352,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         let p = Provenance {
+            repo: None,
             warn_only: false,
             identity: Identity { name: "Instance Bot".into(), email: "bot@example.test".into() },
             trailers: "Terrarium-Session: 01SESSION\nTerrarium-Agent: proj/agent\nTerrarium-Harness: codex 1.2.3\nTerrarium-Model: model-'$(false)'\nTerrarium-Card: TER-258\n".into(),
@@ -389,6 +435,7 @@ mod tests {
         let origin = root.join("origin");
         std::fs::create_dir(&origin).unwrap();
         let p = Provenance {
+            repo: None,
             warn_only: false,
             identity: Identity { name: "Target Bot".into(), email: "target@example.test".into() },
             trailers: "Terrarium-Session: 01TARGET\nTerrarium-Agent: proj/worker\nTerrarium-Harness: codex unknown\nTerrarium-Model: unknown\n".into(),

@@ -46,6 +46,11 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             ],
         )
         .route(
+            "/repos/{id}/push-checked",
+            post(push_checked),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+        .route(
             "/repos/{id}/git",
             get(git_settings).patch(set_git_settings),
             &[
@@ -58,6 +63,19 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             post(checkout),
             &[(axum::http::Method::POST, super::link_registry::Access::Link)],
         )
+}
+
+#[derive(Deserialize)]
+struct PushChecked { updates: String }
+
+async fn push_checked(State(state): State<Shared>, actor: Actor, Path(id): Path<String>, ApiJson(body): ApiJson<PushChecked>) -> ApiResult<Json<serde_json::Value>> {
+    let agent = actor.agent().ok_or_else(|| ApiError::invalid("push check requires an agent"))?;
+    let context = agent.project.clone();
+    let repo = state.db.read(move |c| repos::resolve(c, &id, Some(&context))).await?;
+    if repo.project != agent.project { return Err(ApiError::invalid("push check requires the agent's project")); }
+    policy::read_project(&actor, &repo.project)?;
+    crate::git_identity::mark_push(&repo.id, &agent.id, &body.updates)?;
+    Ok(Json(json!({"checked": true})))
 }
 
 async fn git_settings(State(state): State<Shared>, actor: Actor, Path(id): Path<String>) -> ApiResult<Json<crate::git_identity::Settings>> {

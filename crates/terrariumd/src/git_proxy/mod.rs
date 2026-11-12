@@ -1190,6 +1190,34 @@ async fn upload_pack(
     .await
 }
 
+async fn provenance_warning(state: &Shared, ctx: &Ctx, commands: &[pkt::Command]) {
+    let repo = ctx.repo.id.clone();
+    let project = ctx.repo.project.clone();
+    let agent = ctx.agent.id.clone();
+    let refs: Vec<_> = commands.iter().map(|c| c.refname.clone()).collect();
+    if let Err(e) = state.db.write("system", move |t| {
+        use crate::store::{agents, board, mail};
+        t.audit("git.provenance_warning", &repo, Some(&project), json!({"repo": repo, "agent": agent, "refs": refs}))?;
+        let body = format!("> Git provenance warning: agent {agent} pushed refs {} to repo {repo} with provenance off and no managed hook check. The proxy did not inspect commit contents. Check the outgoing identity and trailers.", refs.join(", "));
+        let view = agents::get(t, &agent)?;
+        if let Some(card) = view.current_card {
+            board::system_comment(t, &card, &body, None)?;
+        } else {
+            mail::send(t, mail::Outgoing {
+                from: &mail::Address::System,
+                to: &mail::Address::Project(project),
+                subject: "Git provenance warning",
+                body: &body,
+                thread: None,
+                in_reply_to: None,
+            })?;
+        }
+        Ok(())
+    }).await {
+        tracing::warn!("cannot record git provenance warning: {e}");
+    }
+}
+
 /// Read the body until the command list is complete.
 async fn read_commands(
     stream: &mut (impl Stream<Item = Result<Bytes, axum::Error>> + Unpin),
@@ -1361,7 +1389,19 @@ async fn receive_pack(
         futures_util::stream::once(async move { Ok::<Bytes, axum::Error>(Bytes::from(prefix)) });
     let all = capped(first.chain(idle_limited(stream)), MAX_PUSH, "the push");
     let url = forge_url(&ctx.base, "git-receive-pack", None);
-    forward(
+    let repo_for_settings = ctx.repo.clone();
+    let enabled = match state.db.read(move |c| Ok(crate::git_identity::effective(c, &repo_for_settings)?.0)).await {
+        Ok(enabled) => enabled,
+        Err(_) => return text(StatusCode::INTERNAL_SERVER_ERROR, "cannot read git provenance settings"),
+    };
+    let checked = crate::git_identity::take_push_marker(&ctx.repo.id, &ctx.agent.id,
+        cmds.commands.iter().map(|c| format!("{} {} {}", c.refname, c.old, c.new)).collect());
+    let warn = !enabled && !checked && !cmds.commands.is_empty();
+    let sideband = cmds.has_cap("side-band-64k") || cmds.has_cap("side-band");
+    if warn {
+        provenance_warning(&state, &ctx, &cmds.commands).await;
+    }
+    let mut response = forward(
         ctx,
         reqwest::Method::POST,
         url,
@@ -1369,7 +1409,16 @@ async fn receive_pack(
         Some((reqwest::Body::wrap_stream(all), false)),
         "application/x-git-receive-pack-result",
     )
-    .await
+    .await;
+    if warn && sideband && response.status().is_success() && !response.headers().contains_key(header::CONTENT_ENCODING) {
+        let line = "\x02Terrarium: provenance is off and no managed hook check was recorded; check outgoing identity and trailers.\n";
+        let prefix = Bytes::from(format!("{:04x}{line}", line.len() + 4));
+        response.headers_mut().remove(header::CONTENT_LENGTH);
+        let (parts, body) = response.into_parts();
+        let first = futures_util::stream::once(async move { Ok::<Bytes, axum::Error>(prefix) });
+        return Response::from_parts(parts, Body::from_stream(first.chain(body.into_data_stream())));
+    }
+    response
 }
 
 /// Why the push of `refname` is refused by the `push_deny` of `repo`, or

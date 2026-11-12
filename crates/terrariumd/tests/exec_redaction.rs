@@ -146,7 +146,7 @@ fn split_print(var: &str, value: &str) -> String {
 }
 
 #[tokio::test]
-async fn agent_exec_overrides_git_identity_and_supplies_provenance() {
+async fn agent_exec_leaves_git_identity_to_checkout_config_and_supplies_provenance() {
     let lab = lab().await;
     let sid = lab.exec(Some(&lab.w1), json!({
         "cmd": ["sh", "-c", "printf '%s\\n' \"$GIT_AUTHOR_NAME\" \"$GIT_AUTHOR_EMAIL\" \"$GIT_COMMITTER_NAME\" \"$GIT_COMMITTER_EMAIL\"; printf '%s' \"$TERRARIUM_GIT_TRAILERS\"; test -z \"${TERRARIUM_GIT_TRAILERS_FILE-}\""],
@@ -155,7 +155,7 @@ async fn agent_exec_overrides_git_identity_and_supplies_provenance() {
     let (out, err) = drain(&lab.td, Some(&lab.w1), &sid).await;
     assert!(err.is_empty(), "{err}");
     assert!(
-        out.starts_with("Terrarium\nterrarium@localhost\nTerrarium\nterrarium@localhost\n"),
+        out.starts_with("\n\n\n\n"),
         "{out}"
     );
     assert!(out.contains("Terrarium-Agent: p/w1"), "{out}");

@@ -2069,6 +2069,10 @@ impl RunnerSupervisor {
         // The instance bot identity deliberately overrides GIT_AUTHOR_* and
         // GIT_COMMITTER_* supplied by the harness or secret environment.
         spec.env.extend(litellm_env);
+        crate::git_identity::write_fallback_config(&layout.workspace, &crate::git_identity::Identity::from_env())
+            .map_err(|e| SupervisorError::NotReady(format!("cannot write git fallback config: {e}")))?;
+        spec.env.insert("GIT_CONFIG_GLOBAL".into(), layout.workspace_mount.as_ref().unwrap_or(&layout.workspace)
+            .join(crate::git_identity::CONFIG_FILE).display().to_string());
         // Local checkout identity must win over the instance fallback.
         // GIT_AUTHOR_* and GIT_COMMITTER_* would override repo config.
         for key in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] {

@@ -254,7 +254,12 @@ fi
 repo_hook="${{0%/*}}/{REPO_PRE_PUSH}"
 if test -x "$repo_hook"; then
   if test -n "$input"; then printf '%s\n' "$input"; fi | "$repo_hook" "$@"
-  exit $?
+  status=$?
+  test "$status" = 0 || exit "$status"
+fi
+repo_id=$(git config --get terrarium.repoId)
+if test -n "$repo_id"; then
+  printf '%s\n' "$input" | terrarium repo push-checked "$repo_id" >/dev/null || echo "Terrarium: could not record managed hook check; the proxy will warn" >&2
 fi
 exit 0
 "#
@@ -306,6 +311,7 @@ fn install_hooks(c: &Checkout, r: &Runner) -> Result<Vec<String>, GitError> {
         files.push(("prepare-commit-msg".into(), p.hook().into_bytes()));
         r.quiet(&c.dest, &["config", "user.name", &p.identity.name])?;
         r.quiet(&c.dest, &["config", "user.email", &p.identity.email])?;
+        if let Some(repo) = &p.repo { r.quiet(&c.dest, &["config", "terrarium.repoId", repo])?; }
         r.quiet(&c.dest, &["config", "terrarium.provenance", if p.trailers.is_empty() { "false" } else { "true" }])?;
         r.quiet(&c.dest, &["config", "terrarium.provenanceWarnOnly", if p.warn_only { "true" } else { "false" }])?;
     }

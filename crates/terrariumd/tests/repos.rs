@@ -80,6 +80,7 @@ on_agent_create = ["proj", "missing"]
         );
     })
     .await;
+    td.patch("/api/projects/terra/git", json!({"provenance": true})).await.ok();
     (td, origin, remotes)
 }
 

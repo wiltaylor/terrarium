@@ -303,6 +303,13 @@ async fn repo_add(ctx: &Ctx, a: &RepoAddArgs) -> anyhow::Result<()> {
 
 pub async fn repo(ctx: &Ctx, cmd: &RepoCmd) -> anyhow::Result<()> {
     match cmd {
+        RepoCmd::PushChecked { repo } => {
+            use std::io::Read as _;
+            let mut updates = String::new();
+            std::io::stdin().take(65537).read_to_string(&mut updates)?;
+            ctx.api.post(&format!("/api/repos/{}/push-checked", encode(repo)), Some(json!({"updates": updates}))).await?;
+            Ok(())
+        }
         RepoCmd::Set { repo, provenance, git_name, git_email, warn_only } => {
             let id = repo;
             let mut body = json!({});

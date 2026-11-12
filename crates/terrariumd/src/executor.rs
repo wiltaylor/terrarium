@@ -5370,6 +5370,7 @@ if [ -n "${TERRARIUM_COMMIT_HOOK:-}" ] && [ "$action" != not_updated ]; then
     mv -f "$push_tmp" "$push_hook"
     G -C "$dest" config terrarium.provenance "$TERRARIUM_PROVENANCE"
     G -C "$dest" config terrarium.provenanceWarnOnly "$TERRARIUM_PROVENANCE_WARN_ONLY"
+    G -C "$dest" config terrarium.repoId "$TERRARIUM_REPO_ID"
   fi
 fi
 head=$(G -C "$dest" rev-parse -q --verify HEAD || true)
@@ -5499,6 +5500,7 @@ pub async fn checkout_on_target(
     crate::target_roots::prepare(state, actor, &row.def, Some(dest)).await?;
     if let Some(a) = actor.agent() {
         let p = crate::git_identity::for_repo(state, &a.id, repo).await?;
+        cmd.env.insert("TERRARIUM_REPO_ID".into(), repo.id.clone());
         cmd.env.insert("TERRARIUM_PUSH_HOOK".into(), crate::git::push_deny_hook(&repo.push_deny));
         cmd.env.insert("TERRARIUM_PROVENANCE".into(), (!p.trailers.is_empty()).to_string());
         cmd.env.insert("TERRARIUM_PROVENANCE_WARN_ONLY".into(), p.warn_only.to_string());
@@ -5859,6 +5861,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         let p = crate::git_identity::Provenance {
+            repo: None,
             warn_only: false,
             identity: crate::git_identity::Identity::from_env(),
             trailers: "Terrarium-Agent: test/worker\n".into(),

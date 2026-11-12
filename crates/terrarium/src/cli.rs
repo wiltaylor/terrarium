@@ -736,6 +736,8 @@ pub struct RepoAddArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum RepoCmd {
+    #[command(hide = true)]
+    PushChecked { repo: String },
     /// Change repo commit settings. Refresh checkouts after changing them.
     Set {
         repo: String,
