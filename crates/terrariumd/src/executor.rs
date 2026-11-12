@@ -55,6 +55,7 @@ use crate::secrets::{RunDirs, Secret};
 use crate::store::leases;
 use crate::store::targets::{self, TargetRow};
 
+pub(crate) mod durable;
 mod workspace_sync;
 
 /// Live exec sessions an agent may hold at once.
@@ -412,9 +413,13 @@ pub fn pump_process(
 
 /// A command for a target. `Debug` shows the env names, not the values
 /// (a value can be a secret, TER-142).
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteCmd {
+    /// Explicit opt-in: no stdin, PTY, or interactive shell.
+    #[serde(default)]
+    pub durable: bool,
     /// Only daemon-owned root scripts may request helper provisioning.
+    #[serde(default)]
     pub prepare_root: Option<terrarium_host::native::OwnedRoot>,
     /// Durable queue-step identity, bound atomically to a host session.
     pub resume_key: Option<String>,
@@ -875,6 +880,8 @@ pub struct ExecSession {
 
 #[derive(Serialize, Deserialize)]
 struct SavedExec {
+    #[serde(default)]
+    durable: bool,
     id: String,
     target: String,
     owner: Option<String>,
@@ -882,6 +889,8 @@ struct SavedExec {
     project: Option<String>,
     host_session: Option<(String, u32)>,
     secrets: Vec<(String, String)>,
+    #[serde(default)]
+    remote_key: Option<String>,
 }
 
 /// Rebuild output consumers before the wait engine reconciles process waits.
@@ -898,6 +907,7 @@ pub fn restore_sessions(state: &Shared) -> ApiResult<()> {
         Arc::get_mut(&mut session)
             .ok_or_else(|| ApiError::internal("restored session is unexpectedly shared"))?
             .id = saved.id;
+        session.takes_stdin.store(!saved.durable, Ordering::SeqCst);
         if let Some((host, id)) = saved.host_session {
             let hs = state
                 .executor
@@ -919,6 +929,26 @@ pub fn restore_sessions(state: &Shared) -> ApiResult<()> {
                 state.db.redactor().get(),
                 view,
             );
+            tokio::spawn(attach(run, session.clone(), ctl, false, false));
+        } else if let Some(key) = saved.remote_key {
+            let run = match durable::resume(state, &key) {
+                Ok(run) => run,
+                Err(error) => {
+                    session.finish(End::error("interrupted", error.message));
+                    state.executor.insert(session);
+                    continue;
+                }
+            };
+            let secrets: Vec<_> = saved
+                .secrets
+                .into_iter()
+                .map(|(name, value)| (name, zeroize::Zeroizing::new(value)))
+                .collect();
+            let view = saved.project.map_or(
+                terrarium_core::redact::View::All,
+                terrarium_core::redact::View::Scope,
+            );
+            let run = redact_run(run, own_redactor(&secrets), state.db.redactor().get(), view);
             tokio::spawn(attach(run, session.clone(), ctl, false, false));
         } else {
             session.finish(End::error("interrupted", "interrupted (ssh transport)"));
@@ -1918,6 +1948,14 @@ pub(crate) fn start_cmd_locked(
     def: &TargetDef,
     cmd: &RemoteCmd,
 ) -> ApiResult<Running> {
+    if cmd.durable && (cmd.pty.is_some() || cmd.shell) {
+        return Err(ApiError::invalid(
+            "durable execution cannot use a PTY or shell",
+        ));
+    }
+    if state.executor.hosts.is_stopped() {
+        return Err(ApiError::conflict("executor is stopping"));
+    }
     no_exec(def)?;
     // An exedev target runs its commands over ssh on its VM.
     if def.kind == TargetKind::Exedev {
@@ -1960,6 +1998,9 @@ pub(crate) fn start_cmd_locked(
                 &known_hosts(&state.state_dir)?,
                 cmd,
             )?;
+            if cmd.durable {
+                return durable::start(state, def, cmd, plan, guard);
+            }
             let mut c = tokio::process::Command::new(&plan.program);
             c.args(&plan.args);
             Ok(pump_process(
@@ -2215,6 +2256,9 @@ async fn start_exec_secrets(
     check_cap(state, actor)?;
     let def = resolved_def(state, &row, Some(actor), cmd.agent.as_deref()).await?;
     let mut cmd = cmd;
+    if cmd.durable && cmd.resume_key.is_none() {
+        cmd.resume_key = Some(format!("remote/{}", ulid::Ulid::new()));
+    }
     cmd.holder = on.holder.clone().or_else(|| holder_of(actor));
     cmd.operator = actor.is_operator();
     crate::target_roots::prepare_exec(state, actor, &def, &mut cmd).await?;
@@ -2263,7 +2307,14 @@ async fn start_exec_secrets(
         state.executor.buffer_limit,
     );
     sess.set_kill_report(report);
+    sess.takes_stdin.store(!cmd.durable, Ordering::SeqCst);
     let saved = SavedExec {
+        durable: cmd.durable,
+        remote_key: if cmd.durable && matches!(def.kind, TargetKind::Ssh | TargetKind::Exedev) {
+            cmd.resume_key.clone()
+        } else {
+            None
+        },
         id: sess.id.clone(),
         target: sess.target.clone(),
         owner: sess.owner.clone(),
