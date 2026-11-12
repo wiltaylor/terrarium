@@ -1319,6 +1319,11 @@ hosts::a_release_key_host_updates_and_confirms_a_signed_asset -- --ignored`.
 It serves a signed asset through the host listener and checks staging, swap,
 confirmation, and update records. Ordinary no-key builds run the refusal test.
 Never use a production private key for this test.
+With the same test-key build, run `cargo test -p terrarium-host --test
+stub_daemon release_key_host_refuses_ -- --ignored` to prove that missing,
+malformed, other-bytes, and other-key bundles cannot reach staging or execute
+the offered asset. These tests also require the current host to stay online
+and log the refusal. Removing the client's verification call must fail them.
 
 1. It checks that it may update. It does not update when:
    - `auto_update = false` is in its config;

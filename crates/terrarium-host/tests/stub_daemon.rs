@@ -29,7 +29,10 @@ fn signed_update_bundle(data: &[u8], private_key: &std::path::Path) -> Vec<u8> {
     std::fs::write(asset.path(), data).unwrap();
     let signature = std::process::Command::new("openssl")
         .args(["dgst", "-sha256", "-sign"])
-        .arg(private_key).arg(asset.path()).output().unwrap();
+        .arg(private_key)
+        .arg(asset.path())
+        .output()
+        .unwrap();
     assert!(signature.status.success(), "test signing failed");
     let base64 = base64::engine::general_purpose::STANDARD;
     serde_json::to_vec(&serde_json::json!({
@@ -44,8 +47,8 @@ fn signed_update_bundle(data: &[u8], private_key: &std::path::Path) -> Vec<u8> {
 /// Exercise Client's actual before-stage boundary, not the verifier in isolation.
 async fn release_key_host_refuses_bundle(case: &str) {
     use std::io::Write;
+    use terrarium_host::selfupdate::{NEW, PENDING, PREV, sidecar};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use terrarium_host::selfupdate::{NEW, PREV, PENDING, sidecar};
 
     #[derive(Clone, Default)]
     struct Log(Arc<Mutex<Vec<u8>>>);
@@ -54,32 +57,67 @@ async fn release_key_host_refuses_bundle(case: &str) {
             self.0.lock().unwrap().extend_from_slice(bytes);
             Ok(bytes.len())
         }
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
-    assert!(terrarium_host::update_signature::RELEASE_KEY.is_some(), "requires a test-key build");
-    let private_key = std::env::var_os("TERRARIUM_TEST_SIGNING_KEY").expect("ephemeral test key path");
+    assert!(
+        terrarium_host::update_signature::RELEASE_KEY.is_some(),
+        "requires a test-key build"
+    );
+    let private_key =
+        std::env::var_os("TERRARIUM_TEST_SIGNING_KEY").expect("ephemeral test key path");
     let log = Log::default();
     let writer = log.clone();
     let _trace = tracing::subscriber::set_default(
-        tracing_subscriber::fmt().with_ansi(false).with_writer(move || writer.clone()).finish()
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish(),
     );
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("host");
     let marker = dir.path().join("asset-executed");
     let old = b"the running build";
     std::fs::write(&binary, old).unwrap();
-    let asset = format!("#!/bin/sh\nprintf executed > '{}'\necho 'terrarium-host {}'\n", marker.display(), terrarium_version::FULL).into_bytes();
+    let asset = format!(
+        "#!/bin/sh\nprintf executed > '{}'\necho 'terrarium-host {}'\n",
+        marker.display(),
+        terrarium_version::FULL
+    )
+    .into_bytes();
     let (status, bundle, reason) = match case {
         "missing" => (404, Vec::new(), "the daemon answered 404"),
-        "malformed" => (200, b"not JSON".to_vec(), "invalid release signature bundle"),
-        "other-bytes" => (200, signed_update_bundle(b"another asset", std::path::Path::new(&private_key)), "digest does not match"),
+        "malformed" => (
+            200,
+            b"not JSON".to_vec(),
+            "invalid release signature bundle",
+        ),
+        "other-bytes" => (
+            200,
+            signed_update_bundle(b"another asset", std::path::Path::new(&private_key)),
+            "digest does not match",
+        ),
         "other-key" => {
             let other_key = dir.path().join("other-test-key.pem");
             let generated = std::process::Command::new("openssl")
-                .args(["genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out"])
-                .arg(&other_key).output().unwrap();
+                .args([
+                    "genpkey",
+                    "-algorithm",
+                    "EC",
+                    "-pkeyopt",
+                    "ec_paramgen_curve:P-256",
+                    "-out",
+                ])
+                .arg(&other_key)
+                .output()
+                .unwrap();
             assert!(generated.status.success());
-            (200, signed_update_bundle(&asset, &other_key), "release signature verification failed")
+            (
+                200,
+                signed_update_bundle(&asset, &other_key),
+                "release signature verification failed",
+            )
         }
         _ => panic!("unknown signature test case"),
     };
@@ -87,28 +125,46 @@ async fn release_key_host_refuses_bundle(case: &str) {
     let mut options = ClientOptions::new(stub.url(), TOKEN, "signature-test");
     options.version = "0.0.9+0000000".into();
     options.self_update = Some(terrarium_host::SelfUpdateOptions {
-        binary: binary.clone(), enabled: true, supervised: true,
-        idle_poll: Duration::from_millis(20), drain_timeout: Duration::from_secs(600),
+        binary: binary.clone(),
+        enabled: true,
+        supervised: true,
+        idle_poll: Duration::from_millis(20),
+        drain_timeout: Duration::from_secs(600),
     });
     let client = tokio::spawn(Client::new(options).run());
     let mut connection = stub.accept().await;
     assert_eq!(connection.hello().await.version, "0.0.9+0000000");
-    connection.send(DaemonFrame::Welcome(Welcome {
-        host_id: "h-1".into(), heartbeat_secs: 60, resume_token: "resume-1".into(),
-        resume: Vec::new(), token: None, metrics: false,
-        update: Some(terrarium_host::protocol::UpdateOffer {
-            version: terrarium_version::FULL.into(), path: "/install/terrarium-host?arch=x86_64".into(),
-            sha256: terrarium_host::transfer::sha256_hex(&asset), release_sha256: None,
-        }),
-    })).await;
+    connection
+        .send(DaemonFrame::Welcome(Welcome {
+            host_id: "h-1".into(),
+            heartbeat_secs: 60,
+            resume_token: "resume-1".into(),
+            resume: Vec::new(),
+            token: None,
+            metrics: false,
+            update: Some(terrarium_host::protocol::UpdateOffer {
+                version: terrarium_version::FULL.into(),
+                path: "/install/terrarium-host?arch=x86_64".into(),
+                sha256: terrarium_host::transfer::sha256_hex(&asset),
+                release_sha256: None,
+            }),
+        }))
+        .await;
     let http = tokio::spawn(async move {
         loop {
             let (mut socket, _) = stub.listener.accept().await.unwrap();
             let mut request = [0; 4096];
             let n = socket.read(&mut request).await.unwrap();
             let signature = String::from_utf8_lossy(&request[..n]).contains(".sigstore.json?");
-            let (code, body) = if signature { (status, &bundle) } else { (200, &asset) };
-            let header = format!("HTTP/1.1 {code} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let (code, body) = if signature {
+                (status, &bundle)
+            } else {
+                (200, &asset)
+            };
+            let header = format!(
+                "HTTP/1.1 {code} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
             socket.write_all(header.as_bytes()).await.unwrap();
             socket.write_all(body).await.unwrap();
         }
@@ -116,20 +172,36 @@ async fn release_key_host_refuses_bundle(case: &str) {
     tokio::time::timeout(WAIT, async {
         loop {
             let text = String::from_utf8_lossy(&log.0.lock().unwrap()).into_owned();
-            if text.contains("self-update failed") || marker.exists() || client.is_finished() { break; }
+            if text.contains("self-update failed") || marker.exists() || client.is_finished() {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await.expect("the offered update was not processed");
+    })
+    .await
+    .expect("the offered update was not processed");
     assert!(!marker.exists(), "{case}: untrusted asset was executed");
-    assert!(!client.is_finished(), "{case}: current host must keep running");
+    assert!(
+        !client.is_finished(),
+        "{case}: current host must keep running"
+    );
     assert_eq!(std::fs::read(&binary).unwrap(), old, "{case}");
     for suffix in [NEW, PREV, PENDING] {
-        assert!(!sidecar(&binary, suffix).exists(), "{case}: staged {suffix}");
+        assert!(
+            !sidecar(&binary, suffix).exists(),
+            "{case}: staged {suffix}"
+        );
     }
     let text = String::from_utf8_lossy(&log.0.lock().unwrap()).into_owned();
-    assert!(text.contains(reason), "{case}: missing refusal reason: {text}");
+    assert!(
+        text.contains(reason),
+        "{case}: missing refusal reason: {text}"
+    );
     connection.send(DaemonFrame::Ping { nonce: 123 }).await;
-    assert!(matches!(connection.next_ctl().await, HostFrame::Pong { nonce: 123 }));
+    assert!(matches!(
+        connection.next_ctl().await,
+        HostFrame::Pong { nonce: 123 }
+    ));
     client.abort();
     http.abort();
 }
