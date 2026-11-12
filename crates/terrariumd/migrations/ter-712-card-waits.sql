@@ -11,7 +11,8 @@ CREATE TABLE card_waits (
     broken INTEGER NOT NULL DEFAULT 0
 );
 INSERT INTO card_waits(card, generation, mode, action, setter)
-SELECT DISTINCT card, lower(hex(randomblob(16))), 'all', '{}', 'operator' FROM card_deps;
+SELECT card, lower(hex(randomblob(16))), 'all', '{}', 'operator'
+FROM (SELECT DISTINCT card FROM card_deps);
 CREATE VIEW card_dependency_unmet AS
 SELECT d.card, d.depends_on FROM card_deps d
 CROSS JOIN cards c ON c.id = d.depends_on
