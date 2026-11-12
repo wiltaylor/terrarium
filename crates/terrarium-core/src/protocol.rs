@@ -154,6 +154,10 @@ pub struct ToolCapability {
 /// (docs/host-protocol.md). [`Capabilities`] is the flat summary of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct HostCapabilities {
+    /// Windows session logon with a daemon-provided account and password.
+    /// Older hosts default to unsupported. Only Windows hosts may advertise it.
+    #[serde(default)]
+    pub windows_run_as: bool,
     /// GPU inventory and Docker allowlist support. Missing on older hosts.
     #[serde(default)]
     pub gpus: Vec<crate::resources::GpuDevice>,

@@ -15,6 +15,257 @@ import socket
 import sqlite3
 import sys
 import time
+import datetime
+import fcntl
+import re
+import stat
+import zipfile
+
+
+def backup_directory():
+    root, _ = paths()
+    return Path(os.environ.get("TERRARIUM_BACKUP_DIR", str(root.parent / "backups")))
+
+
+def retention_json(directory, name, value):
+    """Private durable control files. Never follow an existing temp symlink."""
+    temp = directory / (name + ".new")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as output:
+        json.dump(value, output)
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temp, directory / name)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def retention_read(directory, name):
+    fd = os.open(directory / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise RuntimeError("non-regular retention control")
+        value = source.read(65537)
+        if len(value) > 65536:
+            raise RuntimeError("oversized retention control")
+        return json.loads(value)
+
+
+def retention_authorized(directory, token):
+    if not token or (directory / (".retention-" + token + ".revoked")).exists():
+        return None
+    control = retention_read(directory, ".retention-control.json")
+    expiry = control.get("expires_at")
+    return control if (control.get("token") == token and isinstance(expiry, (int, float))
+                       and time.time() < expiry <= time.time() + 10.0) else None
+
+
+def process_start(pid):
+    return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+
+
+def retention_control(action, value):
+    token = value["token"]
+    if not re.fullmatch(r"[A-Za-z0-9]{26}", token):
+        raise ValueError("invalid retention token")
+    directory = backup_directory()
+    directory.mkdir(parents=True, exist_ok=True)
+    worker_name = ".retention-" + token + ".worker.json"
+    if action in ("prepare", "renew"):
+        fd = os.open(directory / ".retention-control.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if (directory / (".retention-" + token + ".revoked")).exists():
+                raise RuntimeError("retention token already revoked")
+            if action == "renew" and retention_authorized(directory, token) is None:
+                raise RuntimeError("retention lease is no longer current")
+            expiry = value.get("expires_at")
+            if not isinstance(expiry, (int, float)) or not time.time() < expiry <= time.time() + 10.0:
+                raise RuntimeError("invalid or expired retention lease")
+            retention_json(directory, ".retention-control.json", value)
+        return {}
+    if action == "cancel":
+        # Revoke WITHOUT waiting on the directory lock. A delayed prepare/start
+        # cannot resurrect this authorization, even if an RPC was lost.
+        fd = os.open(directory / (".retention-" + token + ".revoked"), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        os.fsync(fd)
+        os.close(fd)
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        os.fsync(fd)
+        os.close(fd)
+        try:
+            identity = retention_read(directory, worker_name)
+        except FileNotFoundError:
+            return {}
+        pid = identity["pid"]
+        if not isinstance(pid, int) or pid < 2 or pid == os.getpid():
+            raise RuntimeError("invalid worker PID")
+        try:
+            pidfd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            return identity
+        try:
+            # pidfd pins the process across the start-time check and signal.
+            if process_start(pid) == identity["start"]:
+                signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        finally:
+            os.close(pidfd)
+        return identity
+    if action == "status":
+        try:
+            return retention_read(directory, worker_name)
+        except FileNotFoundError:
+            return {}
+    if action == "receipt":
+        return retention_read(directory, ".retention-" + token + ".receipt.json")
+    raise ValueError("unknown retention control action")
+
+
+def retain_backups(protected, now=None, preview=False, token=None):
+    """Called only by the updater with its update/rollback lock held.
+
+    The directory flock is also held by every ZIP creator. Never follow a
+    backup symlink, and never derive a deletion path from archive contents.
+    A durable local journal records intent and outcome for each exact file.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    directory = backup_directory()
+    if not directory.exists():
+        return {"preview": [], "total_files": 0, "total_bytes": 0} if preview else {"removed": []}
+    if not preview:
+        if not token or not re.fullmatch(r"[A-Za-z0-9]{26}", token):
+            raise RuntimeError("retention requires an exact helper authorization token")
+        # Register BEFORE blocking on the ZIP lock, so cancellation can find
+        # this exact process even when a backup creator owns the directory.
+        retention_json(directory, ".retention-" + token + ".worker.json", {"pid": os.getpid(), "start": process_start("self")})
+    removed = []
+    lock_fd = os.open(directory / ".retention.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(lock_fd, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not preview:
+            control = retention_authorized(directory, token)
+            if control is None:
+                return {"removed": [], "stopped": True}
+            protected = control["protected"]
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            full = []
+            bases = set()
+            names = os.listdir(fd)
+            pattern = r"terrarium-backup-(\d{8}T\d{6}Z)-(full|diff)(?:-[2-9]\d*|-[1-9]\d+)?\.zip"
+            for name in names:
+                match = re.fullmatch(pattern, name)
+                if not match:
+                    continue
+                source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                with os.fdopen(source, "rb") as stream:
+                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                        continue
+                    try:
+                        with zipfile.ZipFile(stream) as archive:
+                            entry = archive.getinfo("backup.json")
+                            if entry.file_size > 65536:
+                                continue
+                            header = json.loads(archive.read(entry))
+                        created = datetime.datetime.fromisoformat(header["created_at"].replace("Z", "+00:00"))
+                        if (header["format"] != "terrarium-backup" or header["version"] != 1
+                                or header["kind"] != match[2] or not created.tzinfo
+                                or created.astimezone(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ") != match[1]):
+                            continue
+                        if match[2] == "diff":
+                            bases.add(header["base"]["name"])
+                        else:
+                            full.append((created, name))
+                    except (ValueError, KeyError, TypeError, zipfile.BadZipFile):
+                        # Unknown archives are never permission to delete.
+                        continue
+            full.sort(reverse=True)
+            keep = {name for _, name in full[:5]} | bases
+            keep.update(Path(path).name for path in protected)
+            days = set()
+            for created, name in full:
+                age = (now.date() - created.astimezone(datetime.timezone.utc).date()).days
+                day = created.astimezone(datetime.timezone.utc).date()
+                if 0 <= age < 14 and day not in days:
+                    keep.add(name)
+                    days.add(day)
+                if created > now:
+                    keep.add(name)
+            audit_fd = os.open(".retention-audit.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+            with os.fdopen(audit_fd, "a") as audit:
+                for created, name in reversed(full):
+                    if name in keep:
+                        continue
+                    pair = [name + ".hot-swap.sqlite", name]
+                    # Bounded file deletion, never split a pair across passes.
+                    if len(removed) + len(pair) > 32:
+                        break
+                    for item in pair:
+                        if not preview:
+                            control = retention_authorized(directory, token)
+                            if control is None:
+                                return {"removed": removed, "stopped": True}
+                            if name in {Path(path).name for path in control["protected"]}:
+                                break
+                            if control.get("first_pass") is not None and item not in control["first_pass"]:
+                                continue
+                        try:
+                            metadata = os.stat(item, dir_fd=fd, follow_symlinks=False)
+                        except FileNotFoundError:
+                            continue
+                        if not stat.S_ISREG(metadata.st_mode):
+                            raise RuntimeError("retention refuses non-regular file: " + item)
+                        record = {"name": item, "size": metadata.st_size, "created_at": created.isoformat(), "at": now.isoformat(), "actor": "system:updater"}
+                        if preview:
+                            removed.append(record)
+                            continue
+                        audit.write(json.dumps({**record, "action": "backup.prune.intent"}) + "\n")
+                        audit.flush()
+                        os.fsync(audit.fileno())
+                        # An audit fsync may stall past expiry. Check again at
+                        # the unlink boundary, not just before journal IO.
+                        if retention_authorized(directory, token) is None:
+                            return {"removed": removed, "stopped": True}
+                        os.unlink(item, dir_fd=fd)
+                        os.fsync(fd)
+                        audit.write(json.dumps({**record, "action": "backup.prune"}) + "\n")
+                        audit.flush()
+                        os.fsync(audit.fileno())
+                        removed.append(record)
+        finally:
+            os.close(fd)
+    if preview:
+        return {"preview": removed, "total_bytes": sum(item["size"] for item in removed), "total_files": len(removed)}
+    return {"removed": removed}
+
+
+def retention_inventory():
+    """Conservative recovery holds, never infer a leftover snapshot is unused."""
+    directory = backup_directory()
+    if not directory.exists():
+        return {}
+    fd = os.open(directory / ".retention.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    holds = {}
+    with os.fdopen(fd, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for snapshot in directory.iterdir():
+            if not snapshot.name.endswith(".hot-swap.sqlite"):
+                continue
+            name = snapshot.name.removesuffix(".hot-swap.sqlite")
+            if not re.fullmatch(r"terrarium-backup-\d{8}T\d{6}Z-full(?:-[2-9]\d*|-[1-9]\d+)?\.zip", name):
+                raise RuntimeError("unknown recovery snapshot needs manual repair: " + snapshot.name)
+            if not stat.S_ISREG(snapshot.lstat().st_mode):
+                raise RuntimeError("non-regular recovery snapshot: " + snapshot.name)
+            archive = directory / name
+            if archive.exists() and not stat.S_ISREG(archive.lstat().st_mode):
+                raise RuntimeError("non-regular recovery archive: " + name)
+            holds["snapshot:" + name] = str(archive)
+    return holds
 
 
 def paths():
@@ -126,6 +377,24 @@ def main(argv):
             (release / "image.json").unlink(missing_ok=True)
             select(root, release)
             initialized.touch()
+    elif command == "retention-inventory":
+        print(json.dumps(retention_inventory()))
+    elif command == "retention-repair-revoke":
+        try:
+            control = retention_read(backup_directory(), ".retention-control.json")
+        except FileNotFoundError:
+            control = None
+        if control is not None:
+            retention_control("cancel", {"token": control["token"]})
+        print("{}")
+    elif command == "retention-control":
+        print(json.dumps(retention_control(argv[1], json.loads(argv[2]))))
+    elif command == "preview-backups":
+        print(json.dumps(retain_backups(json.loads(argv[1]), preview=True)))
+    elif command == "retain-backups":
+        token = argv[1]
+        result = retain_backups([], token=token)
+        retention_json(backup_directory(), ".retention-" + token + ".receipt.json", result)
     elif command == "stage":
         print(stage(root, json.loads(argv[1])).name)
     elif command == "begin":

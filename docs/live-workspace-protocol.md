@@ -1,7 +1,8 @@
-# Inactive live workspace model (B1, TER-924)
+# Live workspace model and isolated helper (B1/B2)
 
-This is protocol, storage and state-machine work only. There is no helper
-binary, socket, route, host capability advertisement or production caller.
+The B1 model is protocol, storage and state-machine work only. B2 adds an
+isolated root helper, described below. There is no daemon route, host
+capability advertisement or production caller.
 `Activation` can represent only `disabled`. Neither writing a schema row nor
 negotiating a compatible version activates anything. Existing targets and
 workspace execution paths are unchanged. B4 must enforce reservations across
@@ -90,3 +91,120 @@ startup readiness. Compatibility alone is not authorization or proof that the
 pinned kernel/Engine/security profile works. Those checks, privileged tests,
 installation and activation belong to later reviewed cards and the disposable
 VM proof, never a shared build host.
+
+## Isolated root helper (B2, TER-925)
+
+`terrarium-workspace-helper` is a separate executable, not a root mode of the
+self-updating host agent. Nothing installs, starts or advertises it. M1a may
+install it inactive only after B2/B3 review. M1b may start it only on the
+disposable proof VM after B4 review. Production enablement still requires B5.
+`--capabilities` always reports `ready=false` while the daemon gate is disabled.
+
+The service reads only `/etc/terrarium-workspace-helper/config.json`. The
+root-owned regular config must not be group/world writable or hard-linked.
+Its strict, bounded fields are `host_agent_uid`, `host_agent_gid`, `work_root`
+and `registrations`. Each registration supplies root-protected `publisher_root`,
+`staging_root` and `state_root`. These are administrator configuration, never
+request fields. An empty registration list authorizes no operations. The
+service cannot create a registration, bootstrap a missing journal, create a
+Docker target or opt in an existing target. Provisioning and admission remain
+separate reviewed work. Never create real registration journals before B4.
+
+Every administrative ancestor is opened through no-follow directory FDs and
+must be root-owned without group/world write permission. The socket directory
+`/run/terrarium-workspace-helper` must already be root-owned, mode 0750, and
+have the configured host-agent group. The socket is root-owned, mode 0660 with
+that group. Every connection also checks SO_PEERCRED against the configured
+non-root host-agent UID. This authenticates the trusted forwarder, not a lease.
+The daemon/host-agent/Docker authority boundary from TER-750 still applies.
+No generic host verb exposes this protocol. Link-originated grants are refused.
+
+Before opening any store (including creating its lock), startup opens every
+registration root and runs a read-only confinement preflight over the whole
+configuration. State, config and socket directories must be disjoint from all
+work, publisher and staging trees. This checks pinned root/ancestor dev+inode
+identities in both directions, namespace paths, and filesystem-relative mount
+roots. It also inspects mounted descendants for aliases of control directories
+or files in both directions, including a control file bound from a workspace
+file despite having only one hard link. A bind alias of a state subtree cannot evade the
+check by having a different administrative pathname. No helper is constructed
+and no startup snapshot is written before every registration passes.
+
+Frames have a four-byte big-endian byte length followed by the B1 envelope,
+at most 64 KiB, with a five-second connection deadline. Replies use the same
+framing and a typed `Reply`. Unknown fields, paths, namespace PIDs and arbitrary
+mount flags are not accepted. Operations select an existing registration by
+immutable ID, then require the journal's exact host/target/runtime identity.
+Only grant, revoke, superseded grant and reconcile are supported. Registration
+and lifecycle requests return `unsupported` without modifying the journal.
+
+Each journal uses an exclusive lifetime lock. Snapshot files are root-owned,
+single-link regular files with no group/other access, bounded at 8 MiB. Updates
+create an exclusive `journal.next`, sync it and its parent, rename to
+`journal.json`, then sync the parent again before acknowledgement. A leftover
+next file, malformed state, write failure or ambiguous kernel transition fences
+admission. No history is pruned to fit the limit. Committed exact retries never
+repeat a syscall. Restart requires both the B1 history checks and exact fresh
+host/receiver topology matching the last committed evidence. Unknown mounts
+are quarantined, never implicitly deleted. Uncommitted crash states remain
+quarantined rather than guessing whether a syscall completed.
+
+Docker inspection uses a pinned root-owned `/usr/bin/docker` with a fixed local
+socket and no PATH, shell or inherited environment. Output and execution time
+are bounded. Registration/runtime labels are
+`terrarium.workspace.registration` and `terrarium.workspace.runtime`.
+The immutable full container ID, running/paused/restarting state, Docker start
+timestamp, proc start ticks and mount-namespace identity are rechecked around
+FD acquisition and verification. B3 must additionally validate the full Docker
+security configuration and pinned profile. Inspect alone never proves attached.
+
+The kernel backend requires a private independent staging mount and an isolated
+shared per-registration publisher prepared by B3. It resolves the enrolled
+workspace through openat2 beneath/no-symlink/no-magic-link/no-XDEV constraints,
+checks device/inode, and scans without following links for nested mounts,
+sockets, devices and FIFOs. The scan is bounded. Later socket creation cannot
+be filtered by bind mounts: B4's exclusive writer/domain seal is mandatory.
+Within a helper journal, workspace ID, enrollment and domain remain immutable
+across revoke; aliases cannot acquire a new identity.
+
+The source is cloned non-recursively through a pinned open_tree FD, attached to
+private staging, explicitly made private, restricted with mount_setattr, and
+verified before publication through move_mount to a new protected placeholder.
+Workspace mounts are `rw,nosuid,nodev` and deliberately permit exec. The host
+publisher remains writable for administrative placeholder changes. The receiver
+scaffold is read-only and slave-only. Mount IDs and parent IDs are checked
+within their own namespaces, never equated across namespaces. Extra children,
+wrong source/root, flags or propagation relationships quarantine admission.
+
+Revoke first attempts ordinary unmount. Only EBUSY permits a separately recorded
+lazy detach. It removes the protected placeholder and verifies fresh lookup
+ENOENT in both pinned views before committing `path_revoked_verified`. Open FDs,
+cwd, mmap and copied data survive. A retained directory FD can still perform new
+relative lookups. B4's permanent trust-domain seal is not released by revoke.
+
+Ordinary unmount retains a pinned root-only parent and validates the derived
+leaf's mount ID and source identity immediately before the syscall. It closes
+its own lookup FD first, so it does not manufacture EBUSY by keeping an open
+handle on the very mount being unmounted. The final component is no-follow.
+Lazy detach reopens and revalidates the same mount when genuine users cause
+EBUSY. Namespace and journal FDs remain pinned throughout.
+
+The only unsafe code is the operator-approved `terrarium-sys` mount_setattr
+wrapper. Its API borrows an FD and accepts bounded typed attributes. Every other
+crate retains the workspace forbid lint, checked by a regression test. The
+privileged fixture is ignored by ordinary checks and must be run explicitly on
+the disposable VM in a new private mount namespace with
+`TERRARIUM_B2_DISPOSABLE=1`. Skipping it is not kernel evidence. No helper service
+is installed or activated by any test.
+
+The interrupted-state disposable test aborts a separate helper child with
+SIGABRT immediately after real staging, private/attribute, publication,
+ordinary/lazy unmount and placeholder-removal syscalls, before their next
+durable phase record. It also aborts after committed snapshots before grant
+and revoke replies. Parent and helper child share only the outer private test
+mount namespace, so the mutations survive child death. Reopening the real
+backend must quarantine pending state or return the exact committed retry,
+without changing the surviving mount table, deleting unknown mounts or
+resurrecting a revoked path. An unrelated holder and its canary must survive
+every case. Fault hooks and the aborting child probe are compiled only into
+test builds, never the installed executable.

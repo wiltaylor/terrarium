@@ -380,7 +380,8 @@ impl Sessions {
                 ));
             }
         }
-        self.key
+        let session = self
+            .key
             .mint(
                 kind,
                 renew.map(|c| (c.sid.as_str(), c.auth_time)),
@@ -388,7 +389,9 @@ impl Sessions {
                 ttl,
                 pv,
             )
-            .map_err(|e| ApiError::internal(format!("cannot make a session: {e}")))
+            .map_err(|e| ApiError::internal(format!("cannot make a session: {e}")))?;
+        super::front_sessions::observe(&self.operator, &session);
+        Ok(session)
     }
 
     /// The session of a token of `kind`: the signature is right, the token
@@ -424,6 +427,9 @@ impl Sessions {
                 .is_some())
             })
             .await?;
+        if !revoked {
+            super::front_sessions::observe(&self.operator, &s);
+        }
         Ok((!revoked).then_some(s))
     }
 
@@ -439,6 +445,7 @@ impl Sessions {
                     .max(self.ttl_of(TokenKind::Cli)),
             ),
         );
+        super::front_sessions::revoke(&self.operator, s, exp);
         self.db
             .write("operator", move |t| {
                 t.execute("DELETE FROM revoked_sessions WHERE exp <= ?1", [now])?;
@@ -906,6 +913,7 @@ pub async fn delete_all(
         .await
         .map_err(|e| ApiError::internal(format!("the password task failed: {e}")))?
         .map_err(|e| password_error(&e))?;
+    super::front_sessions::clear(&state.operator_auth);
     let ip = super::client_addr(&req);
     state
         .db
@@ -987,6 +995,7 @@ pub async fn set_password(
             PasswordError::TooShort | PasswordError::TooLong => ApiError::invalid(e.to_string()),
             e => password_error(&e),
         })?;
+    super::front_sessions::clear(&state.operator_auth);
     state
         .db
         .write(actor.label(), move |t| {

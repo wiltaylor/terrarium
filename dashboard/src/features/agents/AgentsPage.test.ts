@@ -19,7 +19,7 @@ const list = [
 
 vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({
   agents: { inProject: (p: string) => list.filter((a) => a.project === p), byId: () => undefined, refresh: async () => {}, state: { error: null, loading: false } },
-  api: { agents: { list: async () => [{ ...list[0], id: "E1", name: "ter-1", ephemeral: true }] } },
+  api: { agents: { list: async () => [{ ...list[0], id: "E1", name: "ter-1", ephemeral: true }] }, pages: { list: async () => ({ items: [], can_edit: false }) } },
   events: { on: () => () => {} },
   leases: { loadAll: async () => {} },
   pins: { isPinned: (id: string) => pinned().includes(id), toggle },

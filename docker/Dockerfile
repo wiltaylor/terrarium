@@ -54,6 +54,7 @@ RUN npm run build && test -d dist
 # ---------------------------------------------------------------------------
 FROM ${RUST_IMAGE} AS rust
 ARG TERRARIUM_GIT_REF
+ARG TERRARIUM_RELEASE_PUBKEY
 WORKDIR /src
 COPY Cargo.toml Cargo.lock harnesses.toml ./
 COPY crates ./crates
@@ -66,15 +67,16 @@ COPY --from=dashboard /src/dashboard/dist ./dashboard/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/src/target,id=terrarium-target \
-    cargo build --release --locked -p terrariumd -p terrarium -p terrarium-runner -p terrarium-updater \
+    cargo build --release --locked -p terrariumd -p terrarium -p terrarium-runner -p terrarium-updater -p terrarium-front \
     && mkdir -p /out \
     && cp target/release/terrariumd target/release/terrarium target/release/terrarium-runner \
-        target/release/terrarium-updater /out/ \
+        target/release/terrarium-updater target/release/terrarium-front /out/ \
     && rustc --version | awk '{print $2}' > /build-rust-version
 
 # ---------------------------------------------------------------------------
 FROM ${RUST_IMAGE} AS host-build
 ARG TERRARIUM_GIT_REF
+ARG TERRARIUM_RELEASE_PUBKEY
 RUN apt-get update \
     && apt-get install -y --no-install-recommends musl-tools \
     && rm -rf /var/lib/apt/lists/* \
@@ -104,6 +106,7 @@ COPY --from=host-build /out/terrarium-host /terrarium-host
 # patch as the daemon build. The package pins match the cross-tested build2.
 FROM ${WINDOWS_RUST_IMAGE} AS windows-host
 ARG TERRARIUM_GIT_REF
+ARG TERRARIUM_RELEASE_PUBKEY
 COPY --from=rust /build-rust-version /tmp/expected-rust-version
 RUN test "$(rustc --version | awk '{print $2}')" = "$(cat /tmp/expected-rust-version)" \
     && apt-get update \

@@ -3151,6 +3151,145 @@ pub(super) async fn native_merge_restart_keeps_recipe_exit_tail_and_junit(offlin
     assert_eq!(parsed.ok()["counts"]["passed"], 1);
 }
 
+#[tokio::test]
+async fn durable_ssh_queue_recipe_finishes_offline_once() {
+    let marks = tempfile::tempdir().unwrap();
+    let (ssh, _) = crate::exedev::fake_ssh(marks.path());
+    let mut lab = lab_impl_ssh(1, None, "code", Some(&ssh)).await;
+    // The fake SSH transport authenticates this fixture identity during its
+    // probe. Real SSH writes the same trust store after host authentication.
+    let host_key = marks.path().join("host-key");
+    assert!(
+        std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&host_key)
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::create_dir_all(lab.td.state.join("ssh")).unwrap();
+    std::fs::write(
+        lab.td.state.join("ssh/known_hosts"),
+        format!(
+            "127.0.0.1 {}",
+            std::fs::read_to_string(host_key.with_extension("pub")).unwrap()
+        ),
+    )
+    .unwrap();
+    let spool_root = marks.path().join("spool");
+    let _cleanup = crate::ssh_restart::RemoteCleanup(spool_root.clone());
+    lab.td.post("/api/targets", json!({"name":"p-queue-ssh","kind":"ssh","address":"ci@127.0.0.1","project":"p","work_root":spool_root})).await.ok();
+    let go = marks.path().join("go");
+    let started = marks.path().join("started");
+    let xml = marks.path().join("junit.xml");
+    let recipe = format!(
+        "echo \"$TERRARIUM_JOB_ID\" >> '{}'; printf '<testsuite tests=\"1\"><testcase name=\"kept\"/></testsuite>' > '{}'; while [ ! -e '{}' ]; do sleep 0.02; done; echo offline-queue-tail; exit 7",
+        started.display(),
+        xml.display(),
+        go.display()
+    );
+    lab.td.put("/api/projects/p/delivery", json!({"target":"p-queue-ssh","recipe":recipe,"slots":1,"next_repos":["app"],"work_dir":lab._dirs.path().join("jobs")})).await.ok();
+    lab.branch("ter-ssh-restart", "next", &[("OK", "yes\n")]);
+    let card = lab.card("ssh-restart", "ter-ssh-restart").await;
+    let queued = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    let jid = queued.ok()["job"]["id"].as_str().unwrap().to_owned();
+    crate::ssh_restart::wait_file(&xml).await;
+    let original = lab.td.get(&format!("/api/jobs/{jid}")).await.body;
+    assert_eq!(
+        std::fs::read_to_string(&started).unwrap(),
+        format!("{jid}\n"),
+        "initial launch"
+    );
+    let journal = terrariumd::hosts::resume::Journal::with_db(
+        &lab.td.state,
+        lab.td.daemon.as_ref().unwrap().state.db.clone(),
+    );
+    let prefix = format!("ssh/recipe/{jid}/");
+    let bindings = journal.scan::<Value>(&prefix).unwrap();
+    assert_eq!(
+        bindings[0].0,
+        format!("{prefix}{}", original["attempt"]),
+        "checkpoint attempt"
+    );
+    assert_eq!(
+        journal.scan::<Value>(&prefix).unwrap().len(),
+        1,
+        "recipe binding before shutdown"
+    );
+    lab.td.daemon.take().unwrap().shutdown_and_wait().await;
+    assert_eq!(
+        journal.scan::<Value>(&prefix).unwrap().len(),
+        1,
+        "recipe binding after shutdown"
+    );
+    std::fs::write(&go, "go").unwrap();
+    let spool = std::fs::read_dir(spool_root.join(".terrarium-runs"))
+        .unwrap()
+        .find(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
+        .unwrap()
+        .unwrap()
+        .path();
+    crate::ssh_restart::wait_file(&spool.join("exit")).await;
+    assert_eq!(std::fs::read_to_string(spool.join("exit")).unwrap(), "7\n");
+    assert_eq!(
+        std::fs::read_to_string(&started).unwrap(),
+        format!("{jid}\n"),
+        "offline completion"
+    );
+    lab.td.boot_with_ssh(None, None, Some(&ssh)).await;
+    let spool_count = std::fs::read_dir(spool_root.join(".terrarium-runs"))
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
+        .count();
+    assert_eq!(spool_count, 1, "remote claim count after reboot");
+    // Job finalization publishes the terminal state before its after_end
+    // continuation queues the intentional retry. Do not confuse that brief
+    // idle interval with the retry having finished.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while lab.jobs().await.len() < 2 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let jobs = lab.until_idle().await;
+    let ended = jobs.iter().find(|j| j["id"] == jid).unwrap();
+    assert_eq!(ended["exit_code"], 7, "{ended}");
+    assert!(
+        ended["tail"]
+            .as_str()
+            .unwrap()
+            .contains("offline-queue-tail")
+    );
+    for field in ["attempt", "slot", "started_at"] {
+        assert_eq!(ended[field], original[field], "{field}");
+    }
+    // A failed merge intentionally queues a new job for attempt 2. That is
+    // not a restart of this job. Count launches by their durable job ID.
+    let launches = std::fs::read_to_string(started).unwrap();
+    assert_eq!(
+        launches.lines().filter(|line| *line == jid).count(),
+        1,
+        "{launches}"
+    );
+    assert_eq!(jobs.len(), 2, "the failed merge's intentional retry");
+    let card = lab.td.get(&format!("/api/cards/{card}")).await;
+    let notifications = card.ok()["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| {
+            let body = c["body"].as_str().unwrap_or("");
+            body.contains(&jid) && body.contains("attempt 1") && body.contains("failed")
+        })
+        .count();
+    assert_eq!(notifications, 1, "{}", card.body);
+    assert!(std::fs::read_to_string(xml).unwrap().contains("kept"));
+}
+
 async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
     lab.td
         .put(
@@ -3758,6 +3897,7 @@ while True:
         "next_repos": ["app"], "work_dir": lab._dirs.path().join("jobs"),
         "release_target": "rel-client", "release_recipe": release_recipe,
         "release_secrets": {"GH_TOKEN": "@secret:release-github",
+                            "ANDROID_KEYSTORE_BASE64": "@secret:release-github",
                             "COSIGN_PASSWORD": "@secret:release-cosign.value"},
         "docker_release": {"destination": "root@test-release-vm", "port": 2251,
                            "known_hosts": "test-release-vm ssh-ed25519 public-test-pin\n",
@@ -3800,6 +3940,7 @@ while True:
     let env: std::collections::BTreeMap<String, String> =
         serde_json::from_slice(&std::fs::read(&release_env).unwrap()).unwrap();
     assert_eq!(env["GH_TOKEN"], GH);
+    assert_eq!(env["ANDROID_KEYSTORE_BASE64"], GH);
     assert_eq!(env["COSIGN_PASSWORD"], COSIGN);
     assert_eq!(env["TERRARIUM_JOB_KIND"], "release");
     assert_eq!(env["TERRARIUM_HEAD"], main);
@@ -3839,6 +3980,7 @@ while True:
         serde_json::from_slice(&std::fs::read(&merge_env).unwrap()).unwrap();
     for name in [
         "GH_TOKEN",
+        "ANDROID_KEYSTORE_BASE64",
         "COSIGN_PASSWORD",
         "DOCKER_RELEASE_KEY",
         "TERRARIUM_DOCKER_HOST",
@@ -3960,6 +4102,58 @@ async fn the_release_config_refuses_a_shared_target_and_plain_values() {
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     let base = json!({"target": "p-box", "recipe": "true", "release_target": "rel-client"});
+    let r = lab.td.put("/api/projects/p/delivery", base.clone()).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let before = lab.td.get("/api/projects/p/delivery").await.ok().clone();
+    for name in [
+        "PATH",
+        "HOME",
+        "USER",
+        "SHELL",
+        "PWD",
+        "IFS",
+        "ENV",
+        "BASH_ENV",
+        "TMPDIR",
+        "LANG",
+        "NODE_OPTIONS",
+        "DOCKER_RELEASE_KEY",
+        "DOCKER_HOST",
+        "DOCKER_CONFIG",
+        "LD_TEST",
+        "DYLD_TEST",
+        "TERRARIUM_TEST",
+        "DOCKER_CI_TEST",
+        "GIT_TEST",
+        "SSH_TEST",
+        "CARGO_TEST",
+        "RUST",
+        "RUST_TEST",
+        "PYTHON_TEST",
+        "NPM_CONFIG_TEST",
+        "JUST_TEST",
+        "lowercase",
+        "HAS-DASH",
+        "",
+        "1KEY",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ] {
+        let mut config = base.clone();
+        config["recipe"] = json!("must not be saved");
+        config["release_secrets"] = json!({"ANDROID_KEYSTORE_BASE64": "@secret:release-github"});
+        config["release_secrets"][name] = json!("@secret:release-github");
+        let r = lab.td.put("/api/projects/p/delivery", config).await;
+        assert_eq!(r.status, 422, "{name}: {}", r.body);
+        assert_eq!(lab.td.get("/api/projects/p/delivery").await.ok(), &before);
+    }
+    for value in ["plain-token", "@secret:q/release-github"] {
+        let mut config = base.clone();
+        config["recipe"] = json!("must not be saved");
+        config["release_secrets"] = json!({"ANDROID_KEYSTORE_BASE64": value});
+        let r = lab.td.put("/api/projects/p/delivery", config).await;
+        assert_eq!(r.status, 422, "{}", r.body);
+        assert_eq!(lab.td.get("/api/projects/p/delivery").await.ok(), &before);
+    }
     let mut bad = Vec::new();
     for (key, value) in [
         ("release_target", json!("p-box")),

@@ -13,6 +13,7 @@ pub mod card_files;
 mod config;
 mod event_sources;
 mod fleet;
+mod front_sessions;
 mod home;
 mod hosts;
 mod inbox;
@@ -24,6 +25,7 @@ mod longpoll;
 pub(crate) mod mail;
 mod memory;
 mod monitors;
+mod pages;
 mod pins;
 mod pipelines;
 mod preferences;
@@ -388,6 +390,7 @@ fn routes_with_registry(
         .merge(artifacts::routes())
         .merge(test_runs::routes())
         .merge(monitors::routes())
+        .merge(pages::routes())
         .merge(pipelines::routes())
         .merge(calendar::routes())
         .merge(pins::routes())
@@ -1134,6 +1137,7 @@ async fn security_headers(State(state): State<Shared>, req: Request, next: Next)
 /// ([`artifacts_on_dashboard`]). The settings come from `state.web`; the
 /// session key is `<state>/session.key`.
 pub fn tcp_router(state: Shared, token: String) -> anyhow::Result<Router> {
+    front_sessions::clear(&state.operator_auth);
     let key = session::SessionKey::load_or_create(&state.state_dir).with_context(|| {
         format!(
             "cannot read or make the session key {}",

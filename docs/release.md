@@ -51,6 +51,15 @@ same two checks for it. `SHA256SUMS` lists both binaries.
 
 Both binaries and SHA256SUMS also get cosign signature bundles.
 
+The release build passes the contents of `docker/release/cosign.pub` as the
+`TERRARIUM_RELEASE_PUBKEY` Docker build argument to the Rust stages. The host
+embeds it with `option_env!` and verifies self-update bundles offline in Rust,
+before staging. Ordinary builds do not set it and require manual installation.
+The daemon fetches and caches bundles from the published GitHub release and
+serves them through its host listener. A missing bundle suppresses the offer.
+Hosts do not contact GitHub or run cosign. This verifies the release key's
+signature, not transparency-log inclusion or release freshness.
+
 ## How to make a release
 
 ### Version branch e2e at the cut
@@ -329,6 +338,13 @@ never into a sandbox or to the VM.
 |---|---|---|---|
 | `GHCR_TOKEN` (`GHCR_USER`, default `wiltaylor`) and `GH_TOKEN` | `release-github` (field `value`) | one classic token with `repo` and `write:packages` (the operator's choice; it reaches all of the operator's repos) | crane and the image commands of cosign (`cosign sign` and `cosign verify`; not `sign-blob`, `verify-blob`, or gh) through a mode-0600 `config.json` in a private mode-0700 directory in RAM (`XDG_RUNTIME_DIR` or `/dev/shm` on tmpfs; no tmpfs stops the release), which also holds the state of cosign (`TUF_ROOT`) and gh (`GH_CONFIG_DIR`) and which the script removes at the end, also when the run is stopped by SIGTERM, SIGHUP or SIGINT; `gh` and the scope check as `GH_TOKEN` |
 | `COSIGN_PRIVATE_KEY`, `COSIGN_PASSWORD` | `release-cosign` (fields `private_key`, `password`) | the encrypted private key of the release key pair (cosign 3.1.4), base64-encoded in one line, and its password | `cosign sign` and `cosign sign-blob` only. The script decodes the key in memory and passes the PEM in the env (`--key env://COSIGN_PRIVATE_KEY`): no key file |
+
+Other release recipes may set their own signing env names, for example
+`--release-secret ANDROID_KEYSTORE_BASE64=@secret:android-keystore`.
+Names match `^[A-Z][A-Z0-9_]{0,63}$`, excluding job and tool environment
+names and the secret grant name restrictions (see [release secrets](api.md#35-jobs)).
+Only the operator sets this config. Values are same-project `@secret:`
+references, never literals. `DOCKER_RELEASE_KEY` remains daemon-only.
 
 No secret is on a command line, in the output, in `release-out/`, in the
 build context, in an image layer, or on the release VM: docker (the gate and

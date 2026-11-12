@@ -281,6 +281,9 @@ pub struct ResumeAccept {
 /// Run a command on the host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecRequest {
+    /// One-session Windows credentials. Never persist or log this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_run_as: Option<WindowsRunAs>,
     pub session: SessionId,
     /// The program. It is run directly, not through a shell.
     pub cmd: String,
@@ -302,6 +305,50 @@ pub struct ExecRequest {
     /// `capabilities.limits.systemd`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<ExecLimits>,
+}
+
+/// Password delivery for one session, not host configuration.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsRunAs {
+    pub account: String,
+    pub password: String,
+}
+
+#[cfg(test)]
+mod windows_run_as_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_exec_omits_credentials_and_session_debug_redacts_them() {
+        let legacy = r#"{"type":"exec","session":1,"cmd":"whoami"}"#;
+        let mut frame: DaemonFrame = decode_control(legacy).expect("legacy exec");
+        assert!(
+            !encode_control(&frame)
+                .expect("encoded")
+                .contains("windows_run_as")
+        );
+        let DaemonFrame::Exec(req) = &mut frame else {
+            panic!("exec")
+        };
+        req.windows_run_as = Some(WindowsRunAs {
+            account: "DOMAIN\\worker".into(),
+            password: "unique-test-password-Q7m3V9r2".into(),
+        });
+        let wire = encode_control(&frame).expect("encoded");
+        assert!(wire.contains("unique-test-password-Q7m3V9r2"));
+        assert!(!format!("{frame:?}").contains("unique-test-password-Q7m3V9r2"));
+        let decoded: DaemonFrame = decode_control(&wire).expect("round trip");
+        assert_eq!(decoded, frame);
+    }
+}
+
+impl std::fmt::Debug for WindowsRunAs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WindowsRunAs")
+            .field("account", &self.account)
+            .field("password", &"[redacted]")
+            .finish()
+    }
 }
 
 /// The resource limits of an `exec` on a `host` target. All sessions of
@@ -358,6 +405,8 @@ pub struct ResourceStop {
 /// Write a file on the host. File data frames follow, then `cp_end`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CpPush {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_run_as: Option<WindowsRunAs>,
     pub session: SessionId,
     /// The absolute destination path on the host.
     pub path: PathBuf,
@@ -372,6 +421,8 @@ pub struct CpPush {
 /// Read a file on the host. The host agent sends file data frames, then `cp_done`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CpPull {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_run_as: Option<WindowsRunAs>,
     pub session: SessionId,
     pub path: PathBuf,
 }
@@ -1390,6 +1441,7 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
             capabilities: HostCapabilities {
+                windows_run_as: false,
                 gpus: vec![],
                 gpu_reservations: false,
                 capacity: None,

@@ -41,6 +41,7 @@ pub mod display;
 pub mod docker;
 pub mod labcheck;
 pub mod limits;
+pub mod logging;
 pub mod metrics;
 #[cfg(unix)]
 pub mod native;
@@ -57,11 +58,14 @@ mod session_windows;
 pub mod tls;
 pub mod transfer;
 pub mod update_journal;
+pub mod update_signature;
 pub mod verb;
 pub mod vmlab;
 #[cfg(windows)]
 pub mod windows_update;
 pub mod workspace;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub mod workspace_helper;
 
 pub use client::{Client, ClientOptions, SelfUpdateOptions};
 pub use config::{Config, HostPaths};

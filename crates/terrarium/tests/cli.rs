@@ -947,6 +947,59 @@ fn fake_runner(dir: &Path, answer: fn(&Value) -> Value) -> (PathBuf, Arc<Mutex<V
 }
 
 #[test]
+fn project_pages_commands_use_the_page_api() {
+    let dir = temp_dir("project-pages");
+    let input = dir.join("page.json");
+    let body = json!({"title":"Overview","position":0,"widgets":[]});
+    std::fs::write(&input, body.to_string()).unwrap();
+    let (socket, seen) = fake_runner(&dir, |p| {
+        json!({"status":200,"headers":{},"body": if p["path"] == "/api/projects/terra/pages" {
+            json!({"items":[{"slug":"overview","title":"Overview","position":0}]})
+        } else { json!({"slug":"overview","title":"Overview","position":0,"widgets":[]}) }})
+    });
+    for args in [
+        vec!["page", "ls"],
+        vec!["page", "show", "overview"],
+        vec![
+            "page",
+            "set",
+            "overview",
+            "--from-file",
+            input.to_str().unwrap(),
+        ],
+        vec!["page", "rm", "overview"],
+    ] {
+        let out = bin()
+            .env("TERRARIUM_AGENT", "01AGENT")
+            .env("TERRARIUM_SOCKET", &socket)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("overview"));
+    }
+    let requests = seen.lock().unwrap();
+    let http: Vec<_> = requests
+        .iter()
+        .filter(|r| r["method"] == "http")
+        .map(|r| &r["params"])
+        .collect();
+    assert_eq!(http.len(), 4);
+    for (r, method) in http.iter().zip(["GET", "GET", "PUT", "DELETE"]) {
+        assert_eq!(r["method"], method);
+    }
+    assert_eq!(http[0]["path"], "/api/projects/terra/pages");
+    for r in &http[1..] {
+        assert_eq!(r["path"], "/api/projects/terra/pages/overview");
+    }
+    assert_eq!(http[2]["body"], body);
+}
+
+#[test]
 fn checkbox_question_and_thread_flags_reach_the_api() {
     let dir = temp_dir("checkbox-ask");
     let (socket, seen) = fake_runner(

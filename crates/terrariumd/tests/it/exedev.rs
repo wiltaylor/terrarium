@@ -182,7 +182,7 @@ async fn fake_api() -> (String, FakeRef) {
 
 /// A fake `ssh`: it logs the destination and runs the remote command here.
 /// While the file `ssh-slow` is in `dir`, it waits before it runs.
-fn fake_ssh(dir: &std::path::Path) -> (String, std::path::PathBuf) {
+pub(crate) fn fake_ssh(dir: &std::path::Path) -> (String, std::path::PathBuf) {
     let log = dir.join("ssh.log");
     let bin = dir.join("fake-ssh");
     std::fs::write(
@@ -216,7 +216,7 @@ async fn reboot(td: &mut TestDaemon, url: &str, ssh: &str) {
     .await;
 }
 
-async fn output(td: &TestDaemon, target: &str, sid: &str) -> (String, Value) {
+pub(crate) async fn output(td: &TestDaemon, target: &str, sid: &str) -> (String, Value) {
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut out = Vec::new();
     let mut since = 0u64;
@@ -263,6 +263,186 @@ async fn secrets(td: &TestDaemon, token: &str, key: Option<&str>) {
 fn target(name: &str, life: u64) -> Value {
     json!({"name": name, "kind": "exedev", "ephemeral": true, "credential": "vmkey",
            "exedev": {"max_life_secs": life}})
+}
+
+#[tokio::test]
+async fn durable_exedev_finishes_offline_once_with_real_exit() {
+    let (mut td, _fake, _, url, ssh) = daemon().await;
+    let root = td.dir.path().join("remote-spool");
+    let _cleanup = super::ssh_restart::RemoteCleanup(root.clone());
+    let mut def = target("restart-ex", 8 * 3600);
+    def["work_root"] = json!(root);
+    td.post("/api/targets", def).await.ok();
+    td.post_empty("/api/targets/restart-ex/up").await.ok();
+    let (aid, wid) = super::ssh_restart::start(&td, "restart-ex", root.to_str().unwrap()).await;
+    super::ssh_restart::started(&td, &wid, &root).await;
+    td.daemon.take().unwrap().shutdown_and_wait().await;
+    std::fs::write(root.join("go"), "go").unwrap();
+    let spool = std::fs::read_dir(root.join(".terrarium-runs"))
+        .unwrap()
+        .find(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
+        .unwrap()
+        .unwrap()
+        .path();
+    super::ssh_restart::wait_file(&spool.join("exit")).await;
+    assert_eq!(std::fs::read_to_string(spool.join("exit")).unwrap(), "23\n");
+    reboot(&mut td, &url, &ssh).await;
+    super::ssh_restart::completed(&td, &aid, &wid, &root).await;
+    reboot(&mut td, &url, &ssh).await;
+    super::ssh_restart::completed(&td, &aid, &wid, &root).await;
+}
+
+#[tokio::test]
+async fn durable_expired_checkpoint_does_not_relaunch_or_prevent_boot() {
+    let (mut td, _fake, _, url, ssh) = daemon().await;
+    let root = td.dir.path().join("expired-spool");
+    let _cleanup = super::ssh_restart::RemoteCleanup(root.clone());
+    let mut def = target("expired-ex", 8 * 3600);
+    def["work_root"] = json!(root);
+    td.post("/api/targets", def).await.ok();
+    td.post_empty("/api/targets/expired-ex/up").await.ok();
+    let command = format!(
+        "echo once >> '{}'; echo retained; exit 17",
+        root.join("launches").display()
+    );
+    let opened = td
+        .post(
+            "/api/targets/expired-ex/exec",
+            json!({"cmd":["sh","-c",command],"durable":true}),
+        )
+        .await;
+    let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
+    let (stdout, end) = output(&td, "expired-ex", &sid).await;
+    assert_eq!(stdout, "retained\n");
+    assert_eq!(end["code"], 17);
+    let spool = std::fs::read_dir(root.join(".terrarium-runs"))
+        .unwrap()
+        .find(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
+        .unwrap()
+        .unwrap()
+        .path();
+    // Simulate remote output GC while retaining its claim tombstone.
+    std::fs::write(spool.join("expired"), "").unwrap();
+    reboot(&mut td, &url, &ssh).await;
+    let (_, end) = output(&td, "expired-ex", &sid).await;
+    assert_eq!(end["code"], "durable_expired");
+    let journal = terrariumd::hosts::resume::Journal::with_db(
+        &td.state,
+        td.daemon.as_ref().unwrap().state.db.clone(),
+    );
+    let mut checkpoints = journal.scan::<Value>("ssh/").unwrap();
+    assert_eq!(checkpoints.len(), 1);
+    let (key, checkpoint) = checkpoints.first_mut().unwrap();
+    checkpoint["created"] = json!((chrono::Utc::now() - chrono::Duration::days(9)).timestamp());
+    journal.save(key, checkpoint).unwrap();
+    reboot(&mut td, &url, &ssh).await;
+    let (_, end) = output(&td, "expired-ex", &sid).await;
+    assert_eq!(end["type"], "error");
+    assert_eq!(end["code"], "interrupted");
+    assert_eq!(
+        std::fs::read_to_string(root.join("launches")).unwrap(),
+        "once\n"
+    );
+}
+
+#[tokio::test]
+async fn durable_exedev_recreated_vm_is_not_contacted() {
+    let (mut td, _fake, ssh_log, url, ssh) = daemon().await;
+    let root = td.dir.path().join("replacement-spool");
+    let _cleanup = super::ssh_restart::RemoteCleanup(root.clone());
+    let mut def = target("replacement-ex", 8 * 3600);
+    def["work_root"] = json!(root);
+    td.post("/api/targets", def).await.ok();
+    td.post_empty("/api/targets/replacement-ex/up").await.ok();
+    let opened = td
+        .post(
+            "/api/targets/replacement-ex/exec",
+            json!({"durable":true,"cmd":["sh","-c","echo retained; exit 19"]}),
+        )
+        .await;
+    let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
+    assert_eq!(output(&td, "replacement-ex", &sid).await.1["code"], 19);
+    td.daemon.take().unwrap().shutdown_and_wait().await;
+    let before = std::fs::read_to_string(&ssh_log).unwrap();
+    // Same target definition and SSH destination, but a different VM incarnation.
+    db(&td)
+        .execute(
+            "UPDATE exedev_vms SET name=name || '-replacement' WHERE target='replacement-ex'",
+            [],
+        )
+        .unwrap();
+    reboot(&mut td, &url, &ssh).await;
+    let (_, end) = output(&td, "replacement-ex", &sid).await;
+    assert_eq!(end["code"], "interrupted", "{end}");
+    assert!(
+        end["message"].as_str().unwrap().contains("target changed"),
+        "{end}"
+    );
+    assert_eq!(std::fs::read_to_string(&ssh_log).unwrap(), before);
+}
+
+#[tokio::test]
+async fn durable_startup_failures_end_promptly_with_reason() {
+    let (td, _fake, _, _, _) = daemon().await;
+    let tools = td.dir.path().join("limited-tools");
+    std::fs::create_dir(&tools).unwrap();
+    // Keep every prerequisite except mkfifo. No remote command may start.
+    for tool in [
+        "setsid", "nohup", "flock", "sh", "timeout", "date", "head", "tail", "base64", "tr", "wc",
+        "cat", "mkdir", "mv", "rm", "rmdir", "sleep",
+    ] {
+        std::os::unix::fs::symlink(format!("/usr/bin/{tool}"), tools.join(tool)).unwrap();
+    }
+    for (name, env, reason) in [
+        (
+            "missing-tool-ex",
+            json!({"PATH":tools}),
+            "unsupported: mkfifo missing",
+        ),
+        ("bad-spool-ex", json!({}), "spool error"),
+    ] {
+        let root = td.dir.path().join(name);
+        let mut def = target(name, 8 * 3600);
+        def["work_root"] = json!(root);
+        td.post("/api/targets", def).await.ok();
+        td.post_empty(&format!("/api/targets/{name}/up")).await.ok();
+        if name == "bad-spool-ex" {
+            std::fs::write(&root, "not a directory").unwrap();
+        }
+        let began = tokio::time::Instant::now();
+        let opened = td
+            .post(
+                &format!("/api/targets/{name}/exec"),
+                json!({"durable":true,"env":env,"cmd":["true"]}),
+            )
+            .await;
+        let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
+        let (_, end) = output(&td, name, &sid).await;
+        assert_eq!(end["code"], "unsupported", "{end}");
+        assert!(end["message"].as_str().unwrap().contains(reason), "{end}");
+        assert!(began.elapsed() < Duration::from_secs(5));
+    }
+    std::os::unix::fs::symlink("/usr/bin/mkfifo", tools.join("mkfifo")).unwrap();
+    let root = td.dir.path().join("missing-python");
+    let mut def = target("missing-python-ex", 8 * 3600);
+    def["work_root"] = json!(root);
+    td.post("/api/targets", def).await.ok();
+    td.post_empty("/api/targets/missing-python-ex/up")
+        .await
+        .ok();
+    let opened = td
+        .post(
+            "/api/targets/missing-python-ex/exec",
+            json!({"durable":true,"env":{"PATH":tools},"cmd":["true"]}),
+        )
+        .await;
+    let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
+    let (_, end) = output(&td, "missing-python-ex", &sid).await;
+    assert_eq!(end["code"], "unsupported", "{end}");
+    assert!(
+        end["message"].as_str().unwrap().contains("python3 missing"),
+        "{end}"
+    );
 }
 
 fn db(td: &TestDaemon) -> rusqlite::Connection {

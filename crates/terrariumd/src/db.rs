@@ -2550,8 +2550,29 @@ const MIGRATIONS: &[&str] = &[
     "#,
 ];
 
-/// The shared database handle. One connection behind a mutex; every call
-/// runs on the blocking pool, so the async runtime never waits on SQLite.
+thread_local! {
+    static HELD_DATABASES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+struct DatabaseScope;
+
+impl DatabaseScope {
+    fn enter(conn: &Arc<Mutex<Connection>>) -> Self {
+        HELD_DATABASES.with(|held| held.borrow_mut().push(Arc::as_ptr(conn) as usize));
+        Self
+    }
+}
+
+impl Drop for DatabaseScope {
+    fn drop(&mut self) {
+        HELD_DATABASES.with(|held| {
+            held.borrow_mut().pop();
+        });
+    }
+}
+
+/// The shared database handle. One connection behind a mutex; async calls
+/// run on the blocking pool. Synchronous journal calls document their locks.
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
@@ -2594,7 +2615,8 @@ impl Db {
     }
 
     /// Run a read on the blocking pool.
-    pub async fn read<T, F>(&self, f: F) -> ApiResult<T>
+    #[track_caller]
+    pub fn read<T, F>(&self, f: F) -> impl std::future::Future<Output = ApiResult<T>> + '_
     where
         T: Send + 'static,
         F: FnOnce(&Connection) -> ApiResult<T> + Send + 'static,
@@ -2602,29 +2624,35 @@ impl Db {
         let conn = self.conn.clone();
         let queued = tracing::enabled!(target: "terrariumd::db_timing", tracing::Level::DEBUG)
             .then(std::time::Instant::now);
-        crate::links::spawn_blocking(move || {
-            let started = queued.map(|_| std::time::Instant::now());
-            let guard = match conn.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            let acquired = queued.map(|_| std::time::Instant::now());
-            let result = f(&guard);
-            let finished = queued.map(|_| std::time::Instant::now());
-            drop(guard);
-            if let (Some(queued), Some(started), Some(acquired), Some(finished)) =
-                (queued, started, acquired, finished)
-            {
-                tracing::debug!(target: "terrariumd::db_timing", operation = "read",
+        let caller = std::panic::Location::caller();
+        async move {
+            crate::links::spawn_blocking(move || {
+                let started = queued.map(|_| std::time::Instant::now());
+                let guard = match conn.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                let acquired = queued.map(|_| std::time::Instant::now());
+                let _scope = DatabaseScope::enter(&conn);
+                let result = f(&guard);
+                let finished = queued.map(|_| std::time::Instant::now());
+                drop(guard);
+                if let (Some(queued), Some(started), Some(acquired), Some(finished)) =
+                    (queued, started, acquired, finished)
+                {
+                    tracing::debug!(target: "terrariumd::db_timing", operation = "read",
+                    caller_file = caller.file(),
+                    caller_line = caller.line(),
                     scheduling_us = started.duration_since(queued).as_micros() as u64,
                     mutex_wait_us = acquired.duration_since(started).as_micros() as u64,
                     sql_us = finished.duration_since(acquired).as_micros() as u64,
                     "database access");
-            }
-            result
-        })
-        .await
-        .map_err(|e| ApiError::internal(format!("database task failed: {e}")))?
+                }
+                result
+            })
+            .await
+            .map_err(|e| ApiError::internal(format!("database task failed: {e}")))?
+        }
     }
 
     /// Run a read on the calling thread. Only for a short read at the
@@ -2634,7 +2662,47 @@ impl Db {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
+        let _scope = DatabaseScope::enter(&self.conn);
         f(&guard)
+    }
+
+    /// Journal calls may hold the host registry lock. Never wait for the
+    /// writer here: a write can itself need registry state. Callers retain
+    /// uncommitted events and retry ResourceBusy outside both locks.
+    pub(crate) fn journal_now<T>(
+        &self,
+        wait: bool,
+        f: impl FnOnce(&mut Connection) -> ApiResult<T>,
+    ) -> ApiResult<T> {
+        if wait
+            && HELD_DATABASES
+                .with(|held| held.borrow().contains(&(Arc::as_ptr(&self.conn) as usize)))
+        {
+            return Err(ApiError::internal(
+                "journal cannot wait inside a database closure",
+            ));
+        }
+        let mut guard = if wait {
+            match self.conn.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            }
+        } else {
+            match self.conn.try_lock() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(ApiError::new(
+                        crate::error::Code::ResourceBusy,
+                        "host journal writer is busy",
+                    ));
+                }
+            }
+        };
+        let _scope = DatabaseScope::enter(&self.conn);
+        // Journal ACKs promise durable output, including across power loss.
+        guard.pragma_update(None, "synchronous", "FULL")?;
+        f(&mut guard)
     }
 
     /// Run a write in one transaction. `actor` labels the events and audit
@@ -2676,6 +2744,7 @@ impl Db {
                     Err(poisoned) => poisoned.into_inner(),
                 };
                 let acquired = queued.map(|_| std::time::Instant::now());
+                let _scope = DatabaseScope::enter(&conn);
                 // The snapshot comes after the lock: a write that changed a
                 // secret swapped its matcher in before it let the lock go.
                 let result = (|| {
@@ -3367,6 +3436,69 @@ mod tests {
 
     fn migration_count() -> usize {
         MIGRATIONS.len() + NAMED_MIGRATIONS.len()
+    }
+
+    #[test]
+    fn rule_selection_is_column_indexed_and_does_not_render_board_history() {
+        use crate::store::board::{SELECTION_SQL, get_board, selection_cards};
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO projects(name,created_at,updated_at) VALUES ('p','t','t');
+             INSERT INTO boards(project,created_at) VALUES ('p','t');
+             INSERT INTO board_columns(id,project,name,position) VALUES
+               (1,'p','accepted',0),(2,'p','done',1);
+             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000)
+             INSERT INTO cards(id,project,number,column_id,position,title,labels,created_by,created_at,updated_at)
+               SELECT 'P-'||x,'p',x,CASE WHEN x<=3 THEN 1 ELSE 2 END,x,'fixture',
+                 '[\"version:vnext\"]','operator','2026-11-12T00:00:00Z','t' FROM n;
+             INSERT INTO card_comments(id,card,author,body,created_at)
+               SELECT 'comment-'||id,id,'operator',hex(zeroblob(1000)),'t' FROM cards;
+             UPDATE cards SET archived=1 WHERE id='P-2';
+             UPDATE cards SET kind='group' WHERE id='P-3';",
+        ).unwrap();
+        let start = std::time::Instant::now();
+        let old = get_board(&conn, "p").unwrap();
+        let before = start.elapsed();
+        let start = std::time::Instant::now();
+        let selected = selection_cards(&conn, "p", "accepted").unwrap();
+        let after = start.elapsed();
+        eprintln!("2000 cards, 2000 2KB comments: full board {before:?}, rule selection {after:?}");
+        let expected: Vec<_> = old
+            .cards
+            .iter()
+            .filter(|c| c.column == "accepted" && c.kind != "group")
+            .map(|c| (&c.id, &c.labels, &c.created_at))
+            .collect();
+        let actual: Vec<_> = selected
+            .iter()
+            .map(|c| (&c.id, &c.labels, &c.created_at))
+            .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].comments.is_empty());
+        let pick = crate::store::version_groups::pick(&conn, "p").unwrap();
+        assert_eq!(pick.waiting, 1);
+        assert_eq!(pick.cards[0].id, "P-1");
+        assert!(selection_cards(&conn, "p", "missing").unwrap().is_empty());
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {SELECTION_SQL}"))
+            .unwrap()
+            .query_map(["p", "accepted"], |r| r.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|p| p.contains("SEARCH c USING INDEX cards_column")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|p| p.contains("SCAN c") || p.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
     }
 
     #[tokio::test]

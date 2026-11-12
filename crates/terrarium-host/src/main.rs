@@ -531,14 +531,8 @@ fn main() -> anyhow::Result<()> {
     } else {
         writer
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(writer)
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
-        .init();
+    use tracing_subscriber::util::SubscriberInitExt;
+    terrarium_host::logging::subscriber(writer, std::io::IsTerminal::is_terminal(&std::io::stderr())).init();
     #[cfg(windows)]
     if matches!(args.command, Some(Cmd::Service)) {
         return windows_service_host::dispatch();

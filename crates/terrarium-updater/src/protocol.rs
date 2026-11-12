@@ -18,6 +18,20 @@ pub const MAX_REQUEST: usize = 64 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
+    RetentionRepair {
+        confirm: bool,
+    },
+    /// Trusted operator initialization. Preview unless explicitly confirmed.
+    RetentionInit {
+        confirm: bool,
+        no_rollback_reference: bool,
+    },
+    /// Prune daemon-owned backups. An explicit release is a trusted,
+    /// operator-only recovery decision, naming the failed run.
+    Retention {
+        #[serde(default)]
+        release: Option<String>,
+    },
     /// The current image, the run in progress, and the last results.
     Status,
     /// Move the terrarium container to a release: a version (`0.3.0` or
@@ -42,6 +56,9 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
+    Retained {
+        detail: serde_json::Value,
+    },
     Status(Box<Status>),
     /// The run started; `status` shows its steps.
     Accepted {

@@ -23,6 +23,222 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 const TOKEN: &str = "host-token-1";
 const WAIT: Duration = Duration::from_secs(15);
 
+fn signed_update_bundle(data: &[u8], private_key: &std::path::Path) -> Vec<u8> {
+    use base64::Engine;
+    let asset = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(asset.path(), data).unwrap();
+    let signature = std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-sign"])
+        .arg(private_key)
+        .arg(asset.path())
+        .output()
+        .unwrap();
+    assert!(signature.status.success(), "test signing failed");
+    let base64 = base64::engine::general_purpose::STANDARD;
+    serde_json::to_vec(&serde_json::json!({
+        "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+        "messageSignature": {
+            "messageDigest": {"algorithm": "SHA2_256", "digest": base64.encode(Sha256::digest(data))},
+            "signature": base64.encode(signature.stdout)
+        }
+    })).unwrap()
+}
+
+/// Exercise Client's actual before-stage boundary, not the verifier in isolation.
+async fn release_key_host_refuses_bundle(case: &str) {
+    use std::io::Write;
+    use terrarium_host::selfupdate::{NEW, PENDING, PREV, sidecar};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[derive(Clone, Default)]
+    struct Log(Arc<Mutex<Vec<u8>>>);
+    impl Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    assert!(
+        terrarium_host::update_signature::RELEASE_KEY.is_some(),
+        "requires a test-key build"
+    );
+    let private_key =
+        std::env::var_os("TERRARIUM_TEST_SIGNING_KEY").expect("ephemeral test key path");
+    let log = Log::default();
+    let writer = log.clone();
+    let _trace = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("host");
+    let marker = dir.path().join("asset-executed");
+    let old = b"the running build";
+    std::fs::write(&binary, old).unwrap();
+    let asset = format!(
+        "#!/bin/sh\nprintf executed > '{}'\necho 'terrarium-host {}'\n",
+        marker.display(),
+        terrarium_version::FULL
+    )
+    .into_bytes();
+    let (status, bundle, reason) = match case {
+        "missing" => (404, Vec::new(), "the daemon answered 404"),
+        "malformed" => (
+            200,
+            b"not JSON".to_vec(),
+            "invalid release signature bundle",
+        ),
+        "other-bytes" => (
+            200,
+            signed_update_bundle(b"another asset", std::path::Path::new(&private_key)),
+            "digest does not match",
+        ),
+        "other-key" => {
+            let other_key = dir.path().join("other-test-key.pem");
+            let generated = std::process::Command::new("openssl")
+                .args([
+                    "genpkey",
+                    "-algorithm",
+                    "EC",
+                    "-pkeyopt",
+                    "ec_paramgen_curve:P-256",
+                    "-out",
+                ])
+                .arg(&other_key)
+                .output()
+                .unwrap();
+            assert!(generated.status.success());
+            (
+                200,
+                signed_update_bundle(&asset, &other_key),
+                "release signature verification failed",
+            )
+        }
+        _ => panic!("unknown signature test case"),
+    };
+    let stub = Stub::new().await;
+    let mut options = ClientOptions::new(stub.url(), TOKEN, "signature-test");
+    options.version = "0.0.9+0000000".into();
+    options.self_update = Some(terrarium_host::SelfUpdateOptions {
+        binary: binary.clone(),
+        enabled: true,
+        supervised: true,
+        idle_poll: Duration::from_millis(20),
+        drain_timeout: Duration::from_secs(600),
+    });
+    let client = tokio::spawn(Client::new(options).run());
+    let mut connection = stub.accept().await;
+    assert_eq!(connection.hello().await.version, "0.0.9+0000000");
+    connection
+        .send(DaemonFrame::Welcome(Welcome {
+            host_id: "h-1".into(),
+            heartbeat_secs: 60,
+            resume_token: "resume-1".into(),
+            resume: Vec::new(),
+            token: None,
+            metrics: false,
+            update: Some(terrarium_host::protocol::UpdateOffer {
+                version: terrarium_version::FULL.into(),
+                path: "/install/terrarium-host?arch=x86_64".into(),
+                sha256: terrarium_host::transfer::sha256_hex(&asset),
+                release_sha256: None,
+            }),
+        }))
+        .await;
+    let http = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = stub.listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let n = socket.read(&mut request).await.unwrap();
+            let signature = String::from_utf8_lossy(&request[..n]).contains(".sigstore.json?");
+            let (code, body) = if signature {
+                (status, &bundle)
+            } else {
+                (200, &asset)
+            };
+            let header = format!(
+                "HTTP/1.1 {code} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(header.as_bytes()).await.unwrap();
+            socket.write_all(body).await.unwrap();
+        }
+    });
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let text = String::from_utf8_lossy(&log.0.lock().unwrap()).into_owned();
+            if text.contains("self-update failed") || marker.exists() || client.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the offered update was not processed");
+    assert!(!marker.exists(), "{case}: untrusted asset was executed");
+    assert!(
+        !client.is_finished(),
+        "{case}: current host must keep running"
+    );
+    assert_eq!(std::fs::read(&binary).unwrap(), old, "{case}");
+    for suffix in [NEW, PREV, PENDING] {
+        assert!(
+            !sidecar(&binary, suffix).exists(),
+            "{case}: staged {suffix}"
+        );
+    }
+    let text = String::from_utf8_lossy(&log.0.lock().unwrap()).into_owned();
+    assert!(
+        text.contains(reason),
+        "{case}: missing refusal reason: {text}"
+    );
+    connection.send(DaemonFrame::Ping { nonce: 123 }).await;
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let message = connection.ws.next().await.unwrap().unwrap();
+            if let Message::Text(text) = message
+                && let HostFrame::Pong { nonce } = decode_control::<HostFrame>(&text).unwrap()
+            {
+                assert_eq!(nonce, 123);
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the current host must still answer heartbeats after refusing the update");
+    client.abort();
+    http.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated ephemeral test-key build"]
+async fn release_key_host_refuses_missing_bundle_before_execution() {
+    release_key_host_refuses_bundle("missing").await;
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated ephemeral test-key build"]
+async fn release_key_host_refuses_malformed_bundle_before_execution() {
+    release_key_host_refuses_bundle("malformed").await;
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated ephemeral test-key build"]
+async fn release_key_host_refuses_other_bytes_bundle_before_execution() {
+    release_key_host_refuses_bundle("other-bytes").await;
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated ephemeral test-key build"]
+async fn release_key_host_refuses_other_key_bundle_before_execution() {
+    release_key_host_refuses_bundle("other-key").await;
+}
+
 struct Stub {
     listener: TcpListener,
     auth: Arc<Mutex<Vec<String>>>,
@@ -201,6 +417,7 @@ fn start_client(
 
 fn exec(session: SessionId, cmd: &str, args: &[&str], pty: Option<PtySize>) -> DaemonFrame {
     DaemonFrame::Exec(ExecRequest {
+        windows_run_as: None,
         session,
         cmd: cmd.into(),
         args: args.iter().map(|s| s.to_string()).collect(),
@@ -326,6 +543,7 @@ async fn cp_push_then_pull_round_trips_with_sha256() {
 
     // Push.
     conn.send(DaemonFrame::CpPush(CpPush {
+        windows_run_as: None,
         session: 10,
         path: path.clone(),
         mode: Some(0o640),
@@ -355,6 +573,7 @@ async fn cp_push_then_pull_round_trips_with_sha256() {
 
     // Pull.
     conn.send(DaemonFrame::CpPull(CpPull {
+        windows_run_as: None,
         session: 11,
         path: path.clone(),
     }))
@@ -370,6 +589,7 @@ async fn cp_push_then_pull_round_trips_with_sha256() {
 
     // A bad digest leaves the old file in place.
     conn.send(DaemonFrame::CpPush(CpPush {
+        windows_run_as: None,
         session: 12,
         path: path.clone(),
         mode: None,
@@ -395,6 +615,7 @@ async fn cp_push_then_pull_round_trips_with_sha256() {
 
     // A path outside allowed_cwd_roots is refused before anything runs.
     conn.send(DaemonFrame::CpPull(CpPull {
+        windows_run_as: None,
         session: 13,
         path: "/etc/hostname".into(),
     }))

@@ -77,6 +77,83 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 const ACK_EVERY: u64 = 256 * 1024;
 /// The largest WebSocket message the daemon accepts from a host.
 const MAX_MESSAGE: usize = 2 * 1024 * 1024;
+const JOURNAL_RETRY_DEADLINE: Duration = Duration::from_secs(30);
+const JOURNAL_RETRY_EVENTS: usize = 64;
+const JOURNAL_RETRY_BYTES: usize = 4 * 1024 * 1024;
+// Drain retained chunks without inserting gaps larger than the exec
+// redactor's idle flush (200 ms). Sustained contention still backs off.
+const JOURNAL_RETRY_TICK: Duration = Duration::from_millis(10);
+const JOURNAL_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+
+// Metadata calls do not have a host event to retain. Retry the whole
+// operation after its registry guard has gone, never sleeping under it.
+fn retry_metadata<T, E>(
+    mut operation: impl FnMut() -> Result<T, E>,
+    busy: impl Fn(&E) -> bool,
+) -> Result<T, E> {
+    retry_metadata_for(&mut operation, busy, Duration::from_secs(5))
+}
+
+fn retry_metadata_for<T, E>(
+    mut operation: impl FnMut() -> Result<T, E>,
+    busy: impl Fn(&E) -> bool,
+    timeout: Duration,
+) -> Result<T, E> {
+    let deadline = Instant::now() + timeout;
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        match operation() {
+            Err(error) if busy(&error) && Instant::now() < deadline => {
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn retry_metadata_api<T>(
+    operation: impl FnMut() -> crate::error::ApiResult<T>,
+) -> crate::error::ApiResult<T> {
+    retry_metadata(operation, |error| error.code == Code::ResourceBusy)
+}
+
+struct PendingJournal {
+    events: VecDeque<SessionEvent>,
+    bytes: usize,
+    deadline: Instant,
+    next: Instant,
+    backoff: Duration,
+    exhausted: bool,
+}
+
+impl PendingJournal {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            events: VecDeque::new(),
+            bytes: 0,
+            deadline: now + JOURNAL_RETRY_DEADLINE,
+            next: now + JOURNAL_RETRY_TICK,
+            backoff: JOURNAL_RETRY_TICK,
+            exhausted: false,
+        }
+    }
+
+    fn push(&mut self, event: SessionEvent) -> bool {
+        let bytes = serde_json::to_vec(&event).map_or(usize::MAX, |v| v.len());
+        if self.exhausted
+            || self.events.len() >= JOURNAL_RETRY_EVENTS
+            || bytes > JOURNAL_RETRY_BYTES.saturating_sub(self.bytes)
+        {
+            self.exhausted = true;
+            return false;
+        }
+        self.bytes += bytes;
+        self.events.push_back(event);
+        true
+    }
+}
 /// How long a TLS handshake on the host listener may take.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 /// The default dial-in address with TLS: every interface.
@@ -140,6 +217,10 @@ pub enum HostError {
     Busy(String, u32),
     #[error("cannot persist host session state")]
     Persistence,
+    #[error("host journal writer is busy")]
+    JournalBusy,
+    #[error("Windows run-as requires a Windows host with the windows_run_as capability")]
+    WindowsRunAsUnsupported,
 }
 
 impl From<HostError> for ApiError {
@@ -148,6 +229,8 @@ impl From<HostError> for ApiError {
             HostError::Offline(_) => ApiError::conflict(e.to_string()),
             HostError::Busy(..) => ApiError::new(Code::RateLimited, e.to_string()),
             HostError::Persistence => ApiError::internal(e.to_string()),
+            HostError::JournalBusy => ApiError::new(Code::ResourceBusy, e.to_string()),
+            HostError::WindowsRunAsUnsupported => ApiError::invalid(e.to_string()),
         }
     }
 }
@@ -239,6 +322,13 @@ pub struct LiveInfo {
 
 #[derive(Default)]
 struct Entry {
+    /// Uncommitted events are never exposed or acknowledged. Discard only
+    /// on detach, when the host takes responsibility for replay again.
+    pending_journal: HashMap<SessionId, PendingJournal>,
+    /// Terminal intentions survive a retry deadline without becoming
+    /// resumable. Driven independently of any host link.
+    pending_lost: HashMap<SessionId, SessionEvent>,
+    lost_retry_running: bool,
     conn: Option<Conn>,
     resume_token: Option<String>,
     sessions: HashMap<SessionId, Slot>,
@@ -298,6 +388,10 @@ pub struct LiveView {
 /// The hosts that are or were connected since the daemon started.
 pub struct HostRegistry {
     entries: Mutex<HashMap<String, Entry>>,
+    /// Lock order: metadata, then entries, then a nonblocking DB attempt.
+    /// Never acquire metadata while holding entries or the DB. A newer
+    /// save/delete cannot be overtaken by an older retry.
+    metadata: Mutex<()>,
     next_conn: std::sync::atomic::AtomicU64,
     pub heartbeat: Duration,
     pub resume_grace: Duration,
@@ -325,6 +419,7 @@ impl HostRegistry {
     pub fn new(heartbeat: Duration, resume_grace: Duration) -> Self {
         Self {
             entries: Mutex::default(),
+            metadata: Mutex::default(),
             next_conn: std::sync::atomic::AtomicU64::new(1),
             heartbeat,
             resume_grace,
@@ -336,8 +431,20 @@ impl HostRegistry {
     }
 
     /// Restore before the HTTP/host listeners and process-wait reconciliation.
-    pub fn restore(&self, state_dir: &std::path::Path) -> crate::error::ApiResult<()> {
-        let journal = resume::Journal::new(state_dir);
+    #[cfg(test)]
+    fn restore(&self, state_dir: &std::path::Path) -> crate::error::ApiResult<()> {
+        self.restore_journal(resume::Journal::new(state_dir))
+    }
+
+    pub fn restore_with_db(
+        &self,
+        state_dir: &std::path::Path,
+        db: crate::db::Db,
+    ) -> crate::error::ApiResult<()> {
+        self.restore_journal(resume::Journal::for_registry(state_dir, db))
+    }
+
+    fn restore_journal(&self, journal: resume::Journal) -> crate::error::ApiResult<()> {
         let saved = journal.scan::<SavedHost>("host/")?;
         let mut entries = HashMap::new();
         for (key, saved) in saved {
@@ -408,6 +515,16 @@ impl HostRegistry {
         event: Option<(SessionId, &SessionEvent)>,
         binding: Option<(&str, SessionId)>,
     ) -> crate::error::ApiResult<()> {
+        self.persist_events(host, entry, &event.into_iter().collect::<Vec<_>>(), binding)
+    }
+
+    fn persist_events(
+        &self,
+        host: &str,
+        entry: &Entry,
+        events: &[(SessionId, &SessionEvent)],
+        binding: Option<(&str, SessionId)>,
+    ) -> crate::error::ApiResult<()> {
         if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
             return Err(ApiError::internal("host registry is stopping"));
         }
@@ -438,9 +555,9 @@ impl HostRegistry {
             serde_json::to_value(v)
                 .map_err(|_| ApiError::internal("cannot encode host resume state"))
         };
-        let mut values = vec![(format!("host/{host}"), encode(&saved)?)];
-        if let Some((id, event)) = event {
-            let seq = entry.sessions[&id].events;
+        let mut values = Vec::new();
+        for (id, event) in events {
+            let seq = entry.sessions[id].events;
             values.push((
                 format!("event/{host}/{id}/{seq:020}"),
                 serde_json::to_value(event)
@@ -448,31 +565,93 @@ impl HostRegistry {
             ));
         }
         if let Some((key, id)) = binding {
-            self.ownership_epoch
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             values.push((format!("bound/{key}"), json!((host, id))));
         }
-        let removed: Vec<_> = event
-            .into_iter()
+        // The final host offset and every event share one journal commit.
+        values.push((format!("host/{host}"), encode(&saved)?));
+        let removed: Vec<_> = events
+            .iter()
             .flat_map(|(id, _)| {
-                let slot = &entry.sessions[&id];
+                let slot = &entry.sessions[id];
                 slot.output_events
                     .iter()
                     .take(slot.prune_count())
                     .map(move |(seq, _)| format!("event/{host}/{id}/{seq:020}"))
             })
             .collect();
-        journal.replace(&values, &removed, &[])
+        journal.replace(&values, &removed, &[])?;
+        if binding.is_some() {
+            self.ownership_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// Stage terminal reconciliation under entries, commit all rows once,
+    /// then publish. No receiver or replacement connection sees a partial
+    /// attach, including when a later row fails inside the transaction.
+    fn reconcile_lost(
+        &self,
+        host: &str,
+        entry: &mut Entry,
+        lost: &[(SessionId, SessionEvent)],
+        resume: &[ResumeAccept],
+        token: Option<String>,
+    ) -> crate::error::ApiResult<()> {
+        let old_token = entry.resume_token.clone();
+        let mut old = Vec::new();
+        for (id, _) in lost {
+            if let Some(s) = entry.sessions.get_mut(id) {
+                old.push((*id, s.events, s.held, s.terminal, s.ended_at));
+                s.events += 1;
+                s.terminal = true;
+                s.ended_at = Some(chrono::Utc::now().timestamp());
+            }
+        }
+        for r in resume {
+            if let Some(s) = entry.sessions.get_mut(&r.session) {
+                old.push((r.session, s.events, s.held, s.terminal, s.ended_at));
+                s.held = true;
+            }
+        }
+        entry.resume_token = token;
+        let events: Vec<_> = lost.iter().map(|(id, event)| (*id, event)).collect();
+        if let Err(error) = self.persist_events(host, entry, &events, None) {
+            entry.resume_token = old_token;
+            for (id, events, held, terminal, ended_at) in old {
+                if let Some(s) = entry.sessions.get_mut(&id) {
+                    (s.events, s.held, s.terminal, s.ended_at) = (events, held, terminal, ended_at);
+                }
+            }
+            return Err(error);
+        }
+        for (id, event) in lost {
+            if let Some(s) = entry.sessions.get_mut(id) {
+                let prune = s.prune_count();
+                s.output_events.drain(..prune);
+                let _ = s.tx.send(event.clone());
+            }
+            entry.pending_lost.remove(id);
+            entry.pending_journal.remove(id);
+        }
+        Ok(())
     }
 
     /// Forget an explicitly closed or expired exec and its replay together.
     pub fn forget_exec(&self, id: &str) -> crate::error::ApiResult<()> {
+        let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
+        retry_metadata_api(|| self.try_forget_exec(id))
+    }
+
+    fn try_forget_exec(&self, id: &str) -> crate::error::ApiResult<()> {
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
         #[derive(Deserialize)]
         struct Binding {
             host_session: Option<(String, SessionId)>,
+            #[serde(default)]
+            remote_key: Option<String>,
         }
         let key = format!("exec/{id}");
         let mut entries = self.lock();
@@ -482,6 +661,10 @@ impl HostRegistry {
         let binding = journal.load::<Binding>(&key)?;
         let mut values = Vec::new();
         let mut prefixes = Vec::new();
+        let mut removed = vec![key.clone()];
+        if let Some(remote) = binding.as_ref().and_then(|b| b.remote_key.as_ref()) {
+            removed.push(format!("ssh/{remote}"));
+        }
         let session = binding.and_then(|b| b.host_session);
         if let Some((host, session)) = &session {
             let host_key = format!("host/{host}");
@@ -495,11 +678,13 @@ impl HostRegistry {
             }
             prefixes.push(format!("event/{host}/{session}/"));
         }
-        journal.replace(&values, &[key], &prefixes)?;
+        journal.replace(&values, &removed, &prefixes)?;
         if let Some((host, session)) = session
             && let Some(entry) = entries.get_mut(&host)
         {
             entry.sessions.remove(&session);
+            entry.pending_journal.remove(&session);
+            entry.pending_lost.remove(&session);
             if let Some(conn) = &entry.conn {
                 let _ = conn
                     .tx
@@ -511,10 +696,20 @@ impl HostRegistry {
 
     /// Discard checkpoints only after the queue stored the job's final result.
     pub fn forget_job(&self, job: &str) -> crate::error::ApiResult<()> {
+        let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
+        retry_metadata_api(|| self.try_forget_job(job))
+    }
+
+    fn try_forget_job(&self, job: &str) -> crate::error::ApiResult<()> {
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
-        let mut prefixes = vec![format!("prepare/{job}/"), format!("recipe/{job}/")];
+        let mut entries = self.lock();
+        let mut prefixes = vec![
+            format!("prepare/{job}/"),
+            format!("recipe/{job}/"),
+            format!("ssh/recipe/{job}/"),
+        ];
         let mut removed = Vec::new();
         for phase in ["recipe", "receive"] {
             let prefix = format!("bound/{phase}/{job}/");
@@ -523,7 +718,6 @@ impl HostRegistry {
             }
             prefixes.push(prefix);
         }
-        let mut entries = self.lock();
         if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
             return Err(ApiError::internal("host registry is stopping"));
         }
@@ -551,6 +745,8 @@ impl HostRegistry {
         for (host, id) in removed {
             if let Some(entry) = entries.get_mut(&host) {
                 entry.sessions.remove(&id);
+                entry.pending_journal.remove(&id);
+                entry.pending_lost.remove(&id);
             }
         }
         Ok(())
@@ -567,6 +763,10 @@ impl HostRegistry {
                 let _ = conn.tx.send(Outgoing::Close(None));
             }
         }
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Claim the replay channel of a session from the previous daemon.
@@ -606,6 +806,15 @@ impl HostRegistry {
                 let Some(registry) = registry.upgrade() else {
                     return;
                 };
+                let hosts: Vec<_> = registry
+                    .lock()
+                    .iter()
+                    .filter(|(_, e)| !e.pending_lost.is_empty())
+                    .map(|(host, _)| host.clone())
+                    .collect();
+                for host in hosts {
+                    registry.drive_lost(&host);
+                }
                 if let Err(error) = registry.prune_unowned(chrono::Utc::now().timestamp() - 300) {
                     warn!(%error, "cannot prune orphan host replay");
                 }
@@ -616,6 +825,11 @@ impl HostRegistry {
     /// Finished helper sessions have no durable owner. Keep a five-minute
     /// grace for a fast exec to acquire its owner before removing replay.
     fn prune_unowned(&self, before: i64) -> crate::error::ApiResult<()> {
+        let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
+        retry_metadata_api(|| self.try_prune_unowned(before))
+    }
+
+    fn try_prune_unowned(&self, before: i64) -> crate::error::ApiResult<()> {
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
@@ -677,6 +891,8 @@ impl HostRegistry {
             journal.replace(&[(key, value)], &[], &prefixes)?;
             for id in ids {
                 entry.sessions.remove(&id);
+                entry.pending_journal.remove(&id);
+                entry.pending_lost.remove(&id);
             }
         }
         Ok(())
@@ -687,15 +903,20 @@ impl HostRegistry {
     }
 
     pub fn save_exec(&self, id: &str, value: &impl Serialize) -> crate::error::ApiResult<()> {
+        let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
+        retry_metadata_api(|| self.try_save_exec(id, value))
+    }
+
+    fn try_save_exec(&self, id: &str, value: &impl Serialize) -> crate::error::ApiResult<()> {
         let _entries = self.lock();
         if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
             return Err(ApiError::internal("host registry is stopping"));
         }
-        self.ownership_epoch
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some(journal) = self.journal.get() {
             journal.save(&format!("exec/{id}"), value)?;
         }
+        self.ownership_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
@@ -820,6 +1041,15 @@ impl HostRegistry {
             .and_then(|e| e.info.as_ref().map(|i| i.capabilities.clone()))
     }
 
+    pub fn supports_windows_run_as(&self, host: &str) -> bool {
+        self.lock().get(host).is_some_and(|e| {
+            e.conn.is_some()
+                && e.info
+                    .as_ref()
+                    .is_some_and(|i| i.os == "windows" && i.capabilities.windows_run_as)
+        })
+    }
+
     /// Native path syntax from the last hello. Container paths stay POSIX.
     pub fn path_kind(&self, host: &str) -> terrarium_host::protocol::PathKind {
         self.lock()
@@ -850,6 +1080,22 @@ impl HostRegistry {
         binding: Option<&str>,
         make: impl FnOnce(SessionId) -> DaemonFrame,
     ) -> Result<HostSession, HostError> {
+        let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
+        let mut make = Some(make);
+        let mut prepared = None;
+        retry_metadata(
+            || self.try_open_bound(host, binding, &mut make, &mut prepared),
+            |error| matches!(error, HostError::JournalBusy),
+        )
+    }
+
+    fn try_open_bound(
+        self: &Arc<Self>,
+        host: &str,
+        binding: Option<&str>,
+        make: &mut Option<impl FnOnce(SessionId) -> DaemonFrame>,
+        prepared: &mut Option<(SessionId, DaemonFrame)>,
+    ) -> Result<HostSession, HostError> {
         let mut g = self.lock();
         let e = g
             .get_mut(host)
@@ -859,6 +1105,7 @@ impl HostRegistry {
         if e.sessions.values().filter(|s| !s.terminal).count() >= max as usize {
             return Err(HostError::Busy(host.to_owned(), max));
         }
+        let previous_next = e.next_id;
         let id = loop {
             e.next_id = e.next_id.wrapping_add(1);
             if e.next_id != 0 && !e.sessions.contains_key(&e.next_id) {
@@ -866,6 +1113,38 @@ impl HostRegistry {
             }
         };
         let (tx, rx) = mpsc::unbounded_channel();
+        // Windows capability checks need the frame before persistence.
+        // Keep the FnOnce result across retries rather than consuming it again.
+        if prepared.is_none() {
+            let Some(make) = make.take() else {
+                e.next_id = previous_next;
+                return Err(HostError::Persistence);
+            };
+            *prepared = Some((id, make(id)));
+        }
+        let Some((prepared_id, frame)) = prepared.as_ref() else {
+            e.next_id = previous_next;
+            return Err(HostError::Persistence);
+        };
+        if *prepared_id != id {
+            e.next_id = previous_next;
+            return Err(HostError::Persistence);
+        }
+        let has_run_as = match frame {
+            DaemonFrame::Exec(req) => req.windows_run_as.is_some(),
+            DaemonFrame::CpPush(req) => req.windows_run_as.is_some(),
+            DaemonFrame::CpPull(req) => req.windows_run_as.is_some(),
+            _ => false,
+        };
+        if has_run_as
+            && !e
+                .info
+                .as_ref()
+                .is_some_and(|i| i.os == "windows" && i.capabilities.windows_run_as)
+        {
+            e.next_id = previous_next;
+            return Err(HostError::WindowsRunAsUnsupported);
+        }
         e.sessions.insert(
             id,
             Slot {
@@ -880,15 +1159,20 @@ impl HostRegistry {
                 restored: None,
             },
         );
-        if self
-            .persist_bound(host, e, None, binding.map(|key| (key, id)))
-            .is_err()
-        {
+        if let Err(error) = self.persist_bound(host, e, None, binding.map(|key| (key, id))) {
             e.sessions.remove(&id);
-            return Err(HostError::Persistence);
+            e.next_id = previous_next;
+            return Err(if error.code == Code::ResourceBusy {
+                HostError::JournalBusy
+            } else {
+                HostError::Persistence
+            });
         }
+        let Some((_, frame)) = prepared.take() else {
+            return Err(HostError::Persistence);
+        };
         if let Some(c) = &e.conn {
-            let _ = c.tx.send(Outgoing::frame(make(id)));
+            let _ = c.tx.send(Outgoing::frame(frame));
         }
         Ok(HostSession {
             registry: self.clone(),
@@ -909,6 +1193,16 @@ impl HostRegistry {
         hello: &Hello,
         conn: Conn,
     ) -> crate::error::ApiResult<(Welcome, Option<Conn>, usize, u64)> {
+        let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
+        retry_metadata_api(|| self.try_attach(row, hello, conn.clone()))
+    }
+
+    fn try_attach(
+        &self,
+        row: &Host,
+        hello: &Hello,
+        conn: Conn,
+    ) -> crate::error::ApiResult<(Welcome, Option<Conn>, usize, u64)> {
         let mut g = self.lock();
         let e = g.entry(row.name.clone()).or_default();
         // Keep the reconnect capability stable. Rotating it before welcome
@@ -919,10 +1213,6 @@ impl HostRegistry {
             .resume_token
             .clone()
             .unwrap_or_else(|| format!("r-{}", ulid::Ulid::new()));
-        let previous_token = e.resume_token.clone();
-        let old = e.conn.replace(conn);
-        e.generation += 1;
-        e.last_error = None;
         let offers: HashMap<SessionId, u64> = match (&hello.resume, &e.resume_token) {
             (Some(r), Some(t)) if r.token == *t => {
                 r.sessions.iter().map(|o| (o.session, o.sent)).collect()
@@ -936,33 +1226,28 @@ impl HostRegistry {
             if e.sessions[&id].terminal {
                 continue;
             }
-            if offers.contains_key(&id) {
-                if let Some(s) = e.sessions.get_mut(&id) {
-                    s.held = true;
+            if offers.contains_key(&id) && !e.pending_lost.contains_key(&id) {
+                if let Some(s) = e.sessions.get(&id) {
                     resume.push(ResumeAccept {
                         session: id,
                         received: s.received,
                     });
                 }
             } else {
-                lost.push(id);
+                lost.push((
+                    id,
+                    e.pending_lost
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| SessionEvent::Lost {
+                            message: "the host agent no longer holds the session".into(),
+                        }),
+                ));
             }
         }
         resume.sort_by_key(|r| r.session);
-        for id in lost {
-            if !self.deliver(
-                &row.name,
-                e,
-                id,
-                SessionEvent::Lost {
-                    message: "the host agent no longer holds the session".into(),
-                },
-            ) {
-                return Err(ApiError::internal("cannot persist missing host session"));
-            }
-        }
-        e.resume_token = Some(token.clone());
-        e.info = Some(LiveInfo {
+        lost.sort_by_key(|(id, _)| *id);
+        let info = LiveInfo {
             host_id: row.id.clone(),
             version: hello.version.clone(),
             os: hello.os.clone(),
@@ -972,13 +1257,16 @@ impl HostRegistry {
             max_sessions: hello.max_sessions,
             max_running_targets: hello.max_running_targets,
             connected_at: crate::db::now(),
-        });
+        };
         let n = resume.len();
-        if let Err(error) = self.persist(&row.name, e, None) {
-            e.resume_token = previous_token;
-            e.conn = old;
-            return Err(error);
-        }
+        self.reconcile_lost(&row.name, e, &lost, &resume, Some(token.clone()))?;
+        let old = e.conn.replace(conn);
+        e.generation += 1;
+        e.last_error = None;
+        e.info = Some(info);
+        // A replacement link replays from committed offsets, not from the
+        // uncommitted queue owned by its predecessor.
+        e.pending_journal.clear();
         self.online_changed.notify_waiters();
         Ok((
             Welcome {
@@ -1002,6 +1290,7 @@ impl HostRegistry {
         let e = g.get_mut(host)?;
         if e.conn.as_ref().is_some_and(|c| c.id == conn_id) {
             e.conn = None;
+            e.pending_journal.clear();
             Some(e.generation)
         } else {
             None
@@ -1010,23 +1299,95 @@ impl HostRegistry {
 
     /// After the resume grace, give up the sessions of a host that did not
     /// come back.
-    fn expire(&self, host: &str, generation: u64) {
+    fn expire(self: &Arc<Self>, host: &str, generation: u64) {
+        // Record the terminal intention before releasing entries, so attach
+        // cannot resume it even if the writer stays busy past our deadline.
         let mut g = self.lock();
         if let Some(e) = g.get_mut(host)
             && e.conn.is_none()
             && e.generation == generation
         {
-            let ids: Vec<_> = e.sessions.keys().copied().collect();
-            for id in ids {
-                self.deliver(
-                    host,
-                    e,
-                    id,
-                    SessionEvent::Lost {
-                        message: "the host agent did not come back within the resume grace".into(),
-                    },
-                );
+            for (&id, s) in &e.sessions {
+                if !s.terminal {
+                    e.pending_lost
+                        .entry(id)
+                        .or_insert_with(|| SessionEvent::Lost {
+                            message: "the host agent did not come back within the resume grace"
+                                .into(),
+                        });
+                }
             }
+        }
+        drop(g);
+        self.drive_lost(host);
+    }
+
+    fn drive_lost(self: &Arc<Self>, host: &str) {
+        {
+            let mut g = self.lock();
+            let Some(e) = g.get_mut(host) else { return };
+            if e.pending_lost.is_empty() || e.lost_retry_running {
+                return;
+            }
+            e.lost_retry_running = true;
+        }
+        let registry = self.clone();
+        let host = host.to_owned();
+        let work = move || {
+            registry.finish_pending_lost(&host, JOURNAL_RETRY_DEADLINE);
+            if let Some(e) = registry.lock().get_mut(&host) {
+                e.lost_retry_running = false;
+            }
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn_blocking(work);
+        } else {
+            work();
+        }
+    }
+
+    fn finish_pending_lost(&self, host: &str, timeout: Duration) {
+        let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
+        let result = retry_metadata_for(
+            || {
+                let mut g = self.lock();
+                let Some(e) = g.get_mut(host) else {
+                    return Ok(());
+                };
+                // Output already retained on a live link must finish first.
+                if e.conn.is_some()
+                    && e.pending_lost
+                        .keys()
+                        .any(|id| e.pending_journal.contains_key(id))
+                {
+                    return Err(ApiError::new(
+                        Code::ResourceBusy,
+                        "terminal event waits for retained output",
+                    ));
+                }
+                let mut lost: Vec<_> = e
+                    .pending_lost
+                    .iter()
+                    .filter(|(id, _)| e.sessions.get(id).is_some_and(|s| !s.terminal))
+                    .map(|(id, event)| (*id, event.clone()))
+                    .collect();
+                lost.sort_by_key(|(id, _)| *id);
+                let token = e.resume_token.clone();
+                self.reconcile_lost(host, e, &lost, &[], token)?;
+                e.pending_lost
+                    .retain(|id, _| e.sessions.get(id).is_some_and(|s| !s.terminal));
+                if let Some(c) = &e.conn {
+                    for (session, _) in lost {
+                        let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release { session }));
+                    }
+                }
+                Ok(())
+            },
+            |error| error.code == Code::ResourceBusy,
+            timeout,
+        );
+        if let Err(error) = result {
+            warn!(host, %error, "terminal host event retry exhausted; retained for next sweep");
         }
     }
 
@@ -1053,6 +1414,9 @@ impl HostRegistry {
     fn on_data(&self, host: &str, f: DataFrame) {
         let mut g = self.lock();
         let Some(entry) = g.get_mut(host) else { return };
+        if entry.pending_lost.contains_key(&f.session) {
+            return;
+        }
         let Some(s) = entry.sessions.get_mut(&f.session) else {
             debug!(host, session = f.session, "data for an unknown session");
             return;
@@ -1077,11 +1441,56 @@ impl HostRegistry {
 
     /// Save before exposing output to a consumer that can acknowledge it.
     fn deliver(&self, host: &str, entry: &mut Entry, id: SessionId, event: SessionEvent) -> bool {
-        let Some(s) = entry.sessions.get_mut(&id) else {
+        if let Some(pending) = entry.pending_journal.get_mut(&id) {
+            if !pending.push(event)
+                && let Some(c) = &entry.conn
+            {
+                let _ = c.tx.send(Outgoing::Close(None));
+            }
             return false;
+        }
+        match self.try_deliver(host, entry, id, &event) {
+            Ok(committed) => committed,
+            Err(error) => {
+                if error.code == Code::ResourceBusy {
+                    let pending = entry
+                        .pending_journal
+                        .entry(id)
+                        .or_insert_with(PendingJournal::new);
+                    if pending.push(event) {
+                        warn!(
+                            host,
+                            session = id,
+                            "host journal busy; retaining event without acknowledgement"
+                        );
+                        return false;
+                    }
+                }
+                if let Some(c) = &entry.conn {
+                    let _ = c.tx.send(Outgoing::Close(None));
+                }
+                warn!(
+                    host,
+                    session = id,
+                    "host journal commit failed; closing without acknowledgement"
+                );
+                false
+            }
+        }
+    }
+
+    fn try_deliver(
+        &self,
+        host: &str,
+        entry: &mut Entry,
+        id: SessionId,
+        event: &SessionEvent,
+    ) -> crate::error::ApiResult<bool> {
+        let Some(s) = entry.sessions.get_mut(&id) else {
+            return Ok(false);
         };
         if s.terminal {
-            return false;
+            return Ok(false);
         }
         let old = (s.received, s.held, s.events, s.terminal, s.ended_at);
         s.events += 1;
@@ -1092,44 +1501,106 @@ impl HostRegistry {
         if matches!(event, SessionEvent::Started { .. }) {
             s.held = true;
         }
-        if let SessionEvent::Data { bytes, .. } = &event {
+        if let SessionEvent::Data { bytes, .. } = event {
             s.received += bytes.len() as u64;
         }
         let output = matches!(
-            &event,
+            event,
             SessionEvent::Data {
                 stream: StreamTag::Stdout | StreamTag::Stderr,
                 ..
             }
         );
-        if output && let SessionEvent::Data { bytes, .. } = &event {
+        if output && let SessionEvent::Data { bytes, .. } = event {
             s.output_events.push_back((s.events, bytes.len()));
         }
-        if self.persist(host, entry, Some((id, &event))).is_err() {
+        if let Err(error) = self.persist(host, entry, Some((id, event))) {
             let Some(s) = entry.sessions.get_mut(&id) else {
-                return false;
+                return Err(error);
             };
             (s.received, s.held, s.events, s.terminal, s.ended_at) = old;
             if output {
                 s.output_events.pop_back();
             }
-            if let Some(c) = &entry.conn {
-                let _ = c.tx.send(Outgoing::Close(None));
-            }
-            warn!(
-                host,
-                session = id,
-                "host journal commit failed; closing without acknowledgement"
-            );
-            return false;
+            return Err(error);
         }
         let Some(s) = entry.sessions.get_mut(&id) else {
-            return false;
+            return Ok(false);
         };
         let prune = s.prune_count();
         s.output_events.drain(..prune);
-        let _ = entry.sessions[&id].tx.send(event);
-        true
+        let _ = entry.sessions[&id].tx.send(event.clone());
+        Ok(true)
+    }
+
+    fn retry_journal(&self, host: &str, conn_id: u64) {
+        let mut g = self.lock();
+        let Some(e) = g.get_mut(host) else { return };
+        if !e.conn.as_ref().is_some_and(|c| c.id == conn_id) {
+            return;
+        }
+        // Oldest retry first. At most one SQLite attempt per tick prevents
+        // many blocked sessions from monopolizing the link's heartbeat loop.
+        let mut ids: Vec<_> = e.pending_journal.keys().copied().collect();
+        ids.sort_by_key(|id| e.pending_journal[id].next);
+        for id in ids {
+            let Some(mut pending) = e.pending_journal.remove(&id) else {
+                continue;
+            };
+            let now = Instant::now();
+            let attempt = !pending.exhausted && now < pending.deadline && now >= pending.next;
+            if pending.exhausted || now >= pending.deadline {
+                pending.exhausted = true;
+                if let Some(c) = &e.conn {
+                    let _ = c.tx.send(Outgoing::Close(None));
+                }
+            } else if now >= pending.next {
+                if let Some(event) = pending.events.front().cloned() {
+                    let terminal = event.is_terminal();
+                    let error = matches!(event, SessionEvent::Error { .. });
+                    let lost = matches!(event, SessionEvent::Lost { .. });
+                    match self.try_deliver(host, e, id, &event) {
+                        Ok(committed) => {
+                            pending.backoff = JOURNAL_RETRY_TICK;
+                            pending.events.pop_front();
+                            // Recalculate after removing an event, keeping the byte bound exact.
+                            pending.bytes = pending
+                                .events
+                                .iter()
+                                .map(|v| serde_json::to_vec(v).map_or(0, |v| v.len()))
+                                .sum();
+                            if committed && terminal {
+                                if lost {
+                                    if let Some(c) = &e.conn {
+                                        let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release {
+                                            session: id,
+                                        }));
+                                    }
+                                } else {
+                                    Self::ack_terminal(e, id, error);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            if error.code != Code::ResourceBusy {
+                                pending.exhausted = true;
+                                if let Some(c) = &e.conn {
+                                    let _ = c.tx.send(Outgoing::Close(None));
+                                }
+                            }
+                            pending.backoff = (pending.backoff * 2).min(JOURNAL_RETRY_BACKOFF);
+                        }
+                    }
+                }
+                pending.next = Instant::now() + pending.backoff;
+            }
+            if !pending.events.is_empty() {
+                e.pending_journal.insert(id, pending);
+            }
+            if attempt {
+                break;
+            }
+        }
     }
 
     /// A control frame about a session.
@@ -1177,10 +1648,17 @@ impl HostRegistry {
         let mut g = self.lock();
         let Some(e) = g.get_mut(host) else { return };
         let terminal = event.is_terminal();
+        if e.pending_lost.contains_key(&session) {
+            return;
+        }
         let error = matches!(event, SessionEvent::Error { .. });
         if !self.deliver(host, e, session, event) || !terminal {
             return;
         }
+        Self::ack_terminal(e, session, error);
+    }
+
+    fn ack_terminal(e: &Entry, session: SessionId, error: bool) {
         let s = &e.sessions[&session];
         // An `error` for a session that never started holds no state on
         // the host: no `release` for it.
@@ -1197,21 +1675,19 @@ impl HostRegistry {
     }
 
     /// The consumer dropped a session before its end: abandon it.
-    fn abandon(&self, host: &str, session: SessionId) {
+    fn abandon(self: &Arc<Self>, host: &str, session: SessionId) {
         let mut g = self.lock();
         if let Some(e) = g.get_mut(host)
-            && self.deliver(
-                host,
-                e,
-                session,
-                SessionEvent::Lost {
-                    message: "the session consumer abandoned the run".into(),
-                },
-            )
-            && let Some(c) = &e.conn
+            && e.sessions.get(&session).is_some_and(|s| !s.terminal)
         {
-            let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release { session }));
+            e.pending_lost
+                .entry(session)
+                .or_insert_with(|| SessionEvent::Lost {
+                    message: "the session consumer abandoned the run".into(),
+                });
         }
+        drop(g);
+        self.drive_lost(host);
     }
 }
 
@@ -1862,6 +2338,7 @@ async fn serve_link(
     welcome.update = offer;
     match encode_control(&DaemonFrame::Welcome(welcome.clone())) {
         Ok(t) => {
+            tracing::trace!("host transport frame send");
             if socket.send(WsMessage::Text(t.into())).await.is_err() {
                 reg.detach(&row.name, conn_id);
                 return;
@@ -1937,9 +2414,11 @@ async fn serve_link(
     let hb = reg.heartbeat.max(Duration::from_millis(10));
     let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + hb, hb);
     let mut last_rx = Instant::now();
+    let mut journal_retry = tokio::time::interval(JOURNAL_RETRY_TICK);
     let mut nonce = 0u64;
     let why = loop {
         tokio::select! {
+            _ = journal_retry.tick() => reg.retry_journal(&row.name, conn_id),
             msg = stream.next() => {
                 last_rx = Instant::now();
                 match msg {
@@ -1987,6 +2466,7 @@ async fn serve_link(
                     }
                     None => break "no sender",
                 };
+                tracing::trace!("host transport frame send");
                 if sink.send(msg).await.is_err() {
                     break "send failed";
                 }
@@ -2535,6 +3015,757 @@ mod tests {
         );
         assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 0);
         assert!(session.rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn busy_journal_retains_order_and_retries_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore(dir.path()).unwrap();
+        let mut session = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
+        let (tx, mut outgoing) = mpsc::unbounded_channel();
+        reg.lock().get_mut("lab1").unwrap().conn = Some(Conn { id: 1, tx });
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        reg.on_data(
+            "lab1",
+            DataFrame::new(session.id(), StreamTag::Stdout, b"first".to_vec()),
+        );
+        reg.on_data(
+            "lab1",
+            DataFrame::new(session.id(), StreamTag::Stdout, b"second".to_vec()),
+        );
+        reg.on_session_frame(
+            "lab1",
+            HostFrame::Exit {
+                session: session.id(),
+                code: Some(0),
+                signal: None,
+                reason: ExitReason::Exited,
+            },
+        );
+        assert!(
+            outgoing.try_recv().is_err(),
+            "no close, ACK or release on busy"
+        );
+        assert!(session.rx.try_recv().is_err());
+        assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 0);
+        assert_eq!(
+            reg.lock()["lab1"].pending_journal[&session.id()]
+                .events
+                .len(),
+            3
+        );
+        let deadline = reg.lock()["lab1"].pending_journal[&session.id()].deadline;
+        reg.lock()
+            .get_mut("lab1")
+            .unwrap()
+            .pending_journal
+            .get_mut(&session.id())
+            .unwrap()
+            .next = Instant::now();
+        reg.retry_journal("lab1", 1);
+        assert!(outgoing.try_recv().is_err());
+        assert!(session.rx.try_recv().is_err());
+        assert_eq!(
+            reg.lock()["lab1"].pending_journal[&session.id()]
+                .events
+                .len(),
+            3
+        );
+        assert_eq!(
+            reg.lock()["lab1"].pending_journal[&session.id()].deadline,
+            deadline
+        );
+        assert_eq!(
+            reg.lock()["lab1"].pending_journal[&session.id()].backoff,
+            Duration::from_millis(20)
+        );
+        conn.execute_batch("ROLLBACK").unwrap();
+        for _ in 0..3 {
+            reg.lock()
+                .get_mut("lab1")
+                .unwrap()
+                .pending_journal
+                .get_mut(&session.id())
+                .unwrap()
+                .next = Instant::now();
+            reg.retry_journal("lab1", 1);
+        }
+        for bytes in [b"first".as_slice(), b"second".as_slice()] {
+            assert_eq!(
+                session.rx.try_recv().unwrap(),
+                SessionEvent::Data {
+                    stream: StreamTag::Stdout,
+                    bytes: bytes.to_vec()
+                }
+            );
+        }
+        assert!(matches!(
+            session.rx.try_recv().unwrap(),
+            SessionEvent::Exit { .. }
+        ));
+        assert!(session.rx.try_recv().is_err());
+        assert!(
+            matches!(outgoing.try_recv().unwrap(), Outgoing::Frame(f) if matches!(*f, DaemonFrame::Ack { bytes: 11, .. }))
+        );
+        assert!(
+            matches!(outgoing.try_recv().unwrap(), Outgoing::Frame(f) if matches!(*f, DaemonFrame::Release { .. }))
+        );
+        reg.retry_journal("lab1", 1);
+        assert!(outgoing.try_recv().is_err());
+        let events = resume::Journal::new(dir.path())
+            .scan::<SessionEvent>(&format!("event/lab1/{}/", session.id()))
+            .unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 11);
+    }
+
+    #[tokio::test]
+    async fn journal_queue_exhaustion_closes_and_reconnect_replays() {
+        for deadline in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+            crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+            let reg = Arc::new(registry("lab1", true));
+            reg.restore(dir.path()).unwrap();
+            reg.lock().get_mut("lab1").unwrap().resume_token = Some("retry-token".into());
+            let mut session = reg
+                .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+                .unwrap();
+            let (tx, mut outgoing) = mpsc::unbounded_channel();
+            let mut pending = PendingJournal::new();
+            if deadline {
+                pending.deadline = Instant::now();
+            } else {
+                for _ in 0..JOURNAL_RETRY_EVENTS {
+                    assert!(pending.push(SessionEvent::Started { pid: None }));
+                }
+            }
+            {
+                let mut g = reg.lock();
+                let e = g.get_mut("lab1").unwrap();
+                e.conn = Some(Conn { id: 1, tx });
+                e.pending_journal.insert(session.id(), pending);
+            }
+            reg.on_data(
+                "lab1",
+                DataFrame::new(session.id(), StreamTag::Stdout, b"replayed".to_vec()),
+            );
+            reg.retry_journal("lab1", 1);
+            assert!(matches!(
+                outgoing.try_recv().unwrap(),
+                Outgoing::Close(None)
+            ));
+            assert!(session.rx.try_recv().is_err());
+            assert!(reg.detach("lab1", 1).is_some());
+            assert!(reg.lock()["lab1"].pending_journal.is_empty());
+            let hello = Hello {
+                path_kind: terrarium_host::protocol::PathKind::Posix,
+                protocol: PROTOCOL_VERSION,
+                host: "lab1".into(),
+                version: "test".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                capabilities: HostCapabilities::default(),
+                max_sessions: 8,
+                max_running_targets: None,
+                update_failed: None,
+                resume: Some(terrarium_host::protocol::Resume {
+                    token: "retry-token".into(),
+                    sessions: vec![terrarium_host::protocol::ResumeOffer {
+                        session: session.id(),
+                        sent: 8,
+                        finished: false,
+                    }],
+                }),
+            };
+            let (welcome, _, count, _) = reg
+                .attach(
+                    &host_row(),
+                    &hello,
+                    Conn {
+                        id: 2,
+                        tx: mpsc::unbounded_channel().0,
+                    },
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+            assert_eq!(welcome.resume[0].received, 0);
+            // Replayed data starts at the unchanged committed offset.
+            reg.on_data(
+                "lab1",
+                DataFrame::new(session.id(), StreamTag::Stdout, b"replayed".to_vec()),
+            );
+            assert_eq!(
+                session.rx.try_recv().unwrap(),
+                SessionEvent::Data {
+                    stream: StreamTag::Stdout,
+                    bytes: b"replayed".to_vec()
+                }
+            );
+            assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 8);
+        }
+        let mut pending = PendingJournal::new();
+        assert!(!pending.push(SessionEvent::Data {
+            stream: StreamTag::Stdout,
+            bytes: vec![0; JOURNAL_RETRY_BYTES]
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn main_writer_contention_queues_without_blocking_or_closing() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore_with_db(dir.path(), db.clone()).unwrap();
+        let mut session = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
+        let (tx, mut outgoing) = mpsc::unbounded_channel();
+        reg.lock().get_mut("lab1").unwrap().conn = Some(Conn { id: 1, tx });
+        for byte in 0..16u8 {
+            let (acquired, ready) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let writer_db = db.clone();
+            let writer = tokio::spawn(async move {
+                writer_db
+                    .write("system", move |t| {
+                        t.execute("UPDATE host_resume SET sealed=sealed WHERE id='unused'", [])?;
+                        acquired.send(()).unwrap();
+                        released.recv_timeout(Duration::from_secs(5)).unwrap();
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            });
+            ready.await.unwrap();
+            // The writer cannot release its mutex until this returns. A
+            // blocking journal would deadlock until the writer test times out.
+            reg.on_data(
+                "lab1",
+                DataFrame::new(session.id(), StreamTag::Stdout, vec![byte]),
+            );
+            reg.on_data(
+                "lab1",
+                DataFrame::new(session.id(), StreamTag::Stdout, vec![byte + 16]),
+            );
+            assert!(session.rx.try_recv().is_err());
+            assert!(outgoing.try_recv().is_err());
+            assert_eq!(
+                reg.lock()["lab1"].pending_journal[&session.id()]
+                    .events
+                    .len(),
+                2
+            );
+            release.send(()).unwrap();
+            writer.await.unwrap();
+            for expected in [byte, byte + 16] {
+                reg.lock()
+                    .get_mut("lab1")
+                    .unwrap()
+                    .pending_journal
+                    .get_mut(&session.id())
+                    .unwrap()
+                    .next = Instant::now();
+                reg.retry_journal("lab1", 1);
+                assert_eq!(
+                    session.rx.try_recv().unwrap(),
+                    SessionEvent::Data {
+                        stream: StreamTag::Stdout,
+                        bytes: vec![expected]
+                    }
+                );
+            }
+            assert!(outgoing.try_recv().is_err());
+        }
+        assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 32);
+        let journal = resume::Journal::with_db(dir.path(), db);
+        assert_eq!(
+            journal
+                .scan::<SessionEvent>(&format!("event/lab1/{}/", session.id()))
+                .unwrap()
+                .len(),
+            32
+        );
+    }
+
+    fn hold_writer(
+        db: crate::db::Db,
+    ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+        let (ready, acquired) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            db.read_now(|_| {
+                ready.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(30)).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        });
+        acquired.recv_timeout(Duration::from_secs(5)).unwrap();
+        (release, thread)
+    }
+
+    #[test]
+    fn metadata_lock_is_taken_before_registry_lock() {
+        let reg = registry("lab1", true);
+        let _metadata = reg.metadata.lock().unwrap();
+        let entries = reg.lock();
+        assert!(entries.contains_key("lab1"));
+    }
+
+    fn metadata_retry_started(reg: &HostRegistry) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while reg.metadata.try_lock().is_ok() {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        // The retry keeps its metadata intention, but not the registry lock.
+        let guard = reg.lock();
+        assert!(guard.contains_key("lab1"));
+    }
+
+    #[test]
+    fn contended_metadata_retries_in_order_and_rechecks_current_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore_with_db(dir.path(), db.clone()).unwrap();
+        let (tx, mut outgoing) = mpsc::unbounded_channel();
+        reg.lock().get_mut("lab1").unwrap().conn = Some(Conn { id: 1, tx });
+        let journal = resume::Journal::with_db(dir.path(), db.clone());
+        let (release, writer) = hold_writer(db.clone());
+        let r = reg.clone();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frame_calls = calls.clone();
+        let opening = std::thread::spawn(move || {
+            r.open_bound("lab1", Some("test/open"), |_| {
+                frame_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                DaemonFrame::Ping { nonce: 42 }
+            })
+        });
+        metadata_retry_started(&reg);
+        assert!(reg.lock()["lab1"].sessions.is_empty());
+        assert_eq!(reg.lock()["lab1"].next_id, 0);
+        assert!(outgoing.try_recv().is_err());
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        let session = opening.join().unwrap().unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(outgoing.try_recv().unwrap(), Outgoing::Frame(_)));
+        assert_eq!(
+            journal.load::<(String, u32)>("bound/test/open").unwrap(),
+            Some(("lab1".into(), session.id()))
+        );
+
+        let (release, writer) = hold_writer(db.clone());
+        let r = reg.clone();
+        let id = session.id();
+        let older = std::thread::spawn(move || {
+            r.save_exec(
+                "test",
+                &json!({"host_session": ["lab1", id], "revision": 1}),
+            )
+        });
+        metadata_retry_started(&reg);
+        let r = reg.clone();
+        let newer = std::thread::spawn(move || {
+            r.save_exec(
+                "test",
+                &json!({"host_session": ["lab1", id], "revision": 2}),
+            )
+        });
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        older.join().unwrap().unwrap();
+        newer.join().unwrap().unwrap();
+        assert_eq!(
+            journal.load::<Value>("exec/test").unwrap().unwrap()["revision"],
+            2
+        );
+
+        let other = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
+        outgoing.try_recv().unwrap();
+        let (release, writer) = hold_writer(db.clone());
+        let r = reg.clone();
+        let deleting = std::thread::spawn(move || r.forget_exec("test"));
+        metadata_retry_started(&reg);
+        assert!(reg.lock()["lab1"].sessions.contains_key(&id));
+        assert!(outgoing.try_recv().is_err());
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        // This event may commit before or after deletion. Either order must
+        // preserve it instead of writing the metadata retry's old snapshot.
+        reg.on_data(
+            "lab1",
+            DataFrame::new(other.id(), StreamTag::Stdout, b"new".to_vec()),
+        );
+        deleting.join().unwrap().unwrap();
+        if !reg.lock()["lab1"].pending_journal.is_empty() {
+            reg.lock()
+                .get_mut("lab1")
+                .unwrap()
+                .pending_journal
+                .get_mut(&other.id())
+                .unwrap()
+                .next = Instant::now();
+            reg.retry_journal("lab1", 1);
+        }
+        let saved = journal.load::<SavedHost>("host/lab1").unwrap().unwrap();
+        assert!(!saved.sessions.contains_key(&id));
+        assert_eq!(saved.sessions[&other.id()].received, 3);
+        assert!(journal.load::<Value>("exec/test").unwrap().is_none());
+    }
+
+    #[test]
+    fn metadata_deadline_leaves_no_partial_registry_or_journal_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore_with_db(dir.path(), db.clone()).unwrap();
+        let session = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
+        reg.save_exec("kept", &json!({"host_session": ["lab1", session.id()]}))
+            .unwrap();
+        let next_id = reg.lock()["lab1"].next_id;
+        db.read_now(|_| {
+            assert!(matches!(
+                reg.open_bound("lab1", Some("never"), |_| DaemonFrame::Ping { nonce: 0 }),
+                Err(HostError::JournalBusy)
+            ));
+            assert_eq!(
+                reg.save_exec("new", &1).unwrap_err().code,
+                Code::ResourceBusy
+            );
+            assert_eq!(
+                reg.forget_exec("kept").unwrap_err().code,
+                Code::ResourceBusy
+            );
+            assert_eq!(reg.lock()["lab1"].sessions.len(), 1);
+            assert_eq!(reg.lock()["lab1"].next_id, next_id);
+            Ok(())
+        })
+        .unwrap();
+        let journal = resume::Journal::with_db(dir.path(), db);
+        assert!(journal.load::<Value>("exec/kept").unwrap().is_some());
+        assert!(journal.load::<Value>("exec/new").unwrap().is_none());
+        assert!(journal.load::<Value>("bound/never").unwrap().is_none());
+        assert_eq!(
+            journal
+                .load::<SavedHost>("host/lab1")
+                .unwrap()
+                .unwrap()
+                .sessions
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn contended_reconnect_commits_missing_session_without_an_undriven_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore_with_db(dir.path(), db.clone()).unwrap();
+        let mut session = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
+        reg.detach("lab1", 1).unwrap();
+        let hello = Hello {
+            path_kind: terrarium_host::protocol::PathKind::Posix,
+            protocol: PROTOCOL_VERSION,
+            host: "lab1".into(),
+            version: "test".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            capabilities: HostCapabilities::default(),
+            max_sessions: 8,
+            max_running_targets: None,
+            update_failed: None,
+            resume: None,
+        };
+        let (release, writer) = hold_writer(db);
+        let r = reg.clone();
+        let attaching = std::thread::spawn(move || {
+            r.attach(
+                &host_row(),
+                &hello,
+                Conn {
+                    id: 2,
+                    tx: mpsc::unbounded_channel().0,
+                },
+            )
+        });
+        metadata_retry_started(&reg);
+        assert!(reg.lock()["lab1"].conn.is_none());
+        assert!(!reg.lock()["lab1"].sessions[&session.id()].terminal);
+        assert!(reg.lock()["lab1"].pending_journal.is_empty());
+        assert!(session.rx.try_recv().is_err());
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        attaching.join().unwrap().unwrap();
+        assert!(reg.is_online("lab1"));
+        assert!(matches!(
+            session.rx.try_recv().unwrap(),
+            SessionEvent::Lost { .. }
+        ));
+        assert!(session.rx.try_recv().is_err());
+        assert!(reg.lock()["lab1"].pending_journal.is_empty());
+    }
+
+    fn lost_test_hello(token: &str, ids: &[SessionId]) -> Hello {
+        Hello {
+            path_kind: terrarium_host::protocol::PathKind::Posix,
+            protocol: PROTOCOL_VERSION,
+            host: "lab1".into(),
+            version: "test".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            capabilities: HostCapabilities::default(),
+            max_sessions: 8,
+            max_running_targets: None,
+            update_failed: None,
+            resume: Some(terrarium_host::protocol::Resume {
+                token: token.into(),
+                sessions: ids
+                    .iter()
+                    .map(|id| terrarium_host::protocol::ResumeOffer {
+                        session: *id,
+                        sent: 0,
+                        finished: false,
+                    })
+                    .collect(),
+            }),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offline_expiry_and_abandon_retry_without_reconnect_exactly_once() {
+        for expiry in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+            crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+            let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+            let reg = Arc::new(registry("lab1", true));
+            reg.restore_with_db(dir.path(), db.clone()).unwrap();
+            reg.lock().get_mut("lab1").unwrap().resume_token = Some("offline-token".into());
+            let mut session = reg
+                .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+                .unwrap();
+            let generation = reg.detach("lab1", 1).unwrap();
+            let (release, writer) = hold_writer(db.clone());
+            if expiry {
+                reg.expire("lab1", generation);
+            } else {
+                session.abandon();
+            }
+            assert!(reg.lock()["lab1"].pending_journal.is_empty());
+            assert!(reg.lock()["lab1"].pending_lost.contains_key(&session.id()));
+            assert!(!reg.lock()["lab1"].sessions[&session.id()].terminal);
+            assert!(session.rx.try_recv().is_err());
+            release.send(()).unwrap();
+            writer.join().unwrap();
+            let event = tokio::time::timeout(Duration::from_secs(5), session.rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(event, SessionEvent::Lost { .. }));
+            assert!(session.rx.try_recv().is_err());
+            reg.finish_pending_lost("lab1", Duration::ZERO);
+            assert!(session.rx.try_recv().is_err());
+            let journal = resume::Journal::with_db(dir.path(), db);
+            assert_eq!(
+                journal
+                    .scan::<SessionEvent>(&format!("event/lab1/{}/", session.id()))
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let hello = lost_test_hello("offline-token", &[session.id()]);
+            let (welcome, _, count, _) = reg
+                .attach(
+                    &host_row(),
+                    &hello,
+                    Conn {
+                        id: 2,
+                        tx: mpsc::unbounded_channel().0,
+                    },
+                )
+                .unwrap();
+            assert_eq!(count, 0);
+            assert!(welcome.resume.is_empty());
+            assert!(session.rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn expired_retry_deadline_keeps_a_nonresumable_intention_for_the_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore_with_db(dir.path(), db.clone()).unwrap();
+        reg.lock().get_mut("lab1").unwrap().resume_token = Some("offline-token".into());
+        let mut session = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
+        reg.detach("lab1", 1).unwrap();
+        reg.lock().get_mut("lab1").unwrap().pending_lost.insert(
+            session.id(),
+            SessionEvent::Lost {
+                message: "expired".into(),
+            },
+        );
+        let hello = lost_test_hello("offline-token", &[session.id()]);
+        db.read_now(|_| {
+            reg.finish_pending_lost("lab1", Duration::ZERO);
+            assert!(reg.lock()["lab1"].pending_lost.contains_key(&session.id()));
+            assert_eq!(
+                reg.try_attach(
+                    &host_row(),
+                    &hello,
+                    Conn {
+                        id: 2,
+                        tx: mpsc::unbounded_channel().0
+                    }
+                )
+                .err()
+                .unwrap()
+                .code,
+                Code::ResourceBusy
+            );
+            assert!(reg.lock()["lab1"].conn.is_none());
+            assert!(session.rx.try_recv().is_err());
+            Ok(())
+        })
+        .unwrap();
+        // This is the same operation driven by the independent 30-second sweep.
+        reg.finish_pending_lost("lab1", Duration::ZERO);
+        assert!(matches!(
+            session.rx.try_recv().unwrap(),
+            SessionEvent::Lost { .. }
+        ));
+        assert!(reg.lock()["lab1"].pending_lost.is_empty());
+        let (welcome, _, count, _) = reg
+            .attach(
+                &host_row(),
+                &hello,
+                Conn {
+                    id: 2,
+                    tx: mpsc::unbounded_channel().0,
+                },
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        assert!(welcome.resume.is_empty());
+        assert!(session.rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn attach_reconciliation_rolls_back_all_missing_sessions_on_any_row_failure() {
+        for final_host_row in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+            crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+            let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+            let reg = Arc::new(registry("lab1", true));
+            reg.restore_with_db(dir.path(), db.clone()).unwrap();
+            let mut first = reg
+                .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+                .unwrap();
+            let mut second = reg
+                .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+                .unwrap();
+            let failing_row = if final_host_row {
+                "host/lab1".to_owned()
+            } else {
+                format!("event/lab1/{}/{:020}", second.id(), 1)
+            };
+            db.read_now(|c| {
+                c.execute_batch(&format!("CREATE TRIGGER fail_attach BEFORE INSERT ON host_resume WHEN NEW.id='{failing_row}' BEGIN SELECT RAISE(ABORT, 'injected attach failure'); END"))?;
+                Ok(())
+            }).unwrap();
+            let mut hello = lost_test_hello("unused", &[]);
+            hello.resume = None;
+            assert!(
+                reg.attach(
+                    &host_row(),
+                    &hello,
+                    Conn {
+                        id: 2,
+                        tx: mpsc::unbounded_channel().0
+                    }
+                )
+                .is_err()
+            );
+            assert_eq!(reg.lock()["lab1"].conn.as_ref().unwrap().id, 1);
+            assert!(reg.lock()["lab1"].resume_token.is_none());
+            for id in [first.id(), second.id()] {
+                assert!(!reg.lock()["lab1"].sessions[&id].terminal);
+                assert_eq!(reg.lock()["lab1"].sessions[&id].events, 0);
+            }
+            assert!(first.rx.try_recv().is_err());
+            assert!(second.rx.try_recv().is_err());
+            let journal = resume::Journal::with_db(dir.path(), db.clone());
+            assert!(
+                journal
+                    .scan::<SessionEvent>("event/lab1/")
+                    .unwrap()
+                    .is_empty()
+            );
+            let saved = journal.load::<SavedHost>("host/lab1").unwrap().unwrap();
+            assert!(
+                saved
+                    .sessions
+                    .values()
+                    .all(|s| !s.terminal && s.events == 0)
+            );
+            db.read_now(|c| {
+                c.execute_batch("DROP TRIGGER fail_attach")?;
+                Ok(())
+            })
+            .unwrap();
+            reg.attach(
+                &host_row(),
+                &hello,
+                Conn {
+                    id: 2,
+                    tx: mpsc::unbounded_channel().0,
+                },
+            )
+            .unwrap();
+            assert_eq!(reg.lock()["lab1"].conn.as_ref().unwrap().id, 2);
+            assert!(matches!(
+                first.rx.try_recv().unwrap(),
+                SessionEvent::Lost { .. }
+            ));
+            assert!(matches!(
+                second.rx.try_recv().unwrap(),
+                SessionEvent::Lost { .. }
+            ));
+            assert!(first.rx.try_recv().is_err());
+            assert!(second.rx.try_recv().is_err());
+            assert_eq!(
+                journal.scan::<SessionEvent>("event/lab1/").unwrap().len(),
+                2
+            );
+        }
     }
 
     #[test]

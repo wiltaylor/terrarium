@@ -108,6 +108,11 @@ pub fn secs(t: Option<u64>) -> Option<Duration> {
 
 /// A plain `exec` frame.
 pub fn plan_exec(req: &ExecRequest, policy: &PathPolicy) -> Result<VerbPlan, BuildError> {
+    if req.windows_run_as.is_some() {
+        return Err(BuildError::bad(
+            "Windows run-as logon is not supported by this host",
+        ));
+    }
     if req.cmd.is_empty() {
         return Err(BuildError::bad("cmd is empty"));
     }
@@ -169,6 +174,7 @@ mod tests {
             roots: Some(vec![PathBuf::from("/srv/allowed")]),
         };
         let mut req = ExecRequest {
+            windows_run_as: None,
             session: 1,
             cmd: "ls".into(),
             args: vec![],
