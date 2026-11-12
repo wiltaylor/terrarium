@@ -164,6 +164,69 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Option<Wait>> {
     }))
 }
 
+/// Clear configuration and dependencies with exactly the setter's ownership gate.
+pub fn clear(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
+    let card = find_row(t, id)?;
+    policy::write_project(actor, &card.project)?;
+    not_archived(&card)?;
+    if !policy::is_admin_of(actor, &card.project) && !owns(actor, &card) {
+        return Err(ApiError::forbidden(
+            "only the owner or a project admin clears a card wait",
+        ));
+    }
+    t.execute("DELETE FROM card_deps WHERE card=?1", [&card.id])?;
+    t.execute("DELETE FROM card_waits WHERE card=?1", [&card.id])?;
+    card_event(t, &card, "edited", json!({"fields": ["wait"]}))
+}
+
+/// Authorized presentation. Completion is latched, dependency conditions are live.
+pub fn view(conn: &Connection, actor: &Actor, id: &str) -> ApiResult<serde_json::Value> {
+    let card = find_row(conn, id)?;
+    crate::store::threads::read_card_project(conn, actor, &card.project, None)?;
+    let Some(wait) = get(conn, &card.id)? else {
+        return Ok(json!(null));
+    };
+    let mut result = json!(wait);
+    let (generation, setter): (String, String) = conn.query_row(
+        "SELECT generation, setter FROM card_waits WHERE card=?1",
+        [&card.id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    result["generation"] = json!(generation);
+    result["wake_recipient"] = json!(wake_recipient(conn, &card, &setter)?.key());
+    let mut dependencies = Vec::new();
+    for dep in &wait.dependencies {
+        let row = find_row(conn, &dep.card)?;
+        let met: bool = conn.query_row(
+            "SELECT c.archived = 0 AND CASE WHEN ?2 IS NULL
+             THEN coalesce(k.role,k.name) IN ('accepted','done')
+             ELSE k.name=?2 OR coalesce(k.role=?2,0) END
+             FROM cards c JOIN board_columns k ON k.id=c.column_id WHERE c.id=?1",
+            params![dep.card, dep.target],
+            |r| r.get(0),
+        )?;
+        dependencies.push(if policy::read_project(actor, &row.project).is_err() {
+            json!({"card": null, "hidden": true, "met": met})
+        } else {
+            json!({"card": dep.card, "target": dep.target, "met": met, "hidden": false})
+        });
+    }
+    result["dependencies"] = json!(dependencies);
+    Ok(result)
+}
+
+fn wake_recipient(conn: &Connection, row: &CardRow, setter: &str) -> ApiResult<Address> {
+    let target = [row.assignee.as_deref(), Some(setter)]
+        .into_iter()
+        .flatten()
+        .filter(|a| *a != "operator")
+        .find_map(|a| mail::resolve(conn, a, None).ok());
+    match target {
+        Some(to) => Ok(to),
+        None => Ok(mail::inbox_recipient(conn, &row.project)?.unwrap_or(Address::Operator)),
+    }
+}
+
 pub(super) fn evaluate(t: &mut Tx<'_>, id: &str, broken: bool) -> ApiResult<()> {
     let open: bool = t.query_row(
         "SELECT EXISTS(SELECT 1 FROM card_waits WHERE card=?1 AND met_at IS NULL)",
@@ -299,15 +362,7 @@ fn act_inner(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiRe
         }
     }
     if action.wake || broken || refused {
-        let target = [row.assignee.as_deref(), Some(setter.as_str())]
-            .into_iter()
-            .flatten()
-            .filter(|a| *a != "operator")
-            .find_map(|a| mail::resolve(t, a, None).ok());
-        let to = match target {
-            Some(to) => to,
-            None => mail::inbox_recipient(t, &row.project)?.unwrap_or(Address::Operator),
-        };
+        let to = wake_recipient(t, &row, &setter)?;
         mail::send(
             t,
             Outgoing {
