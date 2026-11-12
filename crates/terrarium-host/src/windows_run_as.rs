@@ -24,15 +24,23 @@ pub struct Account {
 
 impl Policy {
     pub fn elevated(&self, account: &str) -> bool {
-        self.enabled && self.accounts.iter().any(|a| a.account == account && a.elevated)
+        self.enabled
+            && self
+                .accounts
+                .iter()
+                .any(|a| a.account == account && a.elevated)
     }
 }
 
 #[cfg(windows)]
-pub fn check_path(identity: Option<&terrarium_winapi::Identity>, policy: &crate::config::PathPolicy,
-    path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+pub fn check_path(
+    identity: Option<&terrarium_winapi::Identity>,
+    policy: &crate::config::PathPolicy,
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
     match identity {
-        Some(identity) => identity.with_impersonation(|| Ok(policy.check(path)))
+        Some(identity) => identity
+            .with_impersonation(|| Ok(policy.check(path)))
             .map_err(|_| "Windows path check impersonation failed".to_owned())?,
         None => policy.check(path),
     }
@@ -43,9 +51,13 @@ pub async fn logon(
     credentials: Option<crate::protocol::WindowsRunAs>,
     policy: &Policy,
 ) -> Result<Option<std::sync::Arc<terrarium_winapi::Identity>>, crate::verb::BuildError> {
-    let Some(credentials) = credentials else { return Ok(None) };
+    let Some(credentials) = credentials else {
+        return Ok(None);
+    };
     if !policy.enabled {
-        return Err(crate::verb::BuildError::bad("Windows run-as is disabled in the host file"));
+        return Err(crate::verb::BuildError::bad(
+            "Windows run-as is disabled in the host file",
+        ));
     }
     let full = policy.elevated(&credentials.account);
     tokio::task::spawn_blocking(move || {
@@ -54,7 +66,9 @@ pub async fn logon(
         terrarium_winapi::Identity::logon(&credentials.account, &credentials.password, full)
             .map(|identity| Some(std::sync::Arc::new(identity)))
             .map_err(|e| crate::verb::BuildError::bad(format!("Windows logon failed: {e}")))
-    }).await.map_err(|_| crate::verb::BuildError::bad("Windows logon worker failed"))?
+    })
+    .await
+    .map_err(|_| crate::verb::BuildError::bad("Windows logon worker failed"))?
 }
 
 #[cfg(test)]
@@ -65,11 +79,24 @@ mod tests {
     fn only_exact_enabled_host_entries_elevate() {
         let mut policy = Policy {
             enabled: true,
-            accounts: vec![Account { account: "DOMAIN\\admin".into(), elevated: true },
-                Account { account: "DOMAIN\\ordinary".into(), elevated: false }],
+            accounts: vec![
+                Account {
+                    account: "DOMAIN\\admin".into(),
+                    elevated: true,
+                },
+                Account {
+                    account: "DOMAIN\\ordinary".into(),
+                    elevated: false,
+                },
+            ],
         };
         assert!(policy.elevated("DOMAIN\\admin"));
-        for account in ["domain\\admin", "admin@DOMAIN", "DOMAIN\\ordinary", "DOMAIN\\other"] {
+        for account in [
+            "domain\\admin",
+            "admin@DOMAIN",
+            "DOMAIN\\ordinary",
+            "DOMAIN\\other",
+        ] {
             assert!(!policy.elevated(account));
         }
         policy.enabled = false;
@@ -79,7 +106,9 @@ mod tests {
     #[test]
     fn wire_credentials_cannot_choose_elevation() {
         let credentials: crate::protocol::WindowsRunAs = serde_json::from_str(
-            r#"{"account":"DOMAIN\\admin","password":"fixture","elevated":true}"#).unwrap();
+            r#"{"account":"DOMAIN\\admin","password":"fixture","elevated":true}"#,
+        )
+        .unwrap();
         assert!(!Policy::default().elevated(&credentials.account));
     }
 

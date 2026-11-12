@@ -986,21 +986,33 @@ impl Client {
                 #[cfg(windows)]
                 let mut req = req;
                 #[cfg(windows)]
-                let identity = match crate::windows_run_as::logon(req.windows_run_as.take(), &o.windows_run_as).await {
+                let identity = match crate::windows_run_as::logon(
+                    req.windows_run_as.take(),
+                    &o.windows_run_as,
+                )
+                .await
+                {
                     Ok(identity) => identity,
-                    Err(error) => { send_error(tx, id, error.code, error.message); return Ok(()); },
+                    Err(error) => {
+                        send_error(tx, id, error.code, error.message);
+                        return Ok(());
+                    }
                 };
                 #[cfg(not(windows))]
                 let plan = crate::verb::plan_exec(&req, p);
                 #[cfg(windows)]
                 let plan = match identity.as_deref() {
-                    Some(identity) => identity.with_impersonation(|| Ok(crate::verb::plan_exec(&req, p)))
+                    Some(identity) => identity
+                        .with_impersonation(|| Ok(crate::verb::plan_exec(&req, p)))
                         .map_err(|_| BuildError::bad("Windows path check impersonation failed"))
                         .and_then(|plan| plan),
                     None => crate::verb::plan_exec(&req, p),
                 };
                 #[cfg(windows)]
-                let plan = plan.map(|mut plan| { plan.exec.windows_identity = identity; plan });
+                let plan = plan.map(|mut plan| {
+                    plan.exec.windows_identity = identity;
+                    plan
+                });
                 let plan = match (plan, &req.limits) {
                     (Ok(plan), Some(l)) if l.native_gpu.is_some() => self.native(plan, l, id),
                     (Ok(plan), Some(l)) => self.limited(plan, l, id).await,
@@ -1664,7 +1676,12 @@ impl Client {
         #[cfg(windows)]
         let mut req = req;
         #[cfg(windows)]
-        let identity = match crate::windows_run_as::logon(req.windows_run_as.take(), &self.opts.windows_run_as).await {
+        let identity = match crate::windows_run_as::logon(
+            req.windows_run_as.take(),
+            &self.opts.windows_run_as,
+        )
+        .await
+        {
             Ok(identity) => identity,
             Err(error) => return send_error(tx, req.session, error.code, error.message),
         };
@@ -1673,7 +1690,8 @@ impl Client {
             return;
         }
         #[cfg(windows)]
-        let checked_path = crate::windows_run_as::check_path(identity.as_deref(), &self.opts.policy, &req.path);
+        let checked_path =
+            crate::windows_run_as::check_path(identity.as_deref(), &self.opts.policy, &req.path);
         #[cfg(not(windows))]
         let checked_path = self.opts.policy.check(&req.path);
         let path = match checked_path {
@@ -1764,7 +1782,12 @@ impl Client {
         #[cfg(windows)]
         let mut req = req;
         #[cfg(windows)]
-        let identity = match crate::windows_run_as::logon(req.windows_run_as.take(), &self.opts.windows_run_as).await {
+        let identity = match crate::windows_run_as::logon(
+            req.windows_run_as.take(),
+            &self.opts.windows_run_as,
+        )
+        .await
+        {
             Ok(identity) => identity,
             Err(error) => return send_error(tx, req.session, error.code, error.message),
         };
@@ -1773,7 +1796,8 @@ impl Client {
             return;
         }
         #[cfg(windows)]
-        let checked_path = crate::windows_run_as::check_path(identity.as_deref(), &self.opts.policy, &req.path);
+        let checked_path =
+            crate::windows_run_as::check_path(identity.as_deref(), &self.opts.policy, &req.path);
         #[cfg(not(windows))]
         let checked_path = self.opts.policy.check(&req.path);
         let path = match checked_path {

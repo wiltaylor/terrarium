@@ -554,16 +554,21 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::IdentityProbe) => {
             let token = terrarium_winapi::current_token_snapshot()?;
             let environment: std::collections::BTreeMap<_, _> =
-                ["USERPROFILE", "USERNAME", "USERDOMAIN", "TEMP"].into_iter()
-                    .map(|key| (key, std::env::var(key).ok())).collect();
-            println!("{}", serde_json::json!({
-                "user_sid": token.user_sid,
-                "elevation_type": token.elevation_type,
-                "elevated": token.elevated,
-                "administrators_enabled": token.administrators_enabled,
-                "administrators_deny_only": token.administrators_deny_only,
-                "environment": environment,
-            }));
+                ["USERPROFILE", "USERNAME", "USERDOMAIN", "TEMP"]
+                    .into_iter()
+                    .map(|key| (key, std::env::var(key).ok()))
+                    .collect();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "user_sid": token.user_sid,
+                    "elevation_type": token.elevation_type,
+                    "elevated": token.elevated,
+                    "administrators_enabled": token.administrators_enabled,
+                    "administrators_deny_only": token.administrators_deny_only,
+                    "environment": environment,
+                })
+            );
             return Ok(());
         }
         Some(Cmd::TokenFile { path }) => return write_token_file(path),

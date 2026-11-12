@@ -380,8 +380,11 @@ impl Config {
         if config.windows_run_as.enabled {
             // Re-read from the verified, locked native handle, not the pathname
             // we read above. Untrusted config can never enable full-token logon.
-            let protected = terrarium_winapi::read_host_policy_file(path).map_err(|source| ConfigError::Io {
-                path: path.to_owned(), source,
+            let protected = terrarium_winapi::read_host_policy_file(path).map_err(|source| {
+                ConfigError::Io {
+                    path: path.to_owned(),
+                    source,
+                }
             })?;
             return Self::parse(&protected, path);
         }

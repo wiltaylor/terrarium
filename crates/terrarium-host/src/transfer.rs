@@ -13,9 +13,9 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::outbox::{Outbox, Overflow};
-use crate::protocol::{ErrorCode, hex};
 #[cfg(unix)]
 use crate::protocol::{CHUNK_SIZE, SessionId, StreamTag};
+use crate::protocol::{ErrorCode, hex};
 
 #[cfg(windows)]
 #[path = "transfer_windows.rs"]

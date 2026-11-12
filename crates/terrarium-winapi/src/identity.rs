@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use windows_sys::Win32::Security::*;
 use windows_sys::Win32::System::Environment::*;
 use windows_sys::Win32::System::GroupPolicy::PI_NOUI;
-use windows_sys::Win32::UI::Shell::{LoadUserProfileW, UnloadUserProfile, PROFILEINFOW};
+use windows_sys::Win32::UI::Shell::{LoadUserProfileW, PROFILEINFOW, UnloadUserProfile};
 
 /// One password logon. Keep this alive until the entire job has exited.
 /// Debug deliberately omits account, environment and handles.
@@ -22,10 +22,14 @@ fn impersonate<T>(token: &OwnedHandle, operation: impl FnOnce() -> io::Result<T>
     // SAFETY: pseudo current-thread handle is valid, output is writable.
     if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut prior) } != 0 {
         drop(owned(prior)?);
-        return Err(io::Error::other("nested Windows impersonation is forbidden"));
+        return Err(io::Error::other(
+            "nested Windows impersonation is forbidden",
+        ));
     }
     let error = io::Error::last_os_error();
-    if error.raw_os_error() != Some(ERROR_NO_TOKEN as i32) { return Err(error); }
+    if error.raw_os_error() != Some(ERROR_NO_TOKEN as i32) {
+        return Err(error);
+    }
     struct Revert;
     impl Drop for Revert {
         fn drop(&mut self) {
@@ -45,30 +49,61 @@ fn impersonate<T>(token: &OwnedHandle, operation: impl FnOnce() -> io::Result<T>
 fn profile_service() -> io::Result<OwnedHandle> {
     let mut process = null_mut();
     // SAFETY: pseudo process handle is valid; output is writable.
-    checked(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &mut process) })?;
+    checked(unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &mut process,
+        )
+    })?;
     let process = owned(process)?;
     let mut duplicate = null_mut();
     // SAFETY: live process token, writable output. Only this duplicate's
     // existing privileges are enabled, never the shared process token.
-    checked(unsafe { DuplicateTokenEx(process.as_raw_handle(), TOKEN_QUERY | TOKEN_IMPERSONATE | TOKEN_ADJUST_PRIVILEGES,
-        null(), SecurityImpersonation, TokenImpersonation, &mut duplicate) })?;
+    checked(unsafe {
+        DuplicateTokenEx(
+            process.as_raw_handle(),
+            TOKEN_QUERY | TOKEN_IMPERSONATE | TOKEN_ADJUST_PRIVILEGES,
+            null(),
+            SecurityImpersonation,
+            TokenImpersonation,
+            &mut duplicate,
+        )
+    })?;
     let duplicate = owned(duplicate)?;
     for name in ["SeBackupPrivilege", "SeRestorePrivilege"] {
         let name = wide(OsStr::new(name))?;
-        let mut luid = LUID { LowPart: 0, HighPart: 0 };
+        let mut luid = LUID {
+            LowPart: 0,
+            HighPart: 0,
+        };
         // SAFETY: local privilege lookup and writable LUID output.
         checked(unsafe { LookupPrivilegeValueW(null(), name.as_ptr(), &mut luid) })?;
         let privileges = TOKEN_PRIVILEGES {
             PrivilegeCount: 1,
-            Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }],
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
         };
         // SAFETY: live duplicate token and a single-entry correctly sized POD.
         unsafe { SetLastError(ERROR_SUCCESS) };
-        checked(unsafe { AdjustTokenPrivileges(duplicate.as_raw_handle(), 0, &privileges, 0, null_mut(), null_mut()) })?;
+        checked(unsafe {
+            AdjustTokenPrivileges(
+                duplicate.as_raw_handle(),
+                0,
+                &privileges,
+                0,
+                null_mut(),
+                null_mut(),
+            )
+        })?;
         // AdjustTokenPrivileges may succeed while reporting unavailable rights.
         // SAFETY: reads this thread's last-error value immediately after call.
         let error = unsafe { GetLastError() };
-        if error != ERROR_SUCCESS { return Err(io::Error::from_raw_os_error(error as i32)); }
+        if error != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(error as i32));
+        }
     }
     Ok(duplicate)
 }
@@ -108,15 +143,23 @@ pub(crate) fn elevation(token: &OwnedHandle) -> io::Result<(TOKEN_ELEVATION_TYPE
     let mut bytes = 0;
     // SAFETY: live token and correctly sized POD outputs for both classes.
     checked(unsafe {
-        GetTokenInformation(token.as_raw_handle(), TokenElevationType,
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevationType,
             (&mut kind as *mut TOKEN_ELEVATION_TYPE).cast(),
-            size_of::<TOKEN_ELEVATION_TYPE>() as u32, &mut bytes)
+            size_of::<TOKEN_ELEVATION_TYPE>() as u32,
+            &mut bytes,
+        )
     })?;
     // SAFETY: live token and correctly sized POD output.
     checked(unsafe {
-        GetTokenInformation(token.as_raw_handle(), TokenElevation,
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevation,
             (&mut elevated as *mut TOKEN_ELEVATION).cast(),
-            size_of::<TOKEN_ELEVATION>() as u32, &mut bytes)
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut bytes,
+        )
     })?;
     Ok((kind, elevated.TokenIsElevated != 0))
 }
@@ -126,19 +169,25 @@ fn select_token(token: OwnedHandle, full: bool) -> io::Result<OwnedHandle> {
     if (full && elevated) || (!full && !elevated && kind != TokenElevationTypeFull) {
         return Ok(token);
     }
-    if (full && kind != TokenElevationTypeLimited)
-        || (!full && kind != TokenElevationTypeFull)
-    {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "requested Windows token is unavailable"));
+    if (full && kind != TokenElevationTypeLimited) || (!full && kind != TokenElevationTypeFull) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "requested Windows token is unavailable",
+        ));
     }
-    let mut linked = TOKEN_LINKED_TOKEN { LinkedToken: null_mut() };
+    let mut linked = TOKEN_LINKED_TOKEN {
+        LinkedToken: null_mut(),
+    };
     let mut bytes = 0;
     // SAFETY: live token, POD output. Success transfers ownership of the linked handle.
     checked(unsafe {
-        GetTokenInformation(token.as_raw_handle(), TokenLinkedToken,
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenLinkedToken,
             (&mut linked as *mut TOKEN_LINKED_TOKEN).cast(),
-            size_of::<TOKEN_LINKED_TOKEN>() as u32, &mut bytes)
+            size_of::<TOKEN_LINKED_TOKEN>() as u32,
+            &mut bytes,
+        )
     })?;
     let linked = owned(linked.LinkedToken)?;
     let (kind, elevated) = elevation(&linked)?;
@@ -147,8 +196,10 @@ fn select_token(token: OwnedHandle, full: bool) -> io::Result<OwnedHandle> {
     {
         Ok(linked)
     } else {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "linked Windows token does not meet host policy"))
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "linked Windows token does not meet host policy",
+        ))
     }
 }
 
@@ -158,14 +209,19 @@ impl Identity {
     pub fn logon(account: &str, password: &str, full: bool) -> io::Result<Self> {
         let (domain, user) = if let Some((domain, user)) = account.split_once('\\') {
             if domain.is_empty() || user.is_empty() || user.contains('\\') {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid Windows account"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid Windows account",
+                ));
             }
             (Some(wide(OsStr::new(domain))?), user)
         } else if account.contains('@') {
             (None, account)
         } else {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                "Windows account requires domain or local-machine qualifier"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows account requires domain or local-machine qualifier",
+            ));
         };
         let mut user = wide(OsStr::new(user))?;
         let secret = Password(wide(OsStr::new(password))?);
@@ -173,17 +229,30 @@ impl Identity {
         // SAFETY: NUL-terminated buffers survive call, writable handle output.
         // Logon errors contain OS codes only, never credentials.
         checked(unsafe {
-            LogonUserW(user.as_ptr(), domain.as_ref().map_or(null(), |d| d.as_ptr()),
-                secret.0.as_ptr(), LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &mut token)
+            LogonUserW(
+                user.as_ptr(),
+                domain.as_ref().map_or(null(), |d| d.as_ptr()),
+                secret.0.as_ptr(),
+                LOGON32_LOGON_INTERACTIVE,
+                LOGON32_PROVIDER_DEFAULT,
+                &mut token,
+            )
         })?;
         drop(secret);
         let token = select_token(owned(token)?, full)?;
         let mut primary = null_mut();
         // SAFETY: selected logon/linked token is live. Request only the rights
         // needed for process creation, profile load and scoped impersonation.
-        checked(unsafe { DuplicateTokenEx(token.as_raw_handle(), TOKEN_QUERY | TOKEN_DUPLICATE
-            | TOKEN_ASSIGN_PRIMARY | TOKEN_IMPERSONATE, null(), SecurityImpersonation,
-            TokenPrimary, &mut primary) })?;
+        checked(unsafe {
+            DuplicateTokenEx(
+                token.as_raw_handle(),
+                TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_IMPERSONATE,
+                null(),
+                SecurityImpersonation,
+                TokenPrimary,
+                &mut primary,
+            )
+        })?;
         let token = owned(primary)?;
         let profile_service = profile_service()?;
         // SAFETY: zero initialization is valid for PROFILEINFOW, then required fields set.
@@ -196,7 +265,12 @@ impl Identity {
             // SAFETY: live user token and valid profile-info buffers.
             checked(unsafe { LoadUserProfileW(token.as_raw_handle(), &mut info) })
         })?;
-        let mut identity = Self { token, profile_service, profile: info.hProfile, environment: BTreeMap::new() };
+        let mut identity = Self {
+            token,
+            profile_service,
+            profile: info.hProfile,
+            environment: BTreeMap::new(),
+        };
         identity.environment = identity.read_environment()?;
         Ok(identity)
     }
@@ -218,11 +292,14 @@ impl Identity {
         unsafe {
             while *p != 0 {
                 let mut len = 0;
-                while *p.add(len) != 0 { len += 1; }
+                while *p.add(len) != 0 {
+                    len += 1;
+                }
                 let line = String::from_utf16(std::slice::from_raw_parts(p, len))
                     .map_err(|_| io::Error::other("invalid user environment"))?;
                 if let Some((key, value)) = line.split_once('=')
-                    && !key.is_empty() {
+                    && !key.is_empty()
+                {
                     result.insert(key.to_owned(), value.to_owned());
                 }
                 p = p.add(len + 1);
@@ -242,12 +319,18 @@ impl Identity {
     /// Execute synchronous file operations on the current thread as this user.
     /// Never call async filesystem APIs here: their workers would use service authority.
     /// The closure returns only after impersonation has been reverted, including on panic.
-    pub fn with_impersonation<T>(&self, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    pub fn with_impersonation<T>(
+        &self,
+        operation: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
         impersonate(&self.token, operation)
     }
 
     pub(crate) fn base_environment(&self) -> Vec<(OsString, OsString)> {
-        self.environment.iter().map(|(k, v)| (k.into(), v.into())).collect()
+        self.environment
+            .iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect()
     }
 }
 
@@ -270,9 +353,19 @@ mod tests {
     #[test]
     fn invalid_account_and_password_nul_fail_before_logon() {
         for account in ["user", "\\user", "DOMAIN\\", "DOMAIN\\user\\other"] {
-            assert_eq!(Identity::logon(account, "not-a-password", false).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(
+                Identity::logon(account, "not-a-password", false)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
         }
-        assert_eq!(Identity::logon("DOMAIN\\user", "before\0after", false).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            Identity::logon("DOMAIN\\user", "before\0after", false)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]

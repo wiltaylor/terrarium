@@ -61,7 +61,11 @@ pub struct Limits {
 
 /// One session's job. The last handle closing kills every descendant.
 #[derive(Debug)]
-pub struct Job(OwnedHandle, std::sync::Mutex<bool>, Option<std::sync::Arc<Identity>>);
+pub struct Job(
+    OwnedHandle,
+    std::sync::Mutex<bool>,
+    Option<std::sync::Arc<Identity>>,
+);
 
 impl PartialEq for Job {
     fn eq(&self, other: &Self) -> bool {
@@ -147,7 +151,9 @@ impl Job {
 
 impl Drop for Job {
     fn drop(&mut self) {
-        let Some(identity) = self.2.take() else { return };
+        let Some(identity) = self.2.take() else {
+            return;
+        };
         // A profile must not unload while a descendant still uses it. Explicit
         // termination precedes closing this last session job handle, even on
         // async cancellation. If Windows cannot confirm drain, retain the logon
@@ -158,11 +164,18 @@ impl Drop for Job {
             // SAFETY: valid zero-initialized POD and owned job handle.
             let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
             // SAFETY: live job and output matching class and documented size.
-            let ok = unsafe { QueryInformationJobObject(self.0.as_raw_handle(),
-                JobObjectBasicAccountingInformation,
-                (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
-                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32, null_mut()) };
-            if ok != 0 && info.ActiveProcesses == 0 { break; }
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.0.as_raw_handle(),
+                    JobObjectBasicAccountingInformation,
+                    (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                    size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    null_mut(),
+                )
+            };
+            if ok != 0 && info.ActiveProcesses == 0 {
+                break;
+            }
             if std::time::Instant::now() >= deadline {
                 std::mem::forget(identity);
                 return;
@@ -372,8 +385,18 @@ pub fn spawn_in_holder(
     limits: Limits,
     holder: Option<&Job>,
 ) -> io::Result<Child> {
-    spawn_with_context(program, args, cwd, env, terminal, limits,
-        SpawnContext { holder, identity: None })
+    spawn_with_context(
+        program,
+        args,
+        cwd,
+        env,
+        terminal,
+        limits,
+        SpawnContext {
+            holder,
+            identity: None,
+        },
+    )
 }
 
 /// Trusted local identity and shared holder, never deserialized from the wire.
@@ -397,15 +420,21 @@ pub fn spawn_with_context(
     let SpawnContext { holder, identity } = context;
     let mut job = Job::new(limits)?;
     job.2 = identity.cloned();
-    let user_cwd = identity.map(|identity| {
-        identity.environment().iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("USERPROFILE"))
-            .map(|(_, v)| std::path::PathBuf::from(v))
-            .filter(|p| p.is_absolute())
-            .ok_or_else(|| io::Error::other("user profile directory is unavailable"))
-    }).transpose()?;
+    let user_cwd = identity
+        .map(|identity| {
+            identity
+                .environment()
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("USERPROFILE"))
+                .map(|(_, v)| std::path::PathBuf::from(v))
+                .filter(|p| p.is_absolute())
+                .ok_or_else(|| io::Error::other("user profile directory is unavailable"))
+        })
+        .transpose()?;
     let cwd = cwd.or(user_cwd.as_deref());
-    let mut search_env = identity.map(|i| i.environment().clone()).unwrap_or_default();
+    let mut search_env = identity
+        .map(|i| i.environment().clone())
+        .unwrap_or_default();
     if identity.is_some() && !search_env.keys().any(|k| k.eq_ignore_ascii_case("PATH")) {
         search_env.insert("PATH".into(), String::new());
     }
@@ -414,7 +443,9 @@ pub fn spawn_with_context(
         search_env.insert(key.clone(), value.clone());
     }
     let executable = match identity {
-        Some(identity) => identity.with_impersonation(|| resolve_program(program, cwd, &search_env))?,
+        Some(identity) => {
+            identity.with_impersonation(|| resolve_program(program, cwd, &search_env))?
+        }
         None => resolve_program(program, cwd, env)?,
     };
     let program = wide(executable.as_os_str())?;
@@ -428,7 +459,10 @@ pub fn spawn_with_context(
     // Case-insensitive merge is required: PATH and Path are the same Windows key.
     let mut merged: BTreeMap<Vec<u16>, (std::ffi::OsString, std::ffi::OsString)> = BTreeMap::new();
     let base = identity.map_or_else(|| std::env::vars_os().collect(), |i| i.base_environment());
-    for (key, value) in base.into_iter().chain(env.iter().map(|(k, v)| (k.into(), v.into()))) {
+    for (key, value) in base
+        .into_iter()
+        .chain(env.iter().map(|(k, v)| (k.into(), v.into())))
+    {
         if key.is_empty() || key.to_string_lossy().contains('=') {
             continue;
         }
@@ -540,23 +574,31 @@ pub fn spawn_with_context(
         if let Some(identity) = identity {
             CreateProcessAsUserW(
                 identity.token(),
-                program.as_ptr(), command.as_mut_ptr(), null(), null(),
-                i32::from(console.is_none()), flags, environment.as_ptr().cast(),
+                program.as_ptr(),
+                command.as_mut_ptr(),
+                null(),
+                null(),
+                i32::from(console.is_none()),
+                flags,
+                environment.as_ptr().cast(),
                 cwd.as_ref().map_or(null(), |s| s.as_ptr()),
-                &startup.StartupInfo, &mut result,
+                &startup.StartupInfo,
+                &mut result,
             )
-        } else { CreateProcessW(
-            program.as_ptr(),
-            command.as_mut_ptr(),
-            null(),
-            null(),
-            i32::from(console.is_none()),
-            flags,
-            environment.as_ptr().cast(),
-            cwd.as_ref().map_or(null(), |s| s.as_ptr()),
-            &startup.StartupInfo,
-            &mut result,
-        ) }
+        } else {
+            CreateProcessW(
+                program.as_ptr(),
+                command.as_mut_ptr(),
+                null(),
+                null(),
+                i32::from(console.is_none()),
+                flags,
+                environment.as_ptr().cast(),
+                cwd.as_ref().map_or(null(), |s| s.as_ptr()),
+                &startup.StartupInfo,
+                &mut result,
+            )
+        }
     };
     checked(created)?;
     let process = Process {
