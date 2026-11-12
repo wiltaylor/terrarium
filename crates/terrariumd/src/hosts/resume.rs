@@ -96,6 +96,31 @@ impl Journal {
         ids: &[String],
         prefixes: &[String],
     ) -> ApiResult<()> {
+        self.db.journal_now(self.wait, |conn| {
+            self.replace_on(conn, values, ids, prefixes)
+        })
+    }
+
+    /// The caller owns the writer before taking the registry lock. Never
+    /// acquire a waiting writer while holding that lock.
+    pub(super) fn with_writer<T>(
+        &self,
+        mut operation: impl FnMut(&mut rusqlite::Connection) -> ApiResult<T>,
+    ) -> ApiResult<T> {
+        super::retry_metadata_for(
+            || self.db.journal_now(false, &mut operation),
+            |error| error.code == crate::error::Code::ResourceBusy,
+            std::time::Duration::from_millis(100),
+        )
+    }
+
+    pub(super) fn replace_on(
+        &self,
+        conn: &mut rusqlite::Connection,
+        values: &[(String, serde_json::Value)],
+        ids: &[String],
+        prefixes: &[String],
+    ) -> ApiResult<()> {
         // Encoding is independent of rotation and stays outside the writer.
         let values = values
             .iter()
@@ -105,7 +130,7 @@ impl Journal {
                 Ok((id, zeroize::Zeroizing::new(plain)))
             })
             .collect::<ApiResult<Vec<_>>>()?;
-        self.db.journal_now(self.wait, |conn| {
+        {
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(journal_error)?;
@@ -134,7 +159,7 @@ impl Journal {
             }
             tx.commit().map_err(journal_error)?;
             Ok(())
-        })
+        }
     }
 
     pub fn scan<T: DeserializeOwned>(&self, prefix: &str) -> ApiResult<Vec<(String, T)>> {
