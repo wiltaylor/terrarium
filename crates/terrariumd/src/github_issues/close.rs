@@ -273,14 +273,16 @@ async fn close_one(
         response(
             client
                 .post(format!("{url}/comments"))
-                .json(&json!({"body":comment})),
+                .header("Content-Type", "application/json")
+                .body(json!({"body":comment}).to_string()),
         )
         .await?;
     }
     response(
         client
             .patch(url)
-            .json(&json!({"state":"closed", "state_reason":"completed"})),
+            .header("Content-Type", "application/json")
+            .body(json!({"state":"closed", "state_reason":"completed"}).to_string()),
     )
     .await?;
     Ok(true)
