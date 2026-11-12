@@ -247,8 +247,10 @@ mod tests {
             if let Some(path) = &self.journal_path {
                 let disk: serde_json::Value =
                     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-                assert_eq!(disk["steps"].as_array().unwrap().last().unwrap(),
-                    &serde_json::json!({"start_pending": id}));
+                assert_eq!(
+                    disk["steps"].as_array().unwrap().last().unwrap(),
+                    &serde_json::json!({"start_pending": id})
+                );
             }
             self.action()?;
             Ok(RuntimeIdentity {
