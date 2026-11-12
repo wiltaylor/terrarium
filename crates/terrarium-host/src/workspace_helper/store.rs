@@ -22,10 +22,12 @@ pub struct Store {
 #[allow(clippy::unwrap_used)]
 mod bootstrap_tests {
     use super::*;
-    use terrarium_core::live_workspace::bootstrap::{Journal as Bootstrap, Request, Scaffold, Step};
+    use terrarium_core::live_workspace::bootstrap::{
+        Journal as Bootstrap, Request, Scaffold, Step,
+    };
     use terrarium_core::live_workspace::{
-        Caller, OperationId, PROTOCOL_VERSION, Provenance, RegistrationId, RuntimeId, SourceIdentity,
-        TrustDomainId,
+        Caller, OperationId, PROTOCOL_VERSION, Provenance, RegistrationId, RuntimeId,
+        SourceIdentity, TrustDomainId,
     };
     use ulid::Ulid;
 
@@ -48,9 +50,18 @@ mod bootstrap_tests {
 
     fn scaffold() -> Step {
         Step::ScaffoldVerified(Scaffold {
-            publisher: SourceIdentity { device: 1, inode: 1 },
-            staging: SourceIdentity { device: 1, inode: 2 },
-            state: SourceIdentity { device: 1, inode: 3 },
+            publisher: SourceIdentity {
+                device: 1,
+                inode: 1,
+            },
+            staging: SourceIdentity {
+                device: 1,
+                inode: 2,
+            },
+            state: SourceIdentity {
+                device: 1,
+                inode: 3,
+            },
         })
     }
 
@@ -105,7 +116,10 @@ mod bootstrap_tests {
         assert!(store.save_bootstrap(&initial()).is_err());
         std::fs::write(dir.path().join("bootstrap.next"), b"interrupted").unwrap();
         drop(store);
-        assert!(matches!(Store::fixture(dir.path()), Err(Reply::Quarantined)));
+        assert!(matches!(
+            Store::fixture(dir.path()),
+            Err(Reply::Quarantined)
+        ));
     }
 }
 
@@ -181,7 +195,9 @@ impl Store {
 
     /// Bootstrap has its own immutable request because the runtime does not
     /// exist before Docker create. It shares the registration lifetime lock.
-    pub fn load_bootstrap(&self) -> Result<terrarium_core::live_workspace::bootstrap::Journal, Reply> {
+    pub fn load_bootstrap(
+        &self,
+    ) -> Result<terrarium_core::live_workspace::bootstrap::Journal, Reply> {
         self.load_named("bootstrap.json")
     }
 
@@ -263,8 +279,7 @@ impl Store {
         next.sync_all().map_err(|_| Reply::Failed)?;
         // Persist the created name as well as the file, before replacement.
         self.root.fd.sync_all().map_err(|_| Reply::Failed)?;
-        renameat(&self.root.fd, next_name, &self.root.fd, final_name)
-            .map_err(|_| Reply::Failed)?;
+        renameat(&self.root.fd, next_name, &self.root.fd, final_name).map_err(|_| Reply::Failed)?;
         self.root.fd.sync_all().map_err(|_| Reply::Failed)
     }
 }
