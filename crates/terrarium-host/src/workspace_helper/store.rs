@@ -25,9 +25,7 @@ mod bootstrap_tests {
     use terrarium_core::live_workspace::bootstrap::{
         Journal as Bootstrap, Request, Scaffold, Step,
     };
-    use terrarium_core::live_workspace::{
-        Caller, PROTOCOL_VERSION, Provenance, SourceIdentity,
-    };
+    use terrarium_core::live_workspace::{Caller, PROTOCOL_VERSION, Provenance, SourceIdentity};
 
     fn id<T: serde::de::DeserializeOwned>(n: u64) -> T {
         serde_json::from_str(&format!("\"{n:026}\"")).unwrap()
