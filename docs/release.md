@@ -51,6 +51,15 @@ same two checks for it. `SHA256SUMS` lists both binaries.
 
 Both binaries and SHA256SUMS also get cosign signature bundles.
 
+The release build passes the contents of `docker/release/cosign.pub` as the
+`TERRARIUM_RELEASE_PUBKEY` Docker build argument to the Rust stages. The host
+embeds it with `option_env!` and verifies self-update bundles offline in Rust,
+before staging. Ordinary builds do not set it and require manual installation.
+The daemon fetches and caches bundles from the published GitHub release and
+serves them through its host listener. A missing bundle suppresses the offer.
+Hosts do not contact GitHub or run cosign. This verifies the release key's
+signature, not transparency-log inclusion or release freshness.
+
 ## How to make a release
 
 ### Version branch e2e at the cut

@@ -389,6 +389,7 @@ async fn link_credentials_do_not_bypass_public_routes() {
         "/install/host.sh",
         "/install/terrarium-host",
         "/install/terrarium-host.sha256",
+        "/install/terrarium-host.sigstore.json",
         "/",
         "/favicon.svg",
         "/agents/dashboard",
