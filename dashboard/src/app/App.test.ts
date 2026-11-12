@@ -15,7 +15,7 @@ vi.mock("../api", () => ({ isMock: false }));
 vi.mock("../stores", async () => { const { instanceTestStores } = await import("../test/instance"); return instanceTestStores(({
   auth: { mode: () => "operator", token: () => null, csrf: () => null },
   agents: { inProject: () => [] },
-  api: { projects: { counts: async () => ({ blocked_cards: 0, questions: null }) } },
+  api: { projects: { counts: async () => ({ blocked_cards: 0, questions: null }) }, pages: { list: async () => ({ items: [], can_edit: false }) } },
   events: { on: () => () => {} },
 })); });
 vi.mock("./Layout", () => ({ Layout: (props: { children?: unknown }) => props.children }));
