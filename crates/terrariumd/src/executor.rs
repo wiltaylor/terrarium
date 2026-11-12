@@ -873,9 +873,7 @@ pub fn restore_sessions(state: &Shared) -> ApiResult<()> {
         Arc::get_mut(&mut session)
             .ok_or_else(|| ApiError::internal("restored session is unexpectedly shared"))?
             .id = saved.id;
-        session
-            .takes_stdin
-            .store(!saved.durable, Ordering::SeqCst);
+        session.takes_stdin.store(!saved.durable, Ordering::SeqCst);
         if let Some((host, id)) = saved.host_session {
             let hs = state
                 .executor

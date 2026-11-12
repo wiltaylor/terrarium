@@ -13,7 +13,9 @@ pub(crate) fn spawn_cleanup(state: &Shared) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let Some(state) = weak.upgrade() else { return };
-            if let Err(error) = prune(&state) { warn!(%error, "cannot prune durable SSH checkpoints"); }
+            if let Err(error) = prune(&state) {
+                warn!(%error, "cannot prune durable SSH checkpoints");
+            }
             drop(state);
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
@@ -22,16 +24,32 @@ pub(crate) fn spawn_cleanup(state: &Shared) -> tokio::task::JoinHandle<()> {
 
 fn prune(state: &Shared) -> ApiResult<()> {
     #[derive(Deserialize)]
-    struct Owner { #[serde(default)] remote_key: Option<String> }
+    struct Owner {
+        #[serde(default)]
+        remote_key: Option<String>,
+    }
     #[derive(Deserialize)]
-    struct Created { created: i64 }
+    struct Created {
+        created: i64,
+    }
     let j = journal(state);
-    let mut owned: std::collections::HashSet<_> = j.scan::<Owner>("exec/")?.into_iter()
-        .filter_map(|(_, owner)| owner.remote_key.map(|key| format!("ssh/{key}"))).collect();
-    owned.extend(j.scan::<Value>("recipe/")?.into_iter().map(|(key, _)| format!("ssh/{key}")));
+    let mut owned: std::collections::HashSet<_> = j
+        .scan::<Owner>("exec/")?
+        .into_iter()
+        .filter_map(|(_, owner)| owner.remote_key.map(|key| format!("ssh/{key}")))
+        .collect();
+    owned.extend(
+        j.scan::<Value>("recipe/")?
+            .into_iter()
+            .map(|(key, _)| format!("ssh/{key}")),
+    );
     let before = chrono::Utc::now().timestamp() - (MAX_RUN + RETAIN) as i64;
-    let old: Vec<_> = j.scan::<Created>("ssh/")?.into_iter()
-        .filter(|(key, value)| value.created < before && !owned.contains(key)).map(|(key, _)| key).collect();
+    let old: Vec<_> = j
+        .scan::<Created>("ssh/")?
+        .into_iter()
+        .filter(|(key, value)| value.created < before && !owned.contains(key))
+        .map(|(key, _)| key)
+        .collect();
     j.replace(&[], &old, &[])
 }
 
@@ -67,7 +85,11 @@ pub(super) fn start(
     mut plan: SshPlan,
     guard: Option<Box<dyn Send>>,
 ) -> ApiResult<Running> {
-    crate::target_roots::check_base(def.work_root.as_deref().unwrap_or(crate::target_roots::DEFAULT_BASE))?;
+    crate::target_roots::check_base(
+        def.work_root
+            .as_deref()
+            .unwrap_or(crate::target_roots::DEFAULT_BASE),
+    )?;
     let key = cmd
         .resume_key
         .as_deref()

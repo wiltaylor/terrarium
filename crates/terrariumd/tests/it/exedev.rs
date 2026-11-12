@@ -291,12 +291,31 @@ async fn durable_expired_checkpoint_does_not_relaunch_or_prevent_boot() {
     def["work_root"] = json!(root);
     td.post("/api/targets", def).await.ok();
     td.post_empty("/api/targets/expired-ex/up").await.ok();
-    let command = format!("echo once >> '{}'; echo retained; exit 17", root.join("launches").display());
-    let opened = td.post("/api/targets/expired-ex/exec", json!({"cmd":["sh","-c",command],"durable":true})).await;
+    let command = format!(
+        "echo once >> '{}'; echo retained; exit 17",
+        root.join("launches").display()
+    );
+    let opened = td
+        .post(
+            "/api/targets/expired-ex/exec",
+            json!({"cmd":["sh","-c",command],"durable":true}),
+        )
+        .await;
     let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
     let (stdout, end) = output(&td, "expired-ex", &sid).await;
     assert_eq!(stdout, "retained\n");
     assert_eq!(end["code"], 17);
+    let spool = std::fs::read_dir(root.join(".terrarium-runs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    // Simulate remote output GC while retaining its claim tombstone.
+    std::fs::write(spool.join("expired"), "").unwrap();
+    reboot(&mut td, &url, &ssh).await;
+    let (_, end) = output(&td, "expired-ex", &sid).await;
+    assert_eq!(end["code"], "durable_expired");
     let journal = terrariumd::hosts::resume::Journal::new(&td.state);
     let mut checkpoints = journal.scan::<Value>("ssh/").unwrap();
     assert_eq!(checkpoints.len(), 1);
@@ -307,7 +326,10 @@ async fn durable_expired_checkpoint_does_not_relaunch_or_prevent_boot() {
     let (_, end) = output(&td, "expired-ex", &sid).await;
     assert_eq!(end["type"], "error");
     assert_eq!(end["code"], "interrupted");
-    assert_eq!(std::fs::read_to_string(root.join("launches")).unwrap(), "once\n");
+    assert_eq!(
+        std::fs::read_to_string(root.join("launches")).unwrap(),
+        "once\n"
+    );
 }
 
 fn db(td: &TestDaemon) -> rusqlite::Connection {
