@@ -225,7 +225,9 @@ impl Engine for Fake {
             }
             if what == "drain-jobs" {
                 let delay = self.0.lock().unwrap().jobs_delay;
-                tokio::time::sleep(delay).await;
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
                 let hang = self.0.lock().unwrap().jobs_hang;
                 if hang {
                     std::future::pending::<()>().await;
