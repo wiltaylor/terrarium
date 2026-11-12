@@ -1087,8 +1087,8 @@ async fn retention_refuses_active_update_even_before_backup_is_recorded() {
     assert!(r.fake.calls().is_empty());
 }
 
-#[test]
-fn retention_protects_previous_and_recovery_after_history_rotation_until_release() {
+#[tokio::test]
+async fn retention_protects_previous_and_recovery_after_history_rotation_until_release() {
     let r = rig();
     let (mut run, guard) = r
         .updater
