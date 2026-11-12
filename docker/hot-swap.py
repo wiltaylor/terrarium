@@ -80,7 +80,7 @@ def retain_backups(protected, now=None):
                 if 0 <= age < 14 and day not in days:
                     keep.add(name)
                     days.add(day)
-                if age < 0:
+                if created > now:
                     keep.add(name)
             audit_fd = os.open(".retention-audit.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600, dir_fd=fd)
             with os.fdopen(audit_fd, "a") as audit:

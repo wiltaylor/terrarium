@@ -70,6 +70,13 @@ class RetentionTests(unittest.TestCase):
         self.assertTrue((self.directory / future).exists())
         self.assertEqual(unknown.read_bytes(), b"not ours")
 
+    def test_every_future_backup_later_today_is_kept(self):
+        names = [self.backup(0, hour) for hour in range(12, 18)]
+        before_noon = NOW.replace(hour=11)
+        result = HOT.retain_backups([], before_noon)
+        self.assertEqual(result["removed"], [])
+        self.assertTrue(all((self.directory / name).exists() for name in names))
+
     def test_symlink_never_deletes_outside_directory(self):
         outside = self.state / "outside"
         outside.write_bytes(b"keep")
