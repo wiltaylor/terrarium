@@ -13,8 +13,12 @@ CREATE TABLE live_workspaces (
     history TEXT NOT NULL CHECK(history IN ('fresh', 'unknown')),
     UNIQUE(host_id, agent_id),
     UNIQUE(host_id, source_dev, source_ino)
-);
+) WITHOUT ROWID;
 CREATE TRIGGER live_workspace_no_update BEFORE UPDATE ON live_workspaces
+WHEN OLD.workspace_id IS NOT NEW.workspace_id OR OLD.host_id IS NOT NEW.host_id
+    OR OLD.agent_id IS NOT NEW.agent_id OR OLD.project_hint IS NOT NEW.project_hint
+    OR OLD.agent_hint IS NOT NEW.agent_hint OR OLD.source_dev IS NOT NEW.source_dev
+    OR OLD.source_ino IS NOT NEW.source_ino OR OLD.history IS NOT NEW.history
 BEGIN SELECT RAISE(ABORT, 'enrollment is immutable'); END;
 CREATE TRIGGER live_workspace_no_delete BEFORE DELETE ON live_workspaces
 BEGIN SELECT RAISE(ABORT, 'enrollment is permanent'); END;
@@ -35,12 +39,16 @@ CREATE TABLE live_workspace_targets (
     last_contiguous_revision INTEGER NOT NULL DEFAULT 0 CHECK(last_contiguous_revision >= 0),
     allocated_revision INTEGER NOT NULL DEFAULT 0 CHECK(allocated_revision >= last_contiguous_revision),
     UNIQUE(registration_id, trust_domain_id)
-);
+) WITHOUT ROWID;
 CREATE UNIQUE INDEX live_workspace_current_target ON live_workspace_targets(host_id, target_id)
     WHERE state != 'destroyed';
 CREATE TRIGGER live_workspace_target_identity BEFORE UPDATE OF
     registration_id, host_id, target_id, trust_domain_id, runtime_id, container_id,
     namespace_dev, namespace_ino ON live_workspace_targets
+WHEN OLD.registration_id IS NOT NEW.registration_id OR OLD.host_id IS NOT NEW.host_id
+    OR OLD.target_id IS NOT NEW.target_id OR OLD.trust_domain_id IS NOT NEW.trust_domain_id
+    OR OLD.runtime_id IS NOT NEW.runtime_id OR OLD.container_id IS NOT NEW.container_id
+    OR OLD.namespace_dev IS NOT NEW.namespace_dev OR OLD.namespace_ino IS NOT NEW.namespace_ino
 BEGIN SELECT RAISE(ABORT, 'registration identity is immutable'); END;
 CREATE TRIGGER live_workspace_target_revisions BEFORE UPDATE OF last_contiguous_revision, allocated_revision ON live_workspace_targets
 WHEN NEW.last_contiguous_revision < OLD.last_contiguous_revision
@@ -62,10 +70,11 @@ CREATE TABLE workspace_reservations (
     owning_sandbox_incarnation TEXT,
     FOREIGN KEY(current_registration_id, trust_domain_id)
         REFERENCES live_workspace_targets(registration_id, trust_domain_id)
-);
+) WITHOUT ROWID;
 CREATE INDEX workspace_reservations_registration ON workspace_reservations(current_registration_id)
     WHERE current_registration_id IS NOT NULL;
 CREATE TRIGGER workspace_reservation_seal BEFORE UPDATE OF workspace_id, trust_domain_id ON workspace_reservations
+WHEN OLD.workspace_id IS NOT NEW.workspace_id OR OLD.trust_domain_id IS NOT NEW.trust_domain_id
 BEGIN SELECT RAISE(ABORT, 'workspace domain is permanently sealed'); END;
 CREATE TRIGGER workspace_reservation_no_delete BEFORE DELETE ON workspace_reservations
 BEGIN SELECT RAISE(ABORT, 'workspace domain is permanently sealed'); END;
@@ -84,11 +93,13 @@ CREATE TABLE live_workspace_attachments (
     agent_id TEXT NOT NULL,
     state TEXT NOT NULL CHECK(state IN ('attached_verified', 'authority_ended', 'revoke_pending', 'path_revoked_verified', 'quarantined')),
     revoke_revision INTEGER CHECK(revoke_revision > 0)
-);
+) WITHOUT ROWID;
 CREATE INDEX live_workspace_attachments_registration ON live_workspace_attachments(registration_id, state, attachment_id);
 CREATE INDEX live_workspace_attachments_workspace ON live_workspace_attachments(workspace_id, attachment_id);
 CREATE TRIGGER live_workspace_attachment_identity BEFORE UPDATE OF
     attachment_id, workspace_id, registration_id, agent_id ON live_workspace_attachments
+WHEN OLD.attachment_id IS NOT NEW.attachment_id OR OLD.workspace_id IS NOT NEW.workspace_id
+    OR OLD.registration_id IS NOT NEW.registration_id OR OLD.agent_id IS NOT NEW.agent_id
 BEGIN SELECT RAISE(ABORT, 'attachment identity is immutable'); END;
 CREATE TRIGGER live_workspace_attachment_tombstone BEFORE UPDATE OF revoke_revision ON live_workspace_attachments
 WHEN OLD.revoke_revision IS NOT NULL AND NEW.revoke_revision IS NOT OLD.revoke_revision
@@ -120,13 +131,17 @@ CREATE TABLE live_workspace_operations (
     CHECK(delivery != 'superseded' OR kind = 'grant'),
     CHECK(phase NOT IN ('helper_committed', 'daemon_committed') OR result IS NOT NULL),
     UNIQUE(registration_id, revision)
-);
+) WITHOUT ROWID;
 CREATE INDEX live_workspace_operations_pending ON live_workspace_operations(registration_id, phase, revision);
 CREATE TRIGGER live_workspace_operation_identity BEFORE UPDATE OF
     operation_id, registration_id, revision, kind, original_request, original_hash ON live_workspace_operations
+WHEN OLD.operation_id IS NOT NEW.operation_id OR OLD.registration_id IS NOT NEW.registration_id
+    OR OLD.revision IS NOT NEW.revision OR OLD.kind IS NOT NEW.kind
+    OR OLD.original_request IS NOT NEW.original_request OR OLD.original_hash IS NOT NEW.original_hash
 BEGIN SELECT RAISE(ABORT, 'original operation is immutable'); END;
 CREATE TRIGGER live_workspace_operation_delivery BEFORE UPDATE OF delivery ON live_workspace_operations
-WHEN OLD.phase != 'intent' OR OLD.delivery != 'apply' OR NEW.delivery != 'superseded'
+WHEN OLD.delivery IS NOT NEW.delivery
+    AND (OLD.phase != 'intent' OR OLD.delivery != 'apply' OR NEW.delivery != 'superseded')
 BEGIN SELECT RAISE(ABORT, 'delivery already decided'); END;
 CREATE TRIGGER live_workspace_operation_no_delete BEFORE DELETE ON live_workspace_operations
 BEGIN SELECT RAISE(ABORT, 'operation history is permanent'); END;

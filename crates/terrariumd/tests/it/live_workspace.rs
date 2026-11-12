@@ -257,6 +257,121 @@ fn stored_state_transitions_cannot_skip_reconcile_or_revoke() {
     }
 }
 
+#[test]
+fn unchanged_identity_assignments_allow_legal_updates() {
+    for recursive in [false, true] {
+        let c = Connection::open_in_memory().unwrap();
+        c.pragma_update(None, "recursive_triggers", recursive).unwrap();
+        c.pragma_update(None, "foreign_keys", true).unwrap();
+        seed(&c);
+        c.execute_batch("INSERT INTO workspace_reservations VALUES ('w', 'domain', 'r1', 'sandbox');
+            INSERT INTO live_workspace_attachments VALUES ('attachment', 'w', 'r1', 'agent-ulid', 'attached_verified', NULL);
+            INSERT INTO live_workspace_operations VALUES ('op', 'r1', 1, 'grant', X'01', zeroblob(32), 'apply', 'intent', NULL);").unwrap();
+        let before = snapshot(&c);
+        c.execute_batch("UPDATE live_workspaces SET workspace_id = workspace_id, host_id = host_id,
+            agent_id = agent_id, project_hint = project_hint, agent_hint = agent_hint,
+            source_dev = source_dev, source_ino = source_ino, history = history WHERE workspace_id = 'w';
+            UPDATE workspace_reservations SET workspace_id = workspace_id, trust_domain_id = trust_domain_id,
+            current_registration_id = current_registration_id, owning_sandbox_incarnation = owning_sandbox_incarnation WHERE workspace_id = 'w';").unwrap();
+        assert_eq!(snapshot(&c), before);
+        for (table, key, value, same, transitions) in [
+            ("live_workspace_targets", "registration_id", "r1",
+                "registration_id = registration_id, host_id = host_id, target_id = target_id,
+                trust_domain_id = trust_domain_id, runtime_id = runtime_id, container_id = container_id,
+                namespace_dev = namespace_dev, namespace_ino = namespace_ino,
+                allocated_revision = allocated_revision, last_contiguous_revision = last_contiguous_revision",
+                &["reconcile_pending", "verified", "destroyed"][..]),
+            ("live_workspace_attachments", "attachment_id", "attachment",
+                "attachment_id = attachment_id, workspace_id = workspace_id, registration_id = registration_id, agent_id = agent_id, revoke_revision = 2",
+                &["authority_ended", "revoke_pending", "path_revoked_verified"][..]),
+            ("live_workspace_operations", "operation_id", "op",
+                "operation_id = operation_id, registration_id = registration_id, revision = revision,
+                kind = kind, original_request = original_request, original_hash = original_hash, delivery = delivery, result = X'02'",
+                &["helper_committed", "daemon_committed"][..]),
+        ] {
+            let state = if table == "live_workspace_operations" { "phase" } else { "state" };
+            for &transition in transitions {
+                let changed = c.execute(&format!("UPDATE {table} SET {same}, {state} = ?1 WHERE {key} = ?2"), params![transition, value]).unwrap();
+                assert_eq!(changed, 1, "same-value identity update did not match {table}");
+                let actual: String = c.query_row(&format!("SELECT {state} FROM {table} WHERE {key} = ?1"), [value], |r| r.get(0)).unwrap();
+                assert_eq!(actual, transition);
+            }
+        }
+        c.execute("UPDATE workspace_reservations SET workspace_id = workspace_id, trust_domain_id = trust_domain_id,
+            current_registration_id = NULL, owning_sandbox_incarnation = NULL WHERE workspace_id = 'w'", []).unwrap();
+        assert_eq!(c.query_row("SELECT trust_domain_id FROM workspace_reservations WHERE workspace_id = 'w'", [], |r| r.get::<_, String>(0)).unwrap(), "domain");
+        // Same-value assignments also remain legal on terminal/tombstone rows.
+        let before = snapshot(&c);
+        c.execute_batch("UPDATE live_workspace_attachments SET attachment_id = attachment_id,
+            workspace_id = workspace_id, registration_id = registration_id, agent_id = agent_id,
+            state = state, revoke_revision = revoke_revision WHERE attachment_id = 'attachment';
+            UPDATE live_workspace_operations SET operation_id = operation_id, registration_id = registration_id,
+            revision = revision, kind = kind, original_request = original_request, original_hash = original_hash,
+            phase = phase, delivery = delivery, result = result WHERE operation_id = 'op';").unwrap();
+        assert_eq!(snapshot(&c), before);
+    }
+}
+
+#[test]
+fn without_rowid_and_update_replace_preserve_all_history() {
+    for recursive in [false, true] {
+        let c = Connection::open_in_memory().unwrap();
+        c.pragma_update(None, "foreign_keys", true).unwrap();
+        c.pragma_update(None, "recursive_triggers", recursive).unwrap();
+        seed(&c);
+        c.execute_batch("INSERT INTO live_workspaces VALUES ('w2', 'h', 'other-agent', 'project', 'other', '1', '3', 'fresh');
+            INSERT INTO workspace_reservations VALUES ('w', 'domain', 'r1', 'sandbox');
+            INSERT INTO workspace_reservations VALUES ('w2', 'domain', 'r2', 'other-sandbox');
+            INSERT INTO live_workspace_attachments VALUES ('attachment', 'w', 'r1', 'agent-ulid', 'attached_verified', NULL);
+            INSERT INTO live_workspace_attachments VALUES ('other', 'w2', 'r2', 'other-agent', 'attached_verified', NULL);
+            INSERT INTO live_workspace_operations VALUES ('op', 'r1', 1, 'grant', X'01', zeroblob(32), 'apply', 'intent', NULL);
+            INSERT INTO live_workspace_operations VALUES ('op2', 'r2', 1, 'grant', X'02', zeroblob(32), 'apply', 'intent', NULL);").unwrap();
+        let tables = [("live_workspaces", "workspace_id", "w2", "w"),
+            ("workspace_reservations", "workspace_id", "w2", "w"),
+            ("live_workspace_targets", "registration_id", "r2", "r1"),
+            ("live_workspace_attachments", "attachment_id", "other", "attachment"),
+            ("live_workspace_operations", "operation_id", "op2", "op")];
+        for (table, _, _, _) in tables {
+            let wr: u32 = c.query_row("SELECT wr FROM pragma_table_list WHERE schema = 'main' AND name = ?1", [table], |r| r.get(0)).unwrap();
+            assert_eq!(wr, 1, "{table} must not expose any implicit rowid");
+        }
+        for revoked in [false, true] {
+            if revoked {
+                c.execute_batch("UPDATE live_workspace_attachments SET state = 'authority_ended', revoke_revision = 2 WHERE attachment_id = 'attachment';
+                    UPDATE live_workspace_attachments SET state = 'revoke_pending' WHERE attachment_id = 'attachment';
+                    UPDATE live_workspace_attachments SET state = 'path_revoked_verified' WHERE attachment_id = 'attachment';
+                    UPDATE workspace_reservations SET current_registration_id = NULL WHERE workspace_id = 'w';
+                    UPDATE live_workspace_targets SET state = 'destroyed' WHERE registration_id = 'r1';").unwrap();
+            }
+            let before = snapshot(&c);
+            for (table, key, source, destination) in tables {
+                for alias in ["rowid", "_rowid_", "oid"] {
+                    let sql = format!("UPDATE OR REPLACE {table} SET {alias} = (SELECT {alias} FROM {table} WHERE {key} = ?1) WHERE {key} = ?2");
+                    assert!(c.execute(&sql, params![destination, source]).is_err(), "implicit rowid exposed: {sql}");
+                    assert_eq!(snapshot(&c), before);
+                }
+                let sql = format!("UPDATE OR REPLACE {table} SET {key} = ?1 WHERE {key} = ?2");
+                assert!(c.execute(&sql, params![destination, source]).is_err(), "primary key replacement allowed: {sql}");
+                assert_eq!(snapshot(&c), before);
+            }
+            // Every non-primary UNIQUE key is comprised of guarded identity
+            // columns too, including partial current-target identity.
+            for sql in [
+                "UPDATE OR REPLACE live_workspaces SET agent_id = 'agent-ulid' WHERE workspace_id = 'w2'",
+                "UPDATE OR REPLACE live_workspaces SET source_ino = '2' WHERE workspace_id = 'w2'",
+                "UPDATE OR REPLACE live_workspace_targets SET target_id = 'r1' WHERE registration_id = 'r2'",
+                "UPDATE OR REPLACE live_workspace_targets SET registration_id = 'r1', trust_domain_id = 'domain' WHERE registration_id = 'r2'",
+                "UPDATE OR REPLACE live_workspace_operations SET registration_id = 'r1' WHERE operation_id = 'op2'",
+            ] {
+                assert!(c.execute_batch(sql).is_err(), "alternate key replacement allowed: {sql}");
+                assert_eq!(snapshot(&c), before);
+            }
+            assert!(c.execute("INSERT INTO live_workspace_attachments VALUES ('attachment', 'w', 'r1', 'agent-ulid', 'attached_verified', NULL)", []).is_err());
+            assert_eq!(snapshot(&c), before);
+        }
+    }
+}
+
 fn open(path: &std::path::Path) -> Connection {
     let c = Connection::open(path).unwrap();
     c.busy_timeout(std::time::Duration::from_secs(5)).unwrap();

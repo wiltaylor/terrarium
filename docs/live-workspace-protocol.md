@@ -23,7 +23,11 @@ enrollment, reservation, registration, attachment and operation identities,
 including alternate unique keys. They work even with SQLite recursive triggers
 disabled. Daemon connections also enable recursive triggers as defence in depth.
 Identity-column UPDATE guards apply in every state, including revoked and
-destroyed history. A revoked attachment ID cannot be renamed to permit its reuse.
+destroyed history. They compare OLD/NEW values with null-safe `IS NOT`, so
+same-value identity assignments can accompany legal state updates. A revoked
+attachment ID cannot be renamed to permit its reuse. All five tables use
+`WITHOUT ROWID`: neither `rowid`, `_rowid_` nor `oid` provides an unguarded
+replacement identity. All declared alternate unique keys are guarded too.
 Only explicit state edges are mutable: target verification follows pending
 reconciliation, destruction is terminal, and attachment revoke proceeds through
 authority-ended and pending before verified disappearance. Quarantine permits
