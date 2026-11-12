@@ -129,6 +129,55 @@ impl Specification {
             measured,
         )
     }
+
+    /// Necessary configuration check only, never runtime or mount evidence.
+    /// Both inspect bytes and resolved image ID must come from the protected
+    /// local Docker inspector, not the request or host forwarder. Callers must
+    /// separately pin/recheck the runtime and verify fresh B3 mount evidence.
+    pub fn check_inspect_configuration(
+        &self,
+        request: &Request,
+        measured: &Profile,
+        container_id: &str,
+        resolved_image_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), Reply> {
+        self.verify(request, measured)?;
+        let full_id = |s: &str| {
+            s.len() == 64
+                && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        if !full_id(container_id)
+            || !resolved_image_id.strip_prefix("sha256:").is_some_and(full_id)
+        {
+            return Err(Reply::Unauthorized);
+        }
+        if bytes.len() > 256 * 1024 {
+            return Err(Reply::Failed);
+        }
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_slice(bytes).map_err(|_| Reply::Failed)?;
+        let [row] = rows.as_slice() else {
+            return Err(Reply::Quarantined);
+        };
+        let config = &row["Config"];
+        let labels = &config["Labels"];
+        let entrypoint_empty = matches!(config.get("Entrypoint"), Some(serde_json::Value::Null))
+            || config.get("Entrypoint").and_then(serde_json::Value::as_array).is_some_and(Vec::is_empty);
+        if row["Id"] != container_id
+            || row["Image"] != resolved_image_id
+            || row["Name"] != format!("/terrarium-live-{}-{}", request.registration.0, request.incarnation.0)
+            || config["Image"] != self.image
+            || config["Cmd"] != serde_json::json!(self.command)
+            || !entrypoint_empty
+            || labels["terrarium.workspace.registration"] != request.registration.0.to_string()
+            || labels["terrarium.workspace.runtime"] != request.incarnation.0.to_string()
+            || labels["terrarium.workspace.bootstrap"] != request.operation.0.to_string()
+        {
+            return Err(Reply::Quarantined);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -248,5 +297,45 @@ mod tests {
         let mut altered = spec;
         altered.command = vec!["x".repeat(4097)];
         assert!(altered.digest().is_err());
+    }
+
+    #[test]
+    fn inspect_binds_full_identity_image_command_and_rejects_inherited_entrypoint() {
+        let spec = specification();
+        let r = request(&spec);
+        let id = "a".repeat(64);
+        let image = format!("sha256:{}", "b".repeat(64));
+        let row = serde_json::json!({
+            "Id": id, "Image": image,
+            "Name": format!("/terrarium-live-{}-{}", r.registration.0, r.incarnation.0),
+            "Config": {"Image": spec.image, "Cmd": spec.command, "Entrypoint": null,
+                "Labels": {"terrarium.workspace.registration": r.registration.0.to_string(),
+                    "terrarium.workspace.runtime": r.incarnation.0.to_string(),
+                    "terrarium.workspace.bootstrap": r.operation.0.to_string()}}
+        });
+        let check = |rows: serde_json::Value| spec.check_inspect_configuration(
+            &r, &spec.profile, &id, &image, &serde_json::to_vec(&rows).unwrap());
+        assert_eq!(check(serde_json::json!([row.clone()])), Ok(()));
+        for (path, value) in [
+            ("/Id", serde_json::json!("c".repeat(64))),
+            ("/Image", serde_json::json!(format!("sha256:{}", "c".repeat(64)))),
+            ("/Name", serde_json::json!("/foreign")),
+            ("/Config/Image", serde_json::json!("synthetic:latest")),
+            ("/Config/Cmd", serde_json::json!(["/bin/other"])),
+            ("/Config/Entrypoint", serde_json::json!(["/inherited"])),
+            ("/Config/Labels/terrarium.workspace.bootstrap", serde_json::json!("foreign")),
+            ("/Config/Labels/terrarium.workspace.registration", serde_json::json!("foreign")),
+            ("/Config/Labels/terrarium.workspace.runtime", serde_json::json!("foreign")),
+        ] {
+            let mut changed = row.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert_eq!(check(serde_json::json!([changed])), Err(Reply::Quarantined), "{path}");
+        }
+        let mut missing = row.clone();
+        missing["Config"].as_object_mut().unwrap().remove("Entrypoint");
+        assert_eq!(check(serde_json::json!([missing])), Err(Reply::Quarantined));
+        assert_eq!(check(serde_json::json!([])), Err(Reply::Quarantined));
+        assert_eq!(check(serde_json::json!([row.clone(), row])), Err(Reply::Quarantined));
+        assert_eq!(spec.check_inspect_configuration(&r, &spec.profile, "short", &image, b"[]"), Err(Reply::Unauthorized));
     }
 }

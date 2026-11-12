@@ -31,6 +31,13 @@ negative tests. Every retry and recovery must recheck protected configuration,
 even when returning a stored bootstrap result. Digest equality alone supplies
 neither fresh runtime evidence nor runtime-profile approval.
 
+Receiver configuration inspection must match the bound full container ID,
+all three identity labels, the helper-derived name, exact pinned image reference
+and locally resolved immutable image ID. The configured command is Docker Cmd,
+not an inherited image entrypoint. Nonempty entrypoints are refused rather than
+silently executing a different program. Configuration parsing alone does not
+verify mount propagation, process identity or continued runtime ownership.
+
 The daemon first commits a FULL-synchronous immediate transaction recording its
 intent and reservation. The helper then syncs its immutable bootstrap intent
 and containing directory before creating anything. Every externally observed
