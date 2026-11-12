@@ -1231,12 +1231,16 @@ impl HostRegistry {
         if !e.conn.as_ref().is_some_and(|c| c.id == conn_id) {
             return;
         }
-        let ids: Vec<_> = e.pending_journal.keys().copied().collect();
+        // Oldest retry first. At most one SQLite attempt per tick prevents
+        // many blocked sessions from monopolizing the link's heartbeat loop.
+        let mut ids: Vec<_> = e.pending_journal.keys().copied().collect();
+        ids.sort_by_key(|id| e.pending_journal[id].next);
         for id in ids {
             let Some(mut pending) = e.pending_journal.remove(&id) else {
                 continue;
             };
             let now = Instant::now();
+            let attempt = !pending.exhausted && now < pending.deadline && now >= pending.next;
             if pending.exhausted || now >= pending.deadline {
                 pending.exhausted = true;
                 if let Some(c) = &e.conn {
@@ -1246,6 +1250,7 @@ impl HostRegistry {
                 if let Some(event) = pending.events.front().cloned() {
                     let terminal = event.is_terminal();
                     let error = matches!(event, SessionEvent::Error { .. });
+                    let lost = matches!(event, SessionEvent::Lost { .. });
                     if self.deliver_committed(host, e, id, event) {
                         pending.events.pop_front();
                         // Recalculate after removing an event, keeping the byte bound exact.
@@ -1255,7 +1260,13 @@ impl HostRegistry {
                             .map(|v| serde_json::to_vec(v).map_or(0, |v| v.len()))
                             .sum();
                         if terminal {
-                            Self::ack_terminal(e, id, error);
+                            if lost {
+                                if let Some(c) = &e.conn {
+                                    let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release { session: id }));
+                                }
+                            } else {
+                                Self::ack_terminal(e, id, error);
+                            }
                         }
                     } else {
                         // deliver_committed retained a second copy on busy. The
@@ -1268,6 +1279,9 @@ impl HostRegistry {
             }
             if !pending.events.is_empty() {
                 e.pending_journal.insert(id, pending);
+            }
+            if attempt {
+                break;
             }
         }
     }
@@ -2720,6 +2734,14 @@ mod tests {
                 .len(),
             3
         );
+        let deadline = reg.lock()["lab1"].pending_journal[&session.id()].deadline;
+        reg.lock().get_mut("lab1").unwrap().pending_journal.get_mut(&session.id()).unwrap().next = Instant::now();
+        reg.retry_journal("lab1", 1);
+        assert!(outgoing.try_recv().is_err());
+        assert!(session.rx.try_recv().is_err());
+        assert_eq!(reg.lock()["lab1"].pending_journal[&session.id()].events.len(), 3);
+        assert_eq!(reg.lock()["lab1"].pending_journal[&session.id()].deadline, deadline);
+        assert_eq!(reg.lock()["lab1"].pending_journal[&session.id()].backoff, Duration::from_millis(500));
         conn.execute_batch("ROLLBACK").unwrap();
         for _ in 0..3 {
             reg.lock()
@@ -2763,7 +2785,12 @@ mod tests {
     #[tokio::test]
     async fn journal_queue_exhaustion_closes_and_reconnect_replays() {
         for deadline in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+            crate::secrets::ensure_key(&conn, dir.path()).unwrap();
             let reg = Arc::new(registry("lab1", true));
+            reg.restore(dir.path()).unwrap();
+            reg.lock().get_mut("lab1").unwrap().resume_token = Some("retry-token".into());
             let mut session = reg
                 .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
                 .unwrap();
@@ -2794,6 +2821,23 @@ mod tests {
             assert!(session.rx.try_recv().is_err());
             assert!(reg.detach("lab1", 1).is_some());
             assert!(reg.lock()["lab1"].pending_journal.is_empty());
+            let hello = Hello {
+                path_kind: terrarium_host::protocol::PathKind::Posix,
+                protocol: PROTOCOL_VERSION,
+                host: "lab1".into(), version: "test".into(),
+                os: "linux".into(), arch: "x86_64".into(),
+                capabilities: HostCapabilities::default(), max_sessions: 8,
+                max_running_targets: None, update_failed: None,
+                resume: Some(terrarium_host::protocol::Resume {
+                    token: "retry-token".into(),
+                    sessions: vec![terrarium_host::protocol::ResumeOffer {
+                        session: session.id(), sent: 8, finished: false,
+                    }],
+                }),
+            };
+            let (welcome, _, count, _) = reg.attach(&host_row(), &hello, Conn { id: 2, tx: mpsc::unbounded_channel().0 }).unwrap();
+            assert_eq!(count, 1);
+            assert_eq!(welcome.resume[0].received, 0);
             // Replayed data starts at the unchanged committed offset.
             reg.on_data(
                 "lab1",
