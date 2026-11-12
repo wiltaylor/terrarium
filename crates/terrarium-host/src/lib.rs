@@ -51,6 +51,7 @@ pub mod outbox;
 pub mod prepare;
 pub mod protocol;
 pub mod selfupdate;
+pub mod update_journal;
 pub mod session;
 #[cfg(windows)]
 mod session_windows;
