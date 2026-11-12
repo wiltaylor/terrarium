@@ -289,6 +289,32 @@ pub fn set(
     get(t, project, slug)
 }
 
+/// Keep the dashboard deletion behavior without repacking an edited snap grid
+/// or validating unrelated stale references during monitor deletion.
+pub fn drop_dashboard_monitor(t: &mut Tx<'_>, project: &str, id: &str) -> ApiResult<()> {
+    let slug = dashboard_slug(t, project)?;
+    let Some(mut page) = list(t, project)?.into_iter().find(|p| p.slug == slug) else {
+        return Ok(());
+    };
+    let before = page.content.widgets.len();
+    page.content
+        .widgets
+        .retain(|w| w.monitor.as_deref() != Some(id));
+    if page.content.widgets.len() != before {
+        t.execute(
+            "UPDATE project_pages SET widgets=?1,updated_at=?2 WHERE project=?3 AND slug=?4",
+            params![
+                serde_json::to_string(&page.content.widgets)?,
+                now(),
+                project,
+                slug
+            ],
+        )?;
+        changed(t, project, &slug, false)?;
+    }
+    Ok(())
+}
+
 pub fn remove(t: &mut Tx<'_>, project: &str, slug: &str) -> ApiResult<()> {
     get(t, project, slug)?;
     t.execute(

@@ -16,7 +16,9 @@ WHERE NOT EXISTS(SELECT 1 FROM project_pages p WHERE p.project=c.project AND p.s
 
 INSERT INTO project_pages(project,slug,title,position,widgets,updated_at,updated_by)
 SELECT p.name,m.slug,'Dashboard',0,
-  '[{"id":"system-actions","kind":"actions","x":0,"y":0,"w":12,"h":2},{"id":"system-summary","kind":"monitor_summary","x":0,"y":2,"w":12,"h":2},{"id":"system-jobs","kind":"job_queue","x":0,"y":4,"w":12,"h":5},{"id":"system-eta","kind":"eta_accuracy","x":0,"y":9,"w":12,"h":5}]',
+  json_set('[{"kind":"actions","x":0,"y":0,"w":12,"h":2},{"kind":"monitor_summary","x":0,"y":2,"w":12,"h":2},{"kind":"job_queue","x":0,"y":4,"w":12,"h":5},{"kind":"eta_accuracy","x":0,"y":9,"w":12,"h":5}]',
+    '$[0].id',lower(hex(randomblob(16))),'$[1].id',lower(hex(randomblob(16))),
+    '$[2].id',lower(hex(randomblob(16))),'$[3].id',lower(hex(randomblob(16)))),
   COALESCE(d.updated_at,p.updated_at),COALESCE(d.updated_by,'migration')
 FROM projects p JOIN project_dashboard_pages m ON m.project=p.name LEFT JOIN dashboards d ON d.project=p.name;
 

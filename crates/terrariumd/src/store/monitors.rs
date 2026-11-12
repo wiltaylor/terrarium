@@ -634,11 +634,7 @@ pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<Monitor> {
     let m = get(t, id)?;
     t.execute("DELETE FROM monitors WHERE id = ?1", [id])?;
     super::threads::on_monitor_missing(t, &m.project, &m.def.name)?;
-    let (mut l, meta) = layout_of(t, &m.project)?;
-    if layout::drop_monitor(&mut l, id) {
-        let by = meta.map(|(_, by)| by).unwrap_or_else(|| "system".into());
-        write_layout(t, &m.project, &l, &by)?;
-    }
+    super::pages::drop_dashboard_monitor(t, &m.project, id)?;
     t.audit(
         "monitor.delete",
         &m.key(),
@@ -930,6 +926,11 @@ fn write_layout(t: &mut Tx<'_>, project: &str, l: &Layout, by: &str) -> ApiResul
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    for widget in &mut widgets {
+        if l.blocks.iter().any(|b| b.id == widget.id) {
+            widget.id = ulid::Ulid::new().to_string();
+        }
+    }
     let mut y = widgets.iter().map(|w| w.y + w.h).max().unwrap_or(0);
     let mut x = 0;
     for b in &l.blocks {
