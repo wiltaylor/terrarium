@@ -7,6 +7,8 @@ import assert from "node:assert/strict";
 const { chromium, firefox } = createRequire(process.env.PLAYWRIGHT_PACKAGE)("playwright");
 const output = process.env.SCREENSHOT_DIR ?? "/tmp/ter-956-evidence";
 const origin = "http://127.0.0.1:5956";
+// Headed browsers expose native scrollbar thumbs, unlike headless Chromium.
+const display = spawn("Xvfb", [":956", "-screen", "0", "1600x1200x24"], { stdio: "inherit" });
 const server = spawn(process.execPath, ["node_modules/vite/bin/vite.js", "--host", "127.0.0.1", "--port", "5956", "--strictPort"], { env: { ...process.env, VITE_MOCK: "1" }, stdio: "inherit" });
 const tests = [];
 try {
@@ -17,7 +19,7 @@ try {
   }
   for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     let browser;
-    try { browser = await engine.launch({ args: name === "chromium" ? ["--no-sandbox", "--disable-features=OverlayScrollbar"] : [] }); }
+    try { browser = await engine.launch({ headless: false, env: { ...process.env, DISPLAY: ":956" }, args: name === "chromium" ? ["--no-sandbox", "--disable-features=OverlayScrollbar"] : [] }); }
     catch (error) {
       if (name !== "firefox") throw error;
       console.log(`Firefox unavailable: ${error.message}`);
@@ -87,4 +89,4 @@ try {
   }
   await writeFile(`${output}/results.json`, JSON.stringify({ results: { tool: { name: "playwright" }, tests } }));
   console.log(`${tests.length} browser cases passed`);
-} finally { server.kill("SIGTERM"); }
+} finally { server.kill("SIGTERM"); display.kill("SIGTERM"); }
