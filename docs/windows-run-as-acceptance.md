@@ -79,6 +79,27 @@ restore proof nor switch authorization. Fixed-path existence/type/owner/SDDL/
 size/mtime and safe journal-status inventory remain pending. Unknown update
 status is a stop condition. Never read config/token contents to fill this gap.
 
+META-86 F7 subsequently recorded only metadata: `service.log` 41336 bytes,
+`update.json` absent, env directory present, config.toml 367 bytes, with owners/
+SDDL/mtimes retained there. Meta explicitly leaves pending/confirmed transaction
+status **UNKNOWN**. An absent pathname is not accepted as a transaction-status
+proof. Do not switch while that status or any shared-state effect is unreviewed.
+
+Candidate source audit (applies to the final candidate, not just old 7cdc823):
+
+| Code | Candidate entry point | Potential fixed/shared effect |
+|---|---|---|
+| F4 | `main.rs::main` before SCM dispatch | `private_dir(host)` can create the directory, set owner Administrators, replace its protected inheritable DACL with SYSTEM/Administrators FullControl, and propagate inherited ACEs. Then creates/appends fixed `host\service.log`. Inventory affected descendants, including config/token ACL metadata, not just the parent. No log deletion/truncation is approved. |
+| F5 | `main.rs::run`, `session.rs::private_dir/remove_private_files` | Creates/protects fixed `host\env` using the same owner/DACL operation and removes regular files with the Docker env prefix. Unknown/nonempty shared state is a stop condition. An empty directory check does not authorize later pruning. |
+| F6 | `windows_service_host.rs::serve`, `windows_update.rs::startup` | Reads fixed `host\update.json` before config loading. Depending on a matching prior transaction it can write the image's failed sidecar and remove a journal. Unknown/malformed or unreviewed state stops the switch proposal. |
+| F7 | `client.rs::after_welcome`, `selfupdate.rs::confirm`, `windows_update.rs` | Confirmation/collection is not disabled merely by `auto_update=false`. A matching pending transaction can persist the journal through `update.writing`; a later confirmed start can delete the previous version directory and journal. Service health-failure handling can restore SCM selection through rollback. No such production transaction mutation/collection is authorized. |
+| F8 | `client.rs::adopt_token`, `config.rs::write_secret` | A welcome may replace the token at the configured token_file and protect its parent. Only the new isolated fixture token path may be selected. Original token/config contents are never read, copied, logged or replaced by the proposal. |
+
+All fixed-path contents remain unread by inventory. Meta must explicitly accept
+the expanded bounded startup effects, exact before/after SDDL and retention/
+rollback semantics, or reject the deployment proposal. Existing source behavior
+is not authorization to prune, collect versions, delete logs or change ACLs.
+
 Let `COMMIT` be the final 40-hex pushed commit and `RUN_ID` the full UTC
 `YYYYMMDDTHHMMSSZ` execution ID. The fixture namespace is
 `ter272_<COMMIT[:8]>_<RUN_ID>`. A SAM name is

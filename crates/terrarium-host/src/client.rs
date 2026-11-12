@@ -2099,8 +2099,13 @@ pub(crate) mod tests {
                 "windows_run_as": { "account": "unqualified", "password": "non-secret-fixture" }
             });
             client.on_text(&request.to_string(), &tx).await.unwrap();
-            assert!(matches!(rx.recv().await,
-                Some(Outgoing::Control(HostFrame::Error { code: ErrorCode::Busy, .. }))));
+            assert!(matches!(
+                rx.recv().await,
+                Some(Outgoing::Control(HostFrame::Error {
+                    code: ErrorCode::Busy,
+                    ..
+                }))
+            ));
         }
         assert_eq!(client.session_count(), 0);
     }
