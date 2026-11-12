@@ -103,6 +103,15 @@ pub trait Engine: Send + Sync {
     ) -> BoxFut<'a, Res<ExecOut>>;
     /// The health of the container `id`.
     fn health<'a>(&'a self, id: &'a str) -> BoxFut<'a, Res<Health>>;
+    /// A daemon exit after this startup attempt, even when its supervisor
+    /// keeps the container healthy. Never return unredacted daemon output.
+    fn daemon_failure_since<'a>(
+        &'a self,
+        _id: &'a str,
+        _since: &'a str,
+    ) -> BoxFut<'a, Res<Option<String>>> {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 /// The image registry.

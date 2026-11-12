@@ -734,7 +734,8 @@ impl Updater {
                     .to_string();
                 self.exec_ok(&cur.id, hot_argv("cancel-pause", &[&left]))
                     .await?;
-                self.wait_hot_healthy_until(&cur.id, hold_deadline).await
+                self.wait_hot_healthy_until(&cur.id, hold_deadline, None)
+                    .await
             }
             .await;
             return Err(match recovery {
@@ -784,7 +785,8 @@ impl Updater {
                         .to_string();
                     self.exec_ok(&cur.id, hot_argv("start", &[old.trim(), &left]))
                         .await?;
-                    self.wait_hot_healthy_until(&cur.id, hold_deadline).await?;
+                    self.wait_hot_healthy_until(&cur.id, hold_deadline, None)
+                        .await?;
                     self.commit_with_retry(&cur.id, &[]).await
                 }
                 .await;
@@ -801,6 +803,7 @@ impl Updater {
         let attempt = async {
             let left = budget_left(switch_deadline, Duration::ZERO).map_err(Fail)?;
             let control_timeout = left.as_secs_f64().to_string();
+            let startup_since = Utc::now().to_rfc3339();
             self.step(
                 "start-daemon",
                 self.exec_ok(&cur.id, hot_argv("start", &[&release, &control_timeout])),
@@ -809,7 +812,7 @@ impl Updater {
             .await?;
             self.step(
                 "health",
-                self.wait_hot_healthy_until(&cur.id, switch_deadline),
+                self.wait_hot_healthy_until(&cur.id, switch_deadline, Some(&startup_since)),
                 Clone::clone,
             )
             .await?;
@@ -903,7 +906,8 @@ impl Updater {
                         .to_string();
                     self.exec_ok(&cur.id, hot_argv("start", &[old.trim(), &left]))
                         .await?;
-                    self.wait_hot_healthy_until(&cur.id, hold_deadline).await?;
+                    self.wait_hot_healthy_until(&cur.id, hold_deadline, None)
+                        .await?;
                     self.store
                         .set_image(&cur.image.reference)
                         .map_err(|e| e.to_string())?;
@@ -926,14 +930,22 @@ impl Updater {
         &self,
         id: &str,
         hold_deadline: tokio::time::Instant,
+        startup_since: Option<&str>,
     ) -> Res<String> {
         let deadline = (tokio::time::Instant::now() + self.cfg.health_timeout).min(hold_deadline);
         // Docker health can still describe the old daemon. Require a new live
         // status answer too, and allow the normal start-period failures.
         loop {
-            if matches!(self.engine.health(id).await?, Health::Healthy)
-                && self.exec_ok(id, status_argv()).await.is_ok()
+            if let Some(since) = startup_since
+                && let Some(reason) = self.engine.daemon_failure_since(id, since).await?
             {
+                return Err(reason);
+            }
+            let health = self.engine.health(id).await?;
+            if matches!(health, Health::Exited(_)) {
+                return Err("daemon container exited during startup (values hidden)".into());
+            }
+            if matches!(health, Health::Healthy) && self.exec_ok(id, status_argv()).await.is_ok() {
                 return Ok("new daemon healthy; RPC admission still held".into());
             }
             if tokio::time::Instant::now() >= deadline {

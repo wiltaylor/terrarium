@@ -18,6 +18,28 @@ SPEC.loader.exec_module(HOT)
 
 
 class HotSwapTests(unittest.TestCase):
+    def test_supervisor_reports_daemon_exit_one_immediately(self):
+        source = (ROOT / "docker/entrypoint.sh").read_text()
+        loop = source[source.index('RUN_DIR="'):]
+        supervisor = self.path / "crash-supervisor.sh"
+        supervisor.write_text('log() { printf "entrypoint: %s\\n" "$*" >&2; }\n' + loop)
+        daemon = self.path / "crashing-daemon"
+        daemon.write_text('#!/bin/sh\nprintf "Error: FOREIGN KEY constraint failed\\n" >&2\nexit 1\n')
+        daemon.chmod(0o700)
+        output = self.path / "crash.log"
+        with output.open("w") as log:
+            process = subprocess.Popen(["bash", str(supervisor), str(daemon)], stderr=log)
+        def cleanup():
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=10)
+        self.addCleanup(cleanup)
+        started = time.monotonic()
+        while "entrypoint: terrariumd ended (status 1)" not in output.read_text():
+            self.assertLess(time.monotonic() - started, 3, "daemon exit was not reported promptly")
+            time.sleep(.02)
+        self.assertIn("Error: FOREIGN KEY constraint failed", output.read_text())
+
     def test_ready_rejects_non_ok_health(self):
         HOT.main(["init"])
         for status, body in ((200, b'{"status":"activating"}'),

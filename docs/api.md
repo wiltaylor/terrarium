@@ -12642,6 +12642,12 @@ budget starts before `pause-daemon`: switching must finish before the
 15-minute runner hold limit minus a one-minute recovery reserve. Exceeding
 that safety deadline fails the update and attempts recovery of the old daemon.
 Once admission is attempted, errors never rewind the database automatically.
+During hot-swap health checks, the updater reads only startup-attempt-scoped
+supervisor logs. A daemon child exit fails the health step and starts rollback
+on the next poll (normally within two seconds), even if the container stays
+healthy while its entrypoint restarts the child. The run records an allowlisted
+error category from the last daemon error line, with all other values hidden.
+It never copies raw daemon logs into update history.
 
 The daemon sends the operator Inbox mail (from `system`):
 

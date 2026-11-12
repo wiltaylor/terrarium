@@ -941,6 +941,67 @@ impl Engine for Docker {
             Ok(health_of(&c))
         })
     }
+
+    fn daemon_failure_since<'a>(
+        &'a self,
+        id: &'a str,
+        since: &'a str,
+    ) -> BoxFut<'a, Res<Option<String>>> {
+        Box::pin(async move {
+            let (status, logs) = self
+                .call(
+                    Method::GET,
+                    &format!(
+                        "/containers/{}/logs?stdout=1&stderr=1&tail=64&since={}",
+                        enc(id),
+                        enc(since)
+                    ),
+                    None,
+                )
+                .await
+                .map_err(|_| "cannot read daemon startup log (values hidden)".to_owned())?;
+            if !status.is_success() {
+                return Err("cannot read daemon startup log (values hidden)".into());
+            }
+            let (stdout, stderr) = demux(&logs);
+            Ok(daemon_exit_reason(&stdout, &stderr))
+        })
+    }
+}
+
+/// Only fixed error categories from the last daemon line may leave the
+/// Docker log. The updater has no secret store with which to redact arbitrary
+/// values, so unknown text must stay hidden rather than using a heuristic.
+fn daemon_exit_reason(stdout: &str, stderr: &str) -> Option<String> {
+    let lines: Vec<_> = stderr.lines().collect();
+    let exit = lines.iter().rposition(|line| {
+        line.starts_with("entrypoint: terrariumd ended (")
+            || line.starts_with("entrypoint: terrariumd exited with status ")
+            || line.starts_with("entrypoint: terrariumd stopped (status ")
+    })?;
+    let last = lines[..exit]
+        .iter()
+        .rev()
+        .copied()
+        .find(|line| !line.trim().is_empty() && !line.starts_with("entrypoint: "))
+        .or_else(|| stdout.lines().rev().find(|line| !line.trim().is_empty()))
+        .unwrap_or("");
+    let category = [
+        "FOREIGN KEY constraint failed",
+        "UNIQUE constraint failed",
+        "NOT NULL constraint failed",
+        "database is locked",
+        "database disk image is malformed",
+        "disk I/O error",
+        "no such table",
+        "no such column",
+    ]
+    .into_iter()
+    .find(|phrase| last.contains(phrase))
+    .unwrap_or("[hidden]");
+    Some(format!(
+        "new daemon exited during startup; last error: {category} (values hidden)"
+    ))
 }
 
 /// The release payload is the final layer, by hot-swap-layout contract. A
@@ -1234,6 +1295,76 @@ mod tests {
             assert_eq!(value, serde_json::from_str::<Value>(answer).unwrap());
             server.await.unwrap();
         }
+    }
+
+    #[test]
+    fn daemon_exit_reason_keeps_only_fixed_categories_from_the_last_error() {
+        let logs = "entrypoint: started terrariumd (pid 1)\nError: FOREIGN KEY constraint failed: token=do-not-record\nentrypoint: terrariumd ended (status 1) after 0s; starting it again in 1s. The agent runners keep running.\nentrypoint: started terrariumd (pid 2)\n";
+        let reason = daemon_exit_reason("", logs).unwrap();
+        assert!(reason.contains("FOREIGN KEY constraint failed (values hidden)"));
+        assert!(!reason.contains("do-not-record"));
+        let unknown = daemon_exit_reason(
+            "password=do-not-record",
+            "entrypoint: terrariumd ended (status 1)\n",
+        )
+        .unwrap();
+        assert!(unknown.contains("last error: [hidden] (values hidden)"));
+        assert!(daemon_exit_reason("", "entrypoint: started terrariumd (pid 2)\n").is_none());
+        // Do not report an older error category when the last error differs.
+        let changed = daemon_exit_reason("", "FOREIGN KEY constraint failed\npassword=do-not-record\nentrypoint: terrariumd ended (status 1)\n").unwrap();
+        assert!(!changed.contains("FOREIGN KEY"));
+    }
+
+    #[tokio::test]
+    async fn startup_crash_log_is_scoped_and_redacted_through_the_docker_socket() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("docker.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let since = "2026-11-12T02:00:00.123456789+00:00";
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                header.push(stream.read_u8().await.unwrap());
+            }
+            let header = String::from_utf8(header).unwrap();
+            assert!(header.starts_with(&format!(
+                "GET /containers/daemon/logs?stdout=1&stderr=1&tail=64&since={} HTTP/1.1",
+                enc(since)
+            )));
+            let text = b"Error: FOREIGN KEY constraint failed: password=do-not-record\nentrypoint: terrariumd ended (status 1) after 0s; starting it again in 1s. The agent runners keep running.\n";
+            let mut frame = vec![2, 0, 0, 0];
+            frame.extend_from_slice(&(text.len() as u32).to_be_bytes());
+            frame.extend_from_slice(text);
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        frame.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            stream.write_all(&frame).await.unwrap();
+        });
+        let docker = Docker {
+            socket,
+            target: None,
+        };
+        let failure = tokio::time::timeout(
+            Duration::from_secs(3),
+            docker.daemon_failure_since("daemon", since),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert!(failure.contains("FOREIGN KEY constraint failed"));
+        assert!(!failure.contains("do-not-record"));
+        server.await.unwrap();
     }
 
     #[test]

@@ -20,6 +20,7 @@ struct State {
     jobs_hang: bool,
     fail_once: HashSet<String>,
     hot: bool,
+    startup_crash: bool,
     staged: Option<Image>,
     /// The containers by name.
     containers: HashMap<String, Container>,
@@ -330,6 +331,22 @@ impl Engine for Fake {
             Ok(Health::Healthy)
         })
     }
+
+    fn daemon_failure_since<'a>(
+        &'a self,
+        id: &'a str,
+        since: &'a str,
+    ) -> BoxFut<'a, Res<Option<String>>> {
+        Box::pin(async move {
+            assert!(chrono::DateTime::parse_from_rfc3339(since).is_ok());
+            let crashes = self.0.lock().unwrap().startup_crash;
+            if crashes && self.image_of(id).as_deref() == Some(new_ref().as_str()) {
+                self.call("daemon-exit-1".into());
+                return Ok(Some("new daemon exited during startup; last error: FOREIGN KEY constraint failed (values hidden)".into()));
+            }
+            Ok(None)
+        })
+    }
 }
 
 struct FakeRegistry;
@@ -536,6 +553,42 @@ async fn hot_swap_failed_health_restores_before_old_release_admission() {
             .position(|c| c == "hot:restore-database")
             .unwrap()
             < calls.iter().position(|c| c == "hot:commit").unwrap()
+    );
+}
+
+#[tokio::test]
+async fn hot_swap_daemon_exit_rolls_back_without_waiting_for_health_timeout() {
+    let mut r = rig();
+    Arc::get_mut(&mut r.updater).unwrap().cfg.health_timeout = Duration::from_secs(240);
+    {
+        let mut state = r.fake.0.lock().unwrap();
+        state.hot = true;
+        state.startup_crash = true;
+    }
+    // Docker health deliberately remains healthy: it still describes the
+    // supervisor/old process, not the just-crashed daemon child.
+    let run = tokio::time::timeout(
+        Duration::from_secs(3),
+        r.updater.run_now(RunKind::Update, "latest", "operator"),
+    )
+    .await
+    .expect("crash rollback must not wait four minutes");
+    assert_eq!(run.outcome, Outcome::RolledBack, "{run:#?}");
+    assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
+    let health = run.steps.iter().find(|s| s.name == "health").unwrap();
+    assert_eq!(health.state, StepState::Failed);
+    assert!(
+        health
+            .detail
+            .contains("FOREIGN KEY constraint failed (values hidden)")
+    );
+    let calls = r.fake.calls();
+    assert!(
+        calls.iter().position(|c| c == "daemon-exit-1").unwrap()
+            < calls
+                .iter()
+                .position(|c| c == "hot:restore-database")
+                .unwrap()
     );
 }
 
