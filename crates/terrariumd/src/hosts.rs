@@ -803,10 +803,15 @@ impl HostRegistry {
                 let Some(registry) = registry.upgrade() else {
                     return;
                 };
-                let hosts: Vec<_> = registry.lock().iter()
+                let hosts: Vec<_> = registry
+                    .lock()
+                    .iter()
                     .filter(|(_, e)| !e.pending_lost.is_empty())
-                    .map(|(host, _)| host.clone()).collect();
-                for host in hosts { registry.drive_lost(&host); }
+                    .map(|(host, _)| host.clone())
+                    .collect();
+                for host in hosts {
+                    registry.drive_lost(&host);
+                }
                 if let Err(error) = registry.prune_unowned(chrono::Utc::now().timestamp() - 300) {
                     warn!(%error, "cannot prune orphan host replay");
                 }
@@ -1183,9 +1188,15 @@ impl HostRegistry {
                     });
                 }
             } else {
-                lost.push((id, e.pending_lost.get(&id).cloned().unwrap_or_else(|| SessionEvent::Lost {
-                    message: "the host agent no longer holds the session".into(),
-                })));
+                lost.push((
+                    id,
+                    e.pending_lost
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| SessionEvent::Lost {
+                            message: "the host agent no longer holds the session".into(),
+                        }),
+                ));
             }
         }
         resume.sort_by_key(|r| r.session);
@@ -1252,9 +1263,12 @@ impl HostRegistry {
         {
             for (&id, s) in &e.sessions {
                 if !s.terminal {
-                    e.pending_lost.entry(id).or_insert_with(|| SessionEvent::Lost {
-                        message: "the host agent did not come back within the resume grace".into(),
-                    });
+                    e.pending_lost
+                        .entry(id)
+                        .or_insert_with(|| SessionEvent::Lost {
+                            message: "the host agent did not come back within the resume grace"
+                                .into(),
+                        });
                 }
             }
         }
@@ -1266,7 +1280,9 @@ impl HostRegistry {
         {
             let mut g = self.lock();
             let Some(e) = g.get_mut(host) else { return };
-            if e.pending_lost.is_empty() || e.lost_retry_running { return; }
+            if e.pending_lost.is_empty() || e.lost_retry_running {
+                return;
+            }
             e.lost_retry_running = true;
         }
         let registry = self.clone();
@@ -1286,27 +1302,44 @@ impl HostRegistry {
 
     fn finish_pending_lost(&self, host: &str, timeout: Duration) {
         let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
-        let result = retry_metadata_for(|| {
-            let mut g = self.lock();
-            let Some(e) = g.get_mut(host) else { return Ok(()) };
-            // Output already retained on a live link must finish first.
-            if e.conn.is_some() && e.pending_lost.keys().any(|id| e.pending_journal.contains_key(id)) {
-                return Err(ApiError::new(Code::ResourceBusy, "terminal event waits for retained output"));
-            }
-            let mut lost: Vec<_> = e.pending_lost.iter()
-                .filter(|(id, _)| e.sessions.get(id).is_some_and(|s| !s.terminal))
-                .map(|(id, event)| (*id, event.clone())).collect();
-            lost.sort_by_key(|(id, _)| *id);
-            let token = e.resume_token.clone();
-            self.reconcile_lost(host, e, &lost, &[], token)?;
-            e.pending_lost.retain(|id, _| e.sessions.get(id).is_some_and(|s| !s.terminal));
-            if let Some(c) = &e.conn {
-                for (session, _) in lost {
-                    let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release { session }));
+        let result = retry_metadata_for(
+            || {
+                let mut g = self.lock();
+                let Some(e) = g.get_mut(host) else {
+                    return Ok(());
+                };
+                // Output already retained on a live link must finish first.
+                if e.conn.is_some()
+                    && e.pending_lost
+                        .keys()
+                        .any(|id| e.pending_journal.contains_key(id))
+                {
+                    return Err(ApiError::new(
+                        Code::ResourceBusy,
+                        "terminal event waits for retained output",
+                    ));
                 }
-            }
-            Ok(())
-        }, |error| error.code == Code::ResourceBusy, timeout);
+                let mut lost: Vec<_> = e
+                    .pending_lost
+                    .iter()
+                    .filter(|(id, _)| e.sessions.get(id).is_some_and(|s| !s.terminal))
+                    .map(|(id, event)| (*id, event.clone()))
+                    .collect();
+                lost.sort_by_key(|(id, _)| *id);
+                let token = e.resume_token.clone();
+                self.reconcile_lost(host, e, &lost, &[], token)?;
+                e.pending_lost
+                    .retain(|id, _| e.sessions.get(id).is_some_and(|s| !s.terminal));
+                if let Some(c) = &e.conn {
+                    for (session, _) in lost {
+                        let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release { session }));
+                    }
+                }
+                Ok(())
+            },
+            |error| error.code == Code::ResourceBusy,
+            timeout,
+        );
         if let Err(error) = result {
             warn!(host, %error, "terminal host event retry exhausted; retained for next sweep");
         }
@@ -1335,7 +1368,9 @@ impl HostRegistry {
     fn on_data(&self, host: &str, f: DataFrame) {
         let mut g = self.lock();
         let Some(entry) = g.get_mut(host) else { return };
-        if entry.pending_lost.contains_key(&f.session) { return; }
+        if entry.pending_lost.contains_key(&f.session) {
+            return;
+        }
         let Some(s) = entry.sessions.get_mut(&f.session) else {
             debug!(host, session = f.session, "data for an unknown session");
             return;
@@ -1567,7 +1602,9 @@ impl HostRegistry {
         let mut g = self.lock();
         let Some(e) = g.get_mut(host) else { return };
         let terminal = event.is_terminal();
-        if e.pending_lost.contains_key(&session) { return; }
+        if e.pending_lost.contains_key(&session) {
+            return;
+        }
         let error = matches!(event, SessionEvent::Error { .. });
         if !self.deliver(host, e, session, event) || !terminal {
             return;
@@ -1594,10 +1631,14 @@ impl HostRegistry {
     /// The consumer dropped a session before its end: abandon it.
     fn abandon(self: &Arc<Self>, host: &str, session: SessionId) {
         let mut g = self.lock();
-        if let Some(e) = g.get_mut(host) && e.sessions.get(&session).is_some_and(|s| !s.terminal) {
-            e.pending_lost.entry(session).or_insert_with(|| SessionEvent::Lost {
+        if let Some(e) = g.get_mut(host)
+            && e.sessions.get(&session).is_some_and(|s| !s.terminal)
+        {
+            e.pending_lost
+                .entry(session)
+                .or_insert_with(|| SessionEvent::Lost {
                     message: "the session consumer abandoned the run".into(),
-            });
+                });
         }
         drop(g);
         self.drive_lost(host);
@@ -3433,13 +3474,25 @@ mod tests {
     fn lost_test_hello(token: &str, ids: &[SessionId]) -> Hello {
         Hello {
             path_kind: terrarium_host::protocol::PathKind::Posix,
-            protocol: PROTOCOL_VERSION, host: "lab1".into(), version: "test".into(),
-            os: "linux".into(), arch: "x86_64".into(), capabilities: HostCapabilities::default(),
-            max_sessions: 8, max_running_targets: None, update_failed: None,
+            protocol: PROTOCOL_VERSION,
+            host: "lab1".into(),
+            version: "test".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            capabilities: HostCapabilities::default(),
+            max_sessions: 8,
+            max_running_targets: None,
+            update_failed: None,
             resume: Some(terrarium_host::protocol::Resume {
-                token: token.into(), sessions: ids.iter().map(|id| terrarium_host::protocol::ResumeOffer {
-                    session: *id, sent: 0, finished: false,
-                }).collect(),
+                token: token.into(),
+                sessions: ids
+                    .iter()
+                    .map(|id| terrarium_host::protocol::ResumeOffer {
+                        session: *id,
+                        sent: 0,
+                        finished: false,
+                    })
+                    .collect(),
             }),
         }
     }
@@ -3454,25 +3507,49 @@ mod tests {
             let reg = Arc::new(registry("lab1", true));
             reg.restore_with_db(dir.path(), db.clone()).unwrap();
             reg.lock().get_mut("lab1").unwrap().resume_token = Some("offline-token".into());
-            let mut session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+            let mut session = reg
+                .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+                .unwrap();
             let generation = reg.detach("lab1", 1).unwrap();
             let (release, writer) = hold_writer(db.clone());
-            if expiry { reg.expire("lab1", generation); } else { session.abandon(); }
+            if expiry {
+                reg.expire("lab1", generation);
+            } else {
+                session.abandon();
+            }
             assert!(reg.lock()["lab1"].pending_journal.is_empty());
             assert!(reg.lock()["lab1"].pending_lost.contains_key(&session.id()));
             assert!(!reg.lock()["lab1"].sessions[&session.id()].terminal);
             assert!(session.rx.try_recv().is_err());
             release.send(()).unwrap();
             writer.join().unwrap();
-            let event = tokio::time::timeout(Duration::from_secs(5), session.rx.recv()).await.unwrap().unwrap();
+            let event = tokio::time::timeout(Duration::from_secs(5), session.rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
             assert!(matches!(event, SessionEvent::Lost { .. }));
             assert!(session.rx.try_recv().is_err());
             reg.finish_pending_lost("lab1", Duration::ZERO);
             assert!(session.rx.try_recv().is_err());
             let journal = resume::Journal::with_db(dir.path(), db);
-            assert_eq!(journal.scan::<SessionEvent>(&format!("event/lab1/{}/", session.id())).unwrap().len(), 1);
+            assert_eq!(
+                journal
+                    .scan::<SessionEvent>(&format!("event/lab1/{}/", session.id()))
+                    .unwrap()
+                    .len(),
+                1
+            );
             let hello = lost_test_hello("offline-token", &[session.id()]);
-            let (welcome, _, count, _) = reg.attach(&host_row(), &hello, Conn { id: 2, tx: mpsc::unbounded_channel().0 }).unwrap();
+            let (welcome, _, count, _) = reg
+                .attach(
+                    &host_row(),
+                    &hello,
+                    Conn {
+                        id: 2,
+                        tx: mpsc::unbounded_channel().0,
+                    },
+                )
+                .unwrap();
             assert_eq!(count, 0);
             assert!(welcome.resume.is_empty());
             assert!(session.rx.try_recv().is_err());
@@ -3488,23 +3565,56 @@ mod tests {
         let reg = Arc::new(registry("lab1", true));
         reg.restore_with_db(dir.path(), db.clone()).unwrap();
         reg.lock().get_mut("lab1").unwrap().resume_token = Some("offline-token".into());
-        let mut session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let mut session = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
         reg.detach("lab1", 1).unwrap();
-        reg.lock().get_mut("lab1").unwrap().pending_lost.insert(session.id(), SessionEvent::Lost { message: "expired".into() });
+        reg.lock().get_mut("lab1").unwrap().pending_lost.insert(
+            session.id(),
+            SessionEvent::Lost {
+                message: "expired".into(),
+            },
+        );
         let hello = lost_test_hello("offline-token", &[session.id()]);
         db.read_now(|_| {
             reg.finish_pending_lost("lab1", Duration::ZERO);
             assert!(reg.lock()["lab1"].pending_lost.contains_key(&session.id()));
-            assert_eq!(reg.try_attach(&host_row(), &hello, Conn { id: 2, tx: mpsc::unbounded_channel().0 }).err().unwrap().code, Code::ResourceBusy);
+            assert_eq!(
+                reg.try_attach(
+                    &host_row(),
+                    &hello,
+                    Conn {
+                        id: 2,
+                        tx: mpsc::unbounded_channel().0
+                    }
+                )
+                .err()
+                .unwrap()
+                .code,
+                Code::ResourceBusy
+            );
             assert!(reg.lock()["lab1"].conn.is_none());
             assert!(session.rx.try_recv().is_err());
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         // This is the same operation driven by the independent 30-second sweep.
         reg.finish_pending_lost("lab1", Duration::ZERO);
-        assert!(matches!(session.rx.try_recv().unwrap(), SessionEvent::Lost { .. }));
+        assert!(matches!(
+            session.rx.try_recv().unwrap(),
+            SessionEvent::Lost { .. }
+        ));
         assert!(reg.lock()["lab1"].pending_lost.is_empty());
-        let (welcome, _, count, _) = reg.attach(&host_row(), &hello, Conn { id: 2, tx: mpsc::unbounded_channel().0 }).unwrap();
+        let (welcome, _, count, _) = reg
+            .attach(
+                &host_row(),
+                &hello,
+                Conn {
+                    id: 2,
+                    tx: mpsc::unbounded_channel().0,
+                },
+            )
+            .unwrap();
         assert_eq!(count, 0);
         assert!(welcome.resume.is_empty());
         assert!(session.rx.try_recv().is_err());
@@ -3519,16 +3629,34 @@ mod tests {
             let db = crate::db::Db::new(conn, crate::events::EventHub::default());
             let reg = Arc::new(registry("lab1", true));
             reg.restore_with_db(dir.path(), db.clone()).unwrap();
-            let mut first = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
-            let mut second = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
-            let failing_row = if final_host_row { "host/lab1".to_owned() } else { format!("event/lab1/{}/{:020}", second.id(), 1) };
+            let mut first = reg
+                .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+                .unwrap();
+            let mut second = reg
+                .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+                .unwrap();
+            let failing_row = if final_host_row {
+                "host/lab1".to_owned()
+            } else {
+                format!("event/lab1/{}/{:020}", second.id(), 1)
+            };
             db.read_now(|c| {
                 c.execute_batch(&format!("CREATE TRIGGER fail_attach BEFORE INSERT ON host_resume WHEN NEW.id='{failing_row}' BEGIN SELECT RAISE(ABORT, 'injected attach failure'); END"))?;
                 Ok(())
             }).unwrap();
             let mut hello = lost_test_hello("unused", &[]);
             hello.resume = None;
-            assert!(reg.attach(&host_row(), &hello, Conn { id: 2, tx: mpsc::unbounded_channel().0 }).is_err());
+            assert!(
+                reg.attach(
+                    &host_row(),
+                    &hello,
+                    Conn {
+                        id: 2,
+                        tx: mpsc::unbounded_channel().0
+                    }
+                )
+                .is_err()
+            );
             assert_eq!(reg.lock()["lab1"].conn.as_ref().unwrap().id, 1);
             assert!(reg.lock()["lab1"].resume_token.is_none());
             for id in [first.id(), second.id()] {
@@ -3538,17 +3666,48 @@ mod tests {
             assert!(first.rx.try_recv().is_err());
             assert!(second.rx.try_recv().is_err());
             let journal = resume::Journal::with_db(dir.path(), db.clone());
-            assert!(journal.scan::<SessionEvent>("event/lab1/").unwrap().is_empty());
+            assert!(
+                journal
+                    .scan::<SessionEvent>("event/lab1/")
+                    .unwrap()
+                    .is_empty()
+            );
             let saved = journal.load::<SavedHost>("host/lab1").unwrap().unwrap();
-            assert!(saved.sessions.values().all(|s| !s.terminal && s.events == 0));
-            db.read_now(|c| { c.execute_batch("DROP TRIGGER fail_attach")?; Ok(()) }).unwrap();
-            reg.attach(&host_row(), &hello, Conn { id: 2, tx: mpsc::unbounded_channel().0 }).unwrap();
+            assert!(
+                saved
+                    .sessions
+                    .values()
+                    .all(|s| !s.terminal && s.events == 0)
+            );
+            db.read_now(|c| {
+                c.execute_batch("DROP TRIGGER fail_attach")?;
+                Ok(())
+            })
+            .unwrap();
+            reg.attach(
+                &host_row(),
+                &hello,
+                Conn {
+                    id: 2,
+                    tx: mpsc::unbounded_channel().0,
+                },
+            )
+            .unwrap();
             assert_eq!(reg.lock()["lab1"].conn.as_ref().unwrap().id, 2);
-            assert!(matches!(first.rx.try_recv().unwrap(), SessionEvent::Lost { .. }));
-            assert!(matches!(second.rx.try_recv().unwrap(), SessionEvent::Lost { .. }));
+            assert!(matches!(
+                first.rx.try_recv().unwrap(),
+                SessionEvent::Lost { .. }
+            ));
+            assert!(matches!(
+                second.rx.try_recv().unwrap(),
+                SessionEvent::Lost { .. }
+            ));
             assert!(first.rx.try_recv().is_err());
             assert!(second.rx.try_recv().is_err());
-            assert_eq!(journal.scan::<SessionEvent>("event/lab1/").unwrap().len(), 2);
+            assert_eq!(
+                journal.scan::<SessionEvent>("event/lab1/").unwrap().len(),
+                2
+            );
         }
     }
 
