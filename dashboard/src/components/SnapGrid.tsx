@@ -32,6 +32,10 @@ export function SnapGrid<T extends GridWidget>(props: SnapGridProps<T>) {
     });
   }
   let gesture: { id: string; resize: boolean; x: number; y: number; widgets: readonly T[] } | undefined;
+  function change(widgets: readonly T[], id: string, patch: Partial<Pick<GridWidget, "x" | "y" | "w" | "h">>, resize: boolean) {
+    props.onChange?.(placeWidget(widgets, id, patch).map((item) =>
+      resize && item.id === id && autoHeight(item) ? { ...item, auto_height: false } : item));
+  }
   function start(event: PointerEvent, id: string, resize: boolean) {
     if (!props.editing || event.button !== 0) return;
     event.preventDefault();
@@ -46,18 +50,18 @@ export function SnapGrid<T extends GridWidget>(props: SnapGridProps<T>) {
     const widget = active.widgets.find((item) => item.id === active.id)!;
     const dx = snapDelta(event.clientX - active.x, (grid.getBoundingClientRect().width + GRID_GAP) / 12);
     const dy = snapDelta(event.clientY - active.y, ROW_HEIGHT + GRID_GAP);
-    props.onChange?.(placeWidget(active.widgets, active.id, active.resize
+    change(active.widgets, active.id, active.resize
       ? { w: widget.w + dx, h: widget.h + dy }
-      : { x: widget.x + dx, y: widget.y + dy }));
+      : { x: widget.x + dx, y: widget.y + dy }, active.resize);
   }
   function key(event: KeyboardEvent, widget: T) {
     if (!props.editing) return;
     const delta = ({ ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] } as Record<string, readonly [number, number]>)[event.key];
     if (!delta) return;
     event.preventDefault();
-    props.onChange?.(placeWidget(props.widgets, widget.id, event.shiftKey
+    change(props.widgets, widget.id, event.shiftKey
       ? { w: widget.w + delta[0], h: widget.h + delta[1] }
-      : { x: widget.x + delta[0], y: widget.y + delta[1] }));
+      : { x: widget.x + delta[0], y: widget.y + delta[1] }, event.shiftKey);
   }
   return <div ref={grid} class="snap-grid" aria-label="Widget layout">
     <For each={layout().map((widget) => widget.id)}>{(id) => {

@@ -39,10 +39,36 @@ function mount(editing = true) {
 
 it("moves with arrows and resizes with Shift+arrows, leaving read mode inert", () => {
   const { root, widgets } = mount();
+  const button = root.querySelector('button')!;
+  button.focus();
   root.querySelector('button')!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
   expect(widgets()[0]!.x).toBe(1);
   root.querySelector('button')!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", shiftKey: true, bubbles: true }));
   expect(widgets()[0]!.h).toBe(3);
+  expect(document.activeElement).toBe(button);
+});
+
+it("handles pointer move, corner resize, and cancellation through captured controls", () => {
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ width: 1192 } as DOMRect);
+  Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value: vi.fn() });
+  const { root, widgets } = mount();
+  function pointer(button: Element, type: string, x: number, y: number) {
+    const event = new MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true });
+    Object.defineProperty(event, "pointerId", { value: 1 });
+    button.dispatchEvent(event);
+  }
+  const move = root.querySelector('button')!;
+  pointer(move, "pointerdown", 0, 0);
+  pointer(move, "pointerup", 151, 73);
+  expect(widgets()[0]).toMatchObject({ x: 2, y: 1 });
+  const resize = root.querySelectorAll('button')[1]!;
+  pointer(resize, "pointerdown", 0, 0);
+  pointer(resize, "pointerup", 100, 72);
+  expect(widgets()[0]).toMatchObject({ w: 4, h: 3 });
+  pointer(move, "pointerdown", 0, 0);
+  pointer(move, "pointercancel", 0, 0);
+  pointer(move, "pointerup", 400, 400);
+  expect(widgets()[0]).toMatchObject({ x: 2, y: 1 });
 });
 
 it("has no editing controls in read mode", () => {
