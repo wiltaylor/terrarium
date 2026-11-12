@@ -27,8 +27,16 @@ async fn issue_closure_requires_own_project_admin_and_fixed_repo_secret() {
     td.agent("terrarium", "worker", json!({})).await;
     let route = "/api/projects/terrarium/github-issues/close-done";
     let body = json!({"repo":"repo","dry_run":true});
-    td.post_as("terrarium/lead", route, json!({"repo":"repo","issue":20,"version":"0.1.0-alpha"})).await.err(403,"forbidden");
-    td.post(route,json!({"repo":"repo","issue":20})).await.err(422,"invalid");
+    td.post_as(
+        "terrarium/lead",
+        route,
+        json!({"repo":"repo","issue":20,"version":"0.1.0-alpha"}),
+    )
+    .await
+    .err(403, "forbidden");
+    td.post(route, json!({"repo":"repo","issue":20}))
+        .await
+        .err(422, "invalid");
     for who in ["proj/lead", "terrarium/worker", "ops/sys"] {
         td.post_as(who, route, body.clone())
             .await

@@ -78,11 +78,14 @@ pub async fn close_done(
     let published = remote_tags(state, &repo).await?;
     validate_override(&explicit, &published)?;
     let (p, name, override_version) = (project.clone(), repo.name.clone(), explicit.clone());
-    let (candidates, after, closed) = state.db.read(move |c| {
-        let candidates = candidates_with(c, &p, &name, published, override_version)?;
-        let (after, closed) = progress(c, &p, &name)?;
-        Ok((candidates, after, closed))
-    }).await?;
+    let (candidates, after, closed) = state
+        .db
+        .read(move |c| {
+            let candidates = candidates_with(c, &p, &name, published, override_version)?;
+            let (after, closed) = progress(c, &p, &name)?;
+            Ok((candidates, after, closed))
+        })
+        .await?;
     let mut headers = reqwest::header::HeaderMap::new();
     let mut auth = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token.as_str()))
         .map_err(|_| ApiError::invalid("invalid github-issues-token"))?;
@@ -116,10 +119,13 @@ pub async fn close_done(
         if !dry_run && explicit.is_none() {
             let (p, n) = (project.clone(), repo.name.clone());
             let completed = outcome.is_ok();
-            state.db.write(actor.label(), move |t| {
-                record_progress(t, &p, &n, number, completed)?;
-                Ok(())
-            }).await?;
+            state
+                .db
+                .write(actor.label(), move |t| {
+                    record_progress(t, &p, &n, number, completed)?;
+                    Ok(())
+                })
+                .await?;
         }
         if outcome? {
             result.push(Closure {
@@ -132,26 +138,53 @@ pub async fn close_done(
     Ok(result)
 }
 
-fn validate_override(explicit: &Option<(u64,String)>, published: &BTreeSet<String>) -> ApiResult<()> {
-    if let Some((number,version)) = explicit {
+fn validate_override(
+    explicit: &Option<(u64, String)>,
+    published: &BTreeSet<String>,
+) -> ApiResult<()> {
+    if let Some((number, version)) = explicit {
         if *number == 0 || !published.contains(&format!("v{version}")) {
-            return Err(ApiError::invalid("explicit issue version must name an existing published tag vV"));
+            return Err(ApiError::invalid(
+                "explicit issue version must name an existing published tag vV",
+            ));
         }
     }
     Ok(())
 }
 
-fn progress(c: &Connection, project: &str, repo: &str) -> ApiResult<(u64,BTreeSet<u64>)> {
-    let after = c.query_row("SELECT after_issue FROM github_closure_cursor WHERE project=?1 AND repo=?2", params![project,repo], |r| r.get::<_,u64>(0)).optional()?.unwrap_or(0);
+fn progress(c: &Connection, project: &str, repo: &str) -> ApiResult<(u64, BTreeSet<u64>)> {
+    let after = c
+        .query_row(
+            "SELECT after_issue FROM github_closure_cursor WHERE project=?1 AND repo=?2",
+            params![project, repo],
+            |r| r.get::<_, u64>(0),
+        )
+        .optional()?
+        .unwrap_or(0);
     let mut q = c.prepare("SELECT issue FROM github_closed_issues WHERE project=?1 AND repo=?2 ORDER BY issue LIMIT 20001")?;
-    let closed = q.query_map(params![project,repo], |r| r.get::<_,u64>(0))?.collect::<Result<BTreeSet<_>,_>>()?;
-    if closed.len() > 20000 { return Err(ApiError::invalid("closed issue cache exceeds 20000 issues")); }
-    Ok((after,closed))
+    let closed = q
+        .query_map(params![project, repo], |r| r.get::<_, u64>(0))?
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if closed.len() > 20000 {
+        return Err(ApiError::invalid("closed issue cache exceeds 20000 issues"));
+    }
+    Ok((after, closed))
 }
 
-fn record_progress(c: &Connection, project: &str, repo: &str, number: u64, completed: bool) -> ApiResult<()> {
+fn record_progress(
+    c: &Connection,
+    project: &str,
+    repo: &str,
+    number: u64,
+    completed: bool,
+) -> ApiResult<()> {
     c.execute("INSERT INTO github_closure_cursor(project,repo,after_issue) VALUES (?1,?2,?3) ON CONFLICT(project,repo) DO UPDATE SET after_issue=excluded.after_issue",params![project,repo,number])?;
-    if completed { c.execute("INSERT OR IGNORE INTO github_closed_issues(project,repo,issue) VALUES (?1,?2,?3)",params![project,repo,number])?; }
+    if completed {
+        c.execute(
+            "INSERT OR IGNORE INTO github_closed_issues(project,repo,issue) VALUES (?1,?2,?3)",
+            params![project, repo, number],
+        )?;
+    }
     Ok(())
 }
 
@@ -160,12 +193,33 @@ async fn remote_tags(state: &Shared, repo: &repos::Repo) -> ApiResult<BTreeSet<S
     let url = repo.url.clone();
     let dir = state.state_dir.clone();
     let out = tokio::task::spawn_blocking(move || {
-        let runner = crate::git::GitRunner::new(&url, secret, secrets::RunDirs::new(&dir), std::time::Duration::from_secs(20))?;
-        runner.run(&dir, &["ls-remote", "--tags", "--refs", "--upload-pack=git-upload-pack", "--", &url])
-    }).await.map_err(|_| ApiError::new(Code::Unavailable,"published tag task failed"))?
-        .map_err(|_| ApiError::new(Code::Unavailable,"cannot read published repository tags"))?;
-    let tags: BTreeSet<_> = out.lines().filter_map(|l| l.split_once('\t'))
-        .filter_map(|(_,r)| r.strip_prefix("refs/tags/")).map(str::to_owned).collect();
+        let runner = crate::git::GitRunner::new(
+            &url,
+            secret.map(|(_, value)| value),
+            secrets::RunDirs::new(&dir),
+            std::time::Duration::from_secs(20),
+        )?;
+        runner.run(
+            &dir,
+            &[
+                "ls-remote",
+                "--tags",
+                "--refs",
+                "--upload-pack=git-upload-pack",
+                "--",
+                &url,
+            ],
+        )
+    })
+    .await
+    .map_err(|_| ApiError::new(Code::Unavailable, "published tag task failed"))?
+    .map_err(|_| ApiError::new(Code::Unavailable, "cannot read published repository tags"))?;
+    let tags: BTreeSet<_> = out
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .filter_map(|(_, r)| r.strip_prefix("refs/tags/"))
+        .map(str::to_owned)
+        .collect();
     if tags.len() > 10000 {
         return Err(ApiError::invalid("too many published tags"));
     }
@@ -297,7 +351,11 @@ fn candidates_with(
                     .entry(n)
                     .or_default()
                     .push((id.clone(), version.clone()));
-                if issues.len() > 20000 { return Err(ApiError::invalid("issue closure scan exceeds 20000 issue identities")); }
+                if issues.len() > 20000 {
+                    return Err(ApiError::invalid(
+                        "issue closure scan exceeds 20000 issue identities",
+                    ));
+                }
             }
         }
     }
@@ -633,10 +691,13 @@ mod tests {
     #[test]
     fn legacy_override_needs_the_exact_published_tag() {
         let published = BTreeSet::from(["v0.58.0-alpha".into()]);
-        assert!(validate_override(&Some((20,"0.58.0-alpha".into())),&published).is_ok());
-        assert!(validate_override(&Some((20,"0.58.0".into())),&published).is_err());
-        assert!(validate_override(&Some((0,"0.58.0-alpha".into())),&published).is_err());
-        assert_eq!(published_tag("0.58.0",&published).as_deref(),Some("v0.58.0-alpha"));
+        assert!(validate_override(&Some((20, "0.58.0-alpha".into())), &published).is_ok());
+        assert!(validate_override(&Some((20, "0.58.0".into())), &published).is_err());
+        assert!(validate_override(&Some((0, "0.58.0-alpha".into())), &published).is_err());
+        assert_eq!(
+            published_tag("0.58.0", &published).as_deref(),
+            Some("v0.58.0-alpha")
+        );
     }
 
     #[test]
@@ -647,18 +708,31 @@ mod tests {
         {
             let mut c = Connection::open(&path).unwrap();
             crate::db::migrate(&mut c).unwrap();
-            let mut t = crate::db::Tx::for_test(c.transaction().unwrap(),"operator");
-            projects::create(&mut t,&projects::NewProject { name:"p".into(),..Default::default() },"api").unwrap();
+            let mut t = crate::db::Tx::for_test(c.transaction().unwrap(), "operator");
+            projects::create(
+                &mut t,
+                &projects::NewProject {
+                    name: "p".into(),
+                    ..Default::default()
+                },
+                "api",
+            )
+            .unwrap();
             // Complete issue 1, fail issue 2: the next run must start at 3.
-            record_progress(&t,"p","repo",1,true).unwrap();
-            record_progress(&t,"p","repo",2,false).unwrap();
+            record_progress(&t, "p", "repo", 1, true).unwrap();
+            record_progress(&t, "p", "repo", 2, false).unwrap();
             t.commit_for_test().unwrap();
         }
         let c = Connection::open(&path).unwrap();
-        let (after,closed) = progress(&c,"p","repo").unwrap();
-        assert_eq!(after,2);
-        assert_eq!(closed,BTreeSet::from([1]));
-        let batch = select_batch((1..=4).map(|n|(n,String::new())).collect(),after,&closed,false);
-        assert_eq!(batch.iter().map(|(n,_)|*n).collect::<Vec<_>>(),[3,4,2]);
+        let (after, closed) = progress(&c, "p", "repo").unwrap();
+        assert_eq!(after, 2);
+        assert_eq!(closed, BTreeSet::from([1]));
+        let batch = select_batch(
+            (1..=4).map(|n| (n, String::new())).collect(),
+            after,
+            &closed,
+            false,
+        );
+        assert_eq!(batch.iter().map(|(n, _)| *n).collect::<Vec<_>>(), [3, 4, 2]);
     }
 }
