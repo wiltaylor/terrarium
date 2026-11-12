@@ -33,6 +33,8 @@
 #                terrarium-host and terrarium-host-helper assets out of this stage.
 
 ARG RUST_IMAGE=rust:1.97-trixie
+# Same Rust patch on bookworm for the audited mingw toolchain package pins.
+ARG WINDOWS_RUST_IMAGE=rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
 # The git ref of the build (crates/terrarium-version): `<commit>` or
 # `<commit>-dirty`. The build context has no .git, so the caller passes it:
 # `just docker::image-build` and `just host::build` (scripts/build-ref.sh),
@@ -67,7 +69,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked -p terrariumd -p terrarium -p terrarium-runner -p terrarium-updater \
     && mkdir -p /out \
     && cp target/release/terrariumd target/release/terrarium target/release/terrarium-runner \
-        target/release/terrarium-updater /out/
+        target/release/terrarium-updater /out/ \
+    && rustc --version | awk '{print $2}' > /build-rust-version
 
 # ---------------------------------------------------------------------------
 FROM ${RUST_IMAGE} AS host-build
@@ -95,6 +98,32 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 FROM scratch AS host-export
 COPY --from=host-build /out/terrarium-host /terrarium-host
+
+# ---------------------------------------------------------------------------
+# Native Windows host, not the Linux-only GPU helper. Rust stays the same
+# patch as the daemon build. The package pins match the cross-tested build2.
+FROM ${WINDOWS_RUST_IMAGE} AS windows-host
+ARG TERRARIUM_GIT_REF
+COPY --from=rust /build-rust-version /tmp/expected-rust-version
+RUN test "$(rustc --version | awk '{print $2}')" = "$(cat /tmp/expected-rust-version)" \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        gcc-mingw-w64-x86-64=12.2.0-14+25.2 \
+        binutils-mingw-w64-x86-64=2.40-2+10.4 \
+        mingw-w64-x86-64-dev=10.0.0-3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add x86_64-pc-windows-gnu
+WORKDIR /src
+COPY Cargo.toml Cargo.lock harnesses.toml ./
+COPY crates ./crates
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/src/target,id=terrarium-windows-host-target \
+    cargo build --release --locked --target x86_64-pc-windows-gnu \
+        -p terrarium-host --bin terrarium-host \
+    && mkdir -p /dist \
+    && cp target/x86_64-pc-windows-gnu/release/terrarium-host.exe /dist/terrarium-host-x86_64-windows.exe \
+    && cd /dist && sha256sum terrarium-host-x86_64-windows.exe > terrarium-host-x86_64-windows.exe.sha256
 
 # ---------------------------------------------------------------------------
 # The GitHub CLI for the updater's image check (`gh attestation verify`,
@@ -151,6 +180,7 @@ FROM docker:29.0.3-cli AS docker-cli
 FROM ${NODE_IMAGE} AS release-payload
 COPY --from=rust /out/ /payload/bin/
 COPY --from=host-build /dist/ /payload/dist/
+COPY --from=windows-host /dist/ /payload/dist/
 COPY harnesses.toml /payload/harnesses.toml
 COPY defaults /payload/defaults/
 RUN cd /payload && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1 > release-id

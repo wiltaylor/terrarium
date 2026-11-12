@@ -589,11 +589,28 @@ def version_on_vm(ctx: Ctx, binary: str, data: bytes) -> str:
         archive.unlink(missing_ok=True)
 
 
+def check_windows_binary(data: bytes, version: str) -> None:
+    """Check PE32+ AMD64 and the embedded version without executing Windows
+    code on the release client or pretending the Linux VM can run it."""
+    if len(data) < 64 or data[:2] != b"MZ":
+        raise ReleaseError("Windows host is not a PE executable")
+    offset = int.from_bytes(data[60:64], "little")
+    if (offset < 64 or offset + 26 > len(data)
+            or data[offset:offset + 4] != b"PE\0\0"
+            or int.from_bytes(data[offset + 4:offset + 6], "little") != 0x8664
+            or int.from_bytes(data[offset + 24:offset + 26], "little") != 0x20b):
+        raise ReleaseError("Windows host is not a PE32+ x86_64 executable")
+    if f"{version}+".encode() not in data:
+        raise ReleaseError("Windows host has no matching embedded build version")
+
+
 def step_extract(ctx: Ctx, version: str) -> list[Path]:
     layout = ctx.out / "image"
     wanted = []
     for b in BINARIES:
         wanted += [f"{DIST}/{b}-x86_64-linux", f"{DIST}/{b}-x86_64-linux.sha256"]
+    windows_name = "terrarium-host-x86_64-windows.exe"
+    wanted += [f"{DIST}/{windows_name}", f"{DIST}/{windows_name}.sha256"]
     files = image_files(layout, wanted)
     dist = ctx.out / "dist"
     dist.mkdir(parents=True, exist_ok=True)
@@ -615,6 +632,17 @@ def step_extract(ctx: Ctx, version: str) -> list[Path]:
             raise ReleaseError(f"{asset.name} --version says {said.strip()!r}, not {b} {version}+")
         sums.append(f"{got}  {asset.name}\n")
         assets.append(asset)
+    data = files[f"{DIST}/{windows_name}"]
+    want = files[f"{DIST}/{windows_name}.sha256"].decode().split()[0]
+    got = hashlib.sha256(data).hexdigest()
+    if want != got:
+        raise ReleaseError(f"the image's Windows host is {got}, its .sha256 says {want}")
+    check_windows_binary(data, version)
+    asset = dist / f"terrarium-host-{version}-windows-x86_64.exe"
+    asset.write_bytes(data)
+    sums.append(f"{got}  {asset.name}\n")
+    assets.append(asset)
+    ctx.summary["windows_check"] = "PE32+ x86_64, embedded version, SHA-256 (not executed)"
     (dist / "SHA256SUMS").write_text("".join(sums))
     ctx.summary["assets"] = {a.name: hashlib.sha256(a.read_bytes()).hexdigest() for a in assets}
     ctx.save()

@@ -192,7 +192,18 @@ def host_binary(name: str, version: str) -> bytes:
             f'echo "{name} {version}+0123abc"\n').encode()
 
 
-def make_layout(layout: Path, version: str, *, bad_sha=None, helper=True, report=None) -> None:
+def windows_binary(version: str) -> bytes:
+    # Synthetic PE header, never executed by these tests.
+    data = bytearray(128)
+    data[:2] = b"MZ"
+    data[60:64] = (64).to_bytes(4, "little")
+    data[64:68] = b"PE\0\0"
+    data[68:70] = (0x8664).to_bytes(2, "little")
+    data[88:90] = (0x20b).to_bytes(2, "little")
+    return bytes(data) + f"{version}+0123abc".encode()
+
+
+def make_layout(layout: Path, version: str, *, bad_sha=None, helper=True, report=None, windows=True) -> None:
     """An OCI layout like the release image: an index with the amd64 image and an attestation."""
     files = [("opt", None, None, 0o755), ("opt/terrarium", None, None, 0o755),
              ("opt/terrarium/bundled", None, None, 0o755), ("opt/terrarium/bundled/dist", None, None, 0o755)]
@@ -206,6 +217,12 @@ def make_layout(layout: Path, version: str, *, bad_sha=None, helper=True, report
         files.append((f"opt/terrarium/bundled/dist/{b}-x86_64-linux", data, None, 0o755))
         files.append((f"opt/terrarium/bundled/dist/{b}-x86_64-linux.sha256",
                       f"{h}  {b}-x86_64-linux\n".encode(), None, 0o644))
+    if windows:
+        data = windows_binary(report or version)
+        h = "0" * 64 if bad_sha == "windows" else hashlib.sha256(data).hexdigest()
+        name = "terrarium-host-x86_64-windows.exe"
+        files.append((f"opt/terrarium/bundled/dist/{name}", data, None, 0o755))
+        files.append((f"opt/terrarium/bundled/dist/{name}.sha256", f"{h}  {name}\n".encode(), None, 0o644))
     # A later layer: an old file that a whiteout removes, and the dist symlink.
     first = tar_gz(files + [("opt/terrarium/old", b"x", None, 0o644)])
     second = tar_gz([("opt/terrarium/.wh.old", b"", None, 0o644),
@@ -334,8 +351,8 @@ class Release(unittest.TestCase):
             self.tools(),
             [("gh", "release"), *GATE, ("docker", "buildx"), *VERSION, *VERSION,
              ("crane", "push"), ("crane", "tag"), ("cosign", "sign"), ("cosign", "verify"),
-             ("cosign", "sign-blob"), ("cosign", "sign-blob"), ("cosign", "sign-blob"),
-             ("cosign", "verify-blob"), ("cosign", "verify-blob"), ("cosign", "verify-blob"),
+             ("cosign", "sign-blob"), ("cosign", "sign-blob"), ("cosign", "sign-blob"), ("cosign", "sign-blob"),
+             ("cosign", "verify-blob"), ("cosign", "verify-blob"), ("cosign", "verify-blob"), ("cosign", "verify-blob"),
              ("gh", "release")],
         )
         # The same indexes as before the gate and the --version checks moved to the VM.
@@ -375,16 +392,17 @@ class Release(unittest.TestCase):
         self.assertEqual(calls[7]["argv"][:3], ["verify", "--key", str(self.repo / release.KEY_PATH)])
         signed = [Path(c["argv"][-1]).name for c in calls if c["argv"][:1] == ["sign-blob"]]
         self.assertEqual(signed, [f"terrarium-host-{self.VERSION}-linux-x86_64",
-                                  f"terrarium-host-helper-{self.VERSION}-linux-x86_64", "SHA256SUMS"])
+                                  f"terrarium-host-helper-{self.VERSION}-linux-x86_64",
+                                  f"terrarium-host-{self.VERSION}-windows-x86_64.exe", "SHA256SUMS"])
         create = calls[-1]["argv"]
         self.assertEqual(create[:9], ["release", "create", f"v{self.VERSION}", "--repo",
                                       "wiltaylor/terrarium", "--target", commit, "--title", f"v{self.VERSION}"])
         self.assertIn("--latest", create)
         self.assertNotIn("--prerelease", create)
         names = sorted(Path(a).name for a in create if a.startswith(str(self.out)) and "dist" in a)
-        self.assertEqual(len(names), 6, names)
+        self.assertEqual(len(names), 8, names)
         sums = (self.out / "dist/SHA256SUMS").read_text().splitlines()
-        self.assertEqual(len(sums), 2)
+        self.assertEqual(len(sums), 3)
         for line in sums:
             h, name = line.split("  ")
             self.assertEqual(hashlib.sha256((self.out / "dist" / name).read_bytes()).hexdigest(), h)
@@ -578,7 +596,7 @@ class Release(unittest.TestCase):
         proc = self.run_release("dry-run", secrets=False)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(self.tools(), [*GATE, ("docker", "buildx"), *VERSION, *VERSION])
-        self.assertEqual(len((self.out / "dist/SHA256SUMS").read_text().splitlines()), 2)
+        self.assertEqual(len((self.out / "dist/SHA256SUMS").read_text().splitlines()), 3)
         self.assertTrue((self.out / "image/index.json").is_file())
         self.assertFalse((self.out / "image.tar").exists())
         s = self.summary()
@@ -866,6 +884,18 @@ class RealCosign(unittest.TestCase):
             shutil.move(t / "cosign.pub", t / release.KEY_PATH)
             with self.assertRaises(release.ReleaseError):
                 release.sign_blobs(ctx, [blob])
+
+
+class WindowsAsset(unittest.TestCase):
+    def test_pe_architecture_and_embedded_version_are_required(self):
+        data = windows_binary("1.2.3")
+        release.check_windows_binary(data, "1.2.3")
+        for bad in (b"\x7fELF" + data, data[:64], data.replace(b"PE\0\0", b"NOPE"),
+                    data[:68] + b"\x64\xaa" + data[70:]):
+            with self.assertRaises(release.ReleaseError):
+                release.check_windows_binary(bad, "1.2.3")
+        with self.assertRaises(release.ReleaseError):
+            release.check_windows_binary(data, "1.2.4")
 
 
 if __name__ == "__main__":
