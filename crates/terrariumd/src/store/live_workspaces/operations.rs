@@ -230,14 +230,13 @@ pub fn allocate_revoke(
         "SELECT workspace_id, registration_id, agent_id, revoke_revision FROM live_workspace_attachments WHERE attachment_id = ?1",
         [attachment.0.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     ).optional()?;
-    if let Some((workspace, registered, agent, tombstone)) = &existing {
-        if workspace != &holder.enrollment.workspace.0.to_string()
+    if let Some((workspace, registered, agent, tombstone)) = &existing
+        && (workspace != &holder.enrollment.workspace.0.to_string()
             || registered != &registration_id
             || agent != &holder.enrollment.agent.to_string()
-            || tombstone.is_some()
-        {
-            return Err(conflict());
-        }
+            || tombstone.is_some())
+    {
+        return Err(conflict());
     }
     let mut request = grant.envelope.original.clone();
     request.operation = operation;
