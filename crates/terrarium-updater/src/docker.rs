@@ -1444,7 +1444,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("docker.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let since = "2026-11-12T02:00:00.123456789+00:00";
+        let since = "1794448800.123456789";
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut header = Vec::new();
@@ -1456,6 +1456,16 @@ mod tests {
                 "GET /containers/daemon/logs?stdout=1&stderr=1&tail=64&since={} HTTP/1.1",
                 enc(since)
             )));
+            let value = header.split("&since=").nth(1).unwrap().split(' ').next().unwrap();
+            let valid = value.split_once('.').is_some_and(|(seconds, nanos)| {
+                seconds.parse::<i64>().is_ok()
+                    && nanos.len() <= 9
+                    && nanos.parse::<u32>().is_ok()
+            });
+            if !valid {
+                stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                return;
+            }
             let text = b"Error: FOREIGN KEY constraint failed: password=do-not-record\nentrypoint: terrariumd ended (status 1) after 0s; starting it again in 1s. The agent runners keep running.\n";
             let mut frame = vec![2, 0, 0, 0];
             frame.extend_from_slice(&(text.len() as u32).to_be_bytes());

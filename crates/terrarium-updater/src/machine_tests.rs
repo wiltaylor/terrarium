@@ -374,7 +374,13 @@ impl Engine for Fake {
         since: &'a str,
     ) -> BoxFut<'a, Res<Option<String>>> {
         Box::pin(async move {
-            assert!(chrono::DateTime::parse_from_rfc3339(since).is_ok());
+            let (seconds, nanos) = since.split_once('.').unwrap();
+            assert!(seconds.parse::<i64>().is_ok());
+            assert_eq!(nanos.len(), 9);
+            assert!(nanos.parse::<u32>().unwrap() < 1_000_000_000);
+            if self.0.lock().unwrap().fail.contains("startup-log") {
+                return Err("transport error with private values".into());
+            }
             let crashes = self.0.lock().unwrap().startup_crash;
             if crashes && self.image_of(id).as_deref() == Some(new_ref().as_str()) {
                 self.call("daemon-exit-1".into());
@@ -590,6 +596,23 @@ async fn hot_swap_failed_health_restores_before_old_release_admission() {
             .unwrap()
             < calls.iter().position(|c| c == "hot:commit").unwrap()
     );
+}
+
+#[tokio::test]
+async fn unreadable_startup_log_does_not_replace_health_checks() {
+    for healthy in [true, false] {
+        let r = rig();
+        r.fake.0.lock().unwrap().hot = true;
+        r.fake.fail("startup-log");
+        if !healthy {
+            r.fake.fail(&format!("health:{}", new_ref()));
+        }
+        let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+        assert_eq!(run.outcome, if healthy { Outcome::Succeeded } else { Outcome::RolledBack }, "{run:#?}");
+        let warnings: Vec<_> = run.steps.iter().filter(|s| s.name == "startup-log-warning").collect();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].detail, "cannot read daemon startup log (values hidden); continuing health checks");
+    }
 }
 
 #[tokio::test]
