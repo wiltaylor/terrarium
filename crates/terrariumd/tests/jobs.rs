@@ -3926,14 +3926,33 @@ fi"#;
         .await
         .ok()
         .clone();
-    assert_eq!(
-        attached["attachment"]["sha256"],
-        sha256(b"smoke-ok")
-    );
+    assert_eq!(attached["attachment"]["sha256"], sha256(b"smoke-ok"));
     // Advance main. Phase 2 must still take phase 1's exact commit.
-    assert_eq!(lab.td.post_as(&lab.lead, &endpoint, json!({"after":first,"commit":"0000000000000000000000000000000000000000"})).await.status, 409);
-    lab.td.post("/api/projects/p/repos", json!({"name":"other","url":lab.origin.display().to_string()})).await.ok();
-    assert_eq!(lab.td.post_as(&lab.lead, &endpoint, json!({"after":first,"repo":"other"})).await.status, 422);
+    assert_eq!(
+        lab.td
+            .post_as(
+                &lab.lead,
+                &endpoint,
+                json!({"after":first,"commit":"0000000000000000000000000000000000000000"})
+            )
+            .await
+            .status,
+        409
+    );
+    lab.td
+        .post(
+            "/api/projects/p/repos",
+            json!({"name":"other","url":lab.origin.display().to_string()}),
+        )
+        .await
+        .ok();
+    assert_eq!(
+        lab.td
+            .post_as(&lab.lead, &endpoint, json!({"after":first,"repo":"other"}))
+            .await
+            .status,
+        422
+    );
     std::fs::write(lab.work.join("new-main"), "later").unwrap();
     git(&lab.work, &["add", "."]);
     git(&lab.work, &["commit", "-qm", "later main"]);
@@ -3986,20 +4005,43 @@ async fn release_handoff_oversized_publish_fails_without_partial_files() {
         "release_outputs":"handoff"
     })).await.ok();
     let card = lab.card("oversized handoff", "main").await;
-    let queued = lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/release"), json!({})).await.ok().clone();
+    let queued = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/release"), json!({}))
+        .await
+        .ok()
+        .clone();
     let id = queued["job"]["id"].as_str().unwrap();
     let jobs = lab.until_idle().await;
     let job = jobs.iter().find(|j| j["id"] == id).unwrap();
     assert_eq!(job["state"], "failed", "{job:?}");
-    assert!(job["tail"].as_str().unwrap().contains("per-job limit"), "{job:?}");
-    let outputs = lab.td.get_as(&lab.lead, &format!("/api/jobs/{id}/artifacts")).await.ok().clone();
+    assert!(
+        job["tail"].as_str().unwrap().contains("per-job limit"),
+        "{job:?}"
+    );
+    let outputs = lab
+        .td
+        .get_as(&lab.lead, &format!("/api/jobs/{id}/artifacts"))
+        .await
+        .ok()
+        .clone();
     assert!(outputs["artifacts"].as_array().unwrap().is_empty());
     let state = lab.td.daemon.as_ref().unwrap().state.clone();
     let root = state.state_dir.join("release-handoffs").join(id);
     if root.exists() {
         assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);
     }
-    assert_eq!(lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/release"), json!({"after":id})).await.status, 409);
+    assert_eq!(
+        lab.td
+            .post_as(
+                &lab.lead,
+                &format!("/api/cards/{card}/release"),
+                json!({"after":id})
+            )
+            .await
+            .status,
+        409
+    );
 }
 
 /// TER-623: a release job runs the release recipe on the release target,

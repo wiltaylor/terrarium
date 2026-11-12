@@ -1042,12 +1042,24 @@ async fn release(
     let planned_secs = planned(b.eta.as_deref())?;
     let card_id = board::normalise_id(&id);
     let (a, given_repo) = (actor.clone(), b.repo.clone());
+    let after = b.after.clone();
     let (card, repo) = state
         .db
         .read(move |c| {
             let card = board::get_card(c, &card_id)?;
             policy::admin_project(&a, &card.project, "queueing a release")?;
             release_ok(c, &card)?;
+            let given_repo = match (given_repo, after) {
+                (None, Some(id)) => {
+                    let previous = jobs::get(c, &id)?;
+                    super::release_handoffs::authorize(&a, &previous)?;
+                    if previous.project != card.project {
+                        return Err(ApiError::invalid("release phases must have the same project"));
+                    }
+                    Some(previous.repo)
+                }
+                (repo, _) => repo,
+            };
             let repo = repo_of(c, &card, given_repo)?;
             Ok((card, repo))
         })

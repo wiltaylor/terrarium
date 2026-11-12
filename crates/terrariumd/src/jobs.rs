@@ -3597,9 +3597,14 @@ async fn finish_recipe(
         };
         let admission = x.state.executor.target_admission(x.def).await?;
         let (running, report) = crate::run_kill::start_named_locked(
-            x.state, x.def, &cmd, crate::run_kill::job_pidfile(&job.id), &admission,
+            x.state,
+            x.def,
+            &cmd,
+            crate::run_kill::job_pidfile(&job.id),
+            &admission,
         )?;
-        let mut running = crate::executor::track_resource_run(x.state, x.def, &cmd, running, report.clone())?;
+        let mut running =
+            crate::executor::track_resource_run(x.state, x.def, &cmd, running, report.clone())?;
         set_control(&job.id, Some(running.ctl.clone()));
         drop(admission);
         if killed(&job.id) {
@@ -3622,7 +3627,9 @@ async fn finish_recipe(
                 _ => {}
             }
         }
-        if let Some(report) = report { let _ = crate::run_kill::report(report).await; }
+        if let Some(report) = report {
+            let _ = crate::run_kill::report(report).await;
+        }
         if oversized {
             return Err(ApiError::invalid(format!(
                 "release artifacts exceed the per-job limit of {limit} bytes"

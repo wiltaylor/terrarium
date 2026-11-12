@@ -201,7 +201,9 @@ pub fn publish(
     let mut file = File::create(stage.path().join("manifest.json")).map_err(io)?;
     file.write_all(&manifest).map_err(io)?;
     file.sync_all().map_err(io)?;
-    File::open(stage.path()).and_then(|f| f.sync_all()).map_err(io)?;
+    File::open(stage.path())
+        .and_then(|f| f.sync_all())
+        .map_err(io)?;
     fs::rename(stage.path(), root.join("outputs")).map_err(io)?;
     File::open(&root).and_then(|f| f.sync_all()).map_err(io)?;
     Ok(artifacts)
@@ -252,9 +254,7 @@ pub fn inputs(state: &Path, link: &Successor) -> ApiResult<Vec<u8>> {
     let mut tar = tar::Builder::new(Vec::new());
     for artifact in artifacts(state, &link.predecessor)? {
         let bytes = fs::read(output_path(state, &link.predecessor, &artifact.name)?).map_err(io)?;
-        if bytes.len() as u64 != artifact.size
-            || sha256(&bytes) != artifact.sha256
-        {
+        if bytes.len() as u64 != artifact.size || sha256(&bytes) != artifact.sha256 {
             return Err(ApiError::invalid(
                 "stored release artifact failed SHA-256 verification",
             ));
@@ -262,9 +262,7 @@ pub fn inputs(state: &Path, link: &Successor) -> ApiResult<Vec<u8>> {
         append(&mut tar, &format!("artifacts/{}", artifact.name), &bytes)?;
     }
     let bytes = attachment_bytes(state, &link.predecessor)?;
-    if bytes.len() as u64 != link.attachment_size
-        || sha256(&bytes) != link.attachment_sha256
-    {
+    if bytes.len() as u64 != link.attachment_size || sha256(&bytes) != link.attachment_sha256 {
         return Err(ApiError::invalid(
             "stored release attachment failed SHA-256 verification",
         ));
@@ -282,7 +280,10 @@ fn append(tar: &mut tar::Builder<Vec<u8>>, path: &str, bytes: &[u8]) -> ApiResul
 }
 
 pub fn sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 pub fn output_limit() -> ApiResult<u64> {
@@ -302,6 +303,7 @@ pub fn output_limit() -> ApiResult<u64> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -373,12 +375,22 @@ mod tests {
 
     #[test]
     fn sha256_matches_known_digest() {
-        assert_eq!(sha256(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]
     fn output_directory_must_stay_inside_checkout() {
-        for invalid in ["", "/absolute", "../outside", "a/../outside", "a/./b", "a//b"] {
+        for invalid in [
+            "",
+            "/absolute",
+            "../outside",
+            "a/../outside",
+            "a/./b",
+            "a//b",
+        ] {
             assert!(relative_directory(invalid).is_err(), "{invalid}");
         }
         assert!(relative_directory("release-out/handoff").is_ok());

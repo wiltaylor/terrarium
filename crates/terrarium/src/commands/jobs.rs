@@ -145,7 +145,12 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
                 offset += bytes.len() as u64;
             }
             anyhow::ensure!(
-                digest.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>() == hash,
+                digest
+                    .finalize()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+                    == hash,
                 "release artifact SHA-256 mismatch"
             );
             file.as_file().sync_all()?;

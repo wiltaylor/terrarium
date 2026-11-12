@@ -41,12 +41,11 @@ pub fn routes() -> RegisteredRouter {
 
 pub(crate) fn authorize(actor: &Actor, job: &Job) -> ApiResult<()> {
     policy::admin_project(actor, &job.project, "accessing release handoffs")?;
-    if let Actor::Agent(agent) = actor {
-        if agent.project != job.project {
+    if let Actor::Agent(agent) = actor
+        && agent.project != job.project {
             return Err(ApiError::forbidden(
                 "release handoffs belong to the project's own lead",
             ));
-        }
     }
     if job.kind != JobKind::Release {
         return Err(ApiError::invalid("handoffs require a release job"));
