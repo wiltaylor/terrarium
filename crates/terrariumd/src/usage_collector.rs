@@ -1132,7 +1132,10 @@ impl Collector {
                 at: s.at.map(time_str),
             })
             .collect();
-        if !rows.is_empty() {
+        // A session replay may contain thousands of responses. Release the
+        // writer between batches instead of inserting the whole file at once.
+        for batch in rows.chunks(100) {
+            let rows = batch.to_vec();
             match self
                 .state
                 .db
