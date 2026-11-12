@@ -89,7 +89,10 @@ fn parse_config(bytes: &[u8]) -> Result<Config, Reply> {
     let config: Config = serde_json::from_slice(bytes).map_err(|_| Reply::Failed)?;
     if config.host_agent_uid == 0
         || (!config.registrations.is_empty() && config.receiver.is_none())
-        || config.receiver.as_ref().is_some_and(|s| s.digest().is_err())
+        || config
+            .receiver
+            .as_ref()
+            .is_some_and(|s| s.digest().is_err())
         || config.registrations.len() > 128
         || !config.work_root.is_absolute()
         || [
@@ -183,7 +186,11 @@ pub async fn run() -> std::io::Result<()> {
     for r in opened {
         let bootstrap_store = Store::open(r.bootstrap).map_err(|_| failed())?;
         let mut bootstrap = bootstrap_store.load_bootstrap().map_err(|_| failed())?;
-        let binding = c.receiver.as_ref().ok_or_else(failed)?.verify_binding(bootstrap.original());
+        let binding = c
+            .receiver
+            .as_ref()
+            .ok_or_else(failed)?
+            .verify_binding(bootstrap.original());
         if binding.is_err() {
             bootstrap.quarantine();
             let _ = bootstrap_store.save_bootstrap(&bootstrap);

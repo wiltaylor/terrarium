@@ -156,12 +156,18 @@ fn explicit_service_fence_survives_restart_and_never_reaches_backend() {
     let calls = h.backend.calls.borrow().len();
     h.fence().unwrap();
     assert!(h.store.load().unwrap().quarantined);
-    assert_eq!(h.apply(&bytes(&envelope(1, Kind::Grant))), Err(Reply::Quarantined));
+    assert_eq!(
+        h.apply(&bytes(&envelope(1, Kind::Grant))),
+        Err(Reply::Quarantined)
+    );
     assert_eq!(h.backend.calls.borrow().len(), calls);
     drop(h);
     let mut recovered = Helper::open(Store::fixture(dir.path()).unwrap(), Fake::default()).unwrap();
     let calls = recovered.backend.calls.borrow().len();
-    assert_eq!(recovered.apply(&bytes(&envelope(1, Kind::Grant))), Err(Reply::Quarantined));
+    assert_eq!(
+        recovered.apply(&bytes(&envelope(1, Kind::Grant))),
+        Err(Reply::Quarantined)
+    );
     assert_eq!(recovered.backend.calls.borrow().len(), calls);
 }
 
