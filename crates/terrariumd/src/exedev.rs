@@ -415,6 +415,36 @@ pub fn exec_def(state: &Shared, def: &TargetDef) -> ApiResult<TargetDef> {
     }
 }
 
+/// Check the saved root's VM without starting one. Only a complete, valid
+/// account listing can prove absence. Local records alone are not evidence.
+pub async fn root_vm_absent(state: &Shared, def: &TargetDef, saved: &str) -> ApiResult<bool> {
+    let old: TargetDef = serde_json::from_str(saved)
+        .map_err(|e| ApiError::invalid(format!("invalid saved root definition: {e}")))?;
+    let host = old.address.as_deref().and_then(|a| a.rsplit('@').next());
+    let name = host.and_then(|h| h.strip_suffix(".exe.xyz"))
+        .filter(|n| !n.is_empty() && !n.contains(['/', ':', '@']));
+    let Some(name) = name else {
+        return Err(ApiError::conflict("cannot identify the saved root's exe.dev VM"));
+    };
+    let account = state.db.read_now(|c| {
+        match record_of(c, &def.name)? {
+            Some(vm) => Ok(vm.account()),
+            None => Account::of_target(c, def),
+        }
+    })?;
+    let value = api_for(state, &account)?.run("ls --json").await?;
+    let vms = value["vms"].as_array()
+        .ok_or_else(|| ApiError::internal("exe.dev listing has no VM array"))?;
+    let mut found = false;
+    for vm in vms {
+        let listed = vm["vm_name"].as_str().or_else(|| vm["name"].as_str())
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| ApiError::internal("exe.dev listing has an unnamed VM"))?;
+        found |= listed == name;
+    }
+    Ok(!found)
+}
+
 // ------------------------------------------------------------------ API
 
 /// A VM in the answer of `ls`.
