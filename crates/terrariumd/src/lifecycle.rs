@@ -553,19 +553,29 @@ pub fn wake_soon(state: &Shared, id: AgentId, cause: &'static str) {
 /// Wake each agent of `only` (every agent when `None`) that has work
 /// waiting for it ([`agents::queued_count`]).
 pub async fn wake_with_work(state: &Shared, only: Option<AgentId>, cause: &'static str) {
+    wake_with_work_report(state, only, cause).await;
+}
+
+/// Wake queued agents and count failures without making admission fail.
+pub async fn wake_with_work_report(state: &Shared, only: Option<AgentId>, cause: &'static str) -> usize {
+    let mut failures = 0;
     let ids = match state.db.read(agents::with_queued_work).await {
         Ok(ids) => ids,
         Err(e) => {
             warn!("cannot find the agents with queued work: {e}");
-            return;
+            return 1;
         }
     };
     for id in ids.iter().filter_map(|i| i.parse::<AgentId>().ok()) {
         if only.is_none_or(|o| o == id) {
             let woke = wake(state, id, cause).await;
+            if matches!(woke, Woke::Failed(_)) {
+                failures += 1;
+            }
             debug!(agent = %id, %cause, ?woke, "wake");
         }
     }
+    failures
 }
 
 /// Give the queued turns of a running agent to the supervisor, in order,

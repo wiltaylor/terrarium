@@ -524,6 +524,18 @@ struct LaunchedAccounts {
     bound: Vec<String>,
 }
 
+fn account_restart_needed(launched: Option<&str>, desired: Option<&str>) -> bool {
+    launched.is_some() && desired.is_some() && launched != desired
+}
+
+#[test]
+fn recovery_compares_the_effective_account_not_an_empty_subscription() {
+    assert!(!account_restart_needed(Some("default"), Some("default")));
+    assert!(!account_restart_needed(Some("default"), None));
+    assert!(account_restart_needed(Some("old"), Some("new")));
+    assert!(!account_restart_needed(None, Some("default")));
+}
+
 /// The `system` event of a resume that sends a changed prompt.
 const PROMPT_UPDATED: &str = "prompt updated on resume";
 
@@ -5638,12 +5650,19 @@ impl Supervisor for RunnerSupervisor {
             self.adopt(id, epoch, remote, Some(events_since));
             let version = self.recorded_version(id, agent.harness);
             let launched = self.recorded_accounts(id);
+            // A missing explicit subscription means the harness default,
+            // not an empty account. Compare the account the next launch
+            // would actually select, rather than restarting every default
+            // account runner whenever the daemon recovers it.
+            let desired_account = agent.subscription.clone().or(
+                self.store_view(&agent).await.default_account
+            );
             let settled = if let Some(slot) = lock(&self.inner.slots).get_mut(&id) {
                 slot.harness_version = version;
                 // A swap that the stored agent names and that the harness
                 // does not run yet: it applies when the turn ends.
                 slot.swap_pending =
-                    launched.account.is_some() && launched.account != agent.subscription;
+                    account_restart_needed(launched.account.as_deref(), desired_account.as_deref());
                 slot.account = launched.account;
                 slot.bound = launched.bound;
                 // A runner of another build (after a hot swap): it

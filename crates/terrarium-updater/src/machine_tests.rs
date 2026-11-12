@@ -16,6 +16,8 @@ const BACKUP: &str = "/state/backups/terrarium-backup-1.zip";
 
 #[derive(Default)]
 struct State {
+    resume_status: Option<String>,
+    resume_hang: bool,
     jobs_output: Option<String>,
     jobs_hang: bool,
     fail_once: HashSet<String>,
@@ -196,6 +198,7 @@ impl Engine for Fake {
                 });
             }
             let what = match (argv[0].as_str(), argv.get(3).map(String::as_str)) {
+                ("terrarium", Some("status")) if argv.get(2).is_some_and(|s| s == "update") => "update-status".to_owned(),
                 ("terrarium", Some("drain")) => "drain".to_owned(),
                 ("terrarium", Some("drain-jobs")) => "drain-jobs".to_owned(),
                 ("terrarium", Some("resume")) => "resume".to_owned(),
@@ -203,13 +206,18 @@ impl Engine for Fake {
                 _ => format!("status:{}", self.image_of(id).unwrap_or_default()),
             };
             let failed = self.call(format!("{what} {id}"));
+            if what == "resume" && self.0.lock().unwrap().resume_hang {
+                std::future::pending::<()>().await;
+            }
             if what == "drain-jobs" {
                 let hang = self.0.lock().unwrap().jobs_hang;
                 if hang {
                     std::future::pending::<()>().await;
                 }
             }
-            let stdout = if what == "backup" {
+            let stdout = if what == "update-status" {
+                self.0.lock().unwrap().resume_status.clone().unwrap_or_default()
+            } else if what == "backup" {
                 format!(r#"{{"name": "terrarium-backup-1.zip", "path": "{BACKUP}"}}"#)
             } else if what == "drain-jobs" {
                 self.0
@@ -465,6 +473,36 @@ fn rig_with(mode: &'static str, ok: bool) -> Rig {
 
 fn rig() -> Rig {
     rig_with("gh", true)
+}
+
+#[tokio::test]
+async fn resume_retries_an_old_daemon_that_is_not_ready() {
+    let r = rig();
+    r.fake.0.lock().unwrap().fail_once.insert("resume".into());
+    let (_run, _guard) = r.updater.begin(RunKind::Update, "test", "test").unwrap();
+    let cur = r.fake.target().await.unwrap();
+    r.updater.resume(&cur).await;
+    let calls = r.fake.calls();
+    assert_eq!(calls.iter().filter(|c| *c == "resume c0").count(), 2);
+    assert_eq!(r.updater.running().as_ref().unwrap().steps.last().unwrap().state, StepState::Ok);
+}
+
+#[tokio::test]
+async fn resume_accepts_verified_open_drains_after_a_failed_or_slow_wake() {
+    for hang in [false, true] {
+        let r = rig();
+        let (_run, _guard) = r.updater.begin(RunKind::Update, "test", "test").unwrap();
+        r.fake.fail("resume");
+        {
+            let mut s = r.fake.0.lock().unwrap();
+            s.resume_hang = hang;
+            s.resume_status = Some(r#"{"drain":{"on":false,"jobs_drain":null}}"#.into());
+        }
+        let cur = r.fake.target().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), r.updater.resume(&cur)).await.unwrap();
+        assert!(r.fake.calls().iter().any(|c| c == "update-status c0"));
+        assert_eq!(r.updater.running().as_ref().unwrap().steps.last().unwrap().state, StepState::Ok);
+    }
 }
 
 #[tokio::test]
