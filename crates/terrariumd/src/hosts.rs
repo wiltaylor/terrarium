@@ -1082,8 +1082,9 @@ impl HostRegistry {
     ) -> Result<HostSession, HostError> {
         let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
         let mut make = Some(make);
+        let mut prepared = None;
         retry_metadata(
-            || self.try_open_bound(host, binding, &mut make),
+            || self.try_open_bound(host, binding, &mut make, &mut prepared),
             |error| matches!(error, HostError::JournalBusy),
         )
     }
@@ -1093,6 +1094,7 @@ impl HostRegistry {
         host: &str,
         binding: Option<&str>,
         make: &mut Option<impl FnOnce(SessionId) -> DaemonFrame>,
+        prepared: &mut Option<(SessionId, DaemonFrame)>,
     ) -> Result<HostSession, HostError> {
         let mut g = self.lock();
         let e = g
@@ -1111,7 +1113,23 @@ impl HostRegistry {
             }
         };
         let (tx, rx) = mpsc::unbounded_channel();
-        let frame = make(id);
+        // Windows capability checks need the frame before persistence.
+        // Keep the FnOnce result across retries rather than consuming it again.
+        if prepared.is_none() {
+            let Some(make) = make.take() else {
+                e.next_id = previous_next;
+                return Err(HostError::Persistence);
+            };
+            *prepared = Some((id, make(id)));
+        }
+        let Some((prepared_id, frame)) = prepared.as_ref() else {
+            e.next_id = previous_next;
+            return Err(HostError::Persistence);
+        };
+        if *prepared_id != id {
+            e.next_id = previous_next;
+            return Err(HostError::Persistence);
+        }
         let has_run_as = match &frame {
             DaemonFrame::Exec(req) => req.windows_run_as.is_some(),
             DaemonFrame::CpPush(req) => req.windows_run_as.is_some(),
@@ -1124,6 +1142,7 @@ impl HostRegistry {
                 .as_ref()
                 .is_some_and(|i| i.os == "windows" && i.capabilities.windows_run_as)
         {
+            e.next_id = previous_next;
             return Err(HostError::WindowsRunAsUnsupported);
         }
         e.sessions.insert(
@@ -1149,7 +1168,7 @@ impl HostRegistry {
                 HostError::Persistence
             });
         }
-        let Some(make) = make.take() else {
+        let Some((_, frame)) = prepared.take() else {
             return Err(HostError::Persistence);
         };
         if let Some(c) = &e.conn {
