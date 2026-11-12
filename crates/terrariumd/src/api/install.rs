@@ -735,7 +735,9 @@ mod tests {
                     b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort".to_vec()
                 } else if request.contains("/large ") {
                     let body = vec![b'x'; terrarium_host::update_signature::MAX_BUNDLE_BYTES + 1];
-                    let mut response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+                    let mut response =
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len())
+                            .into_bytes();
                     response.extend(body);
                     response
                 } else {
@@ -748,10 +750,16 @@ mod tests {
         let path = dir.path().join("cached");
         let client = reqwest::Client::new();
         for route in ["missing", "partial", "large"] {
-            assert!(fetch_bundle(&client, &format!("{base}/{route}"), &path).await.is_err());
+            assert!(
+                fetch_bundle(&client, &format!("{base}/{route}"), &path)
+                    .await
+                    .is_err()
+            );
             assert!(!path.exists());
         }
-        fetch_bundle(&client, &format!("{base}/valid"), &path).await.unwrap();
+        fetch_bundle(&client, &format!("{base}/valid"), &path)
+            .await
+            .unwrap();
         assert_eq!(read_bundle(&path).await.unwrap(), b"bundle");
         server.await.unwrap();
     }

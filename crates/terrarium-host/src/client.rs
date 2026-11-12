@@ -587,7 +587,13 @@ impl Client {
         let (path, query) = offer.path.split_once('?').unwrap_or((&offer.path, ""));
         let bundle_path = format!("{path}.sigstore.json?{query}");
         let bundle_url = u::http_url(&self.opts.url, &bundle_path)?;
-        crate::update_signature::download_and_verify(&data, &bundle_url, self.opts.tls.clone(), Some(key)).await?;
+        crate::update_signature::download_and_verify(
+            &data,
+            &bundle_url,
+            self.opts.tls.clone(),
+            Some(key),
+        )
+        .await?;
         u::stage(&su.binary, &data, &offer.version).await?;
         tracing::info!(sha256 = %sha, bytes = data.len(), "self-update: the new binary checks out");
         self.drain_for_update(su).await;

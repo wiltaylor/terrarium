@@ -18,12 +18,16 @@ pub async fn download_and_verify(
 ) -> Result<(), crate::selfupdate::UpdateError> {
     use crate::selfupdate::{UpdateError, download};
     if key.is_none() {
-        return Err(UpdateError::Offer("this dev build has no release verification key; install manually".into()));
+        return Err(UpdateError::Offer(
+            "this dev build has no release verification key; install manually".into(),
+        ));
     }
     let bundle = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         download(bundle_url, tls, MAX_BUNDLE_BYTES),
-    ).await.map_err(|_| UpdateError::Download {
+    )
+    .await
+    .map_err(|_| UpdateError::Download {
         url: bundle_url.to_owned(),
         message: "release signature download timed out".into(),
     })??;
@@ -182,17 +186,37 @@ mod tests {
         );
     }
 
-    async fn fake_daemon(data: &[u8], key: Option<&str>, bundle: &[u8], status: u16) -> Result<(), crate::selfupdate::UpdateError> {
+    async fn fake_daemon(
+        data: &[u8],
+        key: Option<&str>,
+        bundle: &[u8],
+        status: u16,
+    ) -> Result<(), crate::selfupdate::UpdateError> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/install/terrarium-host.sigstore.json?arch=x86_64", listener.local_addr().unwrap());
+        let url = format!(
+            "http://{}/install/terrarium-host.sigstore.json?arch=x86_64",
+            listener.local_addr().unwrap()
+        );
         let body = bundle.to_vec();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = [0; 4096];
             let n = socket.read(&mut request).await.unwrap();
-            assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /install/terrarium-host.sigstore.json?arch=x86_64 HTTP/1.1"));
-            socket.write_all(format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&request[..n])
+                    .starts_with("GET /install/terrarium-host.sigstore.json?arch=x86_64 HTTP/1.1")
+            );
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
             socket.write_all(&body).await.unwrap();
         });
         let result = download_and_verify(data, &url, None, key).await;
@@ -207,11 +231,31 @@ mod tests {
     #[tokio::test]
     async fn fake_daemon_valid_missing_other_bytes_and_other_key() {
         let (key, bundle) = fixture(b"asset");
-        fake_daemon(b"asset", Some(&key), &bundle, 200).await.unwrap();
-        assert!(fake_daemon(b"asset", Some(&key), b"missing", 404).await.is_err());
-        assert!(fake_daemon(b"other bytes", Some(&key), &bundle, 200).await.is_err());
+        fake_daemon(b"asset", Some(&key), &bundle, 200)
+            .await
+            .unwrap();
+        assert!(
+            fake_daemon(b"asset", Some(&key), b"missing", 404)
+                .await
+                .is_err()
+        );
+        assert!(
+            fake_daemon(b"other bytes", Some(&key), &bundle, 200)
+                .await
+                .is_err()
+        );
         let (other_key, _) = fixture(b"asset");
-        assert!(fake_daemon(b"asset", Some(&other_key), &bundle, 200).await.is_err());
-        assert!(fake_daemon(b"asset", None, &bundle, 200).await.unwrap_err().to_string().contains("install manually"));
+        assert!(
+            fake_daemon(b"asset", Some(&other_key), &bundle, 200)
+                .await
+                .is_err()
+        );
+        assert!(
+            fake_daemon(b"asset", None, &bundle, 200)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("install manually")
+        );
     }
 }
