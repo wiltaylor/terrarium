@@ -488,7 +488,7 @@ async fn reserved_gpu_uses_its_minor_number_not_its_index() {
         let run = f.log("run.log");
         let devices: Vec<_> = run
             .lines()
-            .filter(|line| line.starts_with("DeviceAllow="))
+            .filter(|line| line.starts_with("DeviceAllow=/dev/nvidia"))
             .collect();
         assert!(
             devices.contains(&format!("DeviceAllow=/dev/nvidia{minor} rw").as_str()),
