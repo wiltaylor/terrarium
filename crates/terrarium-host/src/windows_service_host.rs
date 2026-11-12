@@ -42,7 +42,7 @@ fn service_main(_: Vec<OsString>) {
 }
 
 fn serve() -> anyhow::Result<()> {
-    use terrarium_host::selfupdate::{self, sidecar};
+    use terrarium_host::windows_update;
     let (shutdown, mut stopped) = tokio::sync::mpsc::channel(1);
     let handle = service_control_handler::register(NAME, move |event| match event {
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -54,14 +54,9 @@ fn serve() -> anyhow::Result<()> {
     })?;
     handle.set_service_status(status(ServiceState::StartPending, 0))?;
     let binary = std::env::current_exe()?;
-    let pending = sidecar(&binary, selfupdate::PENDING);
+    let pending = windows_update::journal_path();
+    let checking = windows_update::startup(&binary)?;
     let startup_pending = std::fs::read(&pending).ok();
-    let checking = startup_pending.is_some();
-    if !checking {
-        // The previous image can only be removed after its process exited.
-        let _ = std::fs::remove_file(sidecar(&binary, "old"));
-        let _ = std::fs::remove_file(sidecar(&binary, "rejected"));
-    }
     let mut operator_stop = false;
     let result = (|| -> anyhow::Result<()> {
         use clap::Parser;
@@ -76,7 +71,7 @@ fn serve() -> anyhow::Result<()> {
                     if !checking { std::future::pending::<()>().await; }
                     // A welcome removes the journal only for this build.
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-                    while pending.exists() {
+                    while windows_update::checking() {
                         if tokio::time::Instant::now() >= deadline { return; }
                         tokio::time::sleep(Duration::from_millis(200)).await;
                     }
@@ -91,7 +86,7 @@ fn serve() -> anyhow::Result<()> {
     // A later successful update in this process has a different journal.
     // Never mistake it for the startup transaction's failed health check.
     if checking && std::fs::read(&pending).ok() == startup_pending && !operator_stop {
-        selfupdate::windows_rollback(&binary)?;
+        windows_update::rollback(&binary)?;
     }
     // A deliberate operator stop never invokes failure recovery. An update,
     // rollback or unexpected failure does, including a normal dial-loop exit.

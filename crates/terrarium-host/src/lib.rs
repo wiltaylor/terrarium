@@ -52,6 +52,8 @@ pub mod prepare;
 pub mod protocol;
 pub mod selfupdate;
 pub mod update_journal;
+#[cfg(windows)]
+pub mod windows_update;
 pub mod session;
 #[cfg(windows)]
 mod session_windows;

@@ -103,6 +103,10 @@ pub fn failed_version(bin: &Path) -> Option<String> {
 /// `<binary>.failed`). Returns the version that was pending, if any.
 /// `<binary>.prev` stays, for a manual roll back.
 pub fn confirm(bin: &Path) -> Option<String> {
+    #[cfg(windows)]
+    return crate::windows_update::confirm(bin);
+    #[cfg(unix)]
+    {
     let pending = sidecar(bin, PENDING);
     let text = std::fs::read_to_string(&pending).ok()?;
     // A crash before the replacement can restart the old build. Its welcome
@@ -114,6 +118,7 @@ pub fn confirm(bin: &Path) -> Option<String> {
     let _ = std::fs::remove_file(&pending);
     let _ = std::fs::remove_file(sidecar(bin, FAILED));
     Some(first_line(&text).unwrap_or_default())
+    }
 }
 
 /// Fail closed on foreign or unidentified Windows assets, before any I/O.
@@ -566,19 +571,7 @@ pub fn windows_prepare_replacement(bin: &Path, version: &str) -> std::io::Result
 
 #[cfg(windows)]
 pub fn swap(bin: &Path, version: &str) -> Result<(), UpdateError> {
-    windows_prepare_replacement(bin, version).map_err(io_err(bin))?;
-    let old = sidecar(bin, "old");
-    if old.exists() {
-        std::fs::remove_file(&old).map_err(io_err(&old))?;
-    }
-    // Windows permits renaming the mapped image, but not replacing it.
-    std::fs::rename(bin, &old).map_err(io_err(bin))?;
-    if let Err(source) = std::fs::rename(sidecar(bin, NEW), bin) {
-        let _ = std::fs::rename(&old, bin);
-        let _ = std::fs::remove_file(sidecar(bin, PENDING));
-        return Err(io_err(bin)(source));
-    }
-    Ok(())
+    crate::windows_update::activate(bin, version).map_err(io_err(bin))
 }
 
 /// Restore the saved image while the failed image is still mapped.
