@@ -89,13 +89,18 @@ pub struct Journal {
 }
 
 fn container_id(id: &str) -> bool {
-    id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    id.len() == 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn journal_version<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
     let version = u32::deserialize(d)?;
     if version != JOURNAL_VERSION {
-        return Err(serde::de::Error::custom("unsupported bootstrap journal version"));
+        return Err(serde::de::Error::custom(
+            "unsupported bootstrap journal version",
+        ));
     }
     Ok(version)
 }

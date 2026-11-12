@@ -49,8 +49,11 @@ fn child(parent: &File, name: &str, directory: bool) -> Result<File, Reply> {
     if directory {
         flags |= OFlag::O_DIRECTORY;
     }
-    let file = File::from(openat(parent, name, flags, Mode::empty()).map_err(|_| Reply::Unsupported)?);
-    if nix::sys::statfs::fstatfs(&file).map_err(|_| Reply::Unsupported)?.filesystem_type()
+    let file =
+        File::from(openat(parent, name, flags, Mode::empty()).map_err(|_| Reply::Unsupported)?);
+    if nix::sys::statfs::fstatfs(&file)
+        .map_err(|_| Reply::Unsupported)?
+        .filesystem_type()
         != nix::sys::statfs::PROC_SUPER_MAGIC
     {
         return Err(Reply::Unsupported);
@@ -60,16 +63,24 @@ fn child(parent: &File, name: &str, directory: bool) -> Result<File, Reply> {
 
 fn read(parent: &File, name: &str) -> Result<Vec<u8>, Reply> {
     let mut bytes = Vec::new();
-    child(parent, name, false)?.take((LIMIT + 1) as u64)
-        .read_to_end(&mut bytes).map_err(|_| Reply::Unsupported)?;
+    child(parent, name, false)?
+        .take((LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Reply::Unsupported)?;
     Ok(bytes)
 }
 
 /// Observe fixed local procfs entries, never caller paths or Engine PIDs.
 /// No subprocess, Engine request, mount, namespace entry or probe is invoked.
 pub fn collect_local() -> Result<HostBaseline, Reply> {
-    let proc = File::from(open("/proc", OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW, Mode::empty())
-        .map_err(|_| Reply::Unsupported)?);
+    let proc = File::from(
+        open(
+            "/proc",
+            OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|_| Reply::Unsupported)?,
+    );
     let sys = child(&proc, "sys", true)?;
     let kernel = child(&sys, "kernel", true)?;
     let random = child(&kernel, "random", true)?;
@@ -82,7 +93,11 @@ pub fn collect_local() -> Result<HostBaseline, Reply> {
     // SAFETY: successful uname initialized all fields, including terminating NULs.
     let uts = unsafe { uts.assume_init() };
     let field = |chars: &[nix::libc::c_char]| {
-        let bytes: Vec<u8> = chars.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect();
+        let bytes: Vec<u8> = chars
+            .iter()
+            .take_while(|c| **c != 0)
+            .map(|c| *c as u8)
+            .collect();
         text(&bytes)
     };
     let observed = HostBaseline {
@@ -115,8 +130,19 @@ mod tests {
     #[test]
     fn bounded_kernel_parser_rejects_truncation_controls_and_empty_values() {
         assert_eq!(text(b"6.12.1-test\n").unwrap(), "6.12.1-test");
-        assert_eq!(text(b"#1 SMP PREEMPT_DYNAMIC").unwrap(), "#1 SMP PREEMPT_DYNAMIC");
-        for bytes in [b"".as_slice(), b"\n", b"x\ny", b"x\0", b"x\r\n", &[255], &vec![b'x'; LIMIT + 1]] {
+        assert_eq!(
+            text(b"#1 SMP PREEMPT_DYNAMIC").unwrap(),
+            "#1 SMP PREEMPT_DYNAMIC"
+        );
+        for bytes in [
+            b"".as_slice(),
+            b"\n",
+            b"x\ny",
+            b"x\0",
+            b"x\r\n",
+            &[255],
+            &vec![b'x'; LIMIT + 1],
+        ] {
             assert_eq!(text(bytes), Err(Reply::Unsupported));
         }
     }
@@ -125,7 +151,13 @@ mod tests {
     fn boot_parser_requires_one_complete_canonical_nonzero_id() {
         let id = "12345678-1234-1234-abcd-123456789abc";
         assert_eq!(boot_id(format!("{id}\n").as_bytes()).unwrap(), id);
-        for value in ["", "00000000-0000-0000-0000-000000000000", "12345678-1234-1234-ABCD-123456789ABC", "12345678-1234-1234-abcd-123456789ab", "12345678_1234-1234-abcd-123456789abc"] {
+        for value in [
+            "",
+            "00000000-0000-0000-0000-000000000000",
+            "12345678-1234-1234-ABCD-123456789ABC",
+            "12345678-1234-1234-abcd-123456789ab",
+            "12345678_1234-1234-abcd-123456789abc",
+        ] {
             assert_eq!(boot_id(value.as_bytes()), Err(Reply::Unsupported));
         }
     }

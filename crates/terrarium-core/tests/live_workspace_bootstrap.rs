@@ -281,7 +281,13 @@ fn scaffold_aliases_zero_identity_and_short_container_ids_are_refused() {
     let mut j = Journal::new(r).unwrap();
     j.advance(all[1].clone()).unwrap();
     j.advance(Step::CreatePending).unwrap();
-    for id in ["", "name", &"g".repeat(64), &"a".repeat(63), &"A".repeat(64)] {
+    for id in [
+        "",
+        "name",
+        &"g".repeat(64),
+        &"a".repeat(63),
+        &"A".repeat(64),
+    ] {
         assert!(j.advance(Step::ContainerBound(id.into())).is_err());
     }
 }

@@ -179,6 +179,7 @@ mod tests {
         configuration_changed: bool,
         post_effect: bool,
         effects: usize,
+        journal_path: Option<std::path::PathBuf>,
     }
 
     impl Fake {
@@ -189,6 +190,7 @@ mod tests {
                 configuration_changed: false,
                 post_effect: false,
                 effects: 0,
+                journal_path: None,
             }
         }
         fn action(&mut self) -> Result<(), Reply> {
@@ -242,6 +244,12 @@ mod tests {
             _: &Scaffold,
             id: &str,
         ) -> Result<RuntimeIdentity, Reply> {
+            if let Some(path) = &self.journal_path {
+                let disk: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                assert_eq!(disk["steps"].as_array().unwrap().last().unwrap(),
+                    &serde_json::json!({"start_pending": id}));
+            }
             self.action()?;
             Ok(RuntimeIdentity {
                 registration: r.registration,
@@ -273,6 +281,16 @@ mod tests {
     }
 
     #[test]
+    fn start_observes_the_exact_durable_start_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fake = Fake::fresh(0);
+        fake.journal_path = Some(dir.path().join("bootstrap.json"));
+        let mut bootstrap = Bootstrap::new(Store::fixture(dir.path()).unwrap(), fake);
+        bootstrap.create(request()).unwrap();
+        assert_eq!(bootstrap.backend.calls, 4);
+    }
+
+    #[test]
     fn every_persistence_boundary_refuses_replay_after_error_or_process_restart() {
         // Seven boundaries for each of intent, scaffold, create-pending,
         // container binding, start intent, receiver verification and final commit. These
@@ -288,7 +306,10 @@ mod tests {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.create(r.clone())));
                 assert_eq!(outcome.is_err(), crash, "boundary {boundary}");
                 if boundary <= 35 {
-                    assert!(b.backend.calls <= 2, "start before synced StartPending: {boundary}");
+                    assert!(
+                        b.backend.calls <= 2,
+                        "start before synced StartPending: {boundary}"
+                    );
                 }
                 if !crash {
                     // Initial intent errors propagate their I/O failure.
