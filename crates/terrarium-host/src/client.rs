@@ -988,7 +988,7 @@ impl Client {
                 #[cfg(windows)]
                 let identity = match crate::windows_run_as::logon(req.windows_run_as.take(), &o.windows_run_as).await {
                     Ok(identity) => identity,
-                    Err(error) => return send_error(tx, id, error.code, error.message),
+                    Err(error) => { send_error(tx, id, error.code, error.message); return Ok(()); },
                 };
                 #[cfg(not(windows))]
                 let plan = crate::verb::plan_exec(&req, p);

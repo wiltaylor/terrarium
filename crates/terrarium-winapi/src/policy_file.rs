@@ -6,6 +6,7 @@ use std::path::Component;
 use windows_sys::Win32::Security::*;
 use windows_sys::Win32::Security::Authorization::*;
 use windows_sys::Win32::Storage::FileSystem::*;
+use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 
 struct Local(*mut std::ffi::c_void);
 impl Drop for Local {
@@ -38,7 +39,7 @@ fn check_acl(handle: &OwnedHandle, file: bool, trusted: &[Local]) -> io::Result<
         null_mut(), &mut dacl, null_mut(), &mut descriptor) };
     if error != ERROR_SUCCESS { return Err(io::Error::from_raw_os_error(error as i32)); }
     let _descriptor = Local(descriptor);
-    if !trusted_sid(owner, trusted) || dacl.is_null() { return Err(denied()); }
+    if !trusted_sid(owner, if file { &trusted[..2] } else { trusted }) || dacl.is_null() { return Err(denied()); }
     // Ancestors may allow creating unrelated children, but not deleting or
     // replacing this directory or changing its policy. On the file all write
     // permissions are forbidden for any untrusted trustee (conservative ACL audit).

@@ -102,7 +102,7 @@ impl Drop for Password {
     }
 }
 
-fn elevation(token: &OwnedHandle) -> io::Result<(TOKEN_ELEVATION_TYPE, bool)> {
+pub(crate) fn elevation(token: &OwnedHandle) -> io::Result<(TOKEN_ELEVATION_TYPE, bool)> {
     let mut kind = 0;
     let mut elevated = TOKEN_ELEVATION { TokenIsElevated: 0 };
     let mut bytes = 0;
@@ -260,5 +260,24 @@ impl Drop for Identity {
             // SAFETY: profile and matching logon token are owned and still live.
             checked(unsafe { UnloadUserProfile(self.token.as_raw_handle(), self.profile) })
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_account_and_password_nul_fail_before_logon() {
+        for account in ["user", "\\user", "DOMAIN\\", "DOMAIN\\user\\other"] {
+            assert_eq!(Identity::logon(account, "not-a-password", false).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        }
+        assert_eq!(Identity::logon("DOMAIN\\user", "before\0after", false).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn password_validation_error_does_not_echo_input() {
+        let error = Identity::logon("DOMAIN\\user", "unique-sentinel\0invalid", false).unwrap_err();
+        assert!(!format!("{error:?} {error}").contains("unique-sentinel"));
     }
 }

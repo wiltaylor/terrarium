@@ -57,6 +57,10 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Read-only native acceptance probe, run through an ordinary exec session.
+    #[cfg(windows)]
+    #[command(hide = true)]
+    IdentityProbe,
     /// Run under the Windows Service Control Manager as LocalSystem.
     #[cfg(windows)]
     Service,
@@ -546,6 +550,22 @@ fn main() -> anyhow::Result<()> {
         return windows_service_host::dispatch();
     }
     match &args.command {
+        #[cfg(windows)]
+        Some(Cmd::IdentityProbe) => {
+            let token = terrarium_winapi::current_token_snapshot()?;
+            let environment: std::collections::BTreeMap<_, _> =
+                ["USERPROFILE", "USERNAME", "USERDOMAIN", "TEMP"].into_iter()
+                    .map(|key| (key, std::env::var(key).ok())).collect();
+            println!("{}", serde_json::json!({
+                "user_sid": token.user_sid,
+                "elevation_type": token.elevation_type,
+                "elevated": token.elevated,
+                "administrators_enabled": token.administrators_enabled,
+                "administrators_deny_only": token.administrators_deny_only,
+                "environment": environment,
+            }));
+            return Ok(());
+        }
         Some(Cmd::TokenFile { path }) => return write_token_file(path),
         Some(Cmd::Cert { names, out, force }) => return write_cert(names, out, *force),
         Some(Cmd::Fingerprint { cert }) => return fingerprint(cert),
@@ -569,7 +589,7 @@ fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new().context("start the runtime")?;
     match args.command {
         #[cfg(windows)]
-        Some(Cmd::Service) => unreachable!("handled by the service dispatcher"),
+        Some(Cmd::Service | Cmd::IdentityProbe) => unreachable!("handled before config loading"),
         Some(Cmd::Check { json, probe }) => rt.block_on(check(&cfg, json, probe)),
         Some(Cmd::Run) | None => rt.block_on(run(cfg)),
         Some(

@@ -6,6 +6,8 @@ mod identity;
 pub use identity::Identity;
 mod policy_file;
 pub use policy_file::read_host_policy_file;
+mod diagnostics;
+pub use diagnostics::{TokenSnapshot, current_token_snapshot};
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
