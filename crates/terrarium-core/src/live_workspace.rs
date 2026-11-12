@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use ulid::Ulid;
 
+pub mod bootstrap;
+
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const STATE_VERSION: u32 = 1;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;

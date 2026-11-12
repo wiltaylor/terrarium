@@ -187,12 +187,71 @@ pub struct DockerInspector;
 
 impl DockerInspector {
     fn output(container_id: &str) -> Result<Vec<u8>, Reply> {
-        use std::os::fd::AsRawFd;
-        use std::process::{Command, Stdio};
-        use std::time::{Duration, Instant};
         if container_id.len() != 64 || !container_id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(Reply::Unauthorized);
         }
+        Self::output_args(&["inspect", "--type", "container", container_id])
+    }
+
+    /// Inspect only the helper-selected digest, then the already bound full
+    /// container ID. This checks configuration, not B3 mount evidence. Neither
+    /// image tags nor arbitrary CLI arguments are accepted from the request.
+    pub fn verify_receiver(
+        &mut self,
+        specification: &super::receiver::Specification,
+        request: &terrarium_core::live_workspace::bootstrap::Request,
+        measured: &crate::docker::live_workspace::Profile,
+        expected: &RuntimeIdentity,
+    ) -> Result<Snapshot, Reply> {
+        specification.verify(request, measured)?;
+        if expected.registration != request.registration
+            || expected.incarnation != request.incarnation
+        {
+            return Err(Reply::Quarantined);
+        }
+        let image = Self::output_args(&["image", "inspect", specification.image_reference()])?;
+        let image_id = Self::resolved_image(&image, specification.image_reference())?;
+        let bytes = Self::output(&expected.container_id)?;
+        specification.check_inspect_configuration(
+            request,
+            measured,
+            &expected.container_id,
+            &image_id,
+            &bytes,
+        )?;
+        let snapshot = Self::parse(&bytes, &expected.container_id)?;
+        if snapshot.identity != *expected {
+            return Err(Reply::Quarantined);
+        }
+        Ok(snapshot)
+    }
+
+    fn resolved_image(bytes: &[u8], reference: &str) -> Result<String, Reply> {
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_slice(bytes).map_err(|_| Reply::Failed)?;
+        let [row] = rows.as_slice() else {
+            return Err(Reply::Quarantined);
+        };
+        let id = row["Id"].as_str().ok_or(Reply::Quarantined)?;
+        if !id.strip_prefix("sha256:").is_some_and(|s| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }) || !row["RepoDigests"]
+            .as_array()
+            .is_some_and(|digests| digests.iter().any(|v| v.as_str() == Some(reference)))
+        {
+            return Err(Reply::Quarantined);
+        }
+        Ok(id.into())
+    }
+
+    // Private closed call sites above supply the verb and arguments. Keep this
+    // runner unavailable to the wire protocol and the unprivileged forwarder.
+    fn output_args(args: &[&str]) -> Result<Vec<u8>, Reply> {
+        use std::os::fd::AsRawFd;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
         let bin = super::ProtectedRoot::open(std::path::Path::new("/usr/bin"))?;
         let executable = File::from(
             openat(
@@ -208,14 +267,8 @@ impl DockerInspector {
             return Err(Reply::Unauthorized);
         }
         let mut child = Command::new(format!("/proc/self/fd/{}", executable.as_raw_fd()))
-            .args([
-                "--host",
-                "unix:///var/run/docker.sock",
-                "inspect",
-                "--type",
-                "container",
-                container_id,
-            ])
+            .args(["--host", "unix:///var/run/docker.sock"])
+            .args(args)
             .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -330,5 +383,31 @@ impl DockerInspector {
 impl Inspector for DockerInspector {
     fn inspect(&mut self, container_id: &str) -> Result<Snapshot, Reply> {
         Self::parse(&Self::output(container_id)?, container_id)
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn image_resolution_refuses_tags_missing_digest_and_ambiguous_rows() {
+        let reference = format!("synthetic@sha256:{}", "a".repeat(64));
+        let id = format!("sha256:{}", "b".repeat(64));
+        let row = serde_json::json!({"Id": id, "RepoDigests": [reference]});
+        let check = |value: serde_json::Value| {
+            DockerInspector::resolved_image(value.to_string().as_bytes(), &reference)
+        };
+        assert_eq!(check(serde_json::json!([row.clone()])), Ok(id));
+        for value in [
+            serde_json::json!([]),
+            serde_json::json!([row.clone(), row.clone()]),
+            serde_json::json!([{"Id": "sha256:short", "RepoDigests": [reference]}]),
+            serde_json::json!([{"Id": row["Id"], "RepoTags": [reference]}]),
+            serde_json::json!([{"Id": row["Id"], "RepoDigests": ["synthetic:latest"]}]),
+            serde_json::json!([{"Id": row["Id"], "RepoDigests": null}]),
+        ] {
+            assert_eq!(check(value), Err(Reply::Quarantined));
+        }
     }
 }
