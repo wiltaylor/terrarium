@@ -1098,7 +1098,12 @@ async fn admission_deadline_and_closed_waiter_do_not_start_commands() {
     };
     let lock = state.executor.resource_lock("h");
     let guard = lock.clone().lock_owned(ResourceOperation::Grant).await;
+    assert!(std::sync::Arc::ptr_eq(
+        &lock,
+        &state.executor.target_resource_lock(&def)
+    ));
     tokio::time::pause();
+    let started = tokio::time::Instant::now();
     let mut run = start_cmd(&state, &def, &cmd).unwrap();
     // Drive the spawned acquire before advancing the clock. Never assert
     // scheduler ordering at the exact deadline.
@@ -1110,6 +1115,7 @@ async fn admission_deadline_and_closed_waiter_do_not_start_commands() {
     assert!(state.executor.resource_sessions(std::slice::from_ref(&def.name), None).is_empty());
     tokio::time::advance(Duration::from_millis(2)).await;
     let event = run.events.recv().await.unwrap();
+    assert_eq!(started.elapsed(), Duration::from_millis(501));
     assert!(matches!(event, terrariumd::executor::Ev::End(End::Error { code, .. }) if code == "resource_busy"));
     assert!(run.events.recv().await.is_none());
     assert!(!marker.exists());
