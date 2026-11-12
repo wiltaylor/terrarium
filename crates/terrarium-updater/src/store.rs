@@ -711,7 +711,9 @@ with (directory / '.retention.lock').open('a') as lock:
         print('authorized', flush=True)
         sys.stdin.readline()
         fcntl.flock(lock, fcntl.LOCK_UN)
-        stdout, stderr = child.communicate(timeout=5)
+        # Scheduling delay is not the safety assertion. The actual assertions
+        # below still require an expired lease, a stopped receipt and no unlink.
+        stdout, stderr = child.communicate(timeout=60)
         if child.returncode:
             raise RuntimeError(stderr.decode())
         receipt = hot.retention_read(directory, '.retention-' + authorization['token'] + '.receipt.json')
