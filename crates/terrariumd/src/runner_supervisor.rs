@@ -6048,7 +6048,9 @@ mod tests {
             started_at: chrono::Utc::now(),
             db,
             definitions: Default::default(),
-            supervisor: Arc::new(crate::supervisor::InMemorySupervisor::new(Duration::from_millis(5))),
+            supervisor: Arc::new(crate::supervisor::InMemorySupervisor::new(
+                Duration::from_millis(5),
+            )),
             state_dir: root.join("state"),
             config_dir: root.join("config"),
             work_dir: root.join("work"),
@@ -6087,28 +6089,58 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = workspace_state(tmp.path());
         let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
-            state.state_dir.clone(), tmp.path().join("run"), tmp.path().join("prompts"),
-            SandboxConfig { mode: SandboxMode::None, ..Default::default() }, HashMap::new(),
+            state.state_dir.clone(),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            SandboxConfig {
+                mode: SandboxMode::None,
+                ..Default::default()
+            },
+            HashMap::new(),
         ));
         sup.bind(&state);
         let def = serde_json::from_value(serde_json::json!({
             "name": "holder", "project": "p", "harness": "codex"
-        })).unwrap();
+        }))
+        .unwrap();
         let agent = Agent::from_def(&def, &state.state_dir);
         let id = agent.id;
-        state.db.write_full("system", move |t| {
-            t.execute("INSERT INTO live_workspaces VALUES ('w','h',?1,'p','holder','1','2','fresh')", [id.to_string()])?;
-            t.execute("INSERT INTO workspace_reservations VALUES ('w','d',NULL,'sandbox')", [])?;
-            Ok(())
-        }).await.unwrap();
+        state
+            .db
+            .write_full("system", move |t| {
+                t.execute(
+                    "INSERT INTO live_workspaces VALUES ('w','h',?1,'p','holder','1','2','fresh')",
+                    [id.to_string()],
+                )?;
+                t.execute(
+                    "INSERT INTO workspace_reservations VALUES ('w','d',NULL,'sandbox')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         lock(&sup.inner.slots).insert(id, Slot::new(agent.clone()));
-        assert!(matches!(sup.launch_inner(id, 0).await, Err(SupervisorError::NotReady(_))));
+        assert!(matches!(
+            sup.launch_inner(id, 0).await,
+            Err(SupervisorError::NotReady(_))
+        ));
         for since in [None, Some(7)] {
-            assert!(matches!(sup.connect_runner_for_adoption(id, since).await, Err(SupervisorError::NotReady(_))));
+            assert!(matches!(
+                sup.connect_runner_for_adoption(id, since).await,
+                Err(SupervisorError::NotReady(_))
+            ));
         }
         // Cleanup bypasses admission and reaches the socket, not the seal gate.
-        assert!(matches!(sup.connect_runner(id, None).await, Err(SupervisorError::Other(_))));
-        assert!(crate::workspace::ensure_generic(&state, &agent, true).await.is_err());
+        assert!(matches!(
+            sup.connect_runner(id, None).await,
+            Err(SupervisorError::Other(_))
+        ));
+        assert!(
+            crate::workspace::ensure_generic(&state, &agent, true)
+                .await
+                .is_err()
+        );
         assert!(!state.work_dir.exists());
         assert!(!state.state_dir.exists());
     }
@@ -6119,9 +6151,15 @@ mod tests {
         let state = workspace_state(tmp.path());
         let def = serde_json::from_value(serde_json::json!({
             "name": "holder", "project": "p", "harness": "codex"
-        })).unwrap();
+        }))
+        .unwrap();
         let agent = Agent::from_def(&def, &state.state_dir);
-        assert!(crate::workspace::ensure_generic(&state, &agent, true).await.unwrap().is_some());
+        assert!(
+            crate::workspace::ensure_generic(&state, &agent, true)
+                .await
+                .unwrap()
+                .is_some()
+        );
         state.db.write_full("operator", |t| {
             let def = serde_json::from_value(serde_json::json!({"name":"synthetic", "kind":"host", "host":"fake"}))
                 .unwrap();
@@ -6131,7 +6169,9 @@ mod tests {
             assert!(t.execute("UPDATE live_workspace_targets SET activation = 'enabled'", []).is_err());
             Ok(())
         }).await.unwrap();
-        let error = crate::executor::usable(&state, &crate::actor::Actor::Operator, "synthetic").await.unwrap_err();
+        let error = crate::executor::usable(&state, &crate::actor::Actor::Operator, "synthetic")
+            .await
+            .unwrap_err();
         assert!(error.message.contains("activation is disabled"));
     }
 
