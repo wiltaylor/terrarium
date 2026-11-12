@@ -1,0 +1,25 @@
+[package]
+name = "terrarium-front"
+description = "Terrarium reverse proxy and maintenance page"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+axum.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+tempfile.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true

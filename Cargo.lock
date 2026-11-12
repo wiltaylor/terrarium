@@ -3978,6 +3978,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "terrarium-front"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "futures-util",
+ "hmac",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "terrarium-host"
 version = "0.1.0"
 dependencies = [

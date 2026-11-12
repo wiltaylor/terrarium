@@ -6,6 +6,20 @@
 # `just deploy::server` sets it to the install dir: the code is in
 # <dir>/src and the data stays in <dir>, so a new deploy never touches it.
 services:
+  terrarium-front:
+    image: ${TERRARIUM_FRONT_IMAGE:-${TERRARIUM_IMAGE:-terrarium:dev}}
+    entrypoint: ["/opt/terrarium/bundled/bin/terrarium-front"]
+    command: []
+    restart: unless-stopped
+    ports:
+      - "${TERRARIUM_PORT:-8080}:8080"
+      - "${TERRARIUM_INGEST_PORT:-8083}:8083"
+    volumes:
+      - ${TERRARIUM_DATA_DIR:-.}/state/front:/front:ro
+      - ${TERRARIUM_DATA_DIR:-.}/updater/state:/updater:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
   terrarium:
     build:
       context: .
@@ -24,10 +38,8 @@ services:
     # container stop < 900 s runner call queue. See docker/README.md.
     stop_grace_period: 650s
     ports:
-      - "${TERRARIUM_PORT:-8080}:8080"                 # dashboard and API
       - "${TERRARIUM_ARTIFACT_PORT:-8081}:8081"        # artifact serving origin (§15.2)
       - "${TERRARIUM_HOST_PORT:-8082}:8082"            # host agent dial-in (§19)
-      - "${TERRARIUM_INGEST_PORT:-8083}:8083"          # webhooks of the event sources (docs/api.md §20)
     environment:
       TERRARIUM_TOKEN: ${TERRARIUM_TOKEN:?set TERRARIUM_TOKEN in .env (see .env.example)}
       TERRARIUM_PUBLIC_URL: ${TERRARIUM_PUBLIC_URL:-http://localhost:8080}
