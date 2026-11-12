@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { createSignal } from "solid-js";
+import { createComponent, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import { SnapGrid } from "./SnapGrid";
@@ -33,7 +33,7 @@ it("uses reading order for the phone stack and content-only auto height defaults
 function mount(editing = true) {
   const [widgets, setWidgets] = createSignal([widget("a"), widget("b", 6)]);
   const root = document.createElement("div"); document.body.append(root);
-  dispose = render(() => <SnapGrid widgets={widgets()} editing={editing} onChange={setWidgets} renderWidget={(item) => <p>{item.id}</p>} />, root);
+  dispose = render(() => createComponent(SnapGrid<GridWidget>, { get widgets() { return widgets(); }, editing, onChange: setWidgets, renderWidget: (item) => item.id }), root);
   return { root, widgets, setWidgets };
 }
 
@@ -56,7 +56,7 @@ it("retains exact cell positions across reload and equivalent live updates", () 
   setWidgets(JSON.parse(JSON.stringify(widgets())) as GridWidget[]);
   expect(positions()).toEqual(initial);
   dispose?.();
-  dispose = render(() => <SnapGrid widgets={widgets()} renderWidget={(item) => <p>{item.id} live content</p>} />, root);
+  dispose = render(() => createComponent(SnapGrid<GridWidget>, { widgets: widgets(), renderWidget: (item) => `${item.id} live content` }), root);
   expect(positions()).toEqual(initial);
 });
 
@@ -64,7 +64,7 @@ it("expands content into whole rows and pushes lower widgets without changing sa
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ height: 200 } as DOMRect);
   const items = [{ ...widget("a"), kind: "wiki" }, widget("b", 0, 2)];
-  dispose = render(() => <SnapGrid widgets={items} renderWidget={(item) => <p>{item.id}</p>} />, document.body);
+  dispose = render(() => createComponent(SnapGrid<GridWidget>, { widgets: items, renderWidget: (item) => item.id }), document.body);
   await Promise.resolve();
   const sections = document.querySelectorAll<HTMLElement>("section");
   expect(sections[0]!.style.gridRow).toBe("1 / span 3");
