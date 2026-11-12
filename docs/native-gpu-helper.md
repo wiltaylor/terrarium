@@ -404,17 +404,41 @@ not run it on a shared target or a DGX Spark without that decision.
    such file: build it from the tag with `cargo build
    --release --locked -p terrarium-host --bin terrarium-host-helper`.
 
-4. **The workspace**: a group that both users share, with the setgid bit,
-   so files stay writable for the host agent and the sessions:
+4. **The workspace**: a shared group for agent-root contents, but protected
+   root-owned base and project directories. Pool users must not own or have
+   write permission on either parent, even with a sticky bit. The helper
+   refuses unsafe existing parents rather than repairing them in place.
 
    ```sh
    groupadd terrarium-ws
    usermod -aG terrarium-ws <agent user>
    for i in 1 2 3 4; do usermod -aG terrarium-ws terrarium-w$i; done
-   chgrp -R terrarium-ws /srv/terrarium/work
-   chmod -R g+rwX /srv/terrarium/work
-   find /srv/terrarium/work -type d -exec chmod g+s {} +
+   install -d -o root -g terrarium-ws -m 0755 /srv/terrarium/work
    ```
+
+   Do not recursively grant group write on the base or project directories.
+   Set the target's `work_root` to the helper's `workspace_root`. The helper
+   creates `<workspace_root>/<project>` root-owned, without group/other
+   write, and `<project>/<agent>` as root:terrarium-ws, mode 2770. Its
+   root-owned marker is group-readable. Sessions can write inside their
+   own roots but cannot chmod the project parent or rename siblings. Root
+   preparation requires helper protocol 2, so install the matching host
+   agent and helper together. An older helper refuses the new request.
+
+   **Existing-host migration (including helios)**: schedule a maintenance
+   window and stop new native sessions. Wait for live sessions to end and
+   let the old daemon clean up ended card-agent roots before replacing the
+   helper. Inventory the exact workspace and project paths and verify that
+   none is a symlink. With administrator approval, change only the base
+   and each project parent to root:terrarium-ws, mode 0755. For helios,
+   these are `/srv/terrarium-native` and
+   `/srv/terrarium-native/terrarium`. Do not recursively chown or chmod
+   live roots or unreviewed data. An existing agent root also needs an
+   administrator-reviewed migration to root:terrarium-ws, mode 2770,
+   with a matching regular owner marker, or normal cleanup before it is
+   prepared again. Install the matching host agent and helper, restart
+   them in the maintenance window, and verify two card holders before
+   reopening native sessions. This card does not perform the migration.
 
 5. **The config** `/etc/terrarium-host-helper/config.toml`, owned by root,
    mode 0644 or stricter, in directories owned by root and not writable by

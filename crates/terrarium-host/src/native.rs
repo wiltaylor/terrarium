@@ -275,7 +275,7 @@ pub fn provision_root(workspace: &Path, root: &OwnedRoot) -> Result<(), Refusal>
     use std::fs::File;
     use std::io::{Read, Write};
 
-    let invalid = |e| Refusal::invalid(format!("cannot provision owned root: {e}"));
+    let invalid = |e| Refusal::invalid(format!("cannot provision owned root under {}/{}: {e}; inspect the paths and set the base and project parent to root:workspace-group mode 0755 before retrying", workspace.display(), root.project));
     for name in [&root.project, &root.name, &root.agent] {
         if name.is_empty()
             || name.len() > 128
@@ -297,13 +297,17 @@ pub fn provision_root(workspace: &Path, root: &OwnedRoot) -> Result<(), Refusal>
         Ok(())
     };
     safe_parent(&base)?;
-    match mkdirat(&base, root.project.as_str(), Mode::from_bits_truncate(0o755)) {
-        Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
+    let project_created = match mkdirat(&base, root.project.as_str(), Mode::from_bits_truncate(0o755)) {
+        Ok(()) => true,
+        Err(nix::errno::Errno::EEXIST) => false,
         Err(e) => return Err(invalid(e.to_string())),
-    }
+    };
     let project = File::from(openat(&base, root.project.as_str(), flags, Mode::empty())
         .map_err(|e| invalid(e.to_string()))?);
     safe_parent(&project)?;
+    if project_created {
+        project.set_permissions(std::fs::Permissions::from_mode(0o755)).map_err(|e| invalid(e.to_string()))?;
+    }
     let gid = base.metadata().map_err(|e| invalid(e.to_string()))?.gid();
     let created = match mkdirat(&project, root.name.as_str(), Mode::from_bits_truncate(0o700)) {
         Ok(()) => true,

@@ -76,8 +76,8 @@ fn unsafe_existing_parents_are_refused_without_repair() {
     let project = tmp.path().join("project");
     std::fs::create_dir(&project).unwrap();
     for (path, uid, mode) in [
-        (&project, 23001, 0o755),
-        (&project, 0, 0o775),
+        (project.as_path(), 23001, 0o755),
+        (project.as_path(), 0, 0o775),
         (tmp.path(), 23001, 0o755),
         (tmp.path(), 0, 0o777),
     ] {
