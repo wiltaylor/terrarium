@@ -7459,8 +7459,12 @@ owned root (including its ownership marker) before mirroring, and root cleanup
 also removes the mirror. Other agents use `<work_root>/<project>/<agent>/workspace`,
 or `<remote home>/<project>/<agent>/workspace` without `work_root`. Workspace
 paths in cwd, command arguments, environment values and copy paths are
-translated to that mirror for exec, run and checkout. Remote error text
-contains remote paths, which differ from the sandbox paths. On SSH targets
+translated to that mirror for exec, run and checkout.
+The sandbox workspace alias (`<configured sandbox home>/work`) is translated
+in the same fields, including copy paths. On SSH targets the alias maps to
+the canonical workspace path. Paths outside both roots and paths containing
+`..` components are left unchanged, not normalized into the workspace.
+Remote error text contains remote paths, which differ from the sandbox paths. On SSH targets
 the mirror remains at the same absolute path. An operator must select
 an agent. After a normally exited command (including nonzero exit) or a
 completed copy, it stages the remote tree locally and pulls changes and

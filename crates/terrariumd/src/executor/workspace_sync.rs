@@ -154,6 +154,7 @@ fn workspace_lock(path: &Path) -> Arc<AsyncMutex<()>> {
 
 pub(super) struct Sync {
     root: PathBuf,
+    alias: Option<PathBuf>,
     remote_root: PathBuf,
     basis: PathBuf,
     remote: String,
@@ -410,6 +411,7 @@ pub(super) async fn prepare(
     rsync(&format!("{}/", root.display()), &remote, Some(&shell)).await?;
     Ok(Some(Sync {
         root,
+        alias: state.supervisor.workspace_alias(),
         remote_root,
         basis,
         remote,
@@ -422,7 +424,15 @@ pub(super) async fn prepare(
 
 impl Sync {
     pub(super) fn translate(&self, value: &str) -> String {
-        let local = self.root.to_string_lossy();
+        let value = self.translate_root(value, &self.root);
+        match &self.alias {
+            Some(alias) => self.translate_root(&value, alias),
+            None => value,
+        }
+    }
+
+    fn translate_root(&self, value: &str, root: &Path) -> String {
+        let local = root.to_string_lossy();
         let remote = self.remote_root.to_string_lossy();
         if local == remote {
             return value.to_owned();
@@ -432,10 +442,16 @@ impl Sync {
         while let Some(pos) = rest.find(local.as_ref()) {
             let end = pos + local.len();
             result.push_str(&rest[..pos]);
-            if rest[end..]
-                .chars()
-                .next()
-                .is_none_or(|c| c == '/' || c.is_whitespace() || "'\";:)=|&".contains(c))
+            let boundary = |c: char| c.is_whitespace() || "'\";:)=|&(".contains(c);
+            let suffix = rest[end..].split(boundary).next().unwrap_or_default();
+            if (pos == 0 || rest[..pos].chars().next_back().is_some_and(boundary))
+                && !Path::new(suffix)
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir)
+                && rest[end..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| c == '/' || c.is_whitespace() || "'\";:)=|&".contains(c))
             {
                 result.push_str(&remote);
             } else {
@@ -504,6 +520,43 @@ impl Sync {
         }
         Ok(())
     }
+}
+
+#[test]
+#[allow(clippy::unwrap_used)]
+fn workspace_alias_translation_is_strict() {
+    let root = PathBuf::from("/work/project/agent");
+    let mut sync = Sync {
+        alias: Some(PathBuf::from("/configured/home/work")),
+        remote_root: PathBuf::from("/remote/workspace"),
+        basis: PathBuf::new(),
+        remote: String::new(),
+        shell: String::new(),
+        before: Snapshot::new(),
+        _key: None,
+        _lock: workspace_lock(&root).try_lock_owned().unwrap(),
+        root,
+    };
+    for root in ["/configured/home/work", "/work/project/agent"] {
+        assert_eq!(
+            sync.translate(&format!("{root}/repo")),
+            "/remote/workspace/repo"
+        );
+        for value in [
+            format!("{root}-other/file"),
+            format!("/outside{root}/file"),
+            format!("{root}/../file"),
+            format!("{root}/repo/../../file"),
+        ] {
+            assert_eq!(sync.translate(&value), value);
+        }
+    }
+    assert_eq!(sync.translate("/outside/file"), "/outside/file");
+    sync.remote_root = sync.root.clone();
+    assert_eq!(
+        sync.translate("/configured/home/work/repo"),
+        "/work/project/agent/repo"
+    );
 }
 
 pub(super) fn finish_with(sess: &Arc<ExecSession>, sync: Option<Sync>) {
@@ -687,6 +740,7 @@ mod tests {
         let sync = Sync {
             root: local.path().to_owned(),
             remote_root: local.path().to_owned(),
+            alias: None,
             basis: basis.path().to_owned(),
             remote: String::new(),
             shell: String::new(),
@@ -737,6 +791,7 @@ mod tests {
         let sync = Sync {
             root: local.path().to_owned(),
             remote_root: local.path().to_owned(),
+            alias: None,
             basis: remote.path().join(".terrarium-stage"),
             remote: format!("{}/", remote.path().display()),
             shell: "ssh".into(),
@@ -769,6 +824,7 @@ mod tests {
         let sync = Sync {
             root: local.path().to_owned(),
             remote_root: local.path().to_owned(),
+            alias: None,
             basis: remote.path().join(".terrarium-stage"),
             remote: format!("{}/", remote.path().display()),
             shell: "ssh".into(),
@@ -799,6 +855,7 @@ mod tests {
         let sync = Sync {
             root: local.path().to_owned(),
             remote_root: local.path().to_owned(),
+            alias: None,
             basis: remote.path().join(".terrarium-stage"),
             remote: format!("{}/", remote.path().display()),
             shell: "ssh".into(),
@@ -973,6 +1030,7 @@ mod tests {
         let sync = Sync {
             root: local.clone(),
             remote_root: remote.clone(),
+            alias: None,
             basis: basis.path().to_owned(),
             remote: remote_spec,
             shell,
