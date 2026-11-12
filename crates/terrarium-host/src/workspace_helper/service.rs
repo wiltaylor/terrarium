@@ -57,6 +57,7 @@ pub async fn run() -> std::io::Result<()> {
     if !nix::unistd::geteuid().is_root() { return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "workspace helper requires root")); }
     let c = config().map_err(|_| failed())?;
     let mut helpers = BTreeMap::new();
+    let mut administrative_roots = std::collections::BTreeSet::new();
     // Take every journal lock before touching the socket. A second process can
     // neither replace a live listener nor mutate this registration stream.
     for r in c.registrations {
@@ -65,7 +66,14 @@ pub async fn run() -> std::io::Result<()> {
         let registration = journal.runtime.registration;
         let mut docker = runtime::DockerInspector;
         let pin = runtime::PinnedRuntime::acquire(&mut docker, &journal.runtime).map_err(|_| failed())?;
-        let kernel = kernel::Kernel::new(ProtectedRoot::open(&c.work_root).map_err(|_| failed())?, ProtectedRoot::open(&r.publisher_root).map_err(|_| failed())?, ProtectedRoot::open(&r.staging_root).map_err(|_| failed())?, pin, docker, mounts::LinuxAttributes).map_err(|_| failed())?;
+        let source = ProtectedRoot::open(&c.work_root).map_err(|_| failed())?;
+        let publisher = ProtectedRoot::open(&r.publisher_root).map_err(|_| failed())?;
+        let staging = ProtectedRoot::open(&r.staging_root).map_err(|_| failed())?;
+        for root in [&publisher, &staging] {
+            let metadata = root.fd.metadata()?;
+            if !administrative_roots.insert((metadata.dev(), metadata.ino())) { return Err(failed()); }
+        }
+        let kernel = kernel::Kernel::new(source, publisher, staging, pin, docker, mounts::LinuxAttributes).map_err(|_| failed())?;
         let helper = Helper::open(store, kernel).map_err(|_| failed())?;
         if helpers.insert(registration, helper).is_some() { return Err(failed()); }
     }

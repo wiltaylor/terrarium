@@ -293,11 +293,11 @@ fn evidence(line: &str, inode: u64) -> MountEvidence {
 
 #[test]
 fn namespace_scoped_publisher_and_private_stage_verification() {
-    let host = evidence("10 1 8:1 /reg/work /publisher rw - ext4 /dev/a rw", 1);
+    let host = evidence("10 1 8:1 /reg/work /publisher rw,nosuid,nodev - ext4 /dev/a rw", 1);
     let mut host_shared = host.clone();
     host_shared.optional_fields = vec!["shared:42".into()];
     // Equal mount IDs across namespaces are neither proof nor a mismatch.
-    let receiver = evidence("10 1 8:1 /reg/work /work ro master:42 - ext4 /dev/a rw", 2);
+    let receiver = evidence("10 1 8:1 /reg/work /work ro,nosuid,nodev master:42 - ext4 /dev/a rw", 2);
     assert_eq!(
         mountinfo::publisher(&host_shared, &receiver, &[host_shared.clone()]),
         Ok(42)

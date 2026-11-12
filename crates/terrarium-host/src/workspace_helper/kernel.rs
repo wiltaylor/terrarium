@@ -81,6 +81,16 @@ fn absent(root: &File, relative: &str) -> Result<(), Reply> {
 impl<I: Inspector, A: Attributes> Kernel<I, A> {
     pub fn new(source: ProtectedRoot, publisher: ProtectedRoot, staging: ProtectedRoot, runtime: PinnedRuntime, inspector: I, attributes: A) -> Result<Self, Reply> {
         if !nix::unistd::geteuid().is_root() { return Err(Reply::Unauthorized); }
+        let source_id = mount_id(&source.fd)?;
+        let publisher_id = mount_id(&publisher.fd)?;
+        let staging_id = mount_id(&staging.fd)?;
+        if source_id == publisher_id || source_id == staging_id || publisher_id == staging_id { return Err(Reply::Quarantined); }
+        let roots = [path(&source.fd)?, path(&publisher.fd)?, path(&staging.fd)?];
+        for (n, a) in roots.iter().enumerate() {
+            for b in &roots[n + 1..] {
+                if a.starts_with(b) || b.starts_with(a) { return Err(Reply::Quarantined); }
+            }
+        }
         Ok(Self { source, publisher, staging, runtime, inspector, attributes, live: BTreeMap::new(), known: BTreeMap::new(), pending: None, revoking: None, receiver_relative: "work".into() })
     }
 
