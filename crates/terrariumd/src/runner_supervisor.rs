@@ -6175,6 +6175,137 @@ mod tests {
         assert!(error.message.contains("activation is disabled"));
     }
 
+    async fn sealed_hook_fixture(state: &Shared, status: &str, policy: bool) -> AgentId {
+        let id = AgentId::new();
+        let status = status.to_owned();
+        state.db.write_full("system", move |t| {
+            let workspace = ulid::Ulid::new().to_string();
+            let host = ulid::Ulid::new().to_string();
+            let policy = if policy { r#"{"targets":["synthetic"]}"# } else { "{}" };
+            t.execute("INSERT INTO agents (id,name,project,harness,workspace,created_at,updated_at,status,policy,source)
+                VALUES (?1,'holder','p','codex','/synthetic','now','now',?2,?3,'api')",
+                rusqlite::params![id.to_string(), status, policy])?;
+            t.execute("INSERT INTO live_workspaces VALUES (?1,?2,?3,'p','holder','1','2','fresh')",
+                rusqlite::params![workspace, host, id.to_string()])?;
+            t.execute("INSERT INTO live_workspace_targets (registration_id,host_id,target_id,trust_domain_id,runtime_id,container_id,namespace_dev,namespace_ino)
+                VALUES ('r',?1,'synthetic','d','runtime',?2,'1','2')", rusqlite::params![host, "a".repeat(64)])?;
+            t.execute("UPDATE live_workspace_targets SET state='reconcile_pending'", [])?;
+            t.execute("UPDATE live_workspace_targets SET state='verified'", [])?;
+            t.execute("INSERT INTO workspace_reservations VALUES (?1,'d','r','sandbox')", [&workspace])?;
+            t.execute("INSERT INTO live_workspace_attachments VALUES ('attachment',?1,'r',?2,'attached_verified',NULL)",
+                rusqlite::params![workspace, id.to_string()])?;
+            Ok(())
+        }).await.unwrap();
+        id
+    }
+
+    async fn assert_hook_fence(state: &Shared, expected: &str) {
+        let expected = expected.to_owned();
+        state.db.read(move |c| {
+            let (actual, revoke): (String, Option<u64>) = c.query_row(
+                "SELECT state,revoke_revision FROM live_workspace_attachments", [], |r| Ok((r.get(0)?,r.get(1)?)))?;
+            assert_eq!(actual, expected);
+            assert_eq!(revoke, None, "authority fence is not verified path disappearance");
+            let seals: u64 = c.query_row("SELECT count(*) FROM workspace_reservations", [], |r| r.get(0))?;
+            assert_eq!(seals, 1);
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_hook_forces_sealed_policy_holder_fence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = workspace_state(tmp.path());
+        // Still idle and policy-backed: only the forced stop hook can fence it.
+        let id = sealed_hook_fixture(&state, "idle", true).await;
+        assert_hook_fence(&state, "attached_verified").await;
+        assert!(crate::executor::on_agent_stop(&state, &id.to_string(), &[]).await.is_empty());
+        assert_hook_fence(&state, "authority_ended").await;
+        assert!(crate::executor::on_agent_stop(&state, &id.to_string(), &[]).await.is_empty());
+        assert_hook_fence(&state, "authority_ended").await;
+    }
+
+    #[tokio::test]
+    async fn lease_end_hook_fences_before_policy_and_missing_holder_shortcuts() {
+        for condition in ["idle_policy", "stopped_policy", "deleted", "lease_only"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let state = workspace_state(tmp.path());
+            let id = sealed_hook_fixture(&state, if condition == "stopped_policy" { "stopped" } else { "idle" }, condition != "lease_only").await;
+            if condition == "deleted" {
+                state.db.write("system", move |t| {
+                    t.execute("DELETE FROM agents WHERE id=?1", [id.to_string()])?;
+                    Ok(())
+                }).await.unwrap();
+            }
+            let lease = crate::store::leases::LeaseRow {
+                id: "ended".into(), target: "synthetic".into(), agent: id.to_string(),
+                agent_name: None, project: "p".into(), granted_by: "operator".into(),
+                granted_at: "now".into(), expires_at: None, exclusive: false,
+                revoked_at: Some("now".into()), revoked_by: Some("operator".into()),
+                reason: None, state: "revoked",
+            };
+            assert_hook_fence(&state, "attached_verified").await;
+            crate::leases::after_end(&state, &lease).await;
+            let expected = if condition == "idle_policy" { "attached_verified" } else { "authority_ended" };
+            assert_hook_fence(&state, expected).await;
+            crate::leases::after_end(&state, &lease).await;
+            assert_hook_fence(&state, expected).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_only_clear_error_kills_fake_owned_runner_despite_seal() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use terrarium_runner::control::{ClientFrame, ServerFrame};
+        let tmp = tempfile::tempdir().unwrap();
+        let state = workspace_state(tmp.path());
+        let id = sealed_hook_fixture(&state, "stopped", true).await;
+        let runtime = tmp.path().join("run");
+        let mut cfg = RunnerSupervisorConfig::new(state.state_dir.clone(), runtime.clone(),
+            tmp.path().join("prompts"), SandboxConfig::default(), HashMap::new());
+        cfg.mode = RunnerMode::Process { bin: PathBuf::from("/not-executed") };
+        let sup = RunnerSupervisor::new(cfg);
+        sup.bind(&state);
+        assert!(sup.admit_legacy_workspace(id).await.is_err());
+        std::fs::create_dir_all(runtime.join("runners")).unwrap();
+        let pid_path = terrarium_runner::pid_path(&runtime, id);
+        std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
+        let pid = std::fs::File::open(pid_path).unwrap();
+        let _held = nix::fcntl::Flock::lock(pid, nix::fcntl::FlockArg::LockExclusiveNonblock).unwrap();
+        let socket = runtime.join("runners").join(format!("{id}.sock"));
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let mut stopped_by = false;
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let ClientFrame::Call { id: call, method, params } = serde_json::from_str(&line).unwrap() else { panic!("unexpected frame") };
+                let result = match method.as_str() {
+                    "hello" => serde_json::json!({"protocol":terrarium_runner::control::PROTOCOL_VERSION,
+                        "version":"fake", "agent":id, "harness":"codex", "runner_pid":std::process::id(),
+                        "status":"error", "seq":0, "hook_socket":"/unused", "events_path":"/unused/events.jsonl"}),
+                    "events" | "watch_status" | "wait" => continue,
+                    "set_stopped_by" => { assert_eq!(params["stopped_by"], "operator"); stopped_by = true; serde_json::Value::Null },
+                    "kill" => {
+                        assert!(stopped_by);
+                        let reply = ServerFrame::reply(call, Ok(serde_json::Value::Null));
+                        write.write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes()).await.unwrap();
+                        return true;
+                    }
+                    _ => panic!("unexpected method {method}"),
+                };
+                let reply = ServerFrame::reply(call, Ok(result));
+                write.write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes()).await.unwrap();
+            }
+            false
+        });
+        tokio::time::timeout(Duration::from_secs(5), sup.clear_error(id)).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap());
+        assert!(sup.admit_legacy_workspace(id).await.is_err());
+        assert_hook_fence(&state, "attached_verified").await;
+    }
+
     struct ClaimRunner {
         id: AgentId,
         pending_error: Option<bool>,
