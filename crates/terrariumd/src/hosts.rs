@@ -105,7 +105,8 @@ impl PendingJournal {
 
     fn push(&mut self, event: SessionEvent) -> bool {
         let bytes = serde_json::to_vec(&event).map_or(usize::MAX, |v| v.len());
-        if self.exhausted || self.events.len() >= JOURNAL_RETRY_EVENTS
+        if self.exhausted
+            || self.events.len() >= JOURNAL_RETRY_EVENTS
             || bytes > JOURNAL_RETRY_BYTES.saturating_sub(self.bytes)
         {
             self.exhausted = true;
@@ -1138,7 +1139,9 @@ impl HostRegistry {
     /// Save before exposing output to a consumer that can acknowledge it.
     fn deliver(&self, host: &str, entry: &mut Entry, id: SessionId, event: SessionEvent) -> bool {
         if let Some(pending) = entry.pending_journal.get_mut(&id) {
-            if !pending.push(event) && let Some(c) = &entry.conn {
+            if !pending.push(event)
+                && let Some(c) = &entry.conn
+            {
                 let _ = c.tx.send(Outgoing::Close(None));
             }
             return false;
@@ -1146,7 +1149,13 @@ impl HostRegistry {
         self.deliver_committed(host, entry, id, event)
     }
 
-    fn deliver_committed(&self, host: &str, entry: &mut Entry, id: SessionId, event: SessionEvent) -> bool {
+    fn deliver_committed(
+        &self,
+        host: &str,
+        entry: &mut Entry,
+        id: SessionId,
+        event: SessionEvent,
+    ) -> bool {
         let Some(s) = entry.sessions.get_mut(&id) else {
             return false;
         };
@@ -1184,9 +1193,16 @@ impl HostRegistry {
                 s.output_events.pop_back();
             }
             if error.code == Code::ResourceBusy {
-                let pending = entry.pending_journal.entry(id).or_insert_with(PendingJournal::new);
+                let pending = entry
+                    .pending_journal
+                    .entry(id)
+                    .or_insert_with(PendingJournal::new);
                 if pending.push(event) {
-                    warn!(host, session = id, "host journal busy; retaining event without acknowledgement");
+                    warn!(
+                        host,
+                        session = id,
+                        "host journal busy; retaining event without acknowledgement"
+                    );
                     return false;
                 }
             }
@@ -1217,7 +1233,9 @@ impl HostRegistry {
         }
         let ids: Vec<_> = e.pending_journal.keys().copied().collect();
         for id in ids {
-            let Some(mut pending) = e.pending_journal.remove(&id) else { continue };
+            let Some(mut pending) = e.pending_journal.remove(&id) else {
+                continue;
+            };
             let now = Instant::now();
             if pending.exhausted || now >= pending.deadline {
                 pending.exhausted = true;
@@ -1231,7 +1249,11 @@ impl HostRegistry {
                     if self.deliver_committed(host, e, id, event) {
                         pending.events.pop_front();
                         // Recalculate after removing an event, keeping the byte bound exact.
-                        pending.bytes = pending.events.iter().map(|v| serde_json::to_vec(v).map_or(0, |v| v.len())).sum();
+                        pending.bytes = pending
+                            .events
+                            .iter()
+                            .map(|v| serde_json::to_vec(v).map_or(0, |v| v.len()))
+                            .sum();
                         if terminal {
                             Self::ack_terminal(e, id, error);
                         }
@@ -2663,34 +2685,77 @@ mod tests {
         crate::secrets::ensure_key(&conn, dir.path()).unwrap();
         let reg = Arc::new(registry("lab1", true));
         reg.restore(dir.path()).unwrap();
-        let mut session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let mut session = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
         let (tx, mut outgoing) = mpsc::unbounded_channel();
         reg.lock().get_mut("lab1").unwrap().conn = Some(Conn { id: 1, tx });
         conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-        reg.on_data("lab1", DataFrame::new(session.id(), StreamTag::Stdout, b"first".to_vec()));
-        reg.on_data("lab1", DataFrame::new(session.id(), StreamTag::Stdout, b"second".to_vec()));
-        reg.on_session_frame("lab1", HostFrame::Exit {
-            session: session.id(), code: Some(0), signal: None, reason: ExitReason::Exited,
-        });
-        assert!(outgoing.try_recv().is_err(), "no close, ACK or release on busy");
+        reg.on_data(
+            "lab1",
+            DataFrame::new(session.id(), StreamTag::Stdout, b"first".to_vec()),
+        );
+        reg.on_data(
+            "lab1",
+            DataFrame::new(session.id(), StreamTag::Stdout, b"second".to_vec()),
+        );
+        reg.on_session_frame(
+            "lab1",
+            HostFrame::Exit {
+                session: session.id(),
+                code: Some(0),
+                signal: None,
+                reason: ExitReason::Exited,
+            },
+        );
+        assert!(
+            outgoing.try_recv().is_err(),
+            "no close, ACK or release on busy"
+        );
         assert!(session.rx.try_recv().is_err());
         assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 0);
-        assert_eq!(reg.lock()["lab1"].pending_journal[&session.id()].events.len(), 3);
+        assert_eq!(
+            reg.lock()["lab1"].pending_journal[&session.id()]
+                .events
+                .len(),
+            3
+        );
         conn.execute_batch("ROLLBACK").unwrap();
         for _ in 0..3 {
-            reg.lock().get_mut("lab1").unwrap().pending_journal.get_mut(&session.id()).unwrap().next = Instant::now();
+            reg.lock()
+                .get_mut("lab1")
+                .unwrap()
+                .pending_journal
+                .get_mut(&session.id())
+                .unwrap()
+                .next = Instant::now();
             reg.retry_journal("lab1", 1);
         }
         for bytes in [b"first".as_slice(), b"second".as_slice()] {
-            assert_eq!(session.rx.try_recv().unwrap(), SessionEvent::Data { stream: StreamTag::Stdout, bytes: bytes.to_vec() });
+            assert_eq!(
+                session.rx.try_recv().unwrap(),
+                SessionEvent::Data {
+                    stream: StreamTag::Stdout,
+                    bytes: bytes.to_vec()
+                }
+            );
         }
-        assert!(matches!(session.rx.try_recv().unwrap(), SessionEvent::Exit { .. }));
+        assert!(matches!(
+            session.rx.try_recv().unwrap(),
+            SessionEvent::Exit { .. }
+        ));
         assert!(session.rx.try_recv().is_err());
-        assert!(matches!(outgoing.try_recv().unwrap(), Outgoing::Frame(f) if matches!(*f, DaemonFrame::Ack { bytes: 11, .. })));
-        assert!(matches!(outgoing.try_recv().unwrap(), Outgoing::Frame(f) if matches!(*f, DaemonFrame::Release { .. })));
+        assert!(
+            matches!(outgoing.try_recv().unwrap(), Outgoing::Frame(f) if matches!(*f, DaemonFrame::Ack { bytes: 11, .. }))
+        );
+        assert!(
+            matches!(outgoing.try_recv().unwrap(), Outgoing::Frame(f) if matches!(*f, DaemonFrame::Release { .. }))
+        );
         reg.retry_journal("lab1", 1);
         assert!(outgoing.try_recv().is_err());
-        let events = resume::Journal::new(dir.path()).scan::<SessionEvent>(&format!("event/lab1/{}/", session.id())).unwrap();
+        let events = resume::Journal::new(dir.path())
+            .scan::<SessionEvent>(&format!("event/lab1/{}/", session.id()))
+            .unwrap();
         assert_eq!(events.len(), 3);
         assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 11);
     }
@@ -2699,7 +2764,9 @@ mod tests {
     async fn journal_queue_exhaustion_closes_and_reconnect_replays() {
         for deadline in [false, true] {
             let reg = Arc::new(registry("lab1", true));
-            let mut session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+            let mut session = reg
+                .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+                .unwrap();
             let (tx, mut outgoing) = mpsc::unbounded_channel();
             let mut pending = PendingJournal::new();
             if deadline {
@@ -2715,19 +2782,37 @@ mod tests {
                 e.conn = Some(Conn { id: 1, tx });
                 e.pending_journal.insert(session.id(), pending);
             }
-            reg.on_data("lab1", DataFrame::new(session.id(), StreamTag::Stdout, b"replayed".to_vec()));
+            reg.on_data(
+                "lab1",
+                DataFrame::new(session.id(), StreamTag::Stdout, b"replayed".to_vec()),
+            );
             reg.retry_journal("lab1", 1);
-            assert!(matches!(outgoing.try_recv().unwrap(), Outgoing::Close(None)));
+            assert!(matches!(
+                outgoing.try_recv().unwrap(),
+                Outgoing::Close(None)
+            ));
             assert!(session.rx.try_recv().is_err());
             assert!(reg.detach("lab1", 1).is_some());
             assert!(reg.lock()["lab1"].pending_journal.is_empty());
             // Replayed data starts at the unchanged committed offset.
-            reg.on_data("lab1", DataFrame::new(session.id(), StreamTag::Stdout, b"replayed".to_vec()));
-            assert_eq!(session.rx.try_recv().unwrap(), SessionEvent::Data { stream: StreamTag::Stdout, bytes: b"replayed".to_vec() });
+            reg.on_data(
+                "lab1",
+                DataFrame::new(session.id(), StreamTag::Stdout, b"replayed".to_vec()),
+            );
+            assert_eq!(
+                session.rx.try_recv().unwrap(),
+                SessionEvent::Data {
+                    stream: StreamTag::Stdout,
+                    bytes: b"replayed".to_vec()
+                }
+            );
             assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 8);
         }
         let mut pending = PendingJournal::new();
-        assert!(!pending.push(SessionEvent::Data { stream: StreamTag::Stdout, bytes: vec![0; JOURNAL_RETRY_BYTES] }));
+        assert!(!pending.push(SessionEvent::Data {
+            stream: StreamTag::Stdout,
+            bytes: vec![0; JOURNAL_RETRY_BYTES]
+        }));
     }
 
     #[test]

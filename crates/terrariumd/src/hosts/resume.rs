@@ -9,7 +9,10 @@ use serde::{Serialize, de::DeserializeOwned};
 use crate::error::{ApiError, ApiResult};
 
 fn journal_error(error: rusqlite::Error) -> ApiError {
-    if matches!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)) {
+    if matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    ) {
         ApiError::new(crate::error::Code::ResourceBusy, "host journal is busy")
     } else {
         error.into()
@@ -32,7 +35,8 @@ impl Journal {
     fn connect(&self) -> ApiResult<Connection> {
         let conn = Connection::open(self.state_dir.join("terrarium.db")).map_err(journal_error)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.pragma_update(None, "synchronous", "FULL").map_err(journal_error)?;
+        conn.pragma_update(None, "synchronous", "FULL")
+            .map_err(journal_error)?;
         Ok(conn)
     }
 
@@ -86,18 +90,22 @@ impl Journal {
         prefixes: &[String],
     ) -> ApiResult<()> {
         let mut conn = self.connect()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(journal_error)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(journal_error)?;
         crate::secrets::migrate::finish_rotation(&tx, &self.state_dir)
             .map_err(|_| ApiError::internal("cannot finish host journal key rotation"))?;
         let key = crate::secrets::key(&self.state_dir)?;
         for id in ids {
-            tx.execute("DELETE FROM host_resume WHERE id=?1", [id]).map_err(journal_error)?;
+            tx.execute("DELETE FROM host_resume WHERE id=?1", [id])
+                .map_err(journal_error)?;
         }
         for prefix in prefixes {
             tx.execute(
                 "DELETE FROM host_resume WHERE id>=?1 AND id<?2",
                 params![prefix, prefix_end(prefix)?],
-            ).map_err(journal_error)?;
+            )
+            .map_err(journal_error)?;
         }
         for (id, value) in values {
             let plain = zeroize::Zeroizing::new(
@@ -109,7 +117,8 @@ impl Journal {
                 "INSERT INTO host_resume(id,sealed) VALUES (?1,?2)
              ON CONFLICT(id) DO UPDATE SET sealed=excluded.sealed",
                 params![id, sealed],
-            ).map_err(journal_error)?;
+            )
+            .map_err(journal_error)?;
         }
         tx.commit().map_err(journal_error)?;
         Ok(())
