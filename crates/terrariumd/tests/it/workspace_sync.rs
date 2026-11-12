@@ -145,6 +145,24 @@ async fn ssh_api_exec_run_copy_and_conflict() {
     let Some(sshd) = std::env::var_os("TERRARIUM_TEST_SSHD") else {
         return;
     };
+    // Keep the production security floor while allowing older test hosts to skip.
+    let version_output = tokio::process::Command::new("rsync")
+        .arg("--version")
+        .output()
+        .await;
+    let supported = version_output.is_ok_and(|output| {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let version = stdout
+            .strip_prefix("rsync  version ")
+            .and_then(|s| s.split_whitespace().next())
+            .map(|s| s.split('.').map(str::parse::<u32>).collect::<Vec<_>>());
+        output.status.success()
+            && matches!(version.as_deref(), Some([Ok(major), Ok(minor), Ok(patch)]) if (*major, *minor, *patch) >= (3, 4, 0))
+    });
+    if !supported {
+        eprintln!("SKIP: ssh_api_exec_run_copy_and_conflict requires rsync >= 3.4.0 on PATH");
+        return;
+    }
     let mut ssh = Ssh::start(sshd).await;
     let probe = tokio::process::Command::new("ssh")
         .args([
