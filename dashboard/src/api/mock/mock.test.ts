@@ -8,6 +8,15 @@ const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, autoLoginM
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 describe("mock API", () => {
+  it("serves reader-filtered waits on both the board and card detail", async () => {
+    const api = mock();
+    const board = await api.board.get("terrarium");
+    const detail = await api.cards.get("TER-14");
+    expect(board.cards.find((c) => c.id === "TER-14")?.wait).toEqual({ mode: "all", met: false, deps_met: 1, deps_total: 3 });
+    expect(detail.wait?.dependencies.map((d) => d.met)).toEqual([true, false, false]);
+    expect(detail.wait?.dependencies[2]).toEqual({ card: null, hidden: true, met: false });
+    expect(detail.wait?.wake_recipient).toBe("terrarium/lead");
+  });
   it("serves every project's board with the default columns", async () => {
     const api = mock();
     const board = await api.board.get("terrarium");

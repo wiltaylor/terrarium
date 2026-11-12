@@ -216,6 +216,7 @@ pub async fn run(
         .collect();
     let cmd = RemoteCmd {
         durable: false,
+        prepare_root: None,
         resume_key: None,
         argv: def
             .command

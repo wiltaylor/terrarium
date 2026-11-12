@@ -1678,6 +1678,19 @@ impl RunnerSupervisor {
         let entry = self.entry(agent.harness)?;
         let sub = check_subscription(agent, view.subscription.as_ref())?;
         let def = sub.as_ref().map(sub_def);
+        // Runs for every spawn and restart, before any harness starts. The
+        // adapter receives its normal definition, then these checked launch
+        // values override its endpoint and any inherited proxy bypass list.
+        let litellm_env = if let Some(d) = def.as_ref().filter(|d| d.provider == "litellm") {
+            let settings = d.selfhosted.as_ref().ok_or_else(|| {
+                SupervisorError::NotReady("LiteLLM subscription has no base URL".into())
+            })?;
+            crate::probes::litellm::harness_env(&settings.base_url)
+                .await
+                .map_err(|e| SupervisorError::NotReady(format!("LiteLLM launch refused: {e}")))?
+        } else {
+            Vec::new()
+        };
         if agent.harness == HarnessId::Pi
             && let Some(reason) = def
                 .as_ref()
@@ -1716,6 +1729,32 @@ impl RunnerSupervisor {
                 .map_err(|e| {
                 SupervisorError::NotReady(format!("the {} settings: {e}", agent.harness))
             })?;
+        }
+        // Claude applies settings.env after the process environment. For a
+        // private HTTP LiteLLM launch, settings must not undo the pinned IP
+        // or its proxy bypass. Sanitize before cloning for materialization
+        // and before the adapter constructs --settings at launch.
+        if !litellm_env.is_empty()
+            && agent.harness == HarnessId::Claude
+            && let Some(env) = agent
+                .harness_settings
+                .as_mut()
+                .and_then(|s| s.get_mut("env"))
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            for key in [
+                "ANTHROPIC_BASE_URL",
+                "NO_PROXY",
+                "no_proxy",
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+            ] {
+                env.remove(key);
+            }
         }
         // The hash below covers the whole text, so a change of the base
         // system prompt also starts a new session of a harness that keeps
@@ -2029,6 +2068,7 @@ impl RunnerSupervisor {
         // `.gitconfig`, and the host name gives no mail domain.
         // The instance bot identity deliberately overrides GIT_AUTHOR_* and
         // GIT_COMMITTER_* supplied by the harness or secret environment.
+        spec.env.extend(litellm_env);
         crate::git_identity::Identity::from_env().env(&mut spec.env);
         spec.env.insert(
             "TERRARIUM_GIT_TRAILERS_FILE".into(),
@@ -7276,6 +7316,117 @@ mod tests {
                     "{a:?}"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn litellm_launch_pins_http_names_and_rechecks_on_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let home = tmp.path().join("auth/claude");
+        std::fs::create_dir_all(&home).unwrap();
+        let repo = tmp.path().join("config");
+        let settings_path = repo.join("harness/claude/settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        let conflicts = serde_json::json!({"env": {
+            "ANTHROPIC_BASE_URL": "http://private.invalid:8000",
+            "NO_PROXY": "wrong.invalid", "no_proxy": "wrong.invalid",
+            "HTTP_PROXY": "http://proxy.invalid", "HTTPS_PROXY": "http://proxy.invalid",
+            "http_proxy": "http://proxy.invalid", "https_proxy": "http://proxy.invalid",
+            "ALL_PROXY": "http://proxy.invalid", "all_proxy": "http://proxy.invalid",
+            "KEEP_SETTING": "kept"
+        }});
+        std::fs::write(&settings_path, serde_json::to_vec(&conflicts).unwrap()).unwrap();
+        let mut cfg = RunnerSupervisorConfig::new(
+            state.clone(),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            SandboxConfig {
+                mode: SandboxMode::None,
+                ..SandboxConfig::default()
+            },
+            [(HarnessId::Claude, home)].into_iter().collect(),
+        );
+        cfg.config_repo = Some(repo);
+        let sup = RunnerSupervisor::new(cfg);
+        let def = serde_json::from_value(serde_json::json!({
+            "name": "worker", "project": "p", "harness": "claude", "subscription": "lite"
+        }))
+        .unwrap();
+        let agent = Agent::from_def(&def, &state);
+        let sub: Subscription = serde_json::from_value(serde_json::json!({
+            "name": "lite", "provider": "litellm", "harnesses": ["claude"],
+            "alert_at": 80, "source": "api", "login_status": "api_key",
+            "probe_status": "none", "created_at": "", "updated_at": "",
+            "selfhosted": { "api": "anthropic", "base_url": "http://localhost:8000/prefix", "models": ["test-model"] }
+        })).unwrap();
+        let mut view = StoreView {
+            subscription: Some(SubscriptionCheck::Found(Box::new(sub))),
+            ..Default::default()
+        };
+        for resume in [None, Some(HarnessSessionId("resume-test".into()))] {
+            let built = sup
+                .build_spec(&agent, resume.as_ref(), &view, None)
+                .await
+                .unwrap();
+            let url = reqwest::Url::parse(&built.spec.env["ANTHROPIC_BASE_URL"]).unwrap();
+            assert!(!matches!(url.host(), Some(url::Host::Domain(_))));
+            assert_eq!(url.port(), Some(8000));
+            assert_eq!(url.path(), "/prefix");
+            assert!(
+                built.spec.env["NO_PROXY"].contains("127.0.0.1")
+                    || built.spec.env["NO_PROXY"].contains("::1")
+            );
+            assert_eq!(built.spec.env["NO_PROXY"], built.spec.env["no_proxy"]);
+            let settings_arg = built
+                .spec
+                .args
+                .iter()
+                .position(|a| a == "--settings")
+                .unwrap();
+            let launch_settings: serde_json::Value =
+                serde_json::from_str(&built.spec.args[settings_arg + 1]).unwrap();
+            let file_settings: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(sup.layout(&agent).harness_dir.join("claude/settings.json"))
+                    .unwrap(),
+            )
+            .unwrap();
+            for settings in [launch_settings, file_settings] {
+                assert_eq!(settings["env"], serde_json::json!({"KEEP_SETTING": "kept"}));
+            }
+        }
+        if let Some(SubscriptionCheck::Found(s)) = &mut view.subscription {
+            s.selfhosted.as_mut().unwrap().base_url = "http://8.8.8.8".into();
+        }
+        let err = sup
+            .build_spec(
+                &agent,
+                Some(&HarnessSessionId("resume-test".into())),
+                &view,
+                None,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("LiteLLM launch refused"));
+        // HTTPS keeps the operator's settings behaviour unchanged.
+        if let Some(SubscriptionCheck::Found(s)) = &mut view.subscription {
+            s.selfhosted.as_mut().unwrap().base_url = "https://proxy.example".into();
+        }
+        for resume in [None, Some(HarnessSessionId("resume-test".into()))] {
+            let built = sup
+                .build_spec(&agent, resume.as_ref(), &view, None)
+                .await
+                .unwrap();
+            let i = built
+                .spec
+                .args
+                .iter()
+                .position(|a| a == "--settings")
+                .unwrap();
+            let settings: serde_json::Value =
+                serde_json::from_str(&built.spec.args[i + 1]).unwrap();
+            assert_eq!(settings["env"], conflicts["env"]);
         }
     }
 

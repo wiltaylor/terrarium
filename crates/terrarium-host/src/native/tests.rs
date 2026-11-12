@@ -1349,6 +1349,13 @@ fn an_exec_becomes_a_shim_call_with_the_request_in_the_environment() {
             ..Default::default()
         }),
         native_gpu: Some(crate::protocol::NativeGpu {
+            prepare_root: Some(OwnedRoot {
+                cleanup: false,
+                base: "/workspace".into(),
+                project: "terra".into(),
+                name: "w-1".into(),
+                agent: "id".into(),
+            }),
             lease: Some("01RES".into()),
             exclusive: vec![A.into()],
         }),
@@ -1358,6 +1365,10 @@ fn an_exec_becomes_a_shim_call_with_the_request_in_the_environment() {
     assert_eq!(req.gpus, [A]);
     assert_eq!(req.exclusive_gpus, [A]);
     assert_eq!(req.lease.as_deref(), Some("01RES"));
+    assert_eq!(
+        req.prepare_root.as_deref(),
+        l.native_gpu.as_ref().unwrap().prepare_root.as_ref()
+    );
     assert_eq!(req.pty, Some((30, 100)));
     assert_eq!(req.cwd, "/work/terra/w-1");
     assert_eq!(req.env["TERM"], "xterm-256color");

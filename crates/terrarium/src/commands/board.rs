@@ -6,7 +6,10 @@ use serde_json::{Value, json};
 
 use super::{delimited, event_line, print_table, set_list, set_opt, set_replace_list};
 use crate::api::{CliError, query};
-use crate::cli::{BoardCmd, CardCmd, CardEditArgs, CardFilesCmd, CardNewArgs, ColumnCmd};
+use crate::cli::{
+    BoardCmd, CardCmd, CardEditArgs, CardFilesCmd, CardNewArgs, CardWaitArgs, CardWaitCmd,
+    ColumnCmd,
+};
 use crate::commands::projects::project_path;
 use crate::commands::system::as_items;
 use crate::ctx::{Ctx, Waiter};
@@ -341,6 +344,7 @@ pub fn print_card(ctx: &Ctx, k: &Value) {
     if let Some(eta) = eta_line(k, chrono::Utc::now()) {
         ctx.line(eta);
     }
+    print_wait(ctx, &k["wait"]);
     if let Some(d) = idle_for(k, chrono::Utc::now()) {
         ctx.line(format!(
             "idle: the assignee rests with no wait since {} ({d}); the leads were told",
@@ -663,6 +667,25 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
                 }
             })
         }
+        CardCmd::WaitOn { id, command } => {
+            let path = format!("{}/wait-on", card_path(id));
+            match command {
+                CardWaitCmd::List => {
+                    let value = ctx.api.get(&path, vec![]).await?;
+                    ctx.emit(&value, print_wait)
+                }
+                CardWaitCmd::Set { wait } => {
+                    let value = wait_body(wait)?
+                        .ok_or_else(|| CliError::usage("give at least one --on CARD:TARGET"))?;
+                    let value = ctx.api.put(&path, value).await?;
+                    ctx.emit(&value, print_wait)
+                }
+                CardWaitCmd::Clear => {
+                    let value = ctx.api.delete(&path, vec![]).await?;
+                    ctx.emit(&value, |c, _| c.line("wait cleared"))
+                }
+            }
+        }
         CardCmd::Wait { mine, timeout } => wait(ctx, *mine, *timeout).await,
     }
 }
@@ -670,6 +693,7 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
 async fn new(ctx: &Ctx, a: &CardNewArgs) -> anyhow::Result<()> {
     let p = ctx.project_or(None).await?;
     let mut b = json!({});
+    add_wait(&mut b, &a.wait, &a.depends_on)?;
     set_opt(&mut b, "title", a.title.clone());
     set_opt(&mut b, "body", ctx.opt_text(a.body.as_deref())?);
     set_opt(&mut b, "column", a.column.clone());
@@ -699,6 +723,7 @@ async fn new(ctx: &Ctx, a: &CardNewArgs) -> anyhow::Result<()> {
 
 async fn edit(ctx: &Ctx, a: &CardEditArgs) -> anyhow::Result<()> {
     let mut b = json!({});
+    add_wait(&mut b, &a.wait, &a.depends_on)?;
     set_opt(&mut b, "title", a.title.clone());
     set_opt(&mut b, "body", ctx.opt_text(a.body.as_deref())?);
     set_replace_list(&mut b, "labels", "--label", &a.labels)?;
@@ -719,6 +744,79 @@ async fn edit(ctx: &Ctx, a: &CardEditArgs) -> anyhow::Result<()> {
     }
     let k = ctx.api.patch(&card_path(&a.id), b).await?;
     ctx.emit(&k, |c, k| card_line(c, "updated", k))
+}
+
+fn wait_body(a: &CardWaitArgs) -> anyhow::Result<Option<Value>> {
+    if a.on.is_empty() {
+        return Ok(None);
+    }
+    let mut dependencies = Vec::new();
+    for on in &a.on {
+        let (card, target) = on
+            .rsplit_once(':')
+            .ok_or_else(|| CliError::usage("use --on CARD:TARGET or PROJECT:CARD:TARGET"))?;
+        if card.is_empty()
+            || target.is_empty()
+            || card.split(':').any(str::is_empty)
+            || card.matches(':').count() > 1
+        {
+            return Err(CliError::usage(
+                "use --on CARD:TARGET or PROJECT:CARD:TARGET",
+            ));
+        }
+        dependencies.push(json!({"card": card, "target": target}));
+    }
+    Ok(Some(
+        json!({"dependencies": dependencies, "mode": if a.any {"any"} else {"all"},
+        "action": {"move_to": a.move_to, "wake": a.wake, "comment": null}}),
+    ))
+}
+
+fn add_wait(body: &mut Value, a: &CardWaitArgs, deps: &[String]) -> anyhow::Result<()> {
+    if let Some(wait) = wait_body(a)? {
+        if !deps.is_empty() {
+            return Err(CliError::usage(
+                "--on and --depends-on are mutually exclusive",
+            ));
+        }
+        body["wait"] = wait;
+    }
+    Ok(())
+}
+
+fn print_wait(ctx: &Ctx, wait: &Value) {
+    if wait.is_null() {
+        return;
+    }
+    ctx.line(format!(
+        "wait: {} [{}]",
+        field(wait, "mode"),
+        if wait["met_at"].is_string() {
+            "met"
+        } else {
+            "pending"
+        }
+    ));
+    for dep in as_items(&wait["dependencies"]) {
+        ctx.line(format!(
+            "  {}:{} [{}]",
+            field(dep, "card"),
+            field(dep, "target"),
+            match dep["met"].as_bool() {
+                Some(true) => "met",
+                Some(false) => "pending",
+                None => "hidden",
+            }
+        ));
+    }
+    ctx.line(format!(
+        "  action: move to {}, wake {}",
+        field(&wait["action"], "move_to"),
+        field(&wait["action"], "wake")
+    ));
+    if let Some(comment) = wait["action"]["comment"].as_str() {
+        delimited(ctx, "WAIT ACTION COMMENT", comment);
+    }
 }
 
 /// Wait for a card change.
@@ -1020,6 +1118,7 @@ mod label_tests {
     fn args(add: &[&str], rm: &[&str], set: &[&str]) -> CardEditArgs {
         let v = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect();
         CardEditArgs {
+            wait: CardWaitArgs::default(),
             id: "TER-1".into(),
             title: None,
             body: None,

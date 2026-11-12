@@ -377,17 +377,23 @@ not run it on a shared target or a DGX Spark without that decision.
 3. **The binary**: download it from the GitHub release of the daemon's
    version and verify it; do not build it. Each release has
    `terrarium-host-helper-<version>-linux-x86_64` (static musl, built
-   with `--locked` in the release CI, next to `terrarium-host`) and its
-   line in `SHA256SUMS` ([release.md](release.md)). Then install it
-   root-owned:
+   with `--locked` in the local release build, next to `terrarium-host`),
+   its line in `SHA256SUMS`, and cosign signature bundles for both files
+   ([release.md](release.md)). You need cosign 3 and the release public
+   key from `docker/release/cosign.pub` in a trusted checkout, saved as
+   `cosign.pub`. Then verify and install it root-owned:
 
    ```sh
    v=<version>   # the version of the daemon and the host agent, without the v
    gh release download "v$v" --repo wiltaylor/terrarium \
-     --pattern "terrarium-host-helper-$v-linux-x86_64" --pattern SHA256SUMS &&
+     --pattern "terrarium-host-helper-$v-linux-x86_64" \
+     --pattern "terrarium-host-helper-$v-linux-x86_64.sigstore.json" \
+     --pattern SHA256SUMS --pattern SHA256SUMS.sigstore.json &&
+   cosign verify-blob --key cosign.pub \
+     --bundle "terrarium-host-helper-$v-linux-x86_64.sigstore.json" \
+     "terrarium-host-helper-$v-linux-x86_64" &&
+   cosign verify-blob --key cosign.pub --bundle SHA256SUMS.sigstore.json SHA256SUMS &&
    sha256sum -c --ignore-missing SHA256SUMS &&
-   gh attestation verify "terrarium-host-helper-$v-linux-x86_64" --repo wiltaylor/terrarium \
-     --signer-workflow wiltaylor/terrarium/.github/workflows/ci.yml &&
    install -o root -g root -m 0755 "terrarium-host-helper-$v-linux-x86_64" /usr/local/libexec/terrarium-host-helper &&
    /usr/local/libexec/terrarium-host-helper --version
    ```
@@ -395,26 +401,60 @@ not run it on a shared target or a DGX Spark without that decision.
    The commands are joined with `&&`: when the download or a check fails,
    the install does not run.
 
-   Without `gh`, take both files from the release page with `curl -fLO`
-   and run the `sha256sum` check. `SHA256SUMS` comes from the same release
-   as the binary, so a matching hash proves only that the download is
-   whole, not where the binary comes from. Run the `gh attestation verify`
-   check before the install, on another machine with `gh` if this host has
-   none. A release up to v0.35.0-alpha has no
-   such file: build it from the tag with `cargo build
+   Without `gh`, take the binary, `SHA256SUMS`, and both `.sigstore.json`
+   bundles from the release page with `curl -fLO`, then run the same cosign
+   and checksum checks before installing. A matching checksum alone does
+   not prove where the binary comes from.
+
+   Alternatively, verify the release image by digest with the release
+   public key as described in [release.md](release.md), then copy
+   `/opt/terrarium/dist/terrarium-host-helper-x86_64-linux` out of that
+   verified image and install it root-owned at the same destination. The
+   image also carries the public key at `/opt/terrarium/release/cosign.pub`.
+   A release up to v0.35.0-alpha has no helper asset: build it from the tag with `cargo build
    --release --locked -p terrarium-host --bin terrarium-host-helper`.
 
-4. **The workspace**: a group that both users share, with the setgid bit,
-   so files stay writable for the host agent and the sessions:
+4. **The workspace**: a shared group for agent-root contents, but protected
+   root-owned base and project directories. Every ancestor from `/` to the
+   workspace base must also be root-owned without group/other write, even
+   with a sticky bit. The helper resolves each component through no-follow
+   directory FDs and rejects intermediate symlinks. Pool users must not own or have
+   write permission on any ancestor. The helper
+   refuses unsafe existing parents rather than repairing them in place.
 
    ```sh
    groupadd terrarium-ws
    usermod -aG terrarium-ws <agent user>
    for i in 1 2 3 4; do usermod -aG terrarium-ws terrarium-w$i; done
-   chgrp -R terrarium-ws /srv/terrarium/work
-   chmod -R g+rwX /srv/terrarium/work
-   find /srv/terrarium/work -type d -exec chmod g+s {} +
+   install -d -o root -g terrarium-ws -m 0755 /srv/terrarium/work
    ```
+
+   Do not recursively grant group write on the base or project directories.
+   Set the target's `work_root` to the helper's `workspace_root`. The helper
+   creates `<workspace_root>/<project>` root-owned, without group/other
+   write, and `<project>/<agent>` as root:terrarium-ws, mode 2770. Its
+   root-owned marker is group-readable. Sessions can write inside their
+   own roots but cannot chmod the project parent or rename siblings. Root
+   preparation requires helper protocol 2, so install the matching host
+   agent and helper together. An older helper refuses the new request.
+
+   **Existing-host migration (including helios)**: schedule a maintenance
+   window and stop new native sessions. Wait for live sessions to end and
+   let the old daemon clean up ended card-agent roots before replacing the
+   helper. Inventory the exact workspace and project paths and every
+   ancestor from `/`. Verify that none is a symlink and each ancestor is
+   root-owned without group/other write. On helios this includes `/srv`.
+   Obtain administrator approval for any required ancestor migration, or
+   choose a secure workspace location. With administrator approval, change only the base
+   and each project parent to root:terrarium-ws, mode 0755. For helios,
+   these are `/srv/terrarium-native` and
+   `/srv/terrarium-native/terrarium`. Do not recursively chown or chmod
+   live roots or unreviewed data. An existing agent root also needs an
+   administrator-reviewed migration to root:terrarium-ws, mode 2770,
+   with a matching regular owner marker, or normal cleanup before it is
+   prepared again. Install the matching host agent and helper, restart
+   them in the maintenance window, and verify two card holders before
+   reopening native sessions. This card does not perform the migration.
 
 5. **The config** `/etc/terrarium-host-helper/config.toml`, owned by root,
    mode 0644 or stricter, in directories owned by root and not writable by

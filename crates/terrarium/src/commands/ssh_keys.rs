@@ -94,6 +94,7 @@ pub async fn show(ctx: &Ctx, name: &str) -> anyhow::Result<()> {
             }
         }
         rows.push(("source", field(t, "source")));
+        rows.push(("sync_workspace", (t["sync_workspace"] == true).to_string()));
         rows.push(("state", field(t, "state")));
         if t["runtime"]["recreate_required"] == true {
             rows.push(("recreate", "pending".to_owned()));

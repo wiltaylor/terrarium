@@ -492,9 +492,12 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
       </Show>
       <Show when={(isSelfHosted(provider()) || provider() === "litellm") && !fixedName}>
         <label>
-          {provider() === "litellm" ? "LiteLLM HTTPS base URL (Anthropic root, without /v1)" : "Base URL (a new subscription: an OpenAI-style server)"}
+          {provider() === "litellm" ? "LiteLLM base URL (Anthropic root, without /v1; HTTPS or private HTTP host)" : "Base URL (a new subscription: an OpenAI-style server)"}
           <input type="url" value={baseUrl()} onInput={(e) => setBaseUrl(e.currentTarget.value)} placeholder={provider() === "litellm" ? "https://litellm.example.com" : "http://gpu.lan:8000/v1"} required />
         </label>
+      </Show>
+      <Show when={provider() === "litellm" && baseUrl().trim().toLowerCase().startsWith("http://")}>
+        <p class="muted small">HTTP requires every resolved address to be private. Each launch uses a checked IP, not the hostname, and bypasses environment proxies. Virtual hosts that require the original Host name need HTTPS. Your key and prompts are not encrypted on that network. Harness redirects are not restricted by Terrarium.</p>
       </Show>
       <Show when={!["bedrock", "gcp", "foundry"].includes(provider())}><label>
         Models (comma separated, optional)

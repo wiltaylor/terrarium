@@ -872,6 +872,15 @@ pub fn board_summary(
             FROM test_runs r WHERE r.pk = (SELECT max(run) FROM test_run_cards WHERE card = c.id)),
           'comment_count', (SELECT count(*) FROM card_comments WHERE card = c.id),
           'last_comment_at', (SELECT max(created_at) FROM card_comments WHERE card = c.id),
+          'wait', (SELECT json_object('mode', w.mode, 'met', json(CASE WHEN w.met_at IS NULL THEN 'false' ELSE 'true' END),
+            'deps_total', (SELECT count(*) FROM card_deps WHERE card=c.id),
+            'deps_met', (SELECT count(*) FROM card_deps d
+              CROSS JOIN cards dc ON dc.id=d.depends_on
+              CROSS JOIN board_columns dk ON dk.id=dc.column_id
+              WHERE d.card=c.id AND dc.archived=0 AND CASE WHEN d.target IS NULL
+                THEN coalesce(dk.role,dk.name) IN ('accepted','done')
+                ELSE dk.name=d.target OR coalesce(dk.role=d.target,0) END))
+            FROM card_waits w WHERE w.card=c.id),
           'depends_on', (SELECT json_group_array(depends_on) FROM card_deps WHERE card = c.id),
           'blocked_by', (SELECT json_group_array(d.depends_on) FROM card_dependency_unmet d
             WHERE d.card = c.id))
@@ -1045,6 +1054,17 @@ pub fn list_cards(
     assignee: Option<&str>,
     page: &Page,
 ) -> ApiResult<Paged<Card>> {
+    list_cards_for_request(conn, project, f, assignee, page, None)
+}
+
+pub fn list_cards_for_request(
+    conn: &Connection,
+    project: &str,
+    f: &CardFilter,
+    assignee: Option<&str>,
+    page: &Page,
+    request_agent: Option<&str>,
+) -> ApiResult<Paged<Card>> {
     let limit = page.limit();
     let (after_k, after_p, after_n) = list_cursor(page.cursor());
     // A role alias (`working`, `blocked`) names the column with that role.
@@ -1054,7 +1074,17 @@ pub fn list_cards(
             .map(|k| k.name)
             .unwrap_or_else(|_| c.to_owned())
     });
-    let mut stmt = conn.prepare(
+    let restriction = request_agent
+        .map(|_| {
+            format!(
+                " AND c.id IN ({})",
+                super::threads::REQUEST_CARDS_SQL
+                    .replace("?1", "?11")
+                    .replace("?2", "?1")
+            )
+        })
+        .unwrap_or_else(|| " AND ?11 IS NULL".to_owned());
+    let sql = format!(
         "SELECT c.*, k.name AS column_name, k.role AS column_role,
                 k.position AS column_position
            FROM cards c JOIN board_columns k ON k.id = c.column_id
@@ -1065,8 +1095,10 @@ pub fn list_cards(
            AND (?5 = 0 OR c.assignee IS NULL)
            AND (?6 IS NULL OR EXISTS (SELECT 1 FROM json_each(c.labels) WHERE value = ?6))
            AND c.archived = ?7
-         ORDER BY k.position, c.position, c.number LIMIT ?8",
-    )?;
+         {restriction}
+         ORDER BY k.position, c.position, c.number LIMIT ?8"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(
             params![
@@ -1079,7 +1111,8 @@ pub fn list_cards(
                 f.archived as i64,
                 (limit + 1) as i64,
                 after_p,
-                after_n
+                after_n,
+                request_agent
             ],
             |r| {
                 let place = (
@@ -2043,6 +2076,8 @@ pub fn claim_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<Card> {
 #[serde(deny_unknown_fields)]
 pub struct NewCard {
     #[serde(default)]
+    pub wait: Option<card_waits::Wait>,
+    #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
     pub body: Option<String>,
@@ -2221,7 +2256,16 @@ pub(crate) fn create_card_with_author(
             at
         ],
     )?;
-    set_deps(t, actor, &id, &new.depends_on)?;
+    if let Some(wait) = &new.wait {
+        if !new.depends_on.is_empty() {
+            return Err(ApiError::invalid(
+                "wait and depends_on are mutually exclusive",
+            ));
+        }
+        card_waits::set(t, actor, &id, wait)?;
+    } else {
+        set_deps(t, actor, &id, &new.depends_on)?;
+    }
     if let Some(th) = new.inbox_thread.as_deref().filter(|s| !s.trim().is_empty()) {
         let th = crate::store::threads::link_card(t, actor, th, &id)?;
         // A card made after the agent's hand-off message moves the thread
@@ -2380,6 +2424,8 @@ where
 #[serde(deny_unknown_fields)]
 pub struct CardPatch {
     #[serde(default)]
+    pub wait: Option<card_waits::Wait>,
+    #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
     pub body: Option<String>,
@@ -2413,6 +2459,11 @@ pub struct CardPatch {
 pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> ApiResult<Card> {
     let card = find_row(t, id)?;
     policy::write_project(actor, &card.project)?;
+    if p.wait.is_some() && p.depends_on.is_some() {
+        return Err(ApiError::invalid(
+            "wait and depends_on are mutually exclusive",
+        ));
+    }
     let mut p = p;
     // `add_labels` and `remove_labels` change the current labels in this
     // write, so two changes at once do not lose each other's labels.
@@ -2437,7 +2488,8 @@ pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> Api
         || p.labels.is_some()
         || p.repo.is_some()
         || p.branch.is_some()
-        || p.depends_on.is_some();
+        || p.depends_on.is_some()
+        || p.wait.is_some();
     if edits {
         not_archived(&card)?;
         may_edit(actor, &card)?;
@@ -2472,6 +2524,9 @@ pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> Api
             set_deps(t, actor, &card.id, d)?;
             card_waits::evaluate(t, &card.id, false)?;
         }
+        if let Some(wait) = &p.wait {
+            card_waits::set(t, actor, &card.id, wait)?;
+        }
         let fields: Vec<&str> = [
             p.title.as_ref().map(|_| "title"),
             p.body.as_ref().map(|_| "body"),
@@ -2479,6 +2534,7 @@ pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> Api
             p.repo.as_ref().map(|_| "repo"),
             p.branch.as_ref().map(|_| "branch"),
             p.depends_on.as_ref().map(|_| "depends_on"),
+            p.wait.as_ref().map(|_| "wait"),
         ]
         .into_iter()
         .flatten()

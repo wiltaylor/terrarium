@@ -298,17 +298,18 @@ try:
             except FileExistsError: pass
             fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             fds.append(fd)
-    if mode in ('measure', 'delete'):
+    if mode in ('measure', 'delete', 'clear'):
         meta = os.fstat(fd)
         if mount_id(fd) != mount_id(parent): raise RuntimeError('refusing mounted agent root')
         # First check the complete tree. In particular, refuse mounts before
         # removing the owner marker so a refused cleanup stays retryable.
         size = walk(fd, False, meta.st_dev, mount_id(fd))
-        if mode == 'delete':
+        if mode in ('delete', 'clear'):
             walk(fd, True, meta.st_dev, mount_id(fd), keep_owner=True)
             current = os.stat(name, dir_fd=parent, follow_symlinks=False)
             if (current.st_dev, current.st_ino) != (meta.st_dev, meta.st_ino):
                 raise RuntimeError('agent root changed during cleanup')
+        if mode == 'delete':
             os.unlink('.terrarium-owner', dir_fd=fd)
             try: os.rmdir(name, dir_fd=parent)
             except OSError:
@@ -399,16 +400,41 @@ fn command(
     cwd: Option<&str>,
 ) -> ApiResult<RemoteCmd> {
     root(base, project, name)?;
-    Ok(root_script(
+    let mut cmd = root_script(
         [
-            "python3", "-c", SCRIPT, mode, base, project, name, agent, dest,
+            "python3",
+            "-c",
+            SCRIPT,
+            if mode == "delete" && cwd.is_some() {
+                "clear"
+            } else {
+                mode
+            },
+            base,
+            project,
+            name,
+            agent,
+            dest,
         ]
         .into_iter()
         .map(str::to_owned)
         .collect(),
         if mode == "prepare" { 120 } else { 900 },
         cwd,
-    ))
+    );
+    // A native helper creates the protected parent and root before this
+    // unprivileged operator-scope script checks the marker. Other targets
+    // keep the existing Python preparation path.
+    if matches!(mode, "prepare" | "delete") && cwd.is_some() {
+        cmd.prepare_root = Some(terrarium_host::native::OwnedRoot {
+            cleanup: mode == "delete",
+            base: base.to_owned(),
+            project: project.to_owned(),
+            name: name.to_owned(),
+            agent: agent.to_owned(),
+        });
+    }
+    Ok(cmd)
 }
 
 /// Record before creating anything, so a crash cannot orphan a new root.
@@ -706,7 +732,7 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
             continue;
         }
         let key = target.clone();
-        let row = match state.db.read(move |c| targets::get(c, &key)).await {
+        let mut row = match state.db.read(move |c| targets::get(c, &key)).await {
             Ok(row) => row,
             Err(e) => {
                 refusal(state, &id, &project, &target, &e.to_string()).await?;
@@ -714,6 +740,17 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
                 continue;
             }
         };
+        // Roots are recorded against the VM's resolved SSH definition. Resolve
+        // the current VM too, so cleanup checks the same machine identity.
+        if row.def.kind == terrarium_core::config::TargetKind::Exedev {
+            match crate::exedev::exec_def(state, &row.def) {
+                Ok(def) => row.def = def,
+                Err(e) => {
+                    refusal(state, &id, &project, &target, &e.to_string()).await?;
+                    continue;
+                }
+            }
+        }
         if !same_location(&definition, &row.def) {
             refusal(
                 state,
