@@ -978,8 +978,18 @@ fn skills_lib(state: &Shared) -> Option<std::path::PathBuf> {
 pub async fn retry_missed(state: &Shared) {
     static READY_CURSOR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
     let after = READY_CURSOR.lock().map(|c| c.clone()).unwrap_or_default();
-    match state.db.write("thread-test-ready", move |t| threads::poll_test_ready(t, &after)).await {
-        Ok(next) => { if let Ok(mut cursor) = READY_CURSOR.lock() { *cursor = next; } }
+    match state
+        .db
+        .write("thread-test-ready", move |t| {
+            threads::poll_test_ready(t, &after)
+        })
+        .await
+    {
+        Ok(next) => {
+            if let Ok(mut cursor) = READY_CURSOR.lock() {
+                *cursor = next;
+            }
+        }
         Err(e) => warn!("cannot check installed thread cards: {e}"),
     }
     if let Err(e) = recover_failed_requests(state).await {

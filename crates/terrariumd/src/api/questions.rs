@@ -456,7 +456,10 @@ async fn ask(
         .db
         .write(actor.label(), move |t| {
             if b.test_request {
-                let thread = new.thread.as_deref().ok_or_else(|| ApiError::invalid("test_request requires a thread"))?;
+                let thread = new
+                    .thread
+                    .as_deref()
+                    .ok_or_else(|| ApiError::invalid("test_request requires a thread"))?;
                 crate::store::threads::check_ask(t, thread, &new.agent)?;
                 crate::store::thread_test_ready::check(t, thread)?;
             }

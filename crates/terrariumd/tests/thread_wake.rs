@@ -56,7 +56,8 @@ async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl Fn
 }
 
 const BLOCKED_TURN: &str = "A card that this thread tracks went to blocked.";
-const REVIEW_TURN: &str = "Ready to test: all linked cards are done and installed on this instance.";
+const REVIEW_TURN: &str =
+    "Ready to test: all linked cards are done and installed on this instance.";
 
 #[tokio::test]
 async fn test_request_waits_for_every_card_and_installation() {
@@ -77,22 +78,36 @@ async fn test_request_waits_for_every_card_and_installation() {
     assert_eq!(r.status, 409, "{}", r.body);
     assert!(r.body.to_string().contains(&b));
     let key = b.clone();
-    state(&lab.td).db.write("system", move |t| {
-        t.execute("UPDATE cards SET labels = '[\"version:999.0.0\"]' WHERE id = ?1", [&key])?;
-        Ok(())
-    }).await.unwrap();
+    state(&lab.td)
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "UPDATE cards SET labels = '[\"version:999.0.0\"]' WHERE id = ?1",
+                [&key],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     lab.mv(&b, "done", None).await;
     assert!(lab.wakes(&tid).await.is_empty());
     let r = lab.td.post_as(&eph, &path, body.clone()).await;
     assert_eq!(r.status, 409, "{}", r.body);
     assert!(r.body.to_string().contains("not installed"));
     let key = b.clone();
-    state(&lab.td).db.write("system", move |t| {
-        t.execute("UPDATE cards SET labels = '[\"version:0.0.0\"]' WHERE id = ?1", [&key])?;
-        terrariumd::store::threads::poll_test_ready(t, "")?;
-        terrariumd::store::threads::poll_test_ready(t, "")?;
-        Ok(())
-    }).await.unwrap();
+    state(&lab.td)
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "UPDATE cards SET labels = '[\"version:0.0.0\"]' WHERE id = ?1",
+                [&key],
+            )?;
+            terrariumd::store::threads::poll_test_ready(t, "")?;
+            terrariumd::store::threads::poll_test_ready(t, "")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     assert_eq!(lab.wakes(&tid).await, ["review"]);
     let r = lab.td.post_as(&eph, &path, body).await;
     assert_eq!(r.status, 201, "{}", r.body);
