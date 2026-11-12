@@ -530,6 +530,13 @@ async fn activate(
         info!(agents = moved, work_dir = %state.work_dir.display(),
               "agent workspaces now live under the work root; each moves at its next start");
     }
+    state
+        .db
+        .write_full("system", |t| {
+            store::live_workspaces::quarantine_on_restart(t)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("live workspace restart quarantine failed: {e}"))?;
     reconcile(&state)
         .await
         .map_err(|e| anyhow::anyhow!("reconcile failed: {e}"))?;

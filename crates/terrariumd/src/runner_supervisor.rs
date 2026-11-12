@@ -2227,7 +2227,7 @@ impl RunnerSupervisor {
             && let Some(pid) = live_runner_pid(&self.inner.cfg.runtime_dir, id)
         {
             warn!(agent = %id, pid, "a runner process still holds the agent; taking it over");
-            let remote = match self.connect_runner(id, None).await {
+            let remote = match self.connect_runner_for_adoption(id, None).await {
                 Ok(r) => r,
                 Err(e) => {
                     self.release(id, epoch, AgentStatus::Stopped);
@@ -2337,6 +2337,9 @@ impl RunnerSupervisor {
                 slot.start_reason.take(),
             )
         };
+        // Until the owner-sandbox incarnation path is integrated, no legacy
+        // launch (including None mode and restart) may retain a sealed source.
+        self.admit_legacy_workspace(id).await?;
         let entry = self.entry(agent.harness)?;
         let view = self.store_view(&agent).await;
         let Built {
@@ -2781,6 +2784,32 @@ impl RunnerSupervisor {
         .map_err(|e| SupervisorError::Other(format!("cannot connect to the runner of {id}: {e}")))
     }
 
+    async fn connect_runner_for_adoption(
+        &self,
+        id: AgentId,
+        since: Option<u64>,
+    ) -> Result<RemoteRunner, SupervisorError> {
+        // Adoption retains workspace use. A cleanup-only connection used to
+        // kill a stray runner must remain possible even when admission fails.
+        self.admit_legacy_workspace(id).await?;
+        self.connect_runner(id, since).await
+    }
+
+    async fn admit_legacy_workspace(&self, id: AgentId) -> Result<(), SupervisorError> {
+        if let Some(state) = self.state() {
+            state
+                .db
+                .write_full("workspace:legacy-runner", move |t| {
+                    crate::store::live_workspaces::admit_generic_agent(t, &id.to_string())
+                })
+                .await
+                .map_err(|e| {
+                    SupervisorError::NotReady(format!("workspace admission refused: {e}"))
+                })?;
+        }
+        Ok(())
+    }
+
     /// Take over a connected runner process: the slot of epoch `epoch`
     /// holds it, and a forward task passes its events on. The harness does
     /// not restart. False: the slot moved on (a stop or a new start).
@@ -3015,7 +3044,7 @@ impl RunnerSupervisor {
             && let Some(pid) = live_runner_pid(&self.inner.cfg.runtime_dir, id)
         {
             warn!(agent = %id, pid, "the control connection to the runner dropped; connecting again");
-            match self.connect_runner(id, Some(last)).await {
+            match self.connect_runner_for_adoption(id, Some(last)).await {
                 Ok(remote) => {
                     if !self.adopt(id, epoch, remote, Some(last)) {
                         debug!(agent = %id, "the agent moved on while the supervisor connected again");
@@ -3657,7 +3686,10 @@ impl RunnerSupervisor {
     async fn targets_up(&self, agent: &Agent) {
         let Some(state) = self.state() else { return };
         // The workspace moves to the work root before a target binds it.
-        crate::workspace::ensure(&state.state_dir, &state.work_dir, agent, true);
+        if let Err(e) = crate::workspace::ensure_generic(&state, agent, true).await {
+            warn!(agent = %agent.id, "target startup workspace admission refused: {e}");
+            return;
+        }
         // The files of the agent's cards, before the harness starts (§8.4).
         crate::card_delivery::deliver_at_start(&state, agent).await;
         let id = agent.id.to_string();
@@ -5675,7 +5707,10 @@ impl Supervisor for RunnerSupervisor {
                 Err(SupervisorError::AlreadyRunning(_)) => return Ok(Recovery::Attached),
                 Err(e) => return Err(e),
             };
-            let remote = match self.connect_runner(id, Some(events_since)).await {
+            let remote = match self
+                .connect_runner_for_adoption(id, Some(events_since))
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     self.release(id, epoch, AgentStatus::Error);
@@ -6001,6 +6036,104 @@ fn is_terminal_report(bytes: &[u8]) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    fn workspace_state(root: &Path) -> Shared {
+        let db = crate::db::Db::new(
+            crate::db::open(&root.join("test.sqlite")).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        Arc::new(crate::api::AppState {
+            agent_calls: Default::default(),
+            started: std::time::Instant::now(),
+            started_at: chrono::Utc::now(),
+            db,
+            definitions: Default::default(),
+            supervisor: Arc::new(crate::supervisor::InMemorySupervisor::new(Duration::from_millis(5))),
+            state_dir: root.join("state"),
+            config_dir: root.join("config"),
+            work_dir: root.join("work"),
+            max_targets_per_project: crate::settings::DEFAULT_MAX_TARGETS_PER_PROJECT,
+            repos_dir: root.join("repos"),
+            insecure_agent_header: false,
+            usage: Arc::default(),
+            executor: Arc::default(),
+            harness_latest: Arc::default(),
+            harness_tools: Arc::default(),
+            agent_tools: Arc::default(),
+            harness_auto_update: Arc::default(),
+            self_update: Arc::default(),
+            web: Default::default(),
+            artifact_listen: String::new(),
+            transcripts: Arc::default(),
+            operator_auth: Arc::new(crate::password::OperatorAuth::new(root)),
+            waits: Arc::default(),
+            config_repo: Arc::default(),
+            lifecycle: Arc::default(),
+            tool_rates: Arc::default(),
+            lease_sweep: Arc::default(),
+            rule_timers: Arc::default(),
+            monitors: Arc::default(),
+            webhooks: Arc::default(),
+            pipelines: Arc::default(),
+            git_proxy: Arc::default(),
+            job_queue: Arc::default(),
+            links: Arc::default(),
+            remotes: Arc::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn sealed_workspace_refuses_legacy_launch_adoption_and_preparation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = workspace_state(tmp.path());
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            state.state_dir.clone(), tmp.path().join("run"), tmp.path().join("prompts"),
+            SandboxConfig { mode: SandboxMode::None, ..Default::default() }, HashMap::new(),
+        ));
+        sup.bind(&state);
+        let def = serde_json::from_value(serde_json::json!({
+            "name": "holder", "project": "p", "harness": "codex"
+        })).unwrap();
+        let agent = Agent::from_def(&def, &state.state_dir);
+        let id = agent.id;
+        state.db.write_full("system", move |t| {
+            t.execute("INSERT INTO live_workspaces VALUES ('w','h',?1,'p','holder','1','2','fresh')", [id.to_string()])?;
+            t.execute("INSERT INTO workspace_reservations VALUES ('w','d',NULL,'sandbox')", [])?;
+            Ok(())
+        }).await.unwrap();
+        lock(&sup.inner.slots).insert(id, Slot::new(agent.clone()));
+        assert!(matches!(sup.launch_inner(id, 0).await, Err(SupervisorError::NotReady(_))));
+        for since in [None, Some(7)] {
+            assert!(matches!(sup.connect_runner_for_adoption(id, since).await, Err(SupervisorError::NotReady(_))));
+        }
+        // Cleanup bypasses admission and reaches the socket, not the seal gate.
+        assert!(matches!(sup.connect_runner(id, None).await, Err(SupervisorError::Other(_))));
+        assert!(crate::workspace::ensure_generic(&state, &agent, true).await.is_err());
+        assert!(!state.work_dir.exists());
+        assert!(!state.state_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn unsealed_legacy_preparation_and_disabled_operator_exec() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = workspace_state(tmp.path());
+        let def = serde_json::from_value(serde_json::json!({
+            "name": "holder", "project": "p", "harness": "codex"
+        })).unwrap();
+        let agent = Agent::from_def(&def, &state.state_dir);
+        assert!(crate::workspace::ensure_generic(&state, &agent, true).await.unwrap().is_some());
+        state.db.write_full("operator", |t| {
+            let def = serde_json::from_value(serde_json::json!({"name":"synthetic", "kind":"host", "host":"fake"}))
+                .unwrap();
+            crate::store::targets::create(t, &def)?;
+            t.execute("INSERT INTO live_workspace_targets (registration_id,host_id,target_id,trust_domain_id,runtime_id,container_id,namespace_dev,namespace_ino)
+                VALUES ('r','h','synthetic','d','runtime',?1,'1','2')", ["a".repeat(64)])?;
+            assert!(t.execute("UPDATE live_workspace_targets SET activation = 'enabled'", []).is_err());
+            Ok(())
+        }).await.unwrap();
+        let error = crate::executor::usable(&state, &crate::actor::Actor::Operator, "synthetic").await.unwrap_err();
+        assert!(error.message.contains("activation is disabled"));
+    }
 
     struct ClaimRunner {
         id: AgentId,
