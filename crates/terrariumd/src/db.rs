@@ -3695,6 +3695,70 @@ mod tests {
         assert_eq!(project, "preserved");
     }
 
+    fn seed_migration_dependencies(conn: &Connection) {
+        conn.execute_batch(
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('p', 't', 't');
+             INSERT INTO boards (project, created_at) VALUES ('p', 't');
+             INSERT INTO board_columns (id, project, name, position) VALUES (1, 'p', 'ready', 0);
+             INSERT INTO cards (id, project, number, column_id, position, title,
+                                created_by, created_at, updated_at)
+             SELECT 'P-' || n, 'p', n, 1, n, 'migration fixture', 'operator', 't', 't'
+             FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3
+                   UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6);
+             INSERT INTO card_deps (card, depends_on) VALUES
+               ('P-1', 'P-4'), ('P-1', 'P-5'), ('P-1', 'P-6'),
+               ('P-2', 'P-4'), ('P-3', 'P-5');",
+        )
+        .unwrap();
+    }
+
+    fn assert_migrated_dependencies(conn: &Connection) {
+        let mut query = conn
+            .prepare("SELECT card, generation, mode, action, setter FROM card_waits ORDER BY card")
+            .unwrap();
+        let rows: Vec<(String, String, String, String, String)> = query
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        for (i, (card, generation, mode, action, setter)) in rows.iter().enumerate() {
+            assert_eq!(card, &format!("P-{}", i + 1));
+            assert_eq!(generation.len(), 32);
+            assert!(generation.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+            assert_eq!((mode.as_str(), action.as_str(), setter.as_str()), ("all", "{}", "operator"));
+        }
+        assert_eq!(conn.query_row("SELECT count(*) FROM card_deps", [], |r| r.get::<_, i64>(0)).unwrap(), 5);
+    }
+
+    #[test]
+    fn card_waits_migration_upgrades_populated_055_database() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
+        // These are the only named migrations added after 0.55.0.
+        let before: Vec<_> = NAMED_MIGRATIONS.iter().copied().filter(|(name, _)| {
+            !matches!(*name, "ter-712-card-waits.sql" | "ter-893-legacy-listing-expiry.sql")
+        }).collect();
+        migrate_named(&mut conn, &before).unwrap();
+        seed_migration_dependencies(&conn);
+        assert_eq!(migrate(&mut conn).unwrap(), 2);
+        assert_migrated_dependencies(&conn);
+        assert_eq!(migrate(&mut conn).unwrap(), 0);
+        assert_migrated_dependencies(&conn);
+    }
+
+    #[test]
+    fn named_migrations_upgrade_populated_legacy_database() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
+        seed_migration_dependencies(&conn);
+        assert_eq!(migrate_named(&mut conn, NAMED_MIGRATIONS).unwrap(), NAMED_MIGRATIONS.len());
+        assert_migrated_dependencies(&conn);
+        assert_eq!(migrate(&mut conn).unwrap(), 0);
+    }
+
     #[test]
     fn named_migrations_roll_back_failed_schema_and_record() {
         let mut conn = Connection::open_in_memory().unwrap();
