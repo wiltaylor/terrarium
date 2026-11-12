@@ -228,8 +228,21 @@ mod tests {
         let directories = roots.create_directories(&store).unwrap();
         let pinned = directories.publisher.fd.try_clone().unwrap();
         let before = mount_id(&pinned).unwrap();
+        let identity = |root: &ProtectedRoot| {
+            let m = root.fd.metadata().unwrap();
+            SourceIdentity { device: m.dev(), inode: m.ino() }
+        };
+        // White-box forged scaffold: even matching retained inode/mount IDs
+        // cannot turn arbitrary temporary paths into administrative evidence.
+        let forged = Mounted {
+            evidence: Scaffold { publisher: identity(&directories.publisher), staging: identity(&directories.staging), state: identity(&directories.registration) },
+            mount_ids: [mount_id(&directories.publisher.fd).unwrap(), mount_id(&directories.staging.fd).unwrap(), mount_id(&directories.registration.fd).unwrap()],
+            registration: store.load_bootstrap().unwrap().original().registration,
+            directories,
+        };
+        assert_eq!(forged.recheck_empty(), Err(Reply::Quarantined));
         assert!(matches!(
-            build(&store, directories),
+            build(&store, forged.into_directories()),
             Err(Reply::Unauthorized)
         ));
         assert_eq!(mount_id(&pinned).unwrap(), before);
