@@ -1036,6 +1036,20 @@ mod tests {
     }
 
     #[test]
+    fn write_files_creates_nested_files_with_public_read_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("skill");
+        write_files(&root, &files(&[("nested/example.md", b"example")])).unwrap();
+        let path = root.join("nested/example.md");
+        assert_eq!(std::fs::read(&path).unwrap(), b"example");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o644);
+        }
+    }
+
+    #[test]
     fn names_are_kebab_case() {
         for ok in ["fern-check", "a", "a1-b2", &"x".repeat(NAME_MAX)] {
             assert!(check_name(ok).is_ok(), "{ok}");
