@@ -467,15 +467,23 @@ fn rig() -> Rig {
     rig_with("gh", true)
 }
 
-async fn wait_front(store: &Store, matches: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+async fn wait_front(
+    store: &Store,
+    matches: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if let Ok(bytes) = std::fs::read(store.dir().join("front/current-run.json"))
                 && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
-                && matches(&value) { return value; }
+                && matches(&value)
+            {
+                return value;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-    }).await.unwrap()
+    })
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -549,7 +557,11 @@ async fn stalled_front_writer_cannot_delay_hold_deadline_recovery() {
         }
         store.export_front(run)
     }));
-    updater.hot_budget = (Duration::from_secs(12), Duration::from_secs(6), Duration::from_secs(1));
+    updater.hot_budget = (
+        Duration::from_secs(12),
+        Duration::from_secs(6),
+        Duration::from_secs(1),
+    );
     updater.cfg.health_timeout = Duration::from_secs(240);
     {
         let mut state = r.fake.0.lock().unwrap();
@@ -559,13 +571,23 @@ async fn stalled_front_writer_cannot_delay_hold_deadline_recovery() {
     }
     let started = tokio::time::Instant::now();
     let updater = r.updater.clone();
-    let work = tokio::spawn(async move { updater.run_now(RunKind::Update, "latest", "operator").await });
-    tokio::time::timeout(Duration::from_secs(3), entered.notified()).await.unwrap();
-    let run = tokio::time::timeout(Duration::from_secs(13), work).await
-        .expect("stalled projection must not delay recovery").unwrap();
+    let work =
+        tokio::spawn(async move { updater.run_now(RunKind::Update, "latest", "operator").await });
+    tokio::time::timeout(Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    let run = tokio::time::timeout(Duration::from_secs(13), work)
+        .await
+        .expect("stalled projection must not delay recovery")
+        .unwrap();
     assert!(started.elapsed() < Duration::from_millis(12500));
     assert_eq!(run.outcome, Outcome::RecoveryFailed);
-    assert!(r.fake.calls().iter().any(|call| call == "stop-for-recovery c0"));
+    assert!(
+        r.fake
+            .calls()
+            .iter()
+            .any(|call| call == "stop-for-recovery c0")
+    );
     // No timeout or automatic release exists in the writer. It stays blocked
     // until after the safety-critical update/recovery has finished.
     assert!(!*release.0.0.lock().unwrap());

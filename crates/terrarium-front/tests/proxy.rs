@@ -242,20 +242,29 @@ async fn slow_headers_timeout_but_streaming_body_does_not() {
 
 #[tokio::test]
 async fn paced_upload_is_not_an_outage_and_receives_the_daemon_response() {
-    let upstream = Router::new().route("/upload", axum::routing::post(|body: axum::body::Bytes| async move {
-        assert_eq!(body.as_ref(), b"chunk0chunk1chunk2chunk3chunk4");
-        "complete upload"
-    }));
+    let upstream = Router::new().route(
+        "/upload",
+        axum::routing::post(|body: axum::body::Bytes| async move {
+            assert_eq!(body.as_ref(), b"chunk0chunk1chunk2chunk3chunk4");
+            "complete upload"
+        }),
+    );
     let (upstream, daemon) = serve(upstream).await;
     let (address, task) = serve(front(upstream, false)).await;
     let chunks = futures_util::stream::unfold(0, |n| async move {
-        if n == 5 { return None; }
+        if n == 5 {
+            return None;
+        }
         tokio::time::sleep(Duration::from_millis(550)).await;
         Some((Ok::<_, std::io::Error>(format!("chunk{n}")), n + 1))
     });
     let start = std::time::Instant::now();
-    let response = reqwest::Client::new().post(format!("http://{address}/upload"))
-        .body(reqwest::Body::wrap_stream(chunks)).send().await.unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/upload"))
+        .body(reqwest::Body::wrap_stream(chunks))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(response.text().await.unwrap(), "complete upload");
     assert!(start.elapsed() > Duration::from_secs(2));
