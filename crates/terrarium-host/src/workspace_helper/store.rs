@@ -16,6 +16,8 @@ pub struct Store {
     root: ProtectedRoot,
     _lock: Flock<File>,
     owner: u32,
+    #[cfg(test)]
+    pub(super) fault: std::cell::Cell<Option<(usize, bool)>>,
 }
 
 fn checked(file: &File, owner: u32) -> Result<(), Reply> {
@@ -68,6 +70,8 @@ impl Store {
             root,
             _lock: lock,
             owner,
+            #[cfg(test)]
+            fault: std::cell::Cell::new(None),
         })
     }
 
@@ -173,6 +177,8 @@ impl Store {
         if bytes.len() as u64 > MAX_JOURNAL {
             return Err(Reply::Failed);
         }
+        #[cfg(test)]
+        self.persistence_boundary()?;
         let mut next = File::from(
             openat(
                 &self.root.fd,
@@ -186,13 +192,40 @@ impl Store {
             )
             .map_err(|_| Reply::Failed)?,
         );
+        #[cfg(test)]
+        self.persistence_boundary()?;
         checked(&next, self.owner)?;
         next.write_all(&bytes).map_err(|_| Reply::Failed)?;
+        #[cfg(test)]
+        self.persistence_boundary()?;
         next.sync_all().map_err(|_| Reply::Failed)?;
+        #[cfg(test)]
+        self.persistence_boundary()?;
         // Persist the created name as well as the file, before replacement.
         self.root.fd.sync_all().map_err(|_| Reply::Failed)?;
+        #[cfg(test)]
+        self.persistence_boundary()?;
         renameat(&self.root.fd, next_name, &self.root.fd, final_name).map_err(|_| Reply::Failed)?;
-        self.root.fd.sync_all().map_err(|_| Reply::Failed)
+        #[cfg(test)]
+        self.persistence_boundary()?;
+        self.root.fd.sync_all().map_err(|_| Reply::Failed)?;
+        #[cfg(test)]
+        self.persistence_boundary()?;
+        Ok(())
+    }
+
+    // Per-store, one-shot injection. Never compiled into the helper binary.
+    #[cfg(test)]
+    fn persistence_boundary(&self) -> Result<(), Reply> {
+        if let Some((remaining, crash)) = self.fault.get() {
+            if remaining == 1 {
+                self.fault.set(None);
+                assert!(!crash, "simulated process interruption");
+                return Err(Reply::Failed);
+            }
+            self.fault.set(Some((remaining - 1, crash)));
+        }
+        Ok(())
     }
 }
 

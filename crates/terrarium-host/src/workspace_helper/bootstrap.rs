@@ -154,7 +154,7 @@ impl<B: Backend> Bootstrap<B> {
         })();
         if result.is_err() {
             self.fenced = true;
-            journal.recover_without_evidence();
+            journal.quarantine();
             // Failure to persist quarantine never permits another action in
             // this instance. An incomplete durable journal fences on restart.
             let _ = self.store.save_bootstrap(&journal);
@@ -175,6 +175,8 @@ mod tests {
         calls: usize,
         fail: usize,
         configuration_changed: bool,
+        post_effect: bool,
+        effects: usize,
     }
 
     impl Fake {
@@ -183,10 +185,15 @@ mod tests {
                 calls: 0,
                 fail,
                 configuration_changed: false,
+                post_effect: false,
+                effects: 0,
             }
         }
         fn action(&mut self) -> Result<(), Reply> {
             self.calls += 1;
+            if self.post_effect || self.calls != self.fail {
+                self.effects += 1;
+            }
             if self.calls == self.fail {
                 Err(Reply::Failed)
             } else {
@@ -261,6 +268,71 @@ mod tests {
             "incarnation": "00000000000000000000000005",
             "domain": "00000000000000000000000006"
         })).unwrap()
+    }
+
+    #[test]
+    fn every_persistence_boundary_refuses_replay_after_error_or_process_restart() {
+        // Seven boundaries for each of intent, scaffold, create-pending,
+        // container binding, receiver verification and final commit. These
+        // are process interruptions / I/O errors, not power-loss durability proof.
+        for crash in [false, true] {
+            for boundary in 1..=42 {
+                let dir = tempfile::tempdir().unwrap();
+                let store = Store::fixture(dir.path()).unwrap();
+                store.fault.set(Some((boundary, crash)));
+                let r = request();
+                let mut b = Bootstrap::new(store, Fake::fresh(0));
+                let outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.create(r.clone())));
+                assert_eq!(outcome.is_err(), crash, "boundary {boundary}");
+                if !crash {
+                    assert_eq!(outcome.unwrap(), Err(Reply::Quarantined));
+                    let calls = b.backend.calls;
+                    assert_eq!(b.create(r.clone()), Err(Reply::Quarantined));
+                    assert_eq!(b.retry(&r), Err(Reply::Quarantined));
+                    assert_eq!(b.backend.calls, calls);
+                }
+                // No create/start/commit is repeated after reopening. A
+                // crash after final rename may expose an exact committed
+                // result, but returning it must never invoke external work.
+                drop(b);
+                match Store::fixture(dir.path()) {
+                    Err(Reply::Quarantined) => {
+                        assert!(dir.path().join("bootstrap.next").exists());
+                    }
+                    Ok(store) => {
+                        let committed = store.load_bootstrap().is_ok_and(|j| j.committed());
+                        let mut restarted = Bootstrap::new(store, Fake::fresh(0));
+                        assert_eq!(restarted.retry(&r).is_ok(), committed);
+                        assert_eq!(restarted.backend.calls, 0);
+                        if dir.path().join("bootstrap.json").exists() {
+                            assert!(restarted.create(r.clone()).is_err());
+                            assert_eq!(restarted.backend.calls, 0);
+                        }
+                    }
+                    Err(other) => panic!("unexpected reopen result: {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn post_effect_pre_record_failures_stay_quarantined_after_restart() {
+        for fail in 1..=4 {
+            let dir = tempfile::tempdir().unwrap();
+            let mut fake = Fake::fresh(fail);
+            fake.post_effect = true;
+            let mut b = Bootstrap::new(Store::fixture(dir.path()).unwrap(), fake);
+            let r = request();
+            assert_eq!(b.create(r.clone()), Err(Reply::Quarantined));
+            assert_eq!(b.backend.effects, fail);
+            assert!(b.store.load_bootstrap().unwrap().quarantined());
+            drop(b);
+            let mut restarted = Bootstrap::new(Store::fixture(dir.path()).unwrap(), Fake::fresh(0));
+            assert_eq!(restarted.retry(&r), Err(Reply::Quarantined));
+            assert!(restarted.create(r).is_err());
+            assert_eq!(restarted.backend.effects, 0);
+        }
     }
 
     #[test]

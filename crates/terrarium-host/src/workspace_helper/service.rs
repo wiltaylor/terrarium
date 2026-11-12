@@ -131,6 +131,40 @@ pub fn capability() -> Capability {
     }
 }
 
+// This admission gate must finish before Docker inspection or kernel access.
+// Keeping it separate permits unprivileged restart tests of the actual gate.
+fn owned_journal(
+    bootstrap_store: &Store,
+    specification: Option<&receiver::Specification>,
+    publisher: &ProtectedRoot,
+    staging: &ProtectedRoot,
+    state: &ProtectedRoot,
+    store: &Store,
+) -> Result<Journal, Reply> {
+    let mut bootstrap = bootstrap_store.load_bootstrap()?;
+    let binding = specification
+        .ok_or(Reply::Unauthorized)?
+        .verify_binding(bootstrap.original());
+    if binding.is_err() {
+        bootstrap.quarantine();
+        let _ = bootstrap_store.save_bootstrap(&bootstrap);
+        return Err(Reply::Quarantined);
+    }
+    let journal = store.load()?;
+    let ownership = bootstrap.runtime_ownership(&journal)?;
+    for (root, expected) in [publisher, staging, state].into_iter().zip([
+        &ownership.publisher,
+        &ownership.staging,
+        &ownership.state,
+    ]) {
+        let m = root.fd.metadata().map_err(|_| Reply::Failed)?;
+        if (m.dev(), m.ino()) != (expected.device, expected.inode) {
+            return Err(Reply::Quarantined);
+        }
+    }
+    Ok(journal)
+}
+
 pub async fn run() -> std::io::Result<()> {
     use nix::fcntl::AtFlags;
     use nix::sys::stat::{SFlag, fstatat};
@@ -185,39 +219,17 @@ pub async fn run() -> std::io::Result<()> {
     // neither replace a live listener nor mutate this registration stream.
     for r in opened {
         let bootstrap_store = Store::open(r.bootstrap).map_err(|_| failed())?;
-        let mut bootstrap = bootstrap_store.load_bootstrap().map_err(|_| failed())?;
-        let binding = c
-            .receiver
-            .as_ref()
-            .ok_or_else(failed)?
-            .verify_binding(bootstrap.original());
-        if binding.is_err() {
-            bootstrap.quarantine();
-            let _ = bootstrap_store.save_bootstrap(&bootstrap);
-            return Err(failed());
-        }
-        let identities = [&r.publisher, &r.staging, &r.state].map(|root| {
-            root.fd
-                .metadata()
-                .map(|m| terrarium_core::live_workspace::SourceIdentity {
-                    device: m.dev(),
-                    inode: m.ino(),
-                })
-        });
+        let state = r.state.try_clone().map_err(|_| failed())?;
         let store = Store::open(r.state).map_err(|_| failed())?;
-        let journal = store.load().map_err(|_| failed())?;
-        let ownership = bootstrap
-            .runtime_ownership(&journal)
-            .map_err(|_| failed())?;
-        for (observed, expected) in
-            identities
-                .into_iter()
-                .zip([&ownership.publisher, &ownership.staging, &ownership.state])
-        {
-            if &observed? != expected {
-                return Err(failed());
-            }
-        }
+        let journal = owned_journal(
+            &bootstrap_store,
+            c.receiver.as_ref(),
+            &r.publisher,
+            &r.staging,
+            &state,
+            &store,
+        )
+        .map_err(|_| failed())?;
         bootstrap_stores.push(bootstrap_store);
         let registration = journal.runtime.registration;
         let mut docker = runtime::DockerInspector;
@@ -315,6 +327,154 @@ pub async fn run() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_root(path: &std::path::Path) -> ProtectedRoot {
+        ProtectedRoot {
+            fd: File::open(path).unwrap(),
+            ancestors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn service_ownership_config_and_scaffold_admission_refuse_before_runtime_access() {
+        use terrarium_core::live_workspace::bootstrap::{
+            Journal as Bootstrap, Request, Scaffold, Step,
+        };
+        use terrarium_core::live_workspace::{NamespaceIdentity, RuntimeIdentity, SourceIdentity};
+
+        // Valid synthetic ownership is the positive control, not runtime proof.
+        for case in 0..=13 {
+            let dir = tempfile::tempdir().unwrap();
+            for name in ["bootstrap", "publisher", "staging", "state", "foreign"] {
+                std::fs::create_dir(dir.path().join(name)).unwrap();
+            }
+            let publisher = fixture_root(&dir.path().join("publisher"));
+            let staging = fixture_root(&dir.path().join("staging"));
+            let state = fixture_root(&dir.path().join("state"));
+            let foreign = fixture_root(&dir.path().join("foreign"));
+            let identity = |root: &ProtectedRoot| {
+                let m = root.fd.metadata().unwrap();
+                SourceIdentity {
+                    device: m.dev(),
+                    inode: m.ino(),
+                }
+            };
+            let specification = receiver::Specification::from_config(
+                serde_json::json!({"image": format!("synthetic@sha256:{}", "a".repeat(64)), "command": ["/bin/sleep", "infinity"], "profile": {
+                    "kernel":"synthetic", "engine":"synthetic", "runc":"synthetic", "seccomp_digest":"synthetic", "rootful":true, "same_mount_namespace":true, "propagation_proven":true, "userns_remap":false, "namespace_creation_blocked":true}}).to_string().as_bytes()
+            ).unwrap();
+            let r: Request = serde_json::from_value(serde_json::json!({
+                "version": 1, "configuration": specification.digest().unwrap(),
+                "operation": "00000000000000000000000001",
+                "provenance": {"daemon_instance": "00000000000000000000000002", "caller": "local_operator"},
+                "host": "00000000000000000000000003", "target": "synthetic",
+                "registration": "00000000000000000000000004",
+                "incarnation": "00000000000000000000000005", "domain": "00000000000000000000000006"
+            })).unwrap();
+            let runtime = RuntimeIdentity {
+                registration: r.registration,
+                incarnation: r.incarnation,
+                container_id: "a".repeat(64),
+                namespace: NamespaceIdentity {
+                    device: 2,
+                    inode: 3,
+                },
+            };
+            let mut normal = Journal {
+                state_version: STATE_VERSION,
+                host: r.host,
+                target: r.target.clone(),
+                runtime: runtime.clone(),
+                last_contiguous_revision: 0,
+                quarantined: false,
+                operations: Default::default(),
+                tombstones: Default::default(),
+            };
+            let mut bootstrap = Bootstrap::new(r).unwrap();
+            for step in [
+                Step::ScaffoldVerified(Scaffold {
+                    publisher: identity(&publisher),
+                    staging: identity(&staging),
+                    state: identity(&state),
+                }),
+                Step::CreatePending,
+                Step::ContainerBound(runtime.container_id.clone()),
+                Step::ReceiverVerified(runtime),
+                Step::Committed,
+            ] {
+                if case != 2 {
+                    bootstrap.advance(step).unwrap();
+                }
+            }
+            match case {
+                3 => normal.target.push_str("foreign"),
+                4 => normal.runtime.container_id = "b".repeat(64),
+                5 => normal.runtime.namespace.inode += 1,
+                9 => bootstrap.quarantine(),
+                11 => normal.state_version += 1,
+                12 => {
+                    normal.host =
+                        serde_json::from_value(serde_json::json!("00000000000000000000000009"))
+                            .unwrap()
+                }
+                _ => {}
+            }
+            let boot_path = dir.path().join("bootstrap");
+            let state_path = dir.path().join("state");
+            // Persist through real Store primitives, reopening for every check.
+            let store = Store::fixture(&state_path).unwrap();
+            store.save(&normal).unwrap();
+            drop(store);
+            if case != 1 {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(boot_path.join("bootstrap.json"))
+                    .unwrap();
+                file.write_all(&serde_json::to_vec(&bootstrap).unwrap())
+                    .unwrap();
+                file.sync_all().unwrap();
+            }
+            let mut backend_calls = 0;
+            for restart in 0..2 {
+                let store = Store::fixture(&state_path).unwrap();
+                let boot_store = Store::fixture(&boot_path).unwrap();
+                let mut changed = specification.clone();
+                // A different valid specification must durably fence even if
+                // the original is restored at the next process startup.
+                if case == 10 && restart == 0 {
+                    let mut value = serde_json::to_value(&changed).unwrap();
+                    value["command"] = serde_json::json!(["/bin/false"]);
+                    changed =
+                        receiver::Specification::from_config(value.to_string().as_bytes()).unwrap();
+                }
+                let admitted = owned_journal(
+                    &boot_store,
+                    if case == 13 { None } else { Some(&changed) },
+                    if case == 6 { &foreign } else { &publisher },
+                    if case == 7 { &foreign } else { &staging },
+                    if case == 8 { &foreign } else { &state },
+                    &store,
+                );
+                if admitted.is_ok() {
+                    backend_calls += 1;
+                }
+                assert_eq!(
+                    admitted.is_ok(),
+                    case == 0,
+                    "case {case}, restart {restart}"
+                );
+                if case == 10 {
+                    assert!(boot_store.load_bootstrap().unwrap().quarantined());
+                }
+            }
+            assert_eq!(backend_calls, if case == 0 { 2 } else { 0 });
+        }
+    }
+
     #[test]
     fn operational_paths_are_fixed_same_identity_children() {
         let id = "00000000000000000000000001";
