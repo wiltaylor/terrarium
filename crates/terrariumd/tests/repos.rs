@@ -114,7 +114,14 @@ fn agent_git(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
 async fn git_settings_scope_identity_and_off_hooks() {
     let (td, _origin, _remotes) = daemon_with_repo().await;
     let repos = td.get("/api/projects/terra/repos").await.ok().clone();
-    let id = repos.as_array().unwrap().iter().find(|r| r["name"] == "proj").unwrap()["id"].as_str().unwrap();
+    let id = repos
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "proj")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
     td.patch(
         "/api/projects/terra/git",
         json!({"name": "Project Author", "email": "project@example.test"}),
