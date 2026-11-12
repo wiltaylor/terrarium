@@ -7491,6 +7491,12 @@ changed)`, without connecting to the replacement. Startup probes report
 missing tools or spool errors, with a 30-second readiness deadline.
 See host-protocol.md, Reconnect.
 
+Durable SSH/exe.dev runs end when their foreground command exits or their
+absolute deadline passes, whichever comes first. The supervisor sends TERM
+to the command's process group, then KILL after five seconds, so background
+children cannot keep the run or its output streams open indefinitely. A
+foreground exit preserves its exit code. A deadline ends with code 124.
+
 The input body: `data` is base64, at most 1 MiB of bytes (`413
 too_large` above). In a push, `data` is file bytes. `resize` is
 `{"rows", "cols"}`. `signal` is a name such as `INT`. `eof` closes stdin.

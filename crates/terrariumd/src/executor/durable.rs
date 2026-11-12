@@ -440,6 +440,19 @@ fn script_with_retention(path: &str, cmd: &RemoteCmd, created: i64, retain: u64)
         .min(MAX_RUN);
     let deadline = created + timeout as i64;
     let expires = created + (MAX_RUN + RETAIN) as i64;
+    // Keep a leader in the command's group until the supervisor kills it.
+    // Otherwise a foreground exit can strand inherited FIFO descriptors in
+    // grandchildren, or release the group ID before teardown uses it.
+    let group = format!(r#"
+p={path}
+trap ':' TERM
+sh -c {command} &
+f=$!
+wait "$f"; code=$?
+printf '%s\n' "$code" > "$p/foreground.part"
+mv "$p/foreground.part" "$p/foreground"
+while :; do sleep 60; done
+"#, path = sh_quote(path), command = sh_quote(&command));
     let janitor = format!(
         r#"
 p={path}
@@ -452,7 +465,7 @@ sleep {retain}
 exec 9> "$p/live"
 flock -x 9
 : > "$p/expired"
-rm -f "$p/o" "$p/e" "$p/out" "$p/err" "$p/pid" "$p/exit" "$p/exit.part" "$p/cancel" "$p/ready" "$p/startup-error"
+rm -f "$p/o" "$p/e" "$p/out" "$p/err" "$p/pid" "$p/exit" "$p/exit.part" "$p/cancel" "$p/ready" "$p/startup-error" "$p/foreground" "$p/foreground.part"
 left=$(({expires}-$(date +%s)+120))
 test "$left" -le 0 || sleep "$left"
 rm -f "$p/expired" "$p/janitor" "$p/live"
@@ -488,24 +501,33 @@ if test "$left" -le 0; then
   exit
 fi
 : > "$p/ready"
-(head -c 67108864 > "$p/out"; cat > /dev/null) < "$p/o" &
+setsid sh -c 'head -c 67108864 > "$1/out"; cat > /dev/null; while :; do sleep 60; done' sh "$p" < "$p/o" 9>&- &
 o=$!
-(head -c 67108864 > "$p/err"; cat > /dev/null) < "$p/e" &
+setsid sh -c 'head -c 67108864 > "$1/err"; cat > /dev/null; while :; do sleep 60; done' sh "$p" < "$p/e" 9>&- &
 e=$!
-timeout -k 5 "$left" sh -c {command} > "$p/o" 2> "$p/e" &
+setsid sh -c {group} > "$p/o" 2> "$p/e" 9>&- &
 c=$!
-trap 'kill -TERM "$c" 2>/dev/null' TERM
-(while test ! -f "$p/cancel"; do sleep 0.1; done; kill -TERM "$c" 2>/dev/null) &
-w=$!
-wait "$c"; code=$?
-kill "$w" 2>/dev/null
+trap 'code=143' TERM
+while :; do
+  if test -f "$p/foreground"; then code=$(cat "$p/foreground"); break; fi
+  if test -f "$p/cancel"; then code=143; break; fi
+  if test "$(date +%s)" -ge {deadline}; then code=124; break; fi
+  sleep 0.1
+done
+kill -TERM "-$c" 2>/dev/null
+sleep 5
+kill -KILL "-$c" 2>/dev/null
+wait "$c" 2>/dev/null
+# Logger groups cannot retain the slot beyond teardown, even if a child
+# escaped the command group while keeping inherited stream descriptors.
+kill -TERM "-$o" "-$e" 2>/dev/null
 wait "$o" "$e" 2>/dev/null
 printf '%s\n' "$code" > "$p/exit.part"
 mv "$p/exit.part" "$p/exit"
 setsid nohup sh -c {janitor} </dev/null >/dev/null 2>&1 &
 "#,
         path = sh_quote(path),
-        command = sh_quote(&command),
+        group = sh_quote(&group),
         janitor = sh_quote(&janitor)
     );
     let env = if cmd.env.is_empty() {
@@ -686,6 +708,20 @@ mod tests {
 
     #[tokio::test]
     async fn durable_cleanup_follows_child_exit() {
+        cleanup_case(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn durable_foreground_exit_terminates_background_child() {
+        cleanup_case(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn durable_deadline_terminates_background_children() {
+        cleanup_case(true, true).await;
+    }
+
+    async fn cleanup_case(background: bool, deadline: bool) {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join(".terrarium-runs/cleanup");
         let child = root.path().join("child");
@@ -693,7 +729,9 @@ mod tests {
             argv: vec![
                 "sh".into(),
                 "-c".into(),
-                format!("echo $$ > '{}'; exec sleep 60", child.display()),
+                if background {
+                    format!("sleep 600 & echo $! > '{}'; {}", child.display(), if deadline { "wait" } else { "exit 0" })
+                } else { format!("echo $$ > '{}'; exec sleep 60", child.display()) },
             ],
             timeout_secs: Some(30),
             ..RemoteCmd::default()
@@ -713,15 +751,13 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert!(String::from_utf8_lossy(&result.stdout).contains("X124\n"));
+        assert!(String::from_utf8_lossy(&result.stdout).contains(if deadline { "X124\n" } else { "X0\n" }));
         let pid = std::fs::read_to_string(child).unwrap();
-        assert!(
-            !std::process::Command::new("kill")
-                .args(["-0", pid.trim()])
-                .status()
-                .unwrap()
-                .success()
-        );
+        if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())) {
+            // An orphan may await the target init's reap, but cannot execute
+            // or retain stream descriptors once it has become a zombie.
+            assert_eq!(status.rsplit_once(") ").unwrap().1.split_whitespace().next(), Some("Z"));
+        }
         assert!(path.join("out").exists());
         tokio::time::timeout(Duration::from_secs(5), async {
             while !path.join("expired").exists() || path.join("out").exists() {
