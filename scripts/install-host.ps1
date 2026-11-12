@@ -5,7 +5,10 @@ param(
     [Parameter(Mandatory=$true)][string]$BinaryPath,
     [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$Sha256,
     [string]$ConfigPath,
-    [switch]$NoStart
+    [switch]$NoStart,
+    [switch]$PreflightOnly,
+    [string]$TestStateParent,
+    [string]$TestProgramParent
 )
 $ErrorActionPreference = 'Stop'
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -56,8 +59,27 @@ function Set-NewFileOwner([string]$Path) {
     Set-Acl -LiteralPath $Path -AclObject $acl
     Assert-TrustedPath $Path $true
 }
+function Assert-TrustedAncestor([string]$Path) {
+    $acl = Get-Acl -LiteralPath $Path
+    $trusted = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin $trusted) { throw ('Refusing ancestor owner on ' + $Path + ': ' + $owner) }
+    $replacement = [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership -bor 0x10000000
+    foreach ($ace in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+        $sid = $ace.IdentityReference.Value
+        $creatorOnly = $sid -eq 'S-1-3-0' -and ($ace.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly)
+        if ($ace.AccessControlType -eq 'Allow' -and $sid -notin $trusted -and !$creatorOnly -and ($ace.FileSystemRights -band $replacement)) {
+            throw ('Refusing ancestor replacement permission on ' + $Path + ': ' + $sid)
+        }
+    }
+}
 $stateParent = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Terrarium'
 $programParent = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Terrarium'
+if ($TestStateParent -or $TestProgramParent) {
+    if (!$PreflightOnly -or !$TestStateParent -or !$TestProgramParent) { throw 'Test roots require both paths and PreflightOnly.' }
+    $stateParent = [IO.Path]::GetFullPath($TestStateParent)
+    $programParent = [IO.Path]::GetFullPath($TestProgramParent)
+}
 $root = Join-Path $stateParent 'host'
 $programRoot = Join-Path $programParent 'host'
 $config = Join-Path $root 'config.toml'
@@ -73,6 +95,7 @@ foreach ($start in @($root, $programRoot)) {
         if (!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw 'Install path contains a reparse point or non-directory.'
         }
+        Assert-TrustedAncestor $path
     }
     $parent = Split-Path -Parent $path
     if ($parent -eq $path) { break }
@@ -83,6 +106,7 @@ foreach ($start in @($root, $programRoot)) {
 foreach ($path in @($stateParent, $programParent)) { if (Test-Path -LiteralPath $path) { Assert-TrustedPath $path $false } }
 Assert-TrustedTree $root
 Assert-TrustedTree $programRoot
+if ($PreflightOnly) { return }
 foreach ($path in @($stateParent, $root, $programParent, $programRoot)) { New-TrustedDirectory $path }
 $versionOutput = @(& $BinaryPath --version)
 $version = ($versionOutput[0] -split '\s+')[1]

@@ -9,6 +9,7 @@ use windows_service::{
 };
 
 const NAME: &str = "TerrariumHost";
+static LATER_START: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn journal_path() -> PathBuf {
     crate::config::data_dir().join("host").join("update.json")
@@ -92,12 +93,16 @@ pub fn activate(binary: &Path, version: &str) -> io::Result<()> {
 pub fn confirm(binary: &Path) -> Option<String> {
     let path = journal_path();
     let mut transaction = Journal::read(&path).ok()?;
-    if transaction.confirmed
-        || transaction.next != binary
+    if transaction.next != binary
         || transaction.version != terrarium_version::FULL
         || configured_image().ok()?.as_path() != binary
     {
         return None;
+    }
+    if transaction.confirmed {
+        if !LATER_START.load(std::sync::atomic::Ordering::Relaxed) { return None; }
+        transaction.collect_previous(&path).ok()?;
+        return Some(transaction.version);
     }
     transaction.confirmed = true;
     transaction.persist(&path).ok()?;
@@ -112,8 +117,8 @@ pub fn rollback(binary: &Path) -> io::Result<()> {
     transaction.rollback(switch)
 }
 
-/// A later start, not the welcome callback, may collect the old image. A
-/// journal remaining after a rollback is resolved by SCM's configured path.
+/// A confirmed transaction still needs this later start's welcome before
+/// collecting its rollback image. Startup itself never removes that image.
 pub fn startup(binary: &Path) -> io::Result<bool> {
     let path = journal_path();
     let transaction = match Journal::read(&path) {
@@ -137,22 +142,11 @@ pub fn startup(binary: &Path) -> io::Result<bool> {
             "update journal does not match running image",
         ));
     }
-    if transaction.confirmed {
-        // Do not follow a journal to an unrelated directory when collecting.
-        if transaction.previous.parent().and_then(Path::parent)
-            == binary.parent().and_then(Path::parent)
-            && transaction.previous != binary
-            && let Some(directory) = transaction.previous.parent()
-        {
-            std::fs::remove_dir_all(directory)?;
-        }
-        std::fs::remove_file(path)?;
-        Ok(false)
-    } else {
-        Ok(true)
-    }
+    LATER_START.store(transaction.confirmed, std::sync::atomic::Ordering::Relaxed);
+    Ok(true)
 }
 
 pub fn checking() -> bool {
-    Journal::read(&journal_path()).is_ok_and(|journal| !journal.confirmed)
+    Journal::read(&journal_path()).is_ok_and(|journal| !journal.confirmed
+        || LATER_START.load(std::sync::atomic::Ordering::Relaxed))
 }

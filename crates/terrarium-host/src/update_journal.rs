@@ -12,6 +12,15 @@ pub struct Journal {
 }
 
 impl Journal {
+    /// Called only by a successful welcome on a start after confirmation.
+    pub fn collect_previous(&self, journal: &Path) -> io::Result<()> {
+        if !self.confirmed || self.previous == self.next
+            || self.previous.parent().and_then(Path::parent) != self.next.parent().and_then(Path::parent)
+        { return Err(io::Error::other("invalid confirmed cleanup transaction")); }
+        let directory = self.previous.parent().ok_or_else(|| io::Error::other("missing previous directory"))?;
+        if directory.exists() { std::fs::remove_dir_all(directory)?; }
+        std::fs::remove_file(journal)
+    }
     pub fn read(path: &Path) -> io::Result<Self> {
         serde_json::from_slice(&std::fs::read(path)?).map_err(io::Error::other)
     }
@@ -99,6 +108,32 @@ impl Journal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn later_start_without_welcome_preserves_rollback_image() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        std::fs::create_dir(root.join("old"))?;
+        let previous = root.join("old/terrarium-host.exe");
+        std::fs::write(&previous, b"verified previous image")?;
+        let mut transaction = Journal::stage(&previous, &previous, root, "new")?;
+        let journal = root.join("pending.json");
+        transaction.confirmed = true;
+        transaction.persist(&journal)?;
+        // Later startup only reads the journal. Config/connection failure or
+        // process death before welcome must leave both images intact.
+        let later_start = Journal::read(&journal)?;
+        drop(later_start);
+        assert!(previous.is_file());
+        assert!(transaction.next.is_file());
+        assert!(journal.is_file());
+        // The subsequent successful welcome may collect the previous image.
+        Journal::read(&journal)?.collect_previous(&journal)?;
+        assert!(!previous.exists());
+        assert!(transaction.next.is_file());
+        assert!(!journal.exists());
+        Ok(())
+    }
 
     #[test]
     fn persisted_boundaries_always_select_an_existing_image() -> io::Result<()> {
