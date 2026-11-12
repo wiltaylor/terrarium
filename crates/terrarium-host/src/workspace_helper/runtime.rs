@@ -204,13 +204,21 @@ impl DockerInspector {
         expected: &RuntimeIdentity,
     ) -> Result<Snapshot, Reply> {
         specification.verify(request, measured)?;
-        if expected.registration != request.registration || expected.incarnation != request.incarnation {
+        if expected.registration != request.registration
+            || expected.incarnation != request.incarnation
+        {
             return Err(Reply::Quarantined);
         }
         let image = Self::output_args(&["image", "inspect", specification.image_reference()])?;
         let image_id = Self::resolved_image(&image, specification.image_reference())?;
         let bytes = Self::output(&expected.container_id)?;
-        specification.check_inspect_configuration(request, measured, &expected.container_id, &image_id, &bytes)?;
+        specification.check_inspect_configuration(
+            request,
+            measured,
+            &expected.container_id,
+            &image_id,
+            &bytes,
+        )?;
         let snapshot = Self::parse(&bytes, &expected.container_id)?;
         if snapshot.identity != *expected {
             return Err(Reply::Quarantined);
@@ -219,11 +227,19 @@ impl DockerInspector {
     }
 
     fn resolved_image(bytes: &[u8], reference: &str) -> Result<String, Reply> {
-        let rows: Vec<serde_json::Value> = serde_json::from_slice(bytes).map_err(|_| Reply::Failed)?;
-        let [row] = rows.as_slice() else { return Err(Reply::Quarantined) };
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_slice(bytes).map_err(|_| Reply::Failed)?;
+        let [row] = rows.as_slice() else {
+            return Err(Reply::Quarantined);
+        };
         let id = row["Id"].as_str().ok_or(Reply::Quarantined)?;
-        if !id.strip_prefix("sha256:").is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-            || !row["RepoDigests"].as_array().is_some_and(|digests| digests.iter().any(|v| v.as_str() == Some(reference)))
+        if !id.strip_prefix("sha256:").is_some_and(|s| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }) || !row["RepoDigests"]
+            .as_array()
+            .is_some_and(|digests| digests.iter().any(|v| v.as_str() == Some(reference)))
         {
             return Err(Reply::Quarantined);
         }
@@ -251,10 +267,7 @@ impl DockerInspector {
             return Err(Reply::Unauthorized);
         }
         let mut child = Command::new(format!("/proc/self/fd/{}", executable.as_raw_fd()))
-            .args([
-                "--host",
-                "unix:///var/run/docker.sock",
-            ])
+            .args(["--host", "unix:///var/run/docker.sock"])
             .args(args)
             .env_clear()
             .stdin(Stdio::null())
