@@ -676,7 +676,7 @@ with (directory / '.retention.lock').open('a') as lock:
         stdout, stderr = child.communicate(timeout=5)
         if child.returncode:
             raise RuntimeError(stderr.decode())
-        receipt = json.loads(stdout)
+        receipt = hot.retention_read(directory, '.retention-' + authorization['token'] + '.receipt.json')
         assert receipt['stopped'] and receipt['removed'] == [], receipt
         assert len(list(directory.glob('*.zip'))) == 20
     finally:
