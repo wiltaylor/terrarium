@@ -1523,7 +1523,11 @@ impl Executor {
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 let guard = lock.clone().lock_owned().await;
-                if !def.host.as_deref().is_some_and(|h| self.resource_pending(h)) {
+                if !def
+                    .host
+                    .as_deref()
+                    .is_some_and(|h| self.resource_pending(h))
+                {
                     return guard;
                 }
                 drop(guard);
@@ -1531,9 +1535,11 @@ impl Executor {
             }
         })
         .await
-        .map_err(|_| ApiError::conflict(
-            "host reservation reconciliation is pending; retry after enforcement is restored",
-        ))
+        .map_err(|_| {
+            ApiError::conflict(
+                "host reservation reconciliation is pending; retry after enforcement is restored",
+            )
+        })
     }
 
     pub fn resource_verb_idle(&self, host: &str) -> ApiResult<()> {
