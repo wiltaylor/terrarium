@@ -83,7 +83,8 @@ impl<B: Backend> Bootstrap<B> {
     }
 
     /// No automatic recovery adoption is implemented. A committed duplicate
-    /// returns only its stored identity, never invokes the backend again.
+    /// reports historical completion only, not current runtime admission.
+    /// Configuration is rechecked, but no create/start action is repeated.
     pub fn retry(&mut self, request: &Request) -> Result<(), Reply> {
         if self.fenced {
             return Err(Reply::Quarantined);
@@ -145,6 +146,7 @@ impl<B: Backend> Bootstrap<B> {
             self.advance(&mut journal, Step::CreatePending)?;
             let container = self.backend.create_receiver(&request, &scaffold)?;
             self.advance(&mut journal, Step::ContainerBound(container.clone()))?;
+            self.advance(&mut journal, Step::StartPending(container.clone()))?;
             let runtime = self
                 .backend
                 .start_and_verify(&request, &scaffold, &container)?;
@@ -273,10 +275,10 @@ mod tests {
     #[test]
     fn every_persistence_boundary_refuses_replay_after_error_or_process_restart() {
         // Seven boundaries for each of intent, scaffold, create-pending,
-        // container binding, receiver verification and final commit. These
+        // container binding, start intent, receiver verification and final commit. These
         // are process interruptions / I/O errors, not power-loss durability proof.
         for crash in [false, true] {
-            for boundary in 1..=42 {
+            for boundary in 1..=49 {
                 let dir = tempfile::tempdir().unwrap();
                 let store = Store::fixture(dir.path()).unwrap();
                 store.fault.set(Some((boundary, crash)));
@@ -285,6 +287,9 @@ mod tests {
                 let outcome =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.create(r.clone())));
                 assert_eq!(outcome.is_err(), crash, "boundary {boundary}");
+                if boundary <= 35 {
+                    assert!(b.backend.calls <= 2, "start before synced StartPending: {boundary}");
+                }
                 if !crash {
                     // Initial intent errors propagate their I/O failure.
                     // The instance is fenced before that write regardless.
