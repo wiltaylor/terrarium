@@ -1268,16 +1268,27 @@ impl HostRegistry {
             Ok(committed) => committed,
             Err(error) => {
                 if error.code == Code::ResourceBusy {
-                    let pending = entry.pending_journal.entry(id).or_insert_with(PendingJournal::new);
+                    let pending = entry
+                        .pending_journal
+                        .entry(id)
+                        .or_insert_with(PendingJournal::new);
                     if pending.push(event) {
-                        warn!(host, session = id, "host journal busy; retaining event without acknowledgement");
+                        warn!(
+                            host,
+                            session = id,
+                            "host journal busy; retaining event without acknowledgement"
+                        );
                         return false;
                     }
                 }
                 if let Some(c) = &entry.conn {
                     let _ = c.tx.send(Outgoing::Close(None));
                 }
-                warn!(host, session = id, "host journal commit failed; closing without acknowledgement");
+                warn!(
+                    host,
+                    session = id,
+                    "host journal commit failed; closing without acknowledgement"
+                );
                 false
             }
         }
@@ -1364,34 +1375,36 @@ impl HostRegistry {
                     let error = matches!(event, SessionEvent::Error { .. });
                     let lost = matches!(event, SessionEvent::Lost { .. });
                     match self.try_deliver(host, e, id, &event) {
-                    Ok(committed) => {
-                        pending.backoff = JOURNAL_RETRY_TICK;
-                        pending.events.pop_front();
-                        // Recalculate after removing an event, keeping the byte bound exact.
-                        pending.bytes = pending
-                            .events
-                            .iter()
-                            .map(|v| serde_json::to_vec(v).map_or(0, |v| v.len()))
-                            .sum();
-                        if committed && terminal {
-                            if lost {
-                                if let Some(c) = &e.conn {
-                                    let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release {
-                                        session: id,
-                                    }));
+                        Ok(committed) => {
+                            pending.backoff = JOURNAL_RETRY_TICK;
+                            pending.events.pop_front();
+                            // Recalculate after removing an event, keeping the byte bound exact.
+                            pending.bytes = pending
+                                .events
+                                .iter()
+                                .map(|v| serde_json::to_vec(v).map_or(0, |v| v.len()))
+                                .sum();
+                            if committed && terminal {
+                                if lost {
+                                    if let Some(c) = &e.conn {
+                                        let _ = c.tx.send(Outgoing::frame(DaemonFrame::Release {
+                                            session: id,
+                                        }));
+                                    }
+                                } else {
+                                    Self::ack_terminal(e, id, error);
                                 }
-                            } else {
-                                Self::ack_terminal(e, id, error);
                             }
                         }
-                    }
-                    Err(error) => {
-                        if error.code != Code::ResourceBusy {
-                            pending.exhausted = true;
-                            if let Some(c) = &e.conn { let _ = c.tx.send(Outgoing::Close(None)); }
+                        Err(error) => {
+                            if error.code != Code::ResourceBusy {
+                                pending.exhausted = true;
+                                if let Some(c) = &e.conn {
+                                    let _ = c.tx.send(Outgoing::Close(None));
+                                }
+                            }
+                            pending.backoff = (pending.backoff * 2).min(JOURNAL_RETRY_BACKOFF);
                         }
-                        pending.backoff = (pending.backoff * 2).min(JOURNAL_RETRY_BACKOFF);
-                    }
                     }
                 }
                 pending.next = Instant::now() + pending.backoff;
@@ -3272,17 +3285,35 @@ mod tests {
         let db = crate::db::Db::new(conn, crate::events::EventHub::default());
         let reg = Arc::new(registry("lab1", true));
         reg.restore_with_db(dir.path(), db.clone()).unwrap();
-        let mut session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        let mut session = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
         reg.detach("lab1", 1).unwrap();
         let hello = Hello {
             path_kind: terrarium_host::protocol::PathKind::Posix,
-            protocol: PROTOCOL_VERSION, host: "lab1".into(), version: "test".into(),
-            os: "linux".into(), arch: "x86_64".into(), capabilities: HostCapabilities::default(),
-            max_sessions: 8, max_running_targets: None, update_failed: None, resume: None,
+            protocol: PROTOCOL_VERSION,
+            host: "lab1".into(),
+            version: "test".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            capabilities: HostCapabilities::default(),
+            max_sessions: 8,
+            max_running_targets: None,
+            update_failed: None,
+            resume: None,
         };
         let (release, writer) = hold_writer(db);
         let r = reg.clone();
-        let attaching = std::thread::spawn(move || r.attach(&host_row(), &hello, Conn { id: 2, tx: mpsc::unbounded_channel().0 }));
+        let attaching = std::thread::spawn(move || {
+            r.attach(
+                &host_row(),
+                &hello,
+                Conn {
+                    id: 2,
+                    tx: mpsc::unbounded_channel().0,
+                },
+            )
+        });
         metadata_retry_started(&reg);
         assert!(reg.lock()["lab1"].conn.is_none());
         assert!(!reg.lock()["lab1"].sessions[&session.id()].terminal);
@@ -3292,7 +3323,10 @@ mod tests {
         writer.join().unwrap();
         attaching.join().unwrap().unwrap();
         assert!(reg.is_online("lab1"));
-        assert!(matches!(session.rx.try_recv().unwrap(), SessionEvent::Lost { .. }));
+        assert!(matches!(
+            session.rx.try_recv().unwrap(),
+            SessionEvent::Lost { .. }
+        ));
         assert!(session.rx.try_recv().is_err());
         assert!(reg.lock()["lab1"].pending_journal.is_empty());
     }
