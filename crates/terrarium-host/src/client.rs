@@ -1746,7 +1746,10 @@ pub(crate) mod tests {
             std::task::Poll::Ready(Ok(()))
         }
 
-        fn start_send(mut self: std::pin::Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        fn start_send(
+            mut self: std::pin::Pin<&mut Self>,
+            item: Message,
+        ) -> Result<(), Self::Error> {
             self.writes += 1;
             let Message::Text(text) = item else {
                 panic!("expected control frame");
