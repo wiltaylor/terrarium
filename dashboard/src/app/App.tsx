@@ -26,6 +26,7 @@ const ArtifactsPage = lazy(() => import("../features/artifacts/ArtifactsPage"));
 const TestRunsPage = lazy(() => import("../features/tests/TestRunsPage"));
 const TestRunPage = lazy(() => import("../features/tests/TestRunPage"));
 const DashboardPage = lazy(() => import("../features/dashboard/DashboardPage"));
+const CustomPage = lazy(() => import("../features/pages/CustomPage"));
 const PipelinesPage = lazy(() => import("../features/pipelines/PipelinesPage"));
 const CalendarPage = lazy(() => import("../features/calendar/CalendarPage"));
 const TargetsPage = lazy(() => import("../features/targets/TargetsPage"));
@@ -141,6 +142,7 @@ function instanceRoutes() {
         <Route path="/p/:project" component={ProjectScreen}>
           <Route path="/" component={ProjectIndex} />
           <Route path="/dashboard" component={DashboardPage} />
+          <Route path="/pages/:slug" component={CustomPage} />
           <Route path="/pipelines" component={PipelinesPage} />
           <Route path="/calendar" component={CalendarPage} />
           <Route path="/agents" component={AgentsPage} />

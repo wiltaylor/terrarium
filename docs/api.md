@@ -11301,7 +11301,8 @@ layout) and `crates/terrariumd/src/store/monitors.rs` (the rows).
 ### 30.0 Project pages
 
 Project pages use the rights in §30.1. `GET /api/projects/{name}/pages`
-returns `{"items": [page, ...]}` ordered by position, then slug (at most 10).
+returns `{"items": [page, ...], "can_edit": true}` ordered by position, then slug (at most 10).
+`can_edit` reports the caller's project-page write right. Clients hide edit controls when false.
 `GET /api/projects/{name}/pages/{slug}` returns one page. `PUT` at that
 path creates or completely replaces it. `DELETE` removes it (204).
 Unknown projects or pages return 404. A PUT body is:

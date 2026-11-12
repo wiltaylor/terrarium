@@ -2186,7 +2186,22 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     opts.client ? { token: opts.client.token(), cookie: liveCookie() !== null } : undefined;
   const sock: typeof mockSocket = (path, make) => mockSocket(path, make, wsAuth());
 
+  const customPages = new Map<string, import("../types").ProjectPage>();
   const api: Api & { world: MockWorld } = {
+    pages: {
+      list: (project) => reply(() => ({ items: [...customPages.values()].filter(p => p.project === project).sort((a, b) => a.position - b.position || a.slug.localeCompare(b.slug)), can_edit: true })),
+      get: (project, slug) => reply(() => {
+        const page = customPages.get(`${project}/${slug}`);
+        if (!page) throw new ApiError(404, "page not found");
+        return structuredClone(page);
+      }),
+      save: (project, slug, body) => reply(() => {
+        const page = { ...structuredClone(body), project, slug, updated_at: new Date().toISOString(), updated_by: "operator" };
+        customPages.set(`${project}/${slug}`, page);
+        return structuredClone(page);
+      }),
+      remove: (project, slug) => reply(() => { customPages.delete(`${project}/${slug}`); }),
+    },
     world: w,
     session: {
       create: (token) =>
