@@ -2902,6 +2902,9 @@ pub enum ThreadCmd {
         id: String,
         /// The question, or the summary of a bundle (`-` reads stdin)
         text: String,
+        /// Ask whether linked work works, only once it is done and installed
+        #[arg(long)]
+        test_request: bool,
         /// A choice for the operator; repeat for more (at most 10)
         #[arg(long = "option", short = 'o', conflicts_with = "bundle")]
         options: Vec<String>,
@@ -3014,6 +3017,12 @@ pub enum QuestionCmd {
     Ask {
         /// The question, short and clear
         text: String,
+        /// Ask whether linked work works, only once it is done and installed
+        #[arg(long)]
+        test_request: bool,
+        /// Inbox thread of the attached thread agent
+        #[arg(long)]
+        thread: Option<String>,
         /// A choice for the operator; repeat for more (at most 10)
         #[arg(long = "option", short = 'o')]
         options: Vec<String>,
@@ -3023,7 +3032,7 @@ pub enum QuestionCmd {
         #[command(flatten)]
         context: QuestionContext,
         /// The card that the question is about
-        #[arg(long, required = true)]
+        #[arg(long, required_unless_present = "thread")]
         card: Option<String>,
         /// Mark the question urgent
         #[arg(long, conflicts_with = "critical")]

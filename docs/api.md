@@ -4115,13 +4115,20 @@ closed, `tracking_at` set), a move of a linked card wakes the agent, in
 the transaction of the move:
 
 - a move into the column with the role `blocked` (reason `blocked`);
-- a move from a column before review into review or later that leaves
-  every linked card that is not archived in review or later (reason
-  `review`). Review or later is the column with the role `review` (else
-  the column named `review`) and each column after it on that card's
-  board, never the column with the role `blocked`; a board with neither
-  counts only `done` (the rule of the n/m chip, TER-147). A move between
-  two columns of review or later does not wake it again.
+- ready to test (wire reason `review`, retained for compatibility): every
+  linked card has the `done` column role and all its `version:` labels are
+  installed on this daemon. Version labels `X.Y.Z` name the `X.Y.Z-alpha`
+  pre-release. Semver comparison includes pre-release ordering. No version
+  label means no installation is needed. `vnext` and invalid versions are
+  not installed. This fires once per linked-card set, including after new
+  cards are linked. A bounded indexed background scan catches installation
+  after a daemon restart. Review-only transitions emit quiet `cards_status`
+  events and never prompt the thread agent to ask the operator to test.
+
+Test questions explicitly set `test_request: true` on the agent questions
+endpoint. The CLI accepts `question ask --thread <id> --test-request` and
+`thread ask <id> --test-request`. Before readiness they fail with `409` and
+the cards not done or not installed. Ordinary questions are unchanged.
 
 A thread in `tracking` goes to `waiting_agent`; `tracking_at` stays, so
 the agent's reply puts it back into `tracking`. A thread that waits on
@@ -4133,11 +4140,11 @@ not learn a card of a project it cannot read. The agent gets a
 ID, column, title, and the last comment of a blocked card, quoted as
 data); a card of a project that the agent cannot read is only counted.
 On `blocked` the turn asks the agent to tell the operator what is stuck.
-On `review` it asks the agent to post what changed, the pre-release and
+On ready to test it asks the agent to post what changed, the pre-release and
 the test steps, and to ask `works` or `found an issue`. On `works` the
 agent proposes the close. On `found an issue` it mails its report-to lead
 for a bug card linked to the same thread (`card new --inbox-thread`),
-and moves the thread into tracking again: the bug card's move to review
+and moves the thread into tracking again: the bug card becoming done and installed
 wakes it again.
 
 **Extra requirements** (TER-148, TER-144 D10). The overall response can

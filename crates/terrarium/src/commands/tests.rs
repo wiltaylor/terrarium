@@ -10974,6 +10974,7 @@ async fn thread_commands() {
             "ask",
             "T1",
             "Keep blocked?",
+            "--test-request",
             "-o",
             "yes",
             "-o",
@@ -10990,7 +10991,7 @@ async fn thread_commands() {
             vec![],
             Some(
                 json!({"text": "Keep blocked?", "thread": "T1", "options": ["yes", "no"],
-                        "priority": "urgent"}),
+                        "priority": "urgent", "test_request": true}),
             ),
         )],
     )
