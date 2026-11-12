@@ -36,7 +36,7 @@ try {
         await page.locator('[data-card="TER-14"]').waitFor();
         // Extend the mock board and card to exercise both scroll ranges.
         await page.evaluate(() => { document.body.style.minHeight = "4000px"; window.scrollTo(0, 200); });
-        await page.locator('[data-card="TER-14"]').click();
+        await page.locator('[data-card="TER-14"]').dispatchEvent("click");
         await page.locator(".drawer").waitFor();
         await page.evaluate(() => {
           const content = document.createElement("div");
@@ -49,6 +49,7 @@ try {
         await page.screenshot({ path: `${output}/${key}-before.png` });
         await before.evaluate(el => el.remove());
         const state = await page.evaluate(() => ({ y: window.scrollY, overflow: getComputedStyle(document.documentElement).overflowY, gutter: getComputedStyle(document.documentElement).scrollbarGutter, behavior: getComputedStyle(document.querySelector(".drawer")).overscrollBehaviorY }));
+        assert.equal(state.y, 200, "opening preserves a nonzero page scroll position");
         assert.equal(state.overflow, width > 760 ? "hidden" : "visible");
         assert.equal(state.behavior, "contain");
         if (width > 760) assert.equal(state.gutter, "stable");
@@ -73,6 +74,7 @@ try {
         await page.mouse.wheel(0, 600);
         await page.waitForTimeout(200);
         assert.equal(await page.evaluate(() => window.scrollY), state.y);
+        await drawer.evaluate(el => { el.scrollTop = 0; });
         await page.screenshot({ path: `${output}/${key}-after.png` });
         await page.keyboard.press("Escape");
         await page.waitForTimeout(100);
