@@ -245,6 +245,41 @@ fn code(reply: &Reply) -> Option<ErrorKind> {
 }
 
 #[tokio::test]
+async fn owned_roots_require_operator_scope_and_cleanup_runs_before_success() {
+    if !nix::unistd::geteuid().is_root() { return; }
+    let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
+    let mut req = f.start("p/a", None, &[], &[], &["true"]);
+    req.prepare_root = Some(native::OwnedRoot {
+        cleanup: false,
+        base: f.root.path().to_str().unwrap().into(),
+        project: "p".into(),
+        name: "a".into(),
+        agent: "id-a".into(),
+    });
+    let (_, r) = send(&f.socket, &Request::Start(req.clone())).await;
+    assert_eq!(code(&r), Some(ErrorKind::Invalid));
+    assert!(!f.root.path().join("p").exists());
+    req.holder = "operator".into();
+    for cleanup in [false, true] {
+        req.prepare_root.as_mut().unwrap().cleanup = cleanup;
+        let (s, r) = send(&f.socket, &Request::Start(req.clone())).await;
+        assert!(matches!(r, Reply::Started { .. }), "{r:?}");
+        let (mut rd, _wr) = s.into_split();
+        let exit = loop {
+            match native::read_frame(&mut rd).await.unwrap() {
+                Some((Kind::Exit, d)) => break serde_json::from_slice::<Exit>(&d).unwrap(),
+                Some(_) => {}
+                None => panic!("no exit"),
+            }
+        };
+        assert_eq!(exit.code, Some(0));
+        assert_eq!(f.root.path().join("p/a/.terrarium-owner").exists(), !cleanup);
+        f.wait_idle().await;
+    }
+    assert!(f.root.path().join("p").is_dir());
+}
+
+#[tokio::test]
 async fn the_version_handshake_fails_closed() {
     let f = Fake::new(vec![Right::Session], nix::unistd::getuid().as_raw()).await;
     assert_eq!(native::hello(&f.socket).await.unwrap(), [Right::Session]);
