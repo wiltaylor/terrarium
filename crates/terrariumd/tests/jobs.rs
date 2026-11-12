@@ -3091,6 +3091,12 @@ async fn durable_ssh_queue_recipe_finishes_offline_once() {
     let marks = tempfile::tempdir().unwrap();
     let (ssh, _) = crate::exedev::fake_ssh(marks.path());
     let mut lab = lab_impl_ssh(1, None, "code", Some(&ssh)).await;
+    // The fake SSH transport authenticates this fixture identity during its
+    // probe. Real SSH writes the same trust store after host authentication.
+    let host_key = marks.path().join("host-key");
+    assert!(std::process::Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&host_key).status().unwrap().success());
+    std::fs::create_dir_all(lab.td.state.join("ssh")).unwrap();
+    std::fs::write(lab.td.state.join("ssh/known_hosts"), format!("127.0.0.1 {}", std::fs::read_to_string(host_key.with_extension("pub")).unwrap())).unwrap();
     let spool_root = marks.path().join("spool");
     let _cleanup = crate::ssh_restart::RemoteCleanup(spool_root.clone());
     lab.td.post("/api/targets", json!({"name":"p-queue-ssh","kind":"ssh","address":"ci@127.0.0.1","project":"p","work_root":spool_root})).await.ok();

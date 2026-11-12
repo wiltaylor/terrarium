@@ -206,7 +206,7 @@ async fn reboot(td: &mut TestDaemon, url: &str, ssh: &str) {
     .await;
 }
 
-async fn output(td: &TestDaemon, target: &str, sid: &str) -> (String, Value) {
+pub(crate) async fn output(td: &TestDaemon, target: &str, sid: &str) -> (String, Value) {
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut out = Vec::new();
     let mut since = 0u64;
@@ -330,6 +330,29 @@ async fn durable_expired_checkpoint_does_not_relaunch_or_prevent_boot() {
         std::fs::read_to_string(root.join("launches")).unwrap(),
         "once\n"
     );
+}
+
+#[tokio::test]
+async fn durable_exedev_recreated_vm_is_not_contacted() {
+    let (mut td, _fake, ssh_log, url, ssh) = daemon().await;
+    let root = td.dir.path().join("replacement-spool");
+    let _cleanup = super::ssh_restart::RemoteCleanup(root.clone());
+    let mut def = target("replacement-ex", 8 * 3600);
+    def["work_root"] = json!(root);
+    td.post("/api/targets", def).await.ok();
+    td.post_empty("/api/targets/replacement-ex/up").await.ok();
+    let opened = td.post("/api/targets/replacement-ex/exec", json!({"durable":true,"cmd":["sh","-c","echo retained; exit 19"]})).await;
+    let sid = opened.ok()["session_id"].as_str().unwrap().to_owned();
+    assert_eq!(output(&td, "replacement-ex", &sid).await.1["code"], 19);
+    td.daemon.take().unwrap().shutdown_and_wait().await;
+    let before = std::fs::read_to_string(&ssh_log).unwrap();
+    // Same target definition and SSH destination, but a different VM incarnation.
+    db(&td).execute("UPDATE exedev_vms SET name=name || '-replacement' WHERE target='replacement-ex'", []).unwrap();
+    reboot(&mut td, &url, &ssh).await;
+    let (_, end) = output(&td, "replacement-ex", &sid).await;
+    assert_eq!(end["code"], "interrupted", "{end}");
+    assert!(end["message"].as_str().unwrap().contains("target changed"), "{end}");
+    assert_eq!(std::fs::read_to_string(&ssh_log).unwrap(), before);
 }
 
 fn db(td: &TestDaemon) -> rusqlite::Connection {

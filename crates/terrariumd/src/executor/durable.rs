@@ -62,6 +62,8 @@ struct Checkpoint {
     vm: Option<String>,
     #[serde(default)]
     host_keys: Vec<String>,
+    #[serde(default)]
+    host_trust: String,
     cmd: RemoteCmd,
     token: String,
     created: i64,
@@ -71,17 +73,35 @@ fn journal(state: &Shared) -> crate::hosts::resume::Journal {
     crate::hosts::resume::Journal::new(&state.state_dir)
 }
 
-fn host_keys(state: &Shared, def: &TargetDef) -> ApiResult<Vec<String>> {
-    let host = def.address.as_deref().unwrap_or("").rsplit('@').next().unwrap_or("");
+fn host_trust(state: &Shared, def: &TargetDef) -> ApiResult<String> {
+    let host = def
+        .address
+        .as_deref()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("");
     let host = match def.port {
         Some(port) => format!("[{host}]:{port}"),
         None => host.to_owned(),
     };
     let found = std::process::Command::new("ssh-keygen")
-        .arg("-F").arg(host).arg("-f").arg(known_hosts(&state.state_dir)?)
-        .output().map_err(|e| ApiError::internal(format!("cannot read SSH host identity: {e}")))?;
+        .arg("-F")
+        .arg(host)
+        .arg("-f")
+        .arg(known_hosts(&state.state_dir)?)
+        .output()
+        .map_err(|e| ApiError::internal(format!("cannot read SSH host identity: {e}")))?;
+    Ok(String::from_utf8_lossy(&found.stdout).lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>().join("\n") + "\n")
+}
+
+fn host_keys(state: &Shared, def: &TargetDef) -> ApiResult<Vec<String>> {
+    let trust = host_trust(state, def)?;
     let mut keys = Vec::new();
-    for line in String::from_utf8_lossy(&found.stdout).lines().filter(|line| !line.starts_with('#')) {
+    for line in trust
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+    {
         let fields: Vec<_> = line.split_whitespace().collect();
         if fields.len() >= 3 {
             let key = ssh_key::PublicKey::from_openssh(&format!("{} {}", fields[1], fields[2]))
@@ -95,32 +115,92 @@ fn host_keys(state: &Shared, def: &TargetDef) -> ApiResult<Vec<String>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn durable_missing_tool_is_terminal() {
-        let cmd = RemoteCmd { argv: vec!["true".into()], ..RemoteCmd::default() };
+        let cmd = RemoteCmd {
+            argv: vec!["true".into()],
+            ..RemoteCmd::default()
+        };
         let output = tokio::process::Command::new("/bin/sh")
-            .arg("-c").arg(script("/unused/.terrarium-runs/test", &cmd, chrono::Utc::now().timestamp()))
+            .arg("-c")
+            .arg(script(
+                "/unused/.terrarium-runs/test",
+                &cmd,
+                chrono::Utc::now().timestamp(),
+            ))
             .env("PATH", "/nonexistent")
-            .output().await.unwrap();
-        // Even the encoder is absent here, but the failure frame is terminal.
+            .output()
+            .await
+            .unwrap();
         assert!(!output.status.success());
-        assert!(output.stdout.starts_with(b"B"));
+        assert_eq!(output.stdout, b"Bunsupported: setsid missing\n");
     }
 
     #[tokio::test]
     async fn durable_spool_failure_is_terminal() {
-        let cmd = RemoteCmd { argv: vec!["true".into()], ..RemoteCmd::default() };
+        let cmd = RemoteCmd {
+            argv: vec!["true".into()],
+            ..RemoteCmd::default()
+        };
         let output = tokio::process::Command::new("sh")
-            .arg("-c").arg(script("/dev/null/.terrarium-runs/test", &cmd, chrono::Utc::now().timestamp()))
-            .output().await.unwrap();
+            .arg("-c")
+            .arg(script(
+                "/dev/null/.terrarium-runs/test",
+                &cmd,
+                chrono::Utc::now().timestamp(),
+            ))
+            .output()
+            .await
+            .unwrap();
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).starts_with("B"));
-        let encoded = String::from_utf8_lossy(&output.stdout);
-        let message = base64::engine::general_purpose::STANDARD.decode(encoded.trim().trim_start_matches('B')).unwrap();
-        assert!(String::from_utf8_lossy(&message).contains("spool error"));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("spool error"));
+    }
+
+    async fn late_launch(age: i64, timeout: u64) -> (tempfile::TempDir, std::process::Output) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".terrarium-runs/late");
+        let command = format!("echo child-started; sleep 60; touch '{}'", root.path().join("escaped").display());
+        let cmd = RemoteCmd { argv: vec!["sh".into(), "-c".into(), command], timeout_secs: Some(timeout), ..RemoteCmd::default() };
+        let output = tokio::time::timeout(Duration::from_secs(12), tokio::process::Command::new("sh")
+            .arg("-c").arg(script(path.to_str().unwrap(), &cmd, chrono::Utc::now().timestamp()-age))
+            .output()).await.unwrap().unwrap();
+        // Kill only this test's detached janitor group, after it records its ID.
+        for _ in 0..100 {
+            if let Ok(pid) = std::fs::read_to_string(path.join("janitor")) {
+                assert!(std::process::Command::new("kill").args(["-KILL", "--", &format!("-{}", pid.trim())]).status().unwrap().success());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(path.join("exit").exists());
+        assert!(!path.join("expired").exists());
+        assert!(!root.path().join("escaped").exists());
+        (root, output)
+    }
+
+    #[tokio::test]
+    async fn durable_late_launch_keeps_original_deadline() {
+        let start = tokio::time::Instant::now();
+        let (root, output) = late_launch(28, 30).await;
+        assert!(start.elapsed() < Duration::from_secs(10));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("X124\n"));
+        let path = root.path().join(".terrarium-runs/late");
+        assert!(std::fs::read_to_string(path.join("out")).unwrap().contains("child-started"));
+        // The output/claim are retained after the child exits, not removed at
+        // the original deadline while a fresh full-timeout child still runs.
+        assert_eq!(std::fs::read_to_string(path.join("exit")).unwrap(), "124\n");
+    }
+
+    #[tokio::test]
+    async fn durable_expired_first_launch_never_starts_child() {
+        let (root, output) = late_launch((MAX_RUN + RETAIN - 1) as i64, MAX_RUN).await;
+        assert!(String::from_utf8_lossy(&output.stdout).contains("X124\n"));
+        assert!(std::fs::read(root.path().join(".terrarium-runs/late/out")).unwrap().is_empty());
     }
 }
 
@@ -135,17 +215,29 @@ pub(crate) fn resume(state: &Shared, key: &str) -> ApiResult<Running> {
         .load::<Checkpoint>(&format!("ssh/{key}"))?
         .ok_or_else(|| ApiError::internal("missing durable SSH checkpoint"))?;
     let name = saved.def.name.clone();
-    let current = state.db.read_now(move |c| crate::store::targets::get(c, &name))?;
+    let current = state
+        .db
+        .read_now(move |c| crate::store::targets::get(c, &name))?;
     if saved.identity.as_deref() != Some(crate::job_logs::target_identity(&current).as_str()) {
-        return Err(ApiError::conflict("interrupted (target changed): target incarnation differs"));
+        return Err(ApiError::conflict(
+            "interrupted (target changed): target incarnation differs",
+        ));
     }
     let name = current.def.name.clone();
-    let vm = state.db.read_now(move |c| Ok(crate::exedev::record_of(c, &name)?.map(|vm| vm.name)))?;
+    let vm = state
+        .db
+        .read_now(move |c| Ok(crate::exedev::record_of(c, &name)?.map(|vm| vm.name)))?;
     if saved.vm != vm {
-        return Err(ApiError::conflict("interrupted (target changed): exe.dev VM differs"));
+        return Err(ApiError::conflict(
+            "interrupted (target changed): exe.dev VM differs",
+        ));
     }
-    if saved.vm.is_none() && (saved.host_keys.is_empty() || saved.host_keys != host_keys(state, &saved.def)?) {
-        return Err(ApiError::conflict("interrupted (target changed): SSH host identity differs or was not recorded"));
+    if saved.vm.is_none()
+        && (saved.host_keys.is_empty() || saved.host_keys != host_keys(state, &saved.def)?)
+    {
+        return Err(ApiError::conflict(
+            "interrupted (target changed): SSH host identity differs or was not recorded",
+        ));
     }
     start_cmd_locked(state, &current.def, &saved.cmd)
 }
@@ -174,13 +266,17 @@ pub(super) fn start(
             let name = def.name.clone();
             let (identity, vm) = state.db.read_now(move |c| {
                 let row = crate::store::targets::get(c, &name)?;
-                Ok((crate::job_logs::target_identity(&row), crate::exedev::record_of(c, &name)?.map(|vm| vm.name)))
+                Ok((
+                    crate::job_logs::target_identity(&row),
+                    crate::exedev::record_of(c, &name)?.map(|vm| vm.name),
+                ))
             })?;
             let saved = Checkpoint {
                 def: def.clone(),
                 identity: Some(identity),
                 vm,
                 host_keys: Vec::new(),
+                host_trust: String::new(),
                 cmd: cmd.clone(),
                 token: ulid::Ulid::new().to_string(),
                 created: chrono::Utc::now().timestamp(),
@@ -190,9 +286,13 @@ pub(super) fn start(
         }
     };
     let name = def.name.clone();
-    let current = state.db.read_now(move |c| crate::store::targets::get(c, &name))?;
+    let current = state
+        .db
+        .read_now(move |c| crate::store::targets::get(c, &name))?;
     if saved.identity.as_deref() != Some(crate::job_logs::target_identity(&current).as_str()) {
-        return Err(ApiError::conflict("interrupted (target changed): target incarnation differs"));
+        return Err(ApiError::conflict(
+            "interrupted (target changed): target incarnation differs",
+        ));
     }
     // Never launch from an expired checkpoint, even if remote GC has removed
     // its claim. This is the exactly-once boundary after retention expires.
@@ -220,31 +320,72 @@ pub(super) fn start(
         // remains unbound and is refused on recovery rather than guessing a host.
         if saved.vm.is_none() && saved.host_keys.is_empty() {
             let mut probe = tokio::process::Command::new(&plan.program);
-            probe.args(&plan.args[..plan.args.len()-1]).arg("true");
+            probe.args(&plan.args[..plan.args.len() - 1]).arg("true");
             probe.kill_on_drop(true);
             let authenticated = tokio::time::timeout(Duration::from_secs(20), probe.output()).await;
             match authenticated {
-                Ok(Ok(output)) if output.status.success() => {},
-                _ => { let _ = tx.send(Ev::End(End::error("interrupted", "SSH identity probe failed"))).await; return; }
+                Ok(Ok(output)) if output.status.success() => {}
+                _ => {
+                    let _ = tx
+                        .send(Ev::End(End::error(
+                            "interrupted",
+                            "SSH identity probe failed",
+                        )))
+                        .await;
+                    return;
+                }
             }
             match host_keys(&state, &def) {
                 Ok(keys) if !keys.is_empty() => saved.host_keys = keys,
-                _ => { let _ = tx.send(Ev::End(End::error("interrupted", "SSH identity was not recorded"))).await; return; }
+                _ => {
+                    let _ = tx
+                        .send(Ev::End(End::error(
+                            "interrupted",
+                            "SSH identity was not recorded",
+                        )))
+                        .await;
+                    return;
+                }
+            }
+            match host_trust(&state, &def) {
+                Ok(trust) => saved.host_trust = trust,
+                Err(_) => { let _ = tx.send(Ev::End(End::error("interrupted", "cannot pin SSH host identity"))).await; return; }
             }
             if journal(&state).save(&id, &saved).is_err() {
-                let _ = tx.send(Ev::End(End::error("interrupted", "cannot save SSH identity"))).await; return;
+                let _ = tx
+                    .send(Ev::End(End::error(
+                        "interrupted",
+                        "cannot save SSH identity",
+                    )))
+                    .await;
+                return;
             }
         }
         // Never allow TOFU on a bound SSH run. The saved fingerprint was checked
         // against this trust store before recovery starts a connection.
+        let mut pinned = None;
         if saved.vm.is_none() {
+            let pin = (|| -> ApiResult<_> {
+                let run = RunDirs::new(&state.state_dir).run_dir()?;
+                let path = run.write_private("known_hosts", saved.host_trust.as_bytes())?;
+                Ok((run, path))
+            })();
+            let (run, path) = match pin {
+                Ok(pin) => pin,
+                Err(_) => { let _ = tx.send(Ev::End(End::error("interrupted", "cannot pin SSH host identity"))).await; return; }
+            };
             for arg in &mut plan.args {
-                if arg == "StrictHostKeyChecking=accept-new" { *arg = "StrictHostKeyChecking=yes".into(); }
+                if arg == "StrictHostKeyChecking=accept-new" {
+                    *arg = "StrictHostKeyChecking=yes".into();
+                }
+                if arg.starts_with("UserKnownHostsFile=") { *arg = format!("UserKnownHostsFile={}", path.display()); }
             }
+            pinned = Some(run);
         }
         let mut process = tokio::process::Command::new(&plan.program);
         process.args(&plan.args);
         let mut raw = pump_process(process, plan.stdin_prefix, None, guard);
+        let _pinned_host_identity = pinned;
         // Keep the local SSH client's control owner alive. Capturing just
         // raw.events would drop raw.ctl and pump_process would kill SSH.
         let _transport_control = raw.ctl;
@@ -287,8 +428,7 @@ pub(super) fn start(
                             let payload = &line[1..line.len()-1];
                             if line[0] == b'R' { ready = true; }
                             let event = match line[0] {
-                                b'B' => base64::engine::general_purpose::STANDARD.decode(payload).ok()
-                                    .map(|bytes| Ev::End(End::error("unsupported", String::from_utf8_lossy(&bytes).to_string()))),
+                                b'B' => Some(Ev::End(End::error("unsupported", String::from_utf8_lossy(payload).to_string()))),
                                 b'O' | b'E' => base64::engine::general_purpose::STANDARD.decode(payload).ok()
                                     .map(|bytes| Ev::Data(if line[0] == b'O' { Stream::Stdout } else { Stream::Stderr }, bytes)),
                                 b'X' => std::str::from_utf8(payload).ok().and_then(|s| s.parse::<i32>().ok())
@@ -403,15 +543,17 @@ setsid nohup sh -c {janitor} </dev/null >/dev/null 2>&1 &
         r#"{env}
 umask 077
 p={path}
-fail() {{ printf B; printf '%s' "$1" | base64 | tr -d '\n'; printf '\n'; exit 1; }}
+fail() {{ printf 'B%s\n' "$1"; exit 1; }}
 for tool in setsid nohup mkfifo timeout date head tail base64 tr wc cat mkdir mv rm rmdir sleep; do
   command -v "$tool" >/dev/null 2>&1 || fail "unsupported: $tool missing"
 done
 mkdir -p {parent} || fail 'spool error: cannot create parent'
 test -w {parent} || fail 'spool error: parent is not writable'
 setsid nohup sh -c {supervisor} </dev/null >/dev/null 2>&1 &
+startup=$(date +%s)
 until test -f "$p/ready"; do
   test ! -f "$p/startup-error" || fail "$(cat "$p/startup-error")"
+  test $(($(date +%s)-startup)) -lt 30 || fail 'spool error: supervisor did not become ready'
   sleep 0.1
 done
 printf 'R\n'
