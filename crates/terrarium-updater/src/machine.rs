@@ -10,10 +10,12 @@
 //!    `off` skips it, and the step says so.
 //! 4. `pull`: the image by digest. Before the drain, so that a slow or
 //!    failed pull does not stop work.
-//! 5. `drain`: `terrarium admin update drain` in the container: no new
+//! 5. Supervised recreate: online `backup` before either drain. Legacy
+//!    sources retain the full backup after drain (recorded in history).
+//! 6. `drain`: `terrarium admin update drain` in the container: no new
 //!    turns; the running turns get [`Config::drain_wait`] to end.
-//! 6. `backup`: `terrariumd backup create` in the container (a full
-//!    backup). Migrations only go forward, so the way back needs it.
+//!    Supervised sources then pause and take an exact SQLite snapshot for
+//!    automatic rollback. The ZIP is the manual restore point.
 //! 7. `stop`, then `remove`, then `start`: a new container with the same
 //!    settings and the new image.
 //! 8. `health`: the health check passes and `terrarium daemon status`
@@ -790,15 +792,16 @@ impl Updater {
     }
 
     async fn finish_recreate(&self, cur: &Container, backup: &str) {
+        let deadline = tokio::time::Instant::now() + HOT_SWAP_RECOVERY_RESERVE;
         // Use the source helper even when the destination is a legacy image.
         if let Err(e) = self
             .step(
                 "snapshot-cleanup",
                 async {
-                    let out = self
+                    let out = tokio::time::timeout_at(deadline, self
                         .engine
-                        .run_once(cur, &cur.image, hot_argv("commit", &[backup]))
-                        .await?;
+                        .run_once(cur, &cur.image, bounded_command(hot_argv("commit", &[backup]), deadline)?))
+                        .await.map_err(|_| "snapshot cleanup deadline elapsed".to_owned())??;
                     if out.code != 0 {
                         return Err(out.reason());
                     }
@@ -818,7 +821,11 @@ impl Updater {
         backup: &str,
     ) -> Result<(), (Outcome, Fail)> {
         #[cfg(not(test))]
-        let (hold, reserve, stop) = (HOT_SWAP_HOLD_LIMIT, HOT_SWAP_RECOVERY_RESERVE, HOT_SWAP_STOP_RESERVE);
+        let (hold, reserve, stop) = (
+            HOT_SWAP_HOLD_LIMIT,
+            HOT_SWAP_RECOVERY_RESERVE,
+            HOT_SWAP_STOP_RESERVE,
+        );
         #[cfg(test)]
         let (hold, reserve, stop) = self.hot_budget;
         let deadline = tokio::time::Instant::now() + hold;
@@ -846,8 +853,11 @@ impl Updater {
                         }
                         // End the supervisor hold before container replacement. Once
                         // stopped there are no retained runners or automatic restart.
-                        self.step("stop", self.engine.stop(&cur.id), |()| "stopped the paused source container".into())
-                            .await.map_err(|f| f.0)?;
+                        self.step("stop", self.engine.stop(&cur.id), |()| {
+                            "stopped the paused source container".into()
+                        })
+                        .await
+                        .map_err(|f| f.0)?;
                         Ok(())
                     })
                     .await
@@ -1370,6 +1380,33 @@ impl Updater {
     /// Go back to `cur`: remove what runs under its name, restore
     /// `backup` with the old image, and start the old image.
     async fn recover(&self, cur: &Container, backup: &str, snapshot: bool) -> Result<(), Fail> {
+        if !snapshot {
+            return self.recover_inner(cur, backup, None).await;
+        }
+        let deadline = tokio::time::Instant::now() + HOT_SWAP_RECOVERY_RESERVE;
+        let recovered = tokio::time::timeout_at(deadline - HOT_SWAP_STOP_RESERVE,
+            self.recover_inner(cur, backup, Some(deadline - HOT_SWAP_STOP_RESERVE))).await;
+        match recovered {
+            Ok(Ok(())) => Ok(()),
+            failure => {
+                // A timed-out restore helper is bounded independently. Stop any
+                // uncertain old startup too, never admit it on a failed restore.
+                let stop = tokio::time::timeout_at(deadline, async {
+                    if let Ok(now) = self.engine.target().await {
+                        self.engine.stop_for_recovery(&now.id).await?;
+                    }
+                    Ok::<(), String>(())
+                }).await;
+                let reason = match failure {
+                    Ok(Err(Fail(e))) => e,
+                    _ => "recreate recovery deadline elapsed".into(),
+                };
+                Err(Fail(format!("{reason}; recreate recovery failed; stop confirmed: {}; manual restore required: {backup}.hot-swap.sqlite; verify any outstanding helper has stopped", matches!(stop, Ok(Ok(()))))))
+            }
+        }
+    }
+
+    async fn recover_inner(&self, cur: &Container, backup: &str, snapshot_deadline: Option<tokio::time::Instant>) -> Result<(), Fail> {
         let idx = self.begin_step("rollback");
         self.end_step(
             idx,
@@ -1392,8 +1429,8 @@ impl Updater {
                     .run_once(
                         cur,
                         &cur.image,
-                        if snapshot {
-                            hot_argv("restore-database", &[backup])
+                        if let Some(deadline) = snapshot_deadline {
+                            bounded_command(hot_argv("restore-database", &[backup]), deadline)?
                         } else {
                             restore_argv(backup)
                         },

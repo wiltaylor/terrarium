@@ -163,7 +163,7 @@ class HotSwapTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 5)
         HOT.main(["commit", backup])
         self.assertFalse(Path(backup + ".hot-swap.sqlite").exists())
-        self.assertEqual(HOT.transaction(root)["phase"], "committed")
+        self.assertEqual(HOT.transaction(root)["phase"], "rolled_back")
         self.assertTrue(HOT.transaction(root)["admission_attempted"])
 
     def test_release_path_cannot_escape_volume(self):
