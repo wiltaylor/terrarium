@@ -117,9 +117,8 @@ async fn ensure_bundle(binary: &Path, hash: &str, os: &str, arch: &str) -> anyho
     );
     let version = terrarium_version::VERSION;
     let asset = bundle_release_name(version, os, arch);
-    let url = format!(
-        "https://github.com/wiltaylor/terrarium/releases/download/v{version}/{asset}"
-    );
+    let url =
+        format!("https://github.com/wiltaylor/terrarium/releases/download/v{version}/{asset}");
     let tls = terrarium_host::tls::transport(&url, &terrarium_host::tls::TlsSettings::default())?
         .tls
         .ok_or_else(|| anyhow::anyhow!("missing HTTPS configuration"))?;
@@ -589,8 +588,14 @@ mod tests {
                 .is_none()
         );
         let sha = terrarium_host::transfer::sha256_hex(b"windows binary");
-        assert_eq!(bundle_release_name("1.0.0", "windows", "x86_64"), "terrarium-host-1.0.0-windows-x86_64.exe.sigstore.json");
-        assert_eq!(bundle_release_name("1.0.0", "linux", "x86_64"), "terrarium-host-1.0.0-linux-x86_64.sigstore.json");
+        assert_eq!(
+            bundle_release_name("1.0.0", "windows", "x86_64"),
+            "terrarium-host-1.0.0-windows-x86_64.exe.sigstore.json"
+        );
+        assert_eq!(
+            bundle_release_name("1.0.0", "linux", "x86_64"),
+            "terrarium-host-1.0.0-linux-x86_64.sigstore.json"
+        );
         // TER-1016 also requires an available bundle before offering an asset.
         // The host, not this transport/cache test, authenticates its contents.
         std::fs::write(bundle_cache_path(&path, &sha), b"bundle").unwrap();
