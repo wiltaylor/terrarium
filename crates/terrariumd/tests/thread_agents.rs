@@ -666,7 +666,7 @@ async fn request_cross_project_card_rights_end_at_close() {
         )
         .await
         .status,
-        404
+        403
     );
     let tracked =
         l.td.post_as(
