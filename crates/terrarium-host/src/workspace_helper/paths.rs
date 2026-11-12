@@ -64,7 +64,10 @@ impl ProtectedRoot {
         child.sync_all().map_err(|_| Reply::Quarantined)?;
         let mut ancestors = self.try_clone()?.ancestors;
         ancestors.push(self.fd.try_clone().map_err(|_| Reply::Failed)?);
-        Ok(Self { fd: child, ancestors })
+        Ok(Self {
+            fd: child,
+            ancestors,
+        })
     }
 
     pub fn open(path: &Path) -> Result<Self, Reply> {

@@ -10,8 +10,8 @@ pub mod kernel;
 pub mod mountinfo;
 pub mod mounts;
 mod paths;
-pub mod runtime;
 pub mod registration_roots;
+pub mod runtime;
 pub mod service;
 mod store;
 

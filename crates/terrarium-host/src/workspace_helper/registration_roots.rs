@@ -3,8 +3,8 @@
 use super::{ProtectedRoot, Store};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use terrarium_core::live_workspace::bootstrap::{Journal, Request};
 use terrarium_core::live_workspace::Reply;
+use terrarium_core::live_workspace::bootstrap::{Journal, Request};
 
 pub struct Roots {
     publisher: ProtectedRoot,
@@ -26,10 +26,16 @@ impl Roots {
     /// symlink following or operational journal import is attempted.
     pub fn open() -> Result<Self, Reply> {
         let roots = Self {
-            publisher: ProtectedRoot::open(Path::new("/var/lib/terrarium-workspace-helper/publishers"))?,
+            publisher: ProtectedRoot::open(Path::new(
+                "/var/lib/terrarium-workspace-helper/publishers",
+            ))?,
             staging: ProtectedRoot::open(Path::new("/var/lib/terrarium-workspace-helper/staging"))?,
-            registration: ProtectedRoot::open(Path::new("/var/lib/terrarium-workspace-helper/registrations"))?,
-            bootstrap: ProtectedRoot::open(Path::new("/var/lib/terrarium-workspace-helper/bootstrap"))?,
+            registration: ProtectedRoot::open(Path::new(
+                "/var/lib/terrarium-workspace-helper/registrations",
+            ))?,
+            bootstrap: ProtectedRoot::open(Path::new(
+                "/var/lib/terrarium-workspace-helper/bootstrap",
+            ))?,
             owner: 0,
         };
         roots.distinct()?;
@@ -38,7 +44,12 @@ impl Roots {
 
     fn distinct(&self) -> Result<(), Reply> {
         let mut identities = Vec::new();
-        for root in [&self.publisher, &self.staging, &self.registration, &self.bootstrap] {
+        for root in [
+            &self.publisher,
+            &self.staging,
+            &self.registration,
+            &self.bootstrap,
+        ] {
             let m = root.fd.metadata().map_err(|_| Reply::Failed)?;
             let identity = (m.dev(), m.ino());
             if identities.contains(&identity) {
@@ -54,7 +65,9 @@ impl Roots {
     pub fn begin(&self, request: Request) -> Result<Store, Reply> {
         let journal = Journal::new(request)?;
         self.distinct()?;
-        let root = self.bootstrap.create_registration_child(journal.original().registration, self.owner)?;
+        let root = self
+            .bootstrap
+            .create_registration_child(journal.original().registration, self.owner)?;
         let store = Store::open_owned(root, self.owner)?;
         store.begin_bootstrap(&journal)?;
         Ok(store)
@@ -70,11 +83,15 @@ impl Roots {
         }
         self.distinct()?;
         let id = journal.original().registration;
-        let result = (|| Ok(Directories {
-            publisher: self.publisher.create_registration_child(id, self.owner)?,
-            staging: self.staging.create_registration_child(id, self.owner)?,
-            registration: self.registration.create_registration_child(id, self.owner)?,
-        }))();
+        let result = (|| {
+            Ok(Directories {
+                publisher: self.publisher.create_registration_child(id, self.owner)?,
+                staging: self.staging.create_registration_child(id, self.owner)?,
+                registration: self
+                    .registration
+                    .create_registration_child(id, self.owner)?,
+            })
+        })();
         if result.is_err() {
             let mut fenced = journal;
             fenced.recover_without_evidence();
@@ -162,10 +179,19 @@ mod tests {
         let (dir, mut roots) = fixture();
         roots.staging = roots.publisher.try_clone().unwrap();
         assert!(roots.begin(request()).is_err());
-        assert_eq!(std::fs::read_dir(dir.path().join("bootstrap")).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("bootstrap"))
+                .unwrap()
+                .count(),
+            0
+        );
 
         let (dir, roots) = fixture();
-        std::fs::set_permissions(dir.path().join("bootstrap"), std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(
+            dir.path().join("bootstrap"),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
         assert!(roots.begin(request()).is_err());
     }
 }
