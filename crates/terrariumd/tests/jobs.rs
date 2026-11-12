@@ -3942,7 +3942,7 @@ async fn the_release_config_refuses_a_shared_target_and_plain_values() {
         config["release_secrets"][name] = json!("@secret:release-github");
         let r = lab.td.put("/api/projects/p/delivery", config).await;
         assert_eq!(r.status, 422, "{name}: {}", r.body);
-        assert_eq!(lab.td.get("/api/projects/p/delivery").await.ok(), before);
+        assert_eq!(lab.td.get("/api/projects/p/delivery").await.ok(), &before);
     }
     for value in ["plain-token", "@secret:q/release-github"] {
         let mut config = base.clone();
@@ -3950,7 +3950,7 @@ async fn the_release_config_refuses_a_shared_target_and_plain_values() {
         config["release_secrets"] = json!({"ANDROID_KEYSTORE_BASE64": value});
         let r = lab.td.put("/api/projects/p/delivery", config).await;
         assert_eq!(r.status, 422, "{}", r.body);
-        assert_eq!(lab.td.get("/api/projects/p/delivery").await.ok(), before);
+        assert_eq!(lab.td.get("/api/projects/p/delivery").await.ok(), &before);
     }
     let mut bad = Vec::new();
     for (key, value) in [
