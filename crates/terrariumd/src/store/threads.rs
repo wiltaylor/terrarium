@@ -512,7 +512,16 @@ pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResu
         )
         .optional()?
         .ok_or_else(missing)?;
-    read_card_project(t, actor, &project, Some(id)).map_err(|_| missing())?;
+    if read_card_project(t, actor, &project, Some(id)).is_err() {
+        if want.is_none_or(|p| p == project)
+            && read_linked_card(t, actor, &project, Some(&key)).is_ok()
+        {
+            return Err(ApiError::forbidden(format!(
+                "card {project}/{key} is readable from this thread, but linking it needs project {project} or its lead"
+            )));
+        }
+        return Err(missing());
+    }
     if want.is_some_and(|p| p != project) {
         return Err(ApiError::not_found(format!(
             "no card `{key}` in project `{}`",
@@ -646,6 +655,18 @@ pub fn linked_states(conn: &Connection, thread: &str) -> ApiResult<Vec<LinkedSta
 /// is green. Requires a live card or a monitor, so monitor-only ops work too.
 fn all_review_or_later(conn: &Connection, thread: &str) -> ApiResult<bool> {
     let monitor = get_bare(conn, thread)?.monitor;
+    if !monitor_ready(conn, thread)? {
+        return Ok(false);
+    }
+    let live: Vec<LinkedState> = linked_states(conn, thread)?
+        .into_iter()
+        .filter(|s| !s.archived)
+        .collect();
+    Ok((monitor.is_some() || !live.is_empty()) && live.iter().all(|s| s.review_or_later))
+}
+
+fn monitor_ready(conn: &Connection, thread: &str) -> ApiResult<bool> {
+    let monitor = get_bare(conn, thread)?.monitor;
     if let Some(key) = &monitor {
         let (project, name) = key.split_once(':').unwrap_or(("", ""));
         let green: bool = conn.query_row(
@@ -659,11 +680,35 @@ fn all_review_or_later(conn: &Connection, thread: &str) -> ApiResult<bool> {
             return Ok(false);
         }
     }
-    let live: Vec<LinkedState> = linked_states(conn, thread)?
-        .into_iter()
-        .filter(|s| !s.archived)
-        .collect();
-    Ok((monitor.is_some() || !live.is_empty()) && live.iter().all(|s| s.review_or_later))
+    Ok(true)
+}
+
+/// Check at most 64 tracked threads, using an indexed keyset cursor.
+pub fn poll_test_ready(t: &mut Tx<'_>, after: &str) -> ApiResult<String> {
+    let ids: Vec<String> = {
+        let mut st = t.prepare("SELECT id FROM threads WHERE tracking_at IS NOT NULL AND status != 'closed' AND id > ?1 ORDER BY id LIMIT 64")?;
+        st.query_map([after], |r| r.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    for id in &ids {
+        if monitor_ready(t, id)? {
+            let (cards, reasons) =
+                super::thread_test_ready::readiness(t, id, terrarium_version::VERSION)?;
+            let previous: Option<String> = t.query_row(
+                "SELECT test_ready_cards FROM threads WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )?;
+            if reasons.is_empty() && previous.as_deref() != Some(&cards) {
+                wake(t, id, WAKE_REVIEW)?;
+            }
+        }
+    }
+    Ok(if ids.len() == 64 {
+        ids.last().cloned().unwrap_or_default()
+    } else {
+        String::new()
+    })
 }
 
 /// Link only monitors in a project the caller can read. The API transaction
@@ -762,7 +807,7 @@ pub fn on_card_moved(
     t: &mut Tx<'_>,
     card: &str,
     project: &str,
-    from: &str,
+    _from: &str,
     to: &str,
     to_role: Option<&str>,
 ) -> ApiResult<()> {
@@ -784,21 +829,12 @@ pub fn on_card_moved(
             t.execute("UPDATE threads SET monitor_done = 0 WHERE id = ?1", [id])?;
         }
     }
-    let reason = if to_role == Some(board::BLOCKED) {
-        WAKE_BLOCKED
-    } else {
-        let cols = board::column_roles(t, project)?;
-        if review_or_later(&cols, to) && !review_or_later(&cols, from) {
-            WAKE_REVIEW
-        } else {
-            return Ok(());
-        }
-    };
     for id in ids {
-        if reason == WAKE_REVIEW && !all_review_or_later(t, &id)? {
-            continue;
+        if to_role == Some(board::BLOCKED) {
+            wake(t, &id, WAKE_BLOCKED)?;
+        } else if all_review_or_later(t, &id)? {
+            wake(t, &id, WAKE_REVIEW)?;
         }
-        wake(t, &id, reason)?;
     }
     Ok(())
 }
@@ -811,6 +847,16 @@ pub fn on_card_moved(
 /// carries only the reason, not the card: a reader of the thread's events
 /// need not read the card's project (TER-146).
 fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
+    if (reason == WAKE_REVIEW || reason == "monitor_green")
+        && !super::thread_test_ready::readiness(t, id, terrarium_version::VERSION)?
+            .1
+            .is_empty()
+    {
+        // Review is only a status event, never an invitation to test.
+        let th = get_bare(t, id)?;
+        emit_with(t, &th, "cards_status", json!({"reason": "review"}))?;
+        return Ok(());
+    }
     if reason == WAKE_REVIEW {
         t.execute(
             "UPDATE threads SET monitor_done = 1 WHERE id = ?1 AND monitor IS NOT NULL",
@@ -838,6 +884,12 @@ fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
             params![id, reason],
         )?;
         return Ok(());
+    }
+    if reason == WAKE_REVIEW && !super::thread_test_ready::claim(t, id)? {
+        return Ok(());
+    }
+    if reason == "monitor_green" {
+        super::thread_test_ready::claim(t, id)?;
     }
     let status = if th.status == ThreadStatus::Tracking {
         ThreadStatus::WaitingAgent

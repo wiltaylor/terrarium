@@ -303,6 +303,8 @@ fn items_of(items: Vec<ItemBody>) -> Vec<BundleItem> {
 #[serde(deny_unknown_fields)]
 struct AskBody {
     #[serde(default)]
+    test_request: bool,
+    #[serde(default)]
     multi_select: bool,
     /// `question` (the default), `notice`, or `bundle`.
     #[serde(default)]
@@ -453,6 +455,14 @@ async fn ask(
     let (question, wait) = state
         .db
         .write(actor.label(), move |t| {
+            if b.test_request {
+                let thread = new
+                    .thread
+                    .as_deref()
+                    .ok_or_else(|| ApiError::invalid("test_request requires a thread"))?;
+                crate::store::threads::check_ask(t, thread, &new.agent)?;
+                crate::store::thread_test_ready::check(t, thread)?;
+            }
             let q = questions::ask(t, new)?;
             let w = if wait {
                 Some(create_wait(t, &key, &q.id, timeout_at, None)?)
