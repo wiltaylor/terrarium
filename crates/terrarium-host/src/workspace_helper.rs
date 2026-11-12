@@ -233,7 +233,10 @@ fn crash(point: &str) {
         // Bypass libtest's thread-local eprintln capture: abort intentionally
         // cannot flush that buffer. The parent requires this exact OS-pipe
         // marker as well as SIGABRT and the expected durable phase.
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), format!("B2_CRASH_POINT={point}\n").as_bytes());
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            format!("B2_CRASH_POINT={point}\n").as_bytes(),
+        );
         std::process::abort();
     }
 }
