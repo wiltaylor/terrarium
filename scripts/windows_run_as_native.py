@@ -17,6 +17,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from urllib.parse import urlsplit
 
 
 def literal(value: str) -> str:
@@ -25,24 +26,35 @@ def literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def account_name(commit: str, run_id: str, role: str) -> str:
+    """SAM-compatible 20-character name, not an account creation operation."""
+    if role not in "abcd" or len(role) != 1:
+        raise ValueError("unknown fixture role")
+    digest = hashlib.sha256(run_id.encode("ascii")).hexdigest()[:6]
+    return "t272_" + commit[:7] + "_" + digest + role
+
+
 def validate_fixture(fixture: dict) -> dict:
     required = ("approved_run_id", "daemon_url", "production_daemon_url", "commit",
                 "namespace", "probe", "share_directory", "local_directory",
-                "admin_sentinel", "hkcu_path", "hkcu_value", "dc_receipt",
+                "admin_sentinel", "host_config_path", "hkcu_path", "hkcu_value", "dc_receipt",
                 "a", "b", "c_filtered", "c_full", "wrong_password_target",
-                "disabled_account_target", "wrong_password_attempts_approved")
+                "d_disabled", "wrong_password_attempts_approved")
     if any(key not in fixture for key in required):
         raise ValueError("incomplete native fixture inventory")
     if not re.fullmatch(r"[0-9a-f]{40}", fixture["commit"]):
         raise ValueError("full pushed commit required")
-    if not re.fullmatch(r"ter272_[0-9a-f]{8}_[0-9]{12}", fixture["namespace"]):
+    if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z", fixture["approved_run_id"]):
+        raise ValueError("full UTC run ID required")
+    if fixture["namespace"] != "ter272_" + fixture["commit"][:8] + "_" + fixture["approved_run_id"]:
         raise ValueError("dedicated fixture namespace required")
-    if fixture["namespace"][7:15] != fixture["commit"][:8]:
-        raise ValueError("fixture namespace does not match commit")
     if not fixture["approved_run_id"] or fixture["daemon_url"] == fixture["production_daemon_url"]:
         raise ValueError("isolated approved endpoint required")
-    if not fixture["daemon_url"].startswith("https://"):
-        raise ValueError("isolated TLS endpoint required")
+    endpoint = urlsplit(fixture["daemon_url"])
+    if (endpoint.scheme != "http" or endpoint.hostname != "127.0.0.1"
+            or endpoint.port != 18480 or endpoint.username or endpoint.password
+            or endpoint.path or endpoint.query or endpoint.fragment):
+        raise ValueError("isolated loopback API endpoint required")
     share = fixture["share_directory"]
     if share != "\\\\dc01.lab.test\\share\\" + fixture["namespace"]:
         raise ValueError("dedicated inventoried DC share subdirectory required")
@@ -50,7 +62,7 @@ def validate_fixture(fixture: dict) -> dict:
         raise ValueError("dedicated local fixture directory required")
     if fixture["wrong_password_attempts_approved"] != 1:
         raise ValueError("single wrong-password attempt needs lockout-policy approval")
-    for name in ("a", "b", "c_filtered", "c_full"):
+    for name in ("a", "b", "c_filtered", "c_full", "d_disabled"):
         entry = fixture[name]
         if any(key not in entry for key in ("target", "account", "sid", "username", "domain", "scratch")):
             raise ValueError("incomplete account inventory")
@@ -58,6 +70,13 @@ def validate_fixture(fixture: dict) -> dict:
             raise ValueError("account SID required")
         if len(entry["username"]) > 20 or "agenttest" in entry["username"].lower():
             raise ValueError("dedicated Windows-compatible account names required")
+        role = name[0]
+        username = account_name(fixture["commit"], fixture["approved_run_id"], role)
+        qualifier = "." if name == "c_filtered" else ("WINHOST" if role in "cd" else "LAB")
+        if entry["username"] != username or entry["account"] != qualifier + "\\" + username:
+            raise ValueError("fixture account does not match bounded naming manifest")
+        if fixture["namespace"] not in entry["scratch"]:
+            raise ValueError("account scratch path must be inside fixture namespace")
     if fixture["a"]["sid"] == fixture["b"]["sid"]:
         raise ValueError("ordinary accounts must be distinct")
     if fixture["c_filtered"]["sid"] != fixture["c_full"]["sid"]:
@@ -144,6 +163,12 @@ class WindowsRunAsNative(unittest.TestCase):
         self.ps("c_filtered", "[IO.File]::ReadAllBytes(" + sentinel + ") | Out-Null", success=False)
         self.ps("c_full", "[IO.File]::ReadAllBytes(" + sentinel + ") | Out-Null")
 
+    def test_host_config_is_not_writable_by_ordinary_accounts(self):
+        for account in ("a", "b"):
+            self.ps(account, "$f=[IO.File]::Open(" + literal(self.fixture["host_config_path"])
+                    + ", [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None); $f.Dispose()",
+                    success=False)
+
     def test_copy_and_smb_authority_in_both_directions(self):
         for directory, suffix in ((self.fixture["local_directory"], "local"),
                                   (self.fixture["share_directory"], "smb")):
@@ -193,8 +218,8 @@ class WindowsRunAsNative(unittest.TestCase):
             self.assertEqual(absent.strip(), "False", "grandchild survived session timeout")
 
     def test_wrong_password_once_and_disabled_account_fail_closed(self):
-        for key in ("wrong_password_target", "disabled_account_target"):
-            self.cli("exec", self.fixture[key], "--", self.fixture["probe"], "identity-probe", success=False)
+        for target in (self.fixture["wrong_password_target"], self.fixture["d_disabled"]["target"]):
+            self.cli("exec", target, "--", self.fixture["probe"], "identity-probe", success=False)
 
     def test_dc_observer_receipt_is_present_and_matches_identity(self):
         # Meta supplies this read-only DC-side observation during the window.
