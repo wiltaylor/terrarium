@@ -59,6 +59,16 @@ pub struct Config {
 pub const DEFAULT_REPOSITORY: &str = "ghcr.io/wiltaylor/terrarium";
 const HOT_SWAP_HOLD_LIMIT: Duration = Duration::from_secs(900);
 const HOT_SWAP_RECOVERY_RESERVE: Duration = Duration::from_secs(60);
+const HOT_SWAP_STOP_RESERVE: Duration = Duration::from_secs(5);
+
+async fn recovery_before_deadline<T>(
+    deadline: tokio::time::Instant,
+    work: impl std::future::Future<Output = Res<T>>,
+) -> Res<T> {
+    tokio::time::timeout_at(deadline, work).await.map_err(|_| {
+        "recovery exceeded the remaining runner hold budget; completion uncertain".to_owned()
+    })?
+}
 
 fn budget_left(deadline: tokio::time::Instant, reserve: Duration) -> Res<Duration> {
     deadline
@@ -66,6 +76,20 @@ fn budget_left(deadline: tokio::time::Instant, reserve: Duration) -> Res<Duratio
         .checked_sub(reserve)
         .filter(|left| *left > Duration::from_millis(10))
         .ok_or_else(|| "hot swap would exceed the 15-minute runner hold budget".into())
+}
+
+async fn switch_before_deadline<T>(
+    deadline: tokio::time::Instant,
+    work: impl std::future::Future<Output = Result<T, Fail>>,
+) -> Result<T, Fail> {
+    tokio::time::timeout_at(deadline, work)
+        .await
+        .unwrap_or_else(|_| {
+            Err(Fail(
+                "hot swap pause exceeded the runner hold safety deadline; resuming old daemon"
+                    .into(),
+            ))
+        })
 }
 
 fn bounded_command(argv: Vec<String>, deadline: tokio::time::Instant) -> Res<Vec<String>> {
@@ -177,6 +201,8 @@ pub struct Updater {
     running: Mutex<Option<Run>>,
     /// Held while a run runs.
     busy: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    hot_budget: (Duration, Duration, Duration),
 }
 
 fn now() -> String {
@@ -200,6 +226,12 @@ impl Updater {
             verifier,
             store,
             cfg,
+            #[cfg(test)]
+            hot_budget: (
+                HOT_SWAP_HOLD_LIMIT,
+                HOT_SWAP_RECOVERY_RESERVE,
+                HOT_SWAP_STOP_RESERVE,
+            ),
             running: Mutex::new(None),
             busy: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -587,8 +619,12 @@ impl Updater {
             let result = self.hot_swap(&cur, &to).await;
             // Healthy recovery and early failures must release job admission
             // too. Do not resume a daemon whose recovery failed.
-            if !matches!(&result, Err((Outcome::RollbackFailed, _))) {
-                self.resume(&cur).await;
+            if !matches!(
+                &result,
+                Err((Outcome::RollbackFailed | Outcome::RecoveryFailed, _))
+            ) {
+                // Recovery leaves this final reserve for ending jobs drain.
+                let _ = tokio::time::timeout(HOT_SWAP_STOP_RESERVE, self.resume(&cur)).await;
             }
             return result;
         }
@@ -674,99 +710,140 @@ impl Updater {
             )
             .await
             .map_err(failed)?;
+        // VACUUM INTO in the daemon's backup CLI is safe while it is live.
+        // The ZIP is the manual pre-update restore point, not the exact
+        // automatic rollback point (the paused database snapshot below).
+        let backup_started = Utc::now();
+        let backup = self
+            .step(
+                "backup",
+                async {
+                    let out = self.exec_ok(&cur.id, backup_argv()).await?;
+                    backup_path(&out)
+                },
+                |p| format!("full backup {p}; began at {backup_started}; writes after that time may not be included; manual pre-update restore point"),
+            )
+            .await
+            .map_err(failed)?;
+        self.with_run(|r| r.backup = Some(backup.clone()));
         self.exec_ok(&cur.id, hot_argv("begin", &[&release]))
             .await
             .map_err(|e| failed(Fail(e)))?;
         // Staging is outside the hold window. Reserve one minute for recovery
         // rather than adding a fresh 15-minute health wait after a long drain.
-        let hold_deadline = tokio::time::Instant::now() + HOT_SWAP_HOLD_LIMIT;
-        let switch_deadline = hold_deadline - HOT_SWAP_RECOVERY_RESERVE;
+        #[cfg(not(test))]
+        let (hold_limit, recovery_reserve, stop_reserve) = (
+            HOT_SWAP_HOLD_LIMIT,
+            HOT_SWAP_RECOVERY_RESERVE,
+            HOT_SWAP_STOP_RESERVE,
+        );
+        #[cfg(test)]
+        let (hold_limit, recovery_reserve, stop_reserve) = self.hot_budget;
+        let hold_deadline = tokio::time::Instant::now() + hold_limit;
+        let switch_deadline = hold_deadline - recovery_reserve;
+        let recovery_deadline = hold_deadline - stop_reserve;
         if let Err(f) = self
             .step(
                 "pause-daemon",
-                self.exec_ok(&cur.id, hot_argv("pause", &["660"])),
+                async {
+                    tokio::time::timeout_at(
+                        switch_deadline,
+                        self.exec_ok(&cur.id, hot_argv("pause", &["660"])),
+                    )
+                    .await
+                    .map_err(|_| {
+                        "hot swap pause exceeded the runner hold safety deadline".to_owned()
+                    })?
+                },
                 Clone::clone,
             )
             .await
         {
-            let recovery = async {
-                let left = budget_left(hold_deadline, Duration::ZERO)?
+            let recovery = recovery_before_deadline(recovery_deadline, async {
+                let left = budget_left(recovery_deadline, Duration::ZERO)?
                     .as_secs_f64()
                     .to_string();
                 self.exec_ok(&cur.id, hot_argv("cancel-pause", &[&left]))
                     .await?;
-                self.wait_hot_healthy_until(&cur.id, hold_deadline).await
-            }
+                self.wait_hot_healthy_until(&cur.id, recovery_deadline, None)
+                    .await
+            })
             .await;
             return Err(match recovery {
                 Ok(_) => failed(f),
-                Err(e) => (
-                    Outcome::RollbackFailed,
-                    Fail(format!("{}; cancel pause: {e}", f.0)),
-                ),
+                Err(e) => {
+                    self.failed_hot_recovery(
+                        cur,
+                        &backup,
+                        hold_deadline,
+                        format!("{}; cancel pause: {e}", f.0),
+                    )
+                    .await
+                }
             });
         }
 
         // No daemon is running here. Hold/replay runners keep their processes,
         // while the snapshot includes every completed pre-upgrade write.
-        let backup = self
+        let snapshot = self
             .step(
-                "backup",
+                "snapshot-database",
                 async {
-                    let mut argv = backup_argv();
-                    argv[0] = "/opt/terrarium/bundled/bin/terrariumd".into();
-                    let out = self
-                        .engine
-                        .run_once(cur, &cur.image, bounded_command(argv, switch_deadline)?)
-                        .await?;
-                    if out.code != 0 {
-                        return Err(out.reason());
-                    }
-                    let path = backup_path(&out.stdout)?;
-                    let snapshot = self
-                        .engine
-                        .run_once(
+                    let snapshot = tokio::time::timeout_at(
+                        switch_deadline,
+                        self.engine.run_once(
                             cur,
                             &cur.image,
-                            bounded_command(hot_argv("snapshot", &[&path]), switch_deadline)?,
-                        )
-                        .await?;
+                            bounded_command(hot_argv("snapshot", &[&backup]), switch_deadline)?,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| {
+                        "hot swap database snapshot exceeded the runner hold safety deadline"
+                            .to_owned()
+                    })?;
+                    let snapshot = snapshot?;
                     if snapshot.code != 0 {
                         return Err(snapshot.reason());
                     }
-                    Ok(path)
+                    Ok("exact paused database snapshot for automatic rollback".to_owned())
                 },
                 Clone::clone,
             )
             .await;
-        let backup = match backup {
-            Ok(path) => path,
+        match snapshot {
+            Ok(_) => (),
             Err(f) => {
                 // No new code or migrations have run. Resume the original release.
-                let recovery = async {
-                    let left = budget_left(hold_deadline, Duration::ZERO)?
+                let recovery = recovery_before_deadline(recovery_deadline, async {
+                    let left = budget_left(recovery_deadline, Duration::ZERO)?
                         .as_secs_f64()
                         .to_string();
                     self.exec_ok(&cur.id, hot_argv("start", &[old.trim(), &left]))
                         .await?;
-                    self.wait_hot_healthy_until(&cur.id, hold_deadline).await?;
+                    self.wait_hot_healthy_until(&cur.id, recovery_deadline, None)
+                        .await?;
                     self.commit_with_retry(&cur.id, &[]).await
-                }
+                })
                 .await;
-                return Err((
-                    if recovery.is_ok() {
-                        Outcome::Failed
-                    } else {
-                        Outcome::RollbackFailed
-                    },
-                    f,
-                ));
+                return Err(match recovery {
+                    Ok(_) => (Outcome::Failed, f),
+                    Err(e) => {
+                        self.failed_hot_recovery(
+                            cur,
+                            &backup,
+                            hold_deadline,
+                            format!("{}; snapshot failure recovery: {e}", f.0),
+                        )
+                        .await
+                    }
+                });
             }
         };
-        self.with_run(|r| r.backup = Some(backup.clone()));
         let attempt = async {
             let left = budget_left(switch_deadline, Duration::ZERO).map_err(Fail)?;
             let control_timeout = left.as_secs_f64().to_string();
+            let startup_since = Utc::now().to_rfc3339();
             self.step(
                 "start-daemon",
                 self.exec_ok(&cur.id, hot_argv("start", &[&release, &control_timeout])),
@@ -775,7 +852,7 @@ impl Updater {
             .await?;
             self.step(
                 "health",
-                self.wait_hot_healthy_until(&cur.id, switch_deadline),
+                self.wait_hot_healthy_until(&cur.id, switch_deadline, Some(&startup_since)),
                 Clone::clone,
             )
             .await?;
@@ -790,15 +867,22 @@ impl Updater {
                 .set_image(&to.reference)
                 .map_err(|e| Fail(e.to_string()))?;
             Ok::<_, Fail>(())
-        }
-        .await;
+        };
+        let attempt = switch_before_deadline(switch_deadline, attempt).await;
         match attempt {
             Ok(()) => {
                 // Commit may have removed probation even if Docker loses the
                 // response. Never rewind the journal after attempting admission.
                 self.step(
                     "commit",
-                    self.commit_with_retry(&cur.id, &[&backup, old.trim()]),
+                    async {
+                        tokio::time::timeout_at(
+                            switch_deadline,
+                            self.commit_with_retry(&cur.id, &[&backup, old.trim()]),
+                        )
+                        .await
+                        .map_err(|_| "hot swap admission exceeded the runner hold safety deadline; admission was attempted, automatic rollback is unsafe".to_owned())?
+                    },
                     Clone::clone,
                 )
                 .await
@@ -827,8 +911,18 @@ impl Updater {
                 Ok(Outcome::Succeeded)
             }
             Err(f) => {
-                let recovery = async {
-                    let left = budget_left(hold_deadline, Duration::ZERO)?
+                // A deadline can cancel an engine call inside a step before
+                // step() gets its answer. Do not leave that step "running".
+                self.with_run(|r| {
+                    for step in &mut r.steps {
+                        if step.state == StepState::Running {
+                            step.state = StepState::Failed;
+                            step.detail = f.0.clone();
+                        }
+                    }
+                });
+                let recovery = recovery_before_deadline(recovery_deadline, async {
+                    let left = budget_left(recovery_deadline, Duration::ZERO)?
                         .as_secs_f64()
                         .to_string();
                     self.exec_ok(&cur.id, hot_argv("pause", &[&left])).await?;
@@ -840,49 +934,86 @@ impl Updater {
                             &cur.image,
                             bounded_command(
                                 hot_argv("restore-database", &[&backup]),
-                                hold_deadline,
+                                recovery_deadline,
                             )?,
                         )
                         .await?;
                     if out.code != 0 {
                         return Err(out.reason());
                     }
-                    let left = budget_left(hold_deadline, Duration::ZERO)?
+                    let left = budget_left(recovery_deadline, Duration::ZERO)?
                         .as_secs_f64()
                         .to_string();
                     self.exec_ok(&cur.id, hot_argv("start", &[old.trim(), &left]))
                         .await?;
-                    self.wait_hot_healthy_until(&cur.id, hold_deadline).await?;
+                    self.wait_hot_healthy_until(&cur.id, recovery_deadline, None)
+                        .await?;
                     self.store
                         .set_image(&cur.image.reference)
                         .map_err(|e| e.to_string())?;
                     self.commit_with_retry(&cur.id, &[&backup]).await?;
                     Ok::<_, String>(())
-                }
+                })
                 .await;
                 match recovery {
                     Ok(()) => Err((Outcome::RolledBack, f)),
-                    Err(e) => Err((
-                        Outcome::RollbackFailed,
-                        Fail(format!("{}; recovery: {e}; runners remain held", f.0)),
-                    )),
+                    Err(e) => Err(self
+                        .failed_hot_recovery(
+                            cur,
+                            &backup,
+                            hold_deadline,
+                            format!("{}; recovery: {e}", f.0),
+                        )
+                        .await),
                 }
             }
         }
+    }
+
+    async fn failed_hot_recovery(
+        &self,
+        cur: &Container,
+        backup: &str,
+        deadline: tokio::time::Instant,
+        reason: String,
+    ) -> (Outcome, Fail) {
+        // A cancelled/failed restore may still have changed pages. Never
+        // start or admit a daemon, or attempt a second restore, on uncertainty.
+        let stopped =
+            recovery_before_deadline(deadline, self.engine.stop_for_recovery(&cur.id)).await;
+        let stop = if stopped.is_ok() {
+            "container stopped"
+        } else {
+            "container stop unconfirmed; operator must stop it"
+        };
+        (
+            Outcome::RecoveryFailed,
+            Fail(format!(
+                "{reason}; recovery_failed: {stop}; do not restart on an unverified database; manual restore required: paused snapshot {backup}.hot-swap.sqlite (if created and retained), pre-update ZIP {backup}; verify any outstanding restore helper has stopped"
+            )),
+        )
     }
 
     async fn wait_hot_healthy_until(
         &self,
         id: &str,
         hold_deadline: tokio::time::Instant,
+        startup_since: Option<&str>,
     ) -> Res<String> {
         let deadline = (tokio::time::Instant::now() + self.cfg.health_timeout).min(hold_deadline);
         // Docker health can still describe the old daemon. Require a new live
         // status answer too, and allow the normal start-period failures.
         loop {
-            if matches!(self.engine.health(id).await?, Health::Healthy)
-                && self.exec_ok(id, status_argv()).await.is_ok()
+            if let Some(since) = startup_since
+                && let Some(reason) = self.engine.daemon_failure_since(id, since).await?
             {
+                return Err(reason);
+            }
+            let health = self.engine.health(id).await?;
+            if matches!(health, Health::Exited(_)) {
+                return Err("daemon container exited during startup (values hidden)".into());
+            }
+            if matches!(health, Health::Healthy) && self.exec_ok(id, status_argv()).await.is_ok() {
                 return Ok("new daemon healthy; RPC admission still held".into());
             }
             if tokio::time::Instant::now() >= deadline {

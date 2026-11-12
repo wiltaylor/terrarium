@@ -1489,6 +1489,19 @@ a.chip.card-link:hover {
 }
 
 /* Drawer and modal */
+@media (min-width: 761px) {
+  /* The document is the page scroll root. Keep its gutter when locking it
+     so opening a drawer neither moves the board nor covers its scrollbar. */
+  html {
+    scrollbar-gutter: stable;
+  }
+  html:has(.drawer) {
+    overflow: hidden;
+  }
+  .drawer {
+    overscroll-behavior: contain;
+  }
+}
 .drawer-scrim,
 .modal-scrim {
   position: fixed;

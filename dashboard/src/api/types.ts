@@ -87,7 +87,7 @@ export interface UpdaterImage {
   version?: string;
 }
 
-export type UpdateOutcome = "running" | "succeeded" | "current" | "failed" | "rolled_back" | "rollback_failed";
+export type UpdateOutcome = "running" | "succeeded" | "current" | "failed" | "rolled_back" | "rollback_failed" | "recovery_failed";
 export type UpdateStepState = "running" | "ok" | "failed" | "skipped";
 
 /** One step of an update or a rollback. */
