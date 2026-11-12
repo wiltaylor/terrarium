@@ -198,10 +198,19 @@ async fn release_key_host_refuses_bundle(case: &str) {
         "{case}: missing refusal reason: {text}"
     );
     connection.send(DaemonFrame::Ping { nonce: 123 }).await;
-    assert!(matches!(
-        connection.next_ctl().await,
-        HostFrame::Pong { nonce: 123 }
-    ));
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let message = connection.ws.next().await.unwrap().unwrap();
+            if let Message::Text(text) = message
+                && let HostFrame::Pong { nonce } = decode_control::<HostFrame>(&text).unwrap()
+            {
+                assert_eq!(nonce, 123);
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the current host must still answer heartbeats after refusing the update");
     client.abort();
     http.abort();
 }
