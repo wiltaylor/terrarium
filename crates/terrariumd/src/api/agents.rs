@@ -647,6 +647,7 @@ pub(super) async fn start(
     let a = load(&state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "starting an agent")?;
     refuse_paused(&a, "start")?;
+    refuse_parked(&state, &a).await?;
     refuse_disabled(&state, &a).await?;
     if state
         .supervisor
@@ -711,6 +712,27 @@ async fn refuse_disabled(state: &Shared, a: &AgentView) -> ApiResult<()> {
         Some(why) => Err(ApiError::new(Code::Conflict, why)),
         None => Ok(()),
     }
+}
+
+/// Parked card work must not be resumed by a message or an explicit start.
+async fn refuse_parked(state: &Shared, a: &AgentView) -> ApiResult<()> {
+    let key = a.agent.id.to_string();
+    state
+        .db
+        .read(move |c| {
+            if let Some(sp) = crate::store::spawns::find(c, &key)?
+                && sp.running()
+                && sp.parked_at.is_some()
+            {
+                return Err(ApiError::conflict(format!(
+                    "parked: {} ({})",
+                    sp.bound.as_deref().unwrap_or("bound agent"),
+                    sp.park_reason.as_deref().unwrap_or("waiting on others")
+                )));
+            }
+            Ok(())
+        })
+        .await
 }
 
 /// `409 conflict` for a paused agent: a start or a restart needs an
@@ -1025,6 +1047,7 @@ pub(super) async fn restart(
     let a = load(&state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "restarting an agent")?;
     refuse_paused(&a, "restart")?;
+    refuse_parked(&state, &a).await?;
     refuse_disabled(&state, &a).await?;
     let live = state
         .supervisor
@@ -1115,6 +1138,7 @@ pub(super) async fn send_as(
     let a = load(state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "typing a turn into an agent")?;
     crate::links::refuse_sysadmin_agent(&a.agent.roles, "send a turn to")?;
+    refuse_parked(state, &a).await?;
     if body.text.trim().is_empty() {
         return Err(ApiError::invalid("the turn text is empty"));
     }
