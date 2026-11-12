@@ -224,7 +224,7 @@ import type {
 
 export interface Api {
   pages: {
-    list(project: string): Promise<{ items: import("./types").ProjectPage[]; can_edit: boolean }>;
+    list(project: string): Promise<{ items: import("./types").ProjectPage[]; can_edit: boolean; dashboard_slug?: string }>;
     get(project: string, slug: string): Promise<import("./types").ProjectPage>;
     save(project: string, slug: string, body: import("./types").ProjectPageInput): Promise<import("./types").ProjectPage>;
     remove(project: string, slug: string): Promise<void>;

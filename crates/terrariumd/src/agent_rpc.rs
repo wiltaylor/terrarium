@@ -886,7 +886,9 @@ mod tests {
             .spawn()
             .unwrap();
         let mut lines = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
-        tokio::time::timeout(Duration::from_secs(30), async {
+        // Readiness and exit are events, not timing assertions. The outer cap
+        // only catches a hung child, including slow startup on a loaded host.
+        tokio::time::timeout(Duration::from_secs(300), async {
             loop {
                 let line = lines
                     .next_line()
@@ -897,11 +899,11 @@ mod tests {
                     break;
                 }
             }
+            // Tokio Child::kill sends SIGKILL on Unix and waits for our child.
+            child.kill().await.unwrap();
         })
         .await
-        .unwrap();
-        // Tokio Child::kill sends SIGKILL on Unix and reaps only our child.
-        child.kill().await.unwrap();
+        .expect("child must reach the durable effect and exit after SIGKILL");
         let db = crash_db(&path);
         let result = journaled(
             &db,

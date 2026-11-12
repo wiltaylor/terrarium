@@ -43,7 +43,6 @@ describe("navigation", () => {
       { path: "tests", label: "Tests" },
       { path: "schedules", label: "Schedules" },
       { path: "rules", label: "Rules" },
-      { path: "dashboard", label: "Dashboard" },
       { path: "agents", label: "Agents" },
       { path: "repos", label: "Repos" },
       { path: "knowledge", label: "Knowledge" },
@@ -84,6 +83,7 @@ describe("navigation", () => {
       { path: "general", label: "General" },
       { path: "secrets", label: "Secrets" },
       { path: "templates", label: "Templates" },
+      { path: "monitors", label: "Monitors" },
     ]);
     const project = app.slice(app.indexOf('<Route path="/p/:project" component={ProjectScreen}>'));
     expect(project).toMatch(/<Route path="\/settings" component=\{SettingsPage\}>/);

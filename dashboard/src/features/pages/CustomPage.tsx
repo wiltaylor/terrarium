@@ -11,6 +11,7 @@ import { renderMarkdown } from "../../lib/markdown";
 import { BlockView } from "../dashboard/blocks";
 import { kindsFor, RANGES } from "../dashboard/model";
 import { WikiWidget } from "./WikiWidget";
+import { isSystemWidget, SYSTEM_KINDS, SystemWidget } from "./SystemWidget";
 
 export default function CustomPage() {
   const { api, events } = useInstance();
@@ -44,7 +45,7 @@ export default function CustomPage() {
     const k = kind();
     const id = [...crypto.getRandomValues(new Uint8Array(16))].map(byte => byte.toString(16).padStart(2, "0")).join("");
     const widget: PageWidget = { id, kind: k, x: 0, y: Math.max(0, ...widgets().map(w => w.y + w.h)), w: 12, h: 3,
-      ...(k === "markdown" ? { text: "" } : k === "wiki" ? { wiki: "index" } : { monitor: monitors.latest?.find(m => kindsFor(m.kind).includes(k))?.id ?? "" }) };
+      ...(k === "markdown" ? { text: "" } : k === "wiki" ? { wiki: "index" } : isSystemWidget(k) ? {} : { monitor: monitors.latest?.find(m => kindsFor(m.kind).includes(k as "stat"))?.id ?? "" }) };
     setDraft(d => d && { ...d, widgets: [...d.widgets, widget] });
     setEditingWidget(widget.id);
   }
@@ -74,8 +75,8 @@ export default function CustomPage() {
     <Show when={draft()}>{d => <div class="stack dash-editbar">
       <label>Page title<input required maxlength={120} value={d().title} onInput={e => setDraft(old => old && { ...old, title: e.currentTarget.value })} /></label>
       <label>Tab order (lower comes first)<input type="number" min="0" step="1" value={d().position} onInput={e => setDraft(old => old && { ...old, position: e.currentTarget.valueAsNumber })} /></label>
-      <div class="row"><label>Widget kind<select value={kind()} onChange={e => setKind(e.currentTarget.value as PageWidget["kind"])}><For each={["markdown", "wiki", "stat", "status", "chart", "text", "table"]}>{k => <option value={k}>{k}</option>}</For></select></label>
-      <button disabled={widgets().length >= 100} onClick={addWidget}>Add widget</button></div>
+      <div class="row"><label>Widget kind<select value={kind()} onChange={e => setKind(e.currentTarget.value as PageWidget["kind"])}><For each={["markdown", "wiki", "stat", "status", "chart", "text", "table", ...SYSTEM_KINDS]}>{k => <option value={k}>{k}</option>}</For></select></label>
+      <button disabled={widgets().length >= 104} onClick={addWidget}>Add widget</button></div>
       <p>Drag Move or Resize to snap to cells. Arrow keys move, Shift+arrows resize. Save to keep changes.</p>
     </div>}</Show>
     <SnapGrid widgets={widgets()} editing={!!draft() && !!rights.latest?.can_edit} onChange={widgets => setDraft(d => d && { ...d, widgets })} renderWidget={() => null} renderLiveWidget={current => {
@@ -92,7 +93,7 @@ export default function CustomPage() {
           <p class={new TextEncoder().encode(w.text ?? "").length > 16384 ? "error" : "muted"}>{new TextEncoder().encode(w.text ?? "").length} / 16384 bytes</p>
         </Show>
         <Show when={w.kind === "wiki"}><label>Wiki path (this project)<input value={w.wiki ?? ""} onInput={e => patchWidget(w.id, { wiki: e.currentTarget.value })} /></label></Show>
-        <Show when={w.kind !== "wiki" && w.kind !== "markdown"}><label>Monitor<select value={w.monitor ?? ""} onChange={e => patchWidget(w.id, { monitor: e.currentTarget.value })}><option value="">Choose a monitor</option><For each={monitors.latest?.filter(m => kindsFor(m.kind).includes(w.kind as "stat"))}>{m => <option value={m.id}>{m.name} ({m.kind})</option>}</For></select></label>
+        <Show when={!isSystemWidget(w.kind) && w.kind !== "wiki" && w.kind !== "markdown"}><label>Monitor<select value={w.monitor ?? ""} onChange={e => patchWidget(w.id, { monitor: e.currentTarget.value })}><option value="">Choose a monitor</option><For each={monitors.latest?.filter(m => kindsFor(m.kind).includes(w.kind as "stat"))}>{m => <option value={m.id}>{m.name} ({m.kind})</option>}</For></select></label>
           <label>Range<select value={w.options?.range ?? "24h"} onChange={e => patchWidget(w.id, { options: { ...w.options, range: e.currentTarget.value as DashboardRange } })}><For each={RANGES}>{r => <option value={r.id}>Last {r.label}</option>}</For></select></label>
           <label>Decimals<select value={w.options?.decimals ?? ""} onChange={e => patchWidget(w.id, { options: { ...w.options, decimals: e.currentTarget.value === "" ? undefined : Number(e.currentTarget.value) } })}><option value="">Automatic</option><For each={[0, 1, 2, 3]}>{d => <option value={d}>{d}</option>}</For></select></label>
           <Show when={w.kind === "stat"}><label><input type="checkbox" checked={w.options?.sparkline ?? true} onChange={e => patchWidget(w.id, { options: { ...w.options, sparkline: e.currentTarget.checked } })} />Sparkline</label></Show>
@@ -102,7 +103,8 @@ export default function CustomPage() {
       <Show when={w.title}><h3>{w.title}</h3></Show>
       <Show when={w.kind === "markdown"}><Markdown html={renderMarkdown(w.text ?? "", params.project)} project={params.project} /></Show>
       <Show when={w.kind === "wiki"}><WikiWidget project={params.project} path={w.wiki ?? ""} /></Show>
-      <Show when={w.kind !== "wiki" && w.kind !== "markdown"}><BlockView block={{ id: w.id, title: w.title, monitor: w.monitor, kind: w.kind as "stat", size: "l", options: w.options ?? {} }} monitor={monitors.latest?.find(m => m.id === w.monitor)} project={params.project} now={now()} version={Date.parse(monitors.latest?.find(m => m.id === w.monitor)?.last?.at ?? "") || 0} /></Show>
+      <Show when={isSystemWidget(w.kind)}><SystemWidget kind={w.kind} project={params.project} monitors={monitors.latest ?? []} now={now()} /></Show>
+      <Show when={!isSystemWidget(w.kind) && w.kind !== "wiki" && w.kind !== "markdown"}><BlockView block={{ id: w.id, title: w.title, monitor: w.monitor, kind: w.kind as "stat", size: "l", options: w.options ?? {} }} monitor={monitors.latest?.find(m => m.id === w.monitor)} project={params.project} now={now()} version={Date.parse(monitors.latest?.find(m => m.id === w.monitor)?.last?.at ?? "") || 0} /></Show>
     </>; }} />
     <Show when={page.latest && !widgets().length && !draft()}><p>This page has no widgets.</p></Show>
     <A href={`/p/${encodeURIComponent(params.project)}/board`}>Board</A>
