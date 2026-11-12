@@ -468,10 +468,19 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
     // checkpoint and accidentally replay it after a partially read handoff.
     let collection_checkpoints = journal.scan::<RecipeResume>("recipe/");
     let collection_scan_failed = collection_checkpoints.is_err();
-    if let Err(error) = &collection_checkpoints { warn!(%error, "cannot verify release collection checkpoints; releases will not resume"); }
+    if let Err(error) = &collection_checkpoints {
+        warn!(%error, "cannot verify release collection checkpoints; releases will not resume");
+    }
     let interrupted_collections: HashSet<String> = collection_checkpoints
-        .unwrap_or_default().into_iter().filter(|(_, saved)| saved.collecting)
-        .filter_map(|(key, _)| key.strip_prefix("recipe/").and_then(|rest| rest.split('/').next()).map(str::to_owned)).collect();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, saved)| saved.collecting)
+        .filter_map(|(key, _)| {
+            key.strip_prefix("recipe/")
+                .and_then(|rest| rest.split('/').next())
+                .map(str::to_owned)
+        })
+        .collect();
     let remote_checkpoints: HashSet<String> = journal
         .scan::<serde_json::Value>("ssh/recipe/")
         .unwrap_or_default()
@@ -3584,9 +3593,11 @@ async fn finish_recipe(
         && let Some(directory) = &delivery.release_outputs
     {
         crate::release_handoff::relative_directory(directory)?;
-        let journal = crate::hosts::resume::Journal::with_db(&x.state.state_dir, x.state.db.clone());
+        let journal =
+            crate::hosts::resume::Journal::with_db(&x.state.state_dir, x.state.db.clone());
         let key = recipe_resume_key(job);
-        let mut checkpoint = journal.load::<RecipeResume>(&key)?
+        let mut checkpoint = journal
+            .load::<RecipeResume>(&key)?
             .ok_or_else(|| ApiError::internal("missing release recipe checkpoint"))?;
         checkpoint.collecting = true;
         journal.save(&key, &checkpoint)?;
