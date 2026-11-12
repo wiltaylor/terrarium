@@ -369,6 +369,9 @@ pub struct LiveView {
 /// The hosts that are or were connected since the daemon started.
 pub struct HostRegistry {
     entries: Mutex<HashMap<String, Entry>>,
+    /// Serialize metadata intentions across retries, outside entries and DB
+    /// locks. A newer save/delete cannot be overtaken by an older retry.
+    metadata: Mutex<()>,
     next_conn: std::sync::atomic::AtomicU64,
     pub heartbeat: Duration,
     pub resume_grace: Duration,
@@ -396,6 +399,7 @@ impl HostRegistry {
     pub fn new(heartbeat: Duration, resume_grace: Duration) -> Self {
         Self {
             entries: Mutex::default(),
+            metadata: Mutex::default(),
             next_conn: std::sync::atomic::AtomicU64::new(1),
             heartbeat,
             resume_grace,
@@ -531,8 +535,6 @@ impl HostRegistry {
             ));
         }
         if let Some((key, id)) = binding {
-            self.ownership_epoch
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             values.push((format!("bound/{key}"), json!((host, id))));
         }
         let removed: Vec<_> = event
@@ -545,11 +547,16 @@ impl HostRegistry {
                     .map(move |(seq, _)| format!("event/{host}/{id}/{seq:020}"))
             })
             .collect();
-        journal.replace(&values, &removed, &[])
+        journal.replace(&values, &removed, &[])?;
+        if binding.is_some() {
+            self.ownership_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
     }
 
     /// Forget an explicitly closed or expired exec and its replay together.
     pub fn forget_exec(&self, id: &str) -> crate::error::ApiResult<()> {
+        let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
         retry_metadata_api(|| self.try_forget_exec(id))
     }
 
@@ -593,6 +600,7 @@ impl HostRegistry {
             && let Some(entry) = entries.get_mut(&host)
         {
             entry.sessions.remove(&session);
+            entry.pending_journal.remove(&session);
             if let Some(conn) = &entry.conn {
                 let _ = conn
                     .tx
@@ -604,6 +612,7 @@ impl HostRegistry {
 
     /// Discard checkpoints only after the queue stored the job's final result.
     pub fn forget_job(&self, job: &str) -> crate::error::ApiResult<()> {
+        let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
         retry_metadata_api(|| self.try_forget_job(job))
     }
 
@@ -611,6 +620,7 @@ impl HostRegistry {
         let Some(journal) = self.journal.get() else {
             return Ok(());
         };
+        let mut entries = self.lock();
         let mut prefixes = vec![
             format!("prepare/{job}/"),
             format!("recipe/{job}/"),
@@ -624,7 +634,6 @@ impl HostRegistry {
             }
             prefixes.push(prefix);
         }
-        let mut entries = self.lock();
         if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
             return Err(ApiError::internal("host registry is stopping"));
         }
@@ -652,6 +661,7 @@ impl HostRegistry {
         for (host, id) in removed {
             if let Some(entry) = entries.get_mut(&host) {
                 entry.sessions.remove(&id);
+                entry.pending_journal.remove(&id);
             }
         }
         Ok(())
@@ -721,6 +731,7 @@ impl HostRegistry {
     /// Finished helper sessions have no durable owner. Keep a five-minute
     /// grace for a fast exec to acquire its owner before removing replay.
     fn prune_unowned(&self, before: i64) -> crate::error::ApiResult<()> {
+        let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
         retry_metadata_api(|| self.try_prune_unowned(before))
     }
 
@@ -786,6 +797,7 @@ impl HostRegistry {
             journal.replace(&[(key, value)], &[], &prefixes)?;
             for id in ids {
                 entry.sessions.remove(&id);
+                entry.pending_journal.remove(&id);
             }
         }
         Ok(())
@@ -796,6 +808,7 @@ impl HostRegistry {
     }
 
     pub fn save_exec(&self, id: &str, value: &impl Serialize) -> crate::error::ApiResult<()> {
+        let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
         retry_metadata_api(|| self.try_save_exec(id, value))
     }
 
@@ -804,11 +817,11 @@ impl HostRegistry {
         if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
             return Err(ApiError::internal("host registry is stopping"));
         }
-        self.ownership_epoch
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some(journal) = self.journal.get() {
             journal.save(&format!("exec/{id}"), value)?;
         }
+        self.ownership_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
@@ -963,6 +976,7 @@ impl HostRegistry {
         binding: Option<&str>,
         make: impl FnOnce(SessionId) -> DaemonFrame,
     ) -> Result<HostSession, HostError> {
+        let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
         let mut make = Some(make);
         retry_metadata(
             || self.try_open_bound(host, binding, &mut make),
@@ -985,6 +999,7 @@ impl HostRegistry {
         if e.sessions.values().filter(|s| !s.terminal).count() >= max as usize {
             return Err(HostError::Busy(host.to_owned(), max));
         }
+        let previous_next = e.next_id;
         let id = loop {
             e.next_id = e.next_id.wrapping_add(1);
             if e.next_id != 0 && !e.sessions.contains_key(&e.next_id) {
@@ -1008,6 +1023,7 @@ impl HostRegistry {
         );
         if let Err(error) = self.persist_bound(host, e, None, binding.map(|key| (key, id))) {
             e.sessions.remove(&id);
+            e.next_id = previous_next;
             return Err(if error.code == Code::ResourceBusy {
                 HostError::JournalBusy
             } else {
@@ -1039,6 +1055,7 @@ impl HostRegistry {
         hello: &Hello,
         conn: Conn,
     ) -> crate::error::ApiResult<(Welcome, Option<Conn>, usize, u64)> {
+        let _metadata = self.metadata.lock().unwrap_or_else(|p| p.into_inner());
         retry_metadata_api(|| self.try_attach(row, hello, conn.clone()))
     }
 
@@ -1059,9 +1076,6 @@ impl HostRegistry {
             .clone()
             .unwrap_or_else(|| format!("r-{}", ulid::Ulid::new()));
         let previous_token = e.resume_token.clone();
-        let old = e.conn.replace(conn);
-        e.generation += 1;
-        e.last_error = None;
         let offers: HashMap<SessionId, u64> = match (&hello.resume, &e.resume_token) {
             (Some(r), Some(t)) if r.token == *t => {
                 r.sessions.iter().map(|o| (o.session, o.sent)).collect()
@@ -1076,8 +1090,7 @@ impl HostRegistry {
                 continue;
             }
             if offers.contains_key(&id) {
-                if let Some(s) = e.sessions.get_mut(&id) {
-                    s.held = true;
+                if let Some(s) = e.sessions.get(&id) {
                     resume.push(ResumeAccept {
                         session: id,
                         received: s.received,
@@ -1100,8 +1113,12 @@ impl HostRegistry {
                 return Err(ApiError::internal("cannot persist missing host session"));
             }
         }
+        let held: Vec<_> = resume.iter().map(|r| (r.session, e.sessions[&r.session].held)).collect();
+        for (id, _) in &held {
+            if let Some(s) = e.sessions.get_mut(id) { s.held = true; }
+        }
         e.resume_token = Some(token.clone());
-        e.info = Some(LiveInfo {
+        let info = LiveInfo {
             host_id: row.id.clone(),
             version: hello.version.clone(),
             os: hello.os.clone(),
@@ -1111,13 +1128,19 @@ impl HostRegistry {
             max_sessions: hello.max_sessions,
             max_running_targets: hello.max_running_targets,
             connected_at: crate::db::now(),
-        });
+        };
         let n = resume.len();
         if let Err(error) = self.persist(&row.name, e, None) {
             e.resume_token = previous_token;
-            e.conn = old;
+            for (id, held) in held {
+                if let Some(s) = e.sessions.get_mut(&id) { s.held = held; }
+            }
             return Err(error);
         }
+        let old = e.conn.replace(conn);
+        e.generation += 1;
+        e.last_error = None;
+        e.info = Some(info);
         // A replacement link replays from committed offsets, not from the
         // uncommitted queue owned by its predecessor.
         e.pending_journal.clear();
@@ -3052,6 +3075,118 @@ mod tests {
                 .len(),
             32
         );
+    }
+
+    fn hold_writer(db: crate::db::Db) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+        let (ready, acquired) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            db.read_now(|_| {
+                ready.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(30)).unwrap();
+                Ok(())
+            }).unwrap();
+        });
+        acquired.recv_timeout(Duration::from_secs(5)).unwrap();
+        (release, thread)
+    }
+
+    fn metadata_retry_started(reg: &HostRegistry) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while reg.metadata.try_lock().is_ok() {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        // The retry keeps its metadata intention, but not the registry lock.
+        let guard = reg.lock();
+        assert!(guard.contains_key("lab1"));
+    }
+
+    #[test]
+    fn contended_metadata_retries_in_order_and_rechecks_current_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore_with_db(dir.path(), db.clone()).unwrap();
+        let (tx, mut outgoing) = mpsc::unbounded_channel();
+        reg.lock().get_mut("lab1").unwrap().conn = Some(Conn { id: 1, tx });
+        let journal = resume::Journal::with_db(dir.path(), db.clone());
+        let (release, writer) = hold_writer(db.clone());
+        let r = reg.clone();
+        let opening = std::thread::spawn(move || r.open_bound("lab1", Some("test/open"), |_| DaemonFrame::Ping { nonce: 42 }));
+        metadata_retry_started(&reg);
+        assert!(reg.lock()["lab1"].sessions.is_empty());
+        assert_eq!(reg.lock()["lab1"].next_id, 0);
+        assert!(outgoing.try_recv().is_err());
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        let session = opening.join().unwrap().unwrap();
+        assert!(matches!(outgoing.try_recv().unwrap(), Outgoing::Frame(_)));
+        assert_eq!(journal.load::<(String, u32)>("bound/test/open").unwrap(), Some(("lab1".into(), session.id())));
+
+        let (release, writer) = hold_writer(db.clone());
+        let r = reg.clone();
+        let id = session.id();
+        let older = std::thread::spawn(move || r.save_exec("test", &json!({"host_session": ["lab1", id], "revision": 1})));
+        metadata_retry_started(&reg);
+        let r = reg.clone();
+        let newer = std::thread::spawn(move || r.save_exec("test", &json!({"host_session": ["lab1", id], "revision": 2})));
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        older.join().unwrap().unwrap();
+        newer.join().unwrap().unwrap();
+        assert_eq!(journal.load::<Value>("exec/test").unwrap().unwrap()["revision"], 2);
+
+        let other = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        outgoing.try_recv().unwrap();
+        let (release, writer) = hold_writer(db.clone());
+        let r = reg.clone();
+        let deleting = std::thread::spawn(move || r.forget_exec("test"));
+        metadata_retry_started(&reg);
+        assert!(reg.lock()["lab1"].sessions.contains_key(&id));
+        assert!(outgoing.try_recv().is_err());
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        // This event may commit before or after deletion. Either order must
+        // preserve it instead of writing the metadata retry's old snapshot.
+        reg.on_data("lab1", DataFrame::new(other.id(), StreamTag::Stdout, b"new".to_vec()));
+        deleting.join().unwrap().unwrap();
+        if !reg.lock()["lab1"].pending_journal.is_empty() {
+            reg.lock().get_mut("lab1").unwrap().pending_journal.get_mut(&other.id()).unwrap().next = Instant::now();
+            reg.retry_journal("lab1", 1);
+        }
+        let saved = journal.load::<SavedHost>("host/lab1").unwrap().unwrap();
+        assert!(!saved.sessions.contains_key(&id));
+        assert_eq!(saved.sessions[&other.id()].received, 3);
+        assert!(journal.load::<Value>("exec/test").unwrap().is_none());
+    }
+
+    #[test]
+    fn metadata_deadline_leaves_no_partial_registry_or_journal_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore_with_db(dir.path(), db.clone()).unwrap();
+        let session = reg.open("lab1", |_| DaemonFrame::Ping { nonce: 0 }).unwrap();
+        reg.save_exec("kept", &json!({"host_session": ["lab1", session.id()]})).unwrap();
+        let next_id = reg.lock()["lab1"].next_id;
+        db.read_now(|_| {
+            assert!(matches!(reg.open_bound("lab1", Some("never"), |_| DaemonFrame::Ping { nonce: 0 }), Err(HostError::JournalBusy)));
+            assert_eq!(reg.save_exec("new", &1).unwrap_err().code, Code::ResourceBusy);
+            assert_eq!(reg.forget_exec("kept").unwrap_err().code, Code::ResourceBusy);
+            assert_eq!(reg.lock()["lab1"].sessions.len(), 1);
+            assert_eq!(reg.lock()["lab1"].next_id, next_id);
+            Ok(())
+        }).unwrap();
+        let journal = resume::Journal::with_db(dir.path(), db);
+        assert!(journal.load::<Value>("exec/kept").unwrap().is_some());
+        assert!(journal.load::<Value>("exec/new").unwrap().is_none());
+        assert!(journal.load::<Value>("bound/never").unwrap().is_none());
+        assert_eq!(journal.load::<SavedHost>("host/lab1").unwrap().unwrap().sessions.len(), 1);
     }
 
     #[test]
