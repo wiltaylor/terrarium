@@ -25,15 +25,32 @@ impl Drop for Cleanup {
 }
 
 fn docker(args: &[&str]) -> Vec<u8> {
-    let output = Command::new("/usr/bin/docker").args(["--host", "unix:///var/run/docker.sock"]).args(args).env_clear().output().unwrap();
-    assert!(output.status.success(), "synthetic Docker fixture command failed");
+    let output = Command::new("/usr/bin/docker")
+        .args(["--host", "unix:///var/run/docker.sock"])
+        .args(args)
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "synthetic Docker fixture command failed"
+    );
     output.stdout
 }
 
 struct Container(String);
 impl Drop for Container {
     fn drop(&mut self) {
-        let _ = Command::new("/usr/bin/docker").args(["--host", "unix:///var/run/docker.sock", "rm", "--force", &self.0]).env_clear().output();
+        let _ = Command::new("/usr/bin/docker")
+            .args([
+                "--host",
+                "unix:///var/run/docker.sock",
+                "rm",
+                "--force",
+                &self.0,
+            ])
+            .env_clear()
+            .output();
     }
 }
 
@@ -43,13 +60,52 @@ fn docker_runtime_identity_and_restart() {
     use runtime::Inspector;
     assert_eq!(std::env::var("TERRARIUM_B2_DISPOSABLE").as_deref(), Ok("1"));
     assert!(nix::unistd::geteuid().is_root());
-    let image = String::from_utf8(docker(&["image", "inspect", "busybox:1.37.0", "--format", "{{.Id}}"])).unwrap();
+    let image = String::from_utf8(docker(&[
+        "image",
+        "inspect",
+        "busybox:1.37.0",
+        "--format",
+        "{{.Id}}",
+    ]))
+    .unwrap();
     let image = image.trim();
     assert!(image.starts_with("sha256:") && image.len() == 71);
     let request = super::tests::envelope(1, Kind::Grant).original;
-    let registration = format!("terrarium.workspace.registration={}", request.runtime.registration.0);
-    let incarnation = format!("terrarium.workspace.runtime={}", request.runtime.incarnation.0);
-    let id = String::from_utf8(docker(&["run", "--detach", "--pull", "never", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "65534:65534", "--memory", "64m", "--pids-limit", "16", "--label", &registration, "--label", &incarnation, image, "/bin/sleep", "600"])).unwrap();
+    let registration = format!(
+        "terrarium.workspace.registration={}",
+        request.runtime.registration.0
+    );
+    let incarnation = format!(
+        "terrarium.workspace.runtime={}",
+        request.runtime.incarnation.0
+    );
+    let id = String::from_utf8(docker(&[
+        "run",
+        "--detach",
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--user",
+        "65534:65534",
+        "--memory",
+        "64m",
+        "--pids-limit",
+        "16",
+        "--label",
+        &registration,
+        "--label",
+        &incarnation,
+        image,
+        "/bin/sleep",
+        "600",
+    ]))
+    .unwrap();
     let container = Container(id.trim().to_owned());
     assert_eq!(container.0.len(), 64);
     let mut inspector = runtime::DockerInspector;
@@ -59,7 +115,8 @@ fn docker_runtime_identity_and_restart() {
     let pin = runtime::PinnedRuntime::acquire(&mut inspector, &snapshot.identity).unwrap();
     assert!(!pin.mountinfo(&mut inspector).unwrap().is_empty());
     assert!(inspector.inspect(&container.0[..12]).is_err());
-    let mut wrong = snapshot.identity.clone(); wrong.namespace.inode += 1;
+    let mut wrong = snapshot.identity.clone();
+    wrong.namespace.inode += 1;
     assert!(runtime::PinnedRuntime::acquire(&mut inspector, &wrong).is_err());
     docker(&["pause", &container.0]);
     assert!(pin.recheck(&mut inspector, &snapshot.identity).is_err());
@@ -225,7 +282,8 @@ fn kernel_publish_revoke_and_refusals() {
         let mut wrong = enrollment.clone();
         wrong.source.inode += 1;
         assert!(source_root.enrolled(&wrong).is_err());
-        wrong = enrollment.clone(); wrong.source.device += 1;
+        wrong = enrollment.clone();
+        wrong.source.device += 1;
         assert!(source_root.enrolled(&wrong).is_err());
         let renamed = source_path.join("project").join(format!("{name}-original"));
         std::fs::rename(&workspace, &renamed).unwrap();
@@ -251,7 +309,13 @@ fn kernel_publish_revoke_and_refusals() {
         mounts::lazy_detach(&nested).unwrap();
         scan_source(&opened).unwrap();
         let device = workspace.join("device");
-        nix::sys::stat::mknod(&device, nix::sys::stat::SFlag::S_IFCHR, nix::sys::stat::Mode::S_IRUSR, nix::sys::stat::makedev(1, 3)).unwrap();
+        nix::sys::stat::mknod(
+            &device,
+            nix::sys::stat::SFlag::S_IFCHR,
+            nix::sys::stat::Mode::S_IRUSR,
+            nix::sys::stat::makedev(1, 3),
+        )
+        .unwrap();
         assert_eq!(scan_source(&opened), Err(Reply::Unauthorized));
         std::fs::remove_file(&device).unwrap();
 
@@ -352,11 +416,21 @@ fn kernel_publish_revoke_and_refusals() {
             .iter()
             .any(|m| Path::new(&m.mountpoint) == publisher_path.join("reverse"))
     );
-    assert!(Command::new("/usr/bin/nsenter").arg(format!("--mount=/proc/{pid}/ns/mnt")).arg("/usr/bin/umount").arg(receiver_path.join("reverse")).status().unwrap().success());
+    assert!(
+        Command::new("/usr/bin/nsenter")
+            .arg(format!("--mount=/proc/{pid}/ns/mnt"))
+            .arg("/usr/bin/umount")
+            .arg(receiver_path.join("reverse"))
+            .status()
+            .unwrap()
+            .success()
+    );
     // Exercise the durable service/backend path after the raw primitive proof.
     let remaining = destinations.pop().unwrap();
     let remaining_mount = remaining.mounted().unwrap();
-    if mounts::ordinary_unmount(&remaining_mount).unwrap() == mounts::Unmount::Busy { mounts::lazy_detach(&remaining_mount).unwrap(); }
+    if mounts::ordinary_unmount(&remaining_mount).unwrap() == mounts::Unmount::Busy {
+        mounts::lazy_detach(&remaining_mount).unwrap();
+    }
     remaining.remove().unwrap();
     let state_path = fixture.path().join("state");
     std::fs::create_dir(&state_path).unwrap();
@@ -365,13 +439,33 @@ fn kernel_publish_revoke_and_refusals() {
     journal.runtime = identity.clone();
     store.save(&journal).unwrap();
     let kernel = || {
-        let mut docker = Receiver { snapshot: inspector.snapshot.clone() };
+        let mut docker = Receiver {
+            snapshot: inspector.snapshot.clone(),
+        };
         let pin = runtime::PinnedRuntime::acquire(&mut docker, &identity).unwrap();
-        kernel::Kernel::new(ProtectedRoot::open(&source_path).unwrap(), ProtectedRoot::open(&publisher_path).unwrap(), ProtectedRoot::open(&staging_path).unwrap(), pin, docker, LinuxAttributes).unwrap().fixture_receiver(&receiver_path)
+        kernel::Kernel::new(
+            ProtectedRoot::open(&source_path).unwrap(),
+            ProtectedRoot::open(&publisher_path).unwrap(),
+            ProtectedRoot::open(&staging_path).unwrap(),
+            pin,
+            docker,
+            LinuxAttributes,
+        )
+        .unwrap()
+        .fixture_receiver(&receiver_path)
     };
     // Foreign receiver mounts quarantine even when the source/root/flags of
     // the legitimate publisher are otherwise correct. Nothing is deleted.
-    assert!(Command::new("/usr/bin/nsenter").arg(format!("--mount=/proc/{pid}/ns/mnt")).args(["/usr/bin/mount", "--bind"]).arg(fixture.path().join("other")).arg(receiver_path.join("reverse")).status().unwrap().success());
+    assert!(
+        Command::new("/usr/bin/nsenter")
+            .arg(format!("--mount=/proc/{pid}/ns/mnt"))
+            .args(["/usr/bin/mount", "--bind"])
+            .arg(fixture.path().join("other"))
+            .arg(receiver_path.join("reverse"))
+            .status()
+            .unwrap()
+            .success()
+    );
     let foreign_state = fixture.path().join("foreign-state");
     std::fs::create_dir(&foreign_state).unwrap();
     let foreign_store = Store::open(ProtectedRoot::open(&foreign_state).unwrap()).unwrap();
@@ -380,17 +474,29 @@ fn kernel_publish_revoke_and_refusals() {
     assert!(foreign_service.journal().quarantined);
     assert!(receiver_lookup.join("reverse/reverse-canary").exists());
     drop(foreign_service);
-    assert!(Command::new("/usr/bin/nsenter").arg(format!("--mount=/proc/{pid}/ns/mnt")).arg("/usr/bin/umount").arg(receiver_path.join("reverse")).status().unwrap().success());
+    assert!(
+        Command::new("/usr/bin/nsenter")
+            .arg(format!("--mount=/proc/{pid}/ns/mnt"))
+            .arg("/usr/bin/umount")
+            .arg(receiver_path.join("reverse"))
+            .status()
+            .unwrap()
+            .success()
+    );
     let request = |revision, kind, name: &str| {
         let mut e = super::tests::envelope(revision, kind);
         e.original.runtime = identity.clone();
         let holder = e.original.holder.as_mut().unwrap();
         holder.enrollment.name = name.into();
         let source = std::fs::metadata(source_path.join("project").join(name)).unwrap();
-        holder.enrollment.source = SourceIdentity { device: source.dev(), inode: source.ino() };
+        holder.enrollment.source = SourceIdentity {
+            device: source.dev(),
+            inode: source.ino(),
+        };
         if name == "agent2" {
             holder.attachment = serde_json::from_str("\"00000000000000000000000009\"").unwrap();
-            holder.enrollment.workspace = serde_json::from_str("\"00000000000000000000000009\"").unwrap();
+            holder.enrollment.workspace =
+                serde_json::from_str("\"00000000000000000000000009\"").unwrap();
         }
         e.original_hash = e.original.hash().unwrap();
         serde_json::to_vec(&e).unwrap()
@@ -400,20 +506,48 @@ fn kernel_publish_revoke_and_refusals() {
     let first = request(1, Kind::Grant, "agent");
     assert_eq!(service.apply(&first), Ok(Reply::Applied));
     assert_eq!(service.apply(&first), Ok(Reply::Applied));
-    assert_eq!(service.apply(&request(2, Kind::Grant, "agent2")), Ok(Reply::Applied));
+    assert_eq!(
+        service.apply(&request(2, Kind::Grant, "agent2")),
+        Ok(Reply::Applied)
+    );
     let retained = File::open(receiver_lookup.join("project/agent")).unwrap();
     drop(service);
-    let mut service = Helper::open(Store::open(ProtectedRoot::open(&state_path).unwrap()).unwrap(), kernel()).unwrap();
-    assert!(!service.journal().quarantined, "committed restart must reconcile both views");
-    assert_eq!(service.apply(&request(3, Kind::Revoke, "agent")), Ok(Reply::PathRevokedVerified));
+    let mut service = Helper::open(
+        Store::open(ProtectedRoot::open(&state_path).unwrap()).unwrap(),
+        kernel(),
+    )
+    .unwrap();
+    assert!(
+        !service.journal().quarantined,
+        "committed restart must reconcile both views"
+    );
+    assert_eq!(
+        service.apply(&request(3, Kind::Revoke, "agent")),
+        Ok(Reply::PathRevokedVerified)
+    );
     assert!(!receiver_lookup.join("project/agent").exists());
-    std::fs::write(source_path.join("project/agent/late"), b"retained-handle-limit").unwrap();
-    let mut late = File::from(nix::fcntl::openat(&retained, "late", nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC, nix::sys::stat::Mode::empty()).unwrap());
+    std::fs::write(
+        source_path.join("project/agent/late"),
+        b"retained-handle-limit",
+    )
+    .unwrap();
+    let mut late = File::from(
+        nix::fcntl::openat(
+            &retained,
+            "late",
+            nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC,
+            nix::sys::stat::Mode::empty(),
+        )
+        .unwrap(),
+    );
     let mut value = String::new();
     std::io::Read::read_to_string(&mut late, &mut value).unwrap();
     assert_eq!(value, "retained-handle-limit");
     assert!(receiver_lookup.join("project/agent2/canary").exists());
-    assert_eq!(service.apply(&request(4, Kind::Revoke, "agent2")), Ok(Reply::PathRevokedVerified));
+    assert_eq!(
+        service.apply(&request(4, Kind::Revoke, "agent2")),
+        Ok(Reply::PathRevokedVerified)
+    );
     assert_eq!(service.store.load().unwrap().last_contiguous_revision, 4);
     assert!(child.0.try_wait().unwrap().is_none());
     assert_eq!(

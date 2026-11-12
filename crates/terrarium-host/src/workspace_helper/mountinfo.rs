@@ -161,8 +161,10 @@ pub(super) fn publisher_at(
         || has(&receiver.vfs_flags, "rw")
         || !has(&host.vfs_flags, "rw")
         || has(&host.vfs_flags, "ro")
-        || !has(&host.vfs_flags, "nosuid") || !has(&host.vfs_flags, "nodev")
-        || !has(&receiver.vfs_flags, "nosuid") || !has(&receiver.vfs_flags, "nodev")
+        || !has(&host.vfs_flags, "nosuid")
+        || !has(&host.vfs_flags, "nodev")
+        || !has(&receiver.vfs_flags, "nosuid")
+        || !has(&receiver.vfs_flags, "nodev")
         || host_view
             .iter()
             .filter(|m| m.namespace == host.namespace && group(m, "shared:") == Some(shared))

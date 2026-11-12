@@ -4,12 +4,12 @@
 //! B4 must admit and serialize daemon operations before forwarding them here.
 //! No kernel backend is selected by this module and hello never enables B4.
 
+pub mod kernel;
 pub mod mountinfo;
 pub mod mounts;
-pub mod kernel;
-pub mod service;
 mod paths;
 pub mod runtime;
+pub mod service;
 mod store;
 
 pub use paths::{Destination, ProtectedRoot, mount_id, scan_source};
@@ -90,7 +90,11 @@ impl<B: Backend> Helper<B> {
             return Err(Reply::Quarantined);
         }
         let e = decode_frame(bytes)?;
-        if matches!(e.original.provenance.caller, terrarium_core::live_workspace::Caller::Link(_)) && e.original.kind != Kind::Revoke {
+        if matches!(
+            e.original.provenance.caller,
+            terrarium_core::live_workspace::Caller::Link(_)
+        ) && e.original.kind != Kind::Revoke
+        {
             return Err(Reply::Unauthorized);
         }
         // Validate supported operations BEFORE writing any intent. Register and
@@ -168,10 +172,18 @@ pub async fn serve_connection<B: Backend>(
     serve_frame(stream, agent_uid, |bytes| helper.apply(bytes)).await
 }
 
-pub(super) async fn serve_frame(mut stream: UnixStream, agent_uid: u32, mut apply: impl FnMut(&[u8]) -> Result<Reply, Reply>) -> std::io::Result<()> {
+pub(super) async fn serve_frame(
+    mut stream: UnixStream,
+    agent_uid: u32,
+    mut apply: impl FnMut(&[u8]) -> Result<Reply, Reply>,
+) -> std::io::Result<()> {
     use std::time::Duration;
     let peer = stream.peer_cred()?;
-    tracing::info!(uid = peer.uid(), allowed = peer.uid() == agent_uid, "workspace helper peer");
+    tracing::info!(
+        uid = peer.uid(),
+        allowed = peer.uid() == agent_uid,
+        "workspace helper peer"
+    );
     tokio::time::timeout(Duration::from_secs(5), async {
         let result = if peer.uid() != agent_uid {
             Err(Reply::Unauthorized)
