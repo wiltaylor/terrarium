@@ -1582,6 +1582,7 @@ impl HostRegistry {
         if let Some(journal) = self.journal.get()
             && let Some(conn) = conn
         {
+            values.retain(|(key, _)| !removed.contains(key));
             journal.replace_on(conn, &values, &removed, &[])?;
         }
         // No live offset or consumer can observe the batch until commit.
@@ -3100,16 +3101,14 @@ mod tests {
             Duration::from_millis(20)
         );
         conn.execute_batch("ROLLBACK").unwrap();
-        for _ in 0..1 {
-            reg.lock()
-                .get_mut("lab1")
-                .unwrap()
-                .pending_journal
-                .get_mut(&session.id())
-                .unwrap()
-                .next = Instant::now();
-            reg.retry_journal("lab1", 1);
-        }
+        reg.lock()
+            .get_mut("lab1")
+            .unwrap()
+            .pending_journal
+            .get_mut(&session.id())
+            .unwrap()
+            .next = Instant::now();
+        reg.retry_journal("lab1", 1);
         for bytes in [b"first".as_slice(), b"second".as_slice()] {
             assert_eq!(
                 session.rx.try_recv().unwrap(),
@@ -3141,88 +3140,80 @@ mod tests {
 
     #[tokio::test]
     async fn journal_no_progress_closes_and_reconnect_replays() {
-        for deadline in [true] {
-            let dir = tempfile::tempdir().unwrap();
-            let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
-            crate::secrets::ensure_key(&conn, dir.path()).unwrap();
-            let reg = Arc::new(registry("lab1", true));
-            reg.restore(dir.path()).unwrap();
-            reg.lock().get_mut("lab1").unwrap().resume_token = Some("retry-token".into());
-            let mut session = reg
-                .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
-                .unwrap();
-            let (tx, mut outgoing) = mpsc::unbounded_channel();
-            let mut pending = PendingJournal::new();
-            if deadline {
-                pending.deadline = Instant::now();
-            } else {
-                for _ in 0..JOURNAL_RETRY_EVENTS {
-                    assert!(pending.push(SessionEvent::Started { pid: None }));
-                }
-            }
-            {
-                let mut g = reg.lock();
-                let e = g.get_mut("lab1").unwrap();
-                e.conn = Some(Conn { id: 1, tx });
-                e.pending_journal.insert(session.id(), pending);
-            }
-            reg.on_data(
-                "lab1",
-                DataFrame::new(session.id(), StreamTag::Stdout, b"replayed".to_vec()),
-            );
-            reg.retry_journal("lab1", 1);
-            assert!(matches!(
-                outgoing.try_recv().unwrap(),
-                Outgoing::Close(None)
-            ));
-            assert!(session.rx.try_recv().is_err());
-            assert!(reg.detach("lab1", 1).is_some());
-            assert!(reg.lock()["lab1"].pending_journal.is_empty());
-            let hello = Hello {
-                protocol: PROTOCOL_VERSION,
-                host: "lab1".into(),
-                version: "test".into(),
-                os: "linux".into(),
-                arch: "x86_64".into(),
-                capabilities: HostCapabilities::default(),
-                max_sessions: 8,
-                max_running_targets: None,
-                update_failed: None,
-                resume: Some(terrarium_host::protocol::Resume {
-                    token: "retry-token".into(),
-                    sessions: vec![terrarium_host::protocol::ResumeOffer {
-                        session: session.id(),
-                        sent: 8,
-                        finished: false,
-                    }],
-                }),
-            };
-            let (welcome, _, count, _) = reg
-                .attach(
-                    &host_row(),
-                    &hello,
-                    Conn {
-                        id: 2,
-                        tx: mpsc::unbounded_channel().0,
-                    },
-                )
-                .unwrap();
-            assert_eq!(count, 1);
-            assert_eq!(welcome.resume[0].received, 0);
-            // Replayed data starts at the unchanged committed offset.
-            reg.on_data(
-                "lab1",
-                DataFrame::new(session.id(), StreamTag::Stdout, b"replayed".to_vec()),
-            );
-            assert_eq!(
-                session.rx.try_recv().unwrap(),
-                SessionEvent::Data {
-                    stream: StreamTag::Stdout,
-                    bytes: b"replayed".to_vec()
-                }
-            );
-            assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 8);
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+        crate::secrets::ensure_key(&conn, dir.path()).unwrap();
+        let reg = Arc::new(registry("lab1", true));
+        reg.restore(dir.path()).unwrap();
+        reg.lock().get_mut("lab1").unwrap().resume_token = Some("retry-token".into());
+        let mut session = reg
+            .open("lab1", |_| DaemonFrame::Ping { nonce: 0 })
+            .unwrap();
+        let (tx, mut outgoing) = mpsc::unbounded_channel();
+        let mut pending = PendingJournal::new();
+        pending.deadline = Instant::now();
+        {
+            let mut g = reg.lock();
+            let e = g.get_mut("lab1").unwrap();
+            e.conn = Some(Conn { id: 1, tx });
+            e.pending_journal.insert(session.id(), pending);
         }
+        reg.on_data(
+            "lab1",
+            DataFrame::new(session.id(), StreamTag::Stdout, b"replayed".to_vec()),
+        );
+        reg.retry_journal("lab1", 1);
+        assert!(matches!(
+            outgoing.try_recv().unwrap(),
+            Outgoing::Close(None)
+        ));
+        assert!(session.rx.try_recv().is_err());
+        assert!(reg.detach("lab1", 1).is_some());
+        assert!(reg.lock()["lab1"].pending_journal.is_empty());
+        let hello = Hello {
+            protocol: PROTOCOL_VERSION,
+            host: "lab1".into(),
+            version: "test".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            capabilities: HostCapabilities::default(),
+            max_sessions: 8,
+            max_running_targets: None,
+            update_failed: None,
+            resume: Some(terrarium_host::protocol::Resume {
+                token: "retry-token".into(),
+                sessions: vec![terrarium_host::protocol::ResumeOffer {
+                    session: session.id(),
+                    sent: 8,
+                    finished: false,
+                }],
+            }),
+        };
+        let (welcome, _, count, _) = reg
+            .attach(
+                &host_row(),
+                &hello,
+                Conn {
+                    id: 2,
+                    tx: mpsc::unbounded_channel().0,
+                },
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(welcome.resume[0].received, 0);
+        // Replayed data starts at the unchanged committed offset.
+        reg.on_data(
+            "lab1",
+            DataFrame::new(session.id(), StreamTag::Stdout, b"replayed".to_vec()),
+        );
+        assert_eq!(
+            session.rx.try_recv().unwrap(),
+            SessionEvent::Data {
+                stream: StreamTag::Stdout,
+                bytes: b"replayed".to_vec()
+            }
+        );
+        assert_eq!(reg.lock()["lab1"].sessions[&session.id()].received, 8);
         let mut pending = PendingJournal::new();
         assert!(pending.push(SessionEvent::Data {
             stream: StreamTag::Stdout,
@@ -3259,14 +3250,19 @@ mod tests {
         });
         ready.await.unwrap();
         let journal = resume::Journal::with_db(dir.path(), db.clone());
+        let payload = |offset: u32| {
+            let mut bytes = vec![0; 256];
+            bytes[..4].copy_from_slice(&offset.to_le_bytes());
+            bytes
+        };
+        let mut acks = 0;
         let mut sent = 0u32;
         while sent < 2000 {
             let count = (2000 - sent).min(64);
-            // Model the receive loop: it stops when any session reaches its
-            // watermark. All sessions share the same host connection.
+            // Exercise a batch across all six sessions on one connection.
             for offset in sent..sent + count {
                 for session in &sessions {
-                    reg.on_data("lab1", DataFrame::new(session.id(), StreamTag::Stdout, offset.to_le_bytes().to_vec()));
+                    reg.on_data("lab1", DataFrame::new(session.id(), StreamTag::Stdout, payload(offset)));
                 }
             }
             if sent == 0 {
@@ -3285,8 +3281,18 @@ mod tests {
             let committed = journal.load::<SavedHost>("host/lab1").unwrap().unwrap();
             for session in &mut sessions {
                 for offset in sent..sent + count {
-                    assert!(committed.sessions[&session.id()].received >= u64::from(offset + 1) * 4);
-                    assert_eq!(session.recv().await.unwrap(), SessionEvent::Data { stream: StreamTag::Stdout, bytes: offset.to_le_bytes().to_vec() });
+                    assert!(committed.sessions[&session.id()].received >= u64::from(offset + 1) * 256);
+                    assert_eq!(session.recv().await.unwrap(), SessionEvent::Data { stream: StreamTag::Stdout, bytes: payload(offset) });
+                }
+            }
+            while let Ok(out) = outgoing.try_recv() {
+                match out {
+                    Outgoing::Frame(frame) => if let DaemonFrame::Ack { session, bytes } = *frame {
+                        assert!(bytes <= committed.sessions[&session].received);
+                        acks += 1;
+                    },
+                    Outgoing::Close(_) => panic!("writer contention closed the connection"),
+                    _ => {}
                 }
             }
             sent += count;
@@ -3299,15 +3305,14 @@ mod tests {
             let events = journal.scan::<SessionEvent>(&format!("event/lab1/{}/", session.id())).unwrap();
             assert_eq!(events.len(), 2001);
             for (offset, (_, event)) in events.iter().take(2000).enumerate() {
-                assert_eq!(event, &SessionEvent::Data { stream: StreamTag::Stdout, bytes: (offset as u32).to_le_bytes().to_vec() });
+                assert_eq!(event, &SessionEvent::Data { stream: StreamTag::Stdout, bytes: payload(offset as u32) });
             }
         }
         let committed = journal.load::<SavedHost>("host/lab1").unwrap().unwrap();
-        let mut acks = 0;
         while let Ok(out) = outgoing.try_recv() {
             match out {
                 Outgoing::Frame(frame) => if let DaemonFrame::Ack { session, bytes } = *frame {
-                    assert_eq!(bytes, 8000);
+                    assert_eq!(bytes, 512000);
                     assert!(bytes <= committed.sessions[&session].received);
                     acks += 1;
                 },
@@ -3315,7 +3320,7 @@ mod tests {
                 _ => {}
             }
         }
-        assert_eq!(acks, 6);
+        assert_eq!(acks, 12);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
