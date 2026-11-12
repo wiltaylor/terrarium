@@ -557,7 +557,11 @@ pub async fn wake_with_work(state: &Shared, only: Option<AgentId>, cause: &'stat
 }
 
 /// Wake queued agents and count failures without making admission fail.
-pub async fn wake_with_work_report(state: &Shared, only: Option<AgentId>, cause: &'static str) -> usize {
+pub async fn wake_with_work_report(
+    state: &Shared,
+    only: Option<AgentId>,
+    cause: &'static str,
+) -> usize {
     let mut failures = 0;
     let ids = match state.db.read(agents::with_queued_work).await {
         Ok(ids) => ids,

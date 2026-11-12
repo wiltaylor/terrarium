@@ -18,11 +18,16 @@ async fn resume_reports_wake_errors_without_failing_admission() {
 async fn resume_does_not_cancel_a_slow_wake_or_wait_for_it() {
     let (release, wait) = tokio::sync::oneshot::channel();
     let (done, completed) = tokio::sync::oneshot::channel();
-    let answer = tokio::time::timeout(Duration::from_secs(5), resume_answer(async move {
-        let _ = wait.await;
-        let _ = done.send(());
-        0
-    })).await.unwrap();
+    let answer = tokio::time::timeout(
+        Duration::from_secs(5),
+        resume_answer(async move {
+            let _ = wait.await;
+            let _ = done.send(());
+            0
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!answer.on);
     assert_eq!(answer.wake_errors, 0);
     assert!(answer.wake_pending);

@@ -57,7 +57,9 @@ pub async fn update(ctx: &Ctx, cmd: &UpdateCmd) -> anyhow::Result<()> {
                 c.line("the drain ended: the daemon takes new turns");
                 let errors = v["wake_errors"].as_u64().unwrap_or(0);
                 if errors > 0 {
-                    c.line(format!("warning: {errors} wake error(s); queued work remains queued"));
+                    c.line(format!(
+                        "warning: {errors} wake error(s); queued work remains queued"
+                    ));
                 }
                 if v["wake_pending"].as_bool().unwrap_or(false) {
                     c.line("warning: waking queued work continues in the background");

@@ -803,7 +803,8 @@ pub async fn end_drain(state: &Shared) -> ResumeInfo {
     let state = state.clone();
     resume_answer(async move {
         crate::lifecycle::wake_with_work_report(&state, None, "drain_end").await
-    }).await
+    })
+    .await
 }
 
 /// Admission has already reopened. Wake failures are warnings, not a failed resume.
@@ -815,16 +816,24 @@ pub struct ResumeInfo {
     pub wake_pending: bool,
 }
 
-async fn resume_answer(wake: impl std::future::Future<Output = usize> + Send + 'static) -> ResumeInfo {
+async fn resume_answer(
+    wake: impl std::future::Future<Output = usize> + Send + 'static,
+) -> ResumeInfo {
     // Keep a slow wake alive after the response. Do not wait on busy-agent
     // status or queued work to acknowledge the admission state change.
     let mut task = tokio::spawn(wake);
-    let (wake_errors, wake_pending) = match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
-        Ok(Ok(errors)) => (errors, false),
-        Ok(Err(_)) => (1, false),
-        Err(_) => (0, true),
-    };
-    ResumeInfo { on: false, jobs_drain: None, wake_errors, wake_pending }
+    let (wake_errors, wake_pending) =
+        match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+            Ok(Ok(errors)) => (errors, false),
+            Ok(Err(_)) => (1, false),
+            Err(_) => (0, true),
+        };
+    ResumeInfo {
+        on: false,
+        jobs_drain: None,
+        wake_errors,
+        wake_pending,
+    }
 }
 
 // ------------------------------------------------------------ the task

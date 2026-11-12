@@ -5654,9 +5654,10 @@ impl Supervisor for RunnerSupervisor {
             // not an empty account. Compare the account the next launch
             // would actually select, rather than restarting every default
             // account runner whenever the daemon recovers it.
-            let desired_account = agent.subscription.clone().or(
-                self.store_view(&agent).await.default_account
-            );
+            let desired_account = agent
+                .subscription
+                .clone()
+                .or(self.store_view(&agent).await.default_account);
             let settled = if let Some(slot) = lock(&self.inner.slots).get_mut(&id) {
                 slot.harness_version = version;
                 // A swap that the stored agent names and that the harness

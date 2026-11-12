@@ -198,7 +198,9 @@ impl Engine for Fake {
                 });
             }
             let what = match (argv[0].as_str(), argv.get(3).map(String::as_str)) {
-                ("terrarium", Some("status")) if argv.get(2).is_some_and(|s| s == "update") => "update-status".to_owned(),
+                ("terrarium", Some("status")) if argv.get(2).is_some_and(|s| s == "update") => {
+                    "update-status".to_owned()
+                }
                 ("terrarium", Some("drain")) => "drain".to_owned(),
                 ("terrarium", Some("drain-jobs")) => "drain-jobs".to_owned(),
                 ("terrarium", Some("resume")) => "resume".to_owned(),
@@ -216,7 +218,12 @@ impl Engine for Fake {
                 }
             }
             let stdout = if what == "update-status" {
-                self.0.lock().unwrap().resume_status.clone().unwrap_or_default()
+                self.0
+                    .lock()
+                    .unwrap()
+                    .resume_status
+                    .clone()
+                    .unwrap_or_default()
             } else if what == "backup" {
                 format!(r#"{{"name": "terrarium-backup-1.zip", "path": "{BACKUP}"}}"#)
             } else if what == "drain-jobs" {
@@ -484,7 +491,17 @@ async fn resume_retries_an_old_daemon_that_is_not_ready() {
     r.updater.resume(&cur).await;
     let calls = r.fake.calls();
     assert_eq!(calls.iter().filter(|c| *c == "resume c0").count(), 2);
-    assert_eq!(r.updater.running().as_ref().unwrap().steps.last().unwrap().state, StepState::Ok);
+    assert_eq!(
+        r.updater
+            .running()
+            .as_ref()
+            .unwrap()
+            .steps
+            .last()
+            .unwrap()
+            .state,
+        StepState::Ok
+    );
 }
 
 #[tokio::test]
@@ -499,9 +516,21 @@ async fn resume_accepts_verified_open_drains_after_a_failed_or_slow_wake() {
             s.resume_status = Some(r#"{"drain":{"on":false,"jobs_drain":null}}"#.into());
         }
         let cur = r.fake.target().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(10), r.updater.resume(&cur)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), r.updater.resume(&cur))
+            .await
+            .unwrap();
         assert!(r.fake.calls().iter().any(|c| c == "update-status c0"));
-        assert_eq!(r.updater.running().as_ref().unwrap().steps.last().unwrap().state, StepState::Ok);
+        assert_eq!(
+            r.updater
+                .running()
+                .as_ref()
+                .unwrap()
+                .steps
+                .last()
+                .unwrap()
+                .state,
+            StepState::Ok
+        );
     }
 }
 

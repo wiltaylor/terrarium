@@ -196,7 +196,10 @@ async fn drain(
 }
 
 /// `POST /api/system/update/resume`: end the drain.
-async fn resume(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<self_update::ResumeInfo>> {
+async fn resume(
+    State(state): State<Shared>,
+    actor: Actor,
+) -> ApiResult<Json<self_update::ResumeInfo>> {
     policy::operator_only(&actor, WHAT)?;
     Ok(Json(self_update::end_drain(&state).await))
 }
