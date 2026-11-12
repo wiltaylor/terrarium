@@ -38,8 +38,9 @@ async fn trace_child(name: &str) -> bool {
         .output().await.unwrap();
     assert!(
         output.status.success(),
-        "TRACE child failed: {}",
-        String::from_utf8_lossy(&output.stdout)
+        "TRACE child failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
     true
 }
@@ -752,10 +753,24 @@ async fn durable_run_resume_never_replays_credentials() {
         if let Message::Text(text) = message {
             assert_no_password(text.as_bytes());
             let frame: DaemonFrame = serde_json::from_str(&text).unwrap();
-            assert!(!matches!(
-                frame,
-                DaemonFrame::Exec(_) | DaemonFrame::CpPush(_) | DaemonFrame::CpPull(_)
-            ));
+            // Reconnect reconciliation and run-kill cleanup may open their own
+            // service sessions. Neither those nor resume may resend credentials
+            // or start the original session again.
+            match &frame {
+                DaemonFrame::Exec(req) => {
+                    assert_ne!(req.session, session);
+                    assert!(req.windows_run_as.is_none());
+                }
+                DaemonFrame::CpPush(req) => {
+                    assert_ne!(req.session, session);
+                    assert!(req.windows_run_as.is_none());
+                }
+                DaemonFrame::CpPull(req) => {
+                    assert_ne!(req.session, session);
+                    assert!(req.windows_run_as.is_none());
+                }
+                _ => {}
+            }
             lab.captures.push(format!("{frame:?}"));
         }
     }
