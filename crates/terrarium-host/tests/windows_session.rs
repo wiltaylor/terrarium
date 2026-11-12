@@ -139,12 +139,20 @@ fn versioned_update_preserves_both_images_across_rollback() {
     std::fs::write(&verified, b"new").unwrap();
     let transaction = Journal::stage(&verified, &binary, root.path(), "test-new").unwrap();
     let mut selected = binary.clone();
-    transaction.activate(&root.path().join("pending.json"), |next| {
-        selected = next.to_owned(); Ok(())
-    }).unwrap();
+    transaction
+        .activate(&root.path().join("pending.json"), |next| {
+            selected = next.to_owned();
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(std::fs::read(&selected).unwrap(), b"new");
     assert_eq!(std::fs::read(&binary).unwrap(), b"old");
-    transaction.rollback(|old| { selected = old.to_owned(); Ok(()) }).unwrap();
+    transaction
+        .rollback(|old| {
+            selected = old.to_owned();
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(std::fs::read(&selected).unwrap(), b"old");
     assert_eq!(std::fs::read(&transaction.next).unwrap(), b"new");
 }

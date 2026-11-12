@@ -1,14 +1,19 @@
 //! Loopback-only native service update fixture. Does not access enrollment.
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
-use terrarium_host::protocol::{DaemonFrame, HostFrame, UpdateOffer, Welcome, decode_control, encode_control};
+use terrarium_host::protocol::{
+    DaemonFrame, HostFrame, UpdateOffer, Welcome, decode_control, encode_control,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    anyhow::ensure!(args.len() == 5, "usage: windows-update-stub PORT ASSET VERSION accept|reject");
+    anyhow::ensure!(
+        args.len() == 5,
+        "usage: windows-update-stub PORT ASSET VERSION accept|reject"
+    );
     let port: u16 = args[1].parse()?;
     let asset = Arc::new(std::fs::read(&args[2])?);
     let version = args[3].clone();
@@ -79,7 +84,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Ok(())
             }.await;
-            if let Err(error) = result { eprintln!("fixture connection: {error}"); }
+            if let Err(error) = result {
+                eprintln!("fixture connection: {error}");
+            }
         });
     }
 }

@@ -112,8 +112,9 @@ if (!$service) {
     # Omitted credentials select LocalSystem. No interactive logon or desktop.
     New-Service -Name TerrariumHost -DisplayName 'Terrarium Host' -BinaryPathName $command -StartupType Automatic | Out-Null
 } else {
-    & sc.exe config TerrariumHost binPath= $command obj= LocalSystem start= auto | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Cannot update service configuration.' }
+    $instance = Get-CimInstance Win32_Service -Filter "Name='TerrariumHost'"
+    $changed = Invoke-CimMethod -InputObject $instance -MethodName Change -Arguments @{PathName=$command; StartName='LocalSystem'; StartMode='Automatic'}
+    if ($changed.ReturnValue -ne 0) { throw 'Cannot update service configuration.' }
 }
 & sc.exe failure TerrariumHost reset= 86400 actions= restart/5000/restart/15000/restart/30000 | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Cannot set service recovery.' }
