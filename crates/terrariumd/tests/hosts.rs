@@ -563,11 +563,17 @@ async fn self_update_signature_flow(signed: bool) {
         reqwest::StatusCode::NOT_FOUND
     );
     if signed {
-        let private_key = std::env::var_os("TERRARIUM_TEST_SIGNING_KEY").expect("ephemeral signing key path");
-        let asset = dist.path().join(format!("terrarium-host-{}-linux", std::env::consts::ARCH));
+        let private_key =
+            std::env::var_os("TERRARIUM_TEST_SIGNING_KEY").expect("ephemeral signing key path");
+        let asset = dist
+            .path()
+            .join(format!("terrarium-host-{}-linux", std::env::consts::ARCH));
         let signature = std::process::Command::new("openssl")
             .args(["dgst", "-sha256", "-sign"])
-            .arg(private_key).arg(&asset).output().unwrap();
+            .arg(private_key)
+            .arg(&asset)
+            .output()
+            .unwrap();
         assert!(signature.status.success(), "test asset signing failed");
         let bundle = json!({
             "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
@@ -576,63 +582,78 @@ async fn self_update_signature_flow(signed: bool) {
                 "signature": B64.encode(signature.stdout)
             }
         });
-        let cache = format!("terrarium-host-{}-linux.{}.sigstore.json", std::env::consts::ARCH, sha(served.as_bytes()));
-        std::fs::write(dist.path().join(cache), serde_json::to_vec(&bundle).unwrap()).unwrap();
-        tokio::time::timeout(Duration::from_secs(30), Client::new(options("0.0.9+0000000")).run())
-            .await.expect("the host agent stops after the signed update");
+        let cache = format!(
+            "terrarium-host-{}-linux.{}.sigstore.json",
+            std::env::consts::ARCH,
+            sha(served.as_bytes())
+        );
+        std::fs::write(
+            dist.path().join(cache),
+            serde_json::to_vec(&bundle).unwrap(),
+        )
+        .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            Client::new(options("0.0.9+0000000")).run(),
+        )
+        .await
+        .expect("the host agent stops after the signed update");
         assert_eq!(std::fs::read_to_string(&bin).unwrap(), served);
         assert_eq!(std::fs::read_to_string(sidecar(&bin, PREV)).unwrap(), old);
-        assert_eq!(std::fs::read_to_string(sidecar(&bin, PENDING)).unwrap(), format!("{}\n", terrarium_version::FULL));
+        assert_eq!(
+            std::fs::read_to_string(sidecar(&bin, PENDING)).unwrap(),
+            format!("{}\n", terrarium_version::FULL)
+        );
         assert!(!sidecar(&bin, NEW).exists());
     } else {
-    for cached in [false, true] {
-        if cached {
-            let name = format!(
-                "terrarium-host-{}-linux.{}.sigstore.json",
-                std::env::consts::ARCH,
-                sha(served.as_bytes())
-            );
-            std::fs::write(dist.path().join(name), b"untrusted bundle").unwrap();
-            let response = reqwest::get(&bundle_url).await.unwrap();
-            assert_eq!(response.status(), reqwest::StatusCode::OK);
-            assert_eq!(
-                response.bytes().await.unwrap().as_ref(),
-                b"untrusted bundle"
-            );
+        for cached in [false, true] {
+            if cached {
+                let name = format!(
+                    "terrarium-host-{}-linux.{}.sigstore.json",
+                    std::env::consts::ARCH,
+                    sha(served.as_bytes())
+                );
+                std::fs::write(dist.path().join(name), b"untrusted bundle").unwrap();
+                let response = reqwest::get(&bundle_url).await.unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                assert_eq!(
+                    response.bytes().await.unwrap().as_ref(),
+                    b"untrusted bundle"
+                );
+            }
+            let task = tokio::spawn(Client::new(options("0.0.9+0000000")).run());
+            wait_until(
+                &trace,
+                "missing signature refusal was not logged",
+                async || {
+                    if cached {
+                        trace.text().contains("no release verification key")
+                    } else {
+                        trace
+                            .text()
+                            .contains("cannot obtain release signature bundle")
+                    }
+                },
+            )
+            .await;
+            assert!(!task.is_finished());
+            assert_eq!(std::fs::read_to_string(&bin).unwrap(), old);
+            for suffix in [NEW, PENDING, PREV] {
+                assert!(!sidecar(&bin, suffix).exists(), "{suffix}");
+            }
+            task.abort();
+            let _ = task.await;
         }
-        let task = tokio::spawn(Client::new(options("0.0.9+0000000")).run());
-        wait_until(
-            &trace,
-            "missing signature refusal was not logged",
-            async || {
-                if cached {
-                    trace.text().contains("no release verification key")
-                } else {
-                    trace
-                        .text()
-                        .contains("cannot obtain release signature bundle")
-                }
-            },
-        )
-        .await;
-        assert!(!task.is_finished());
-        assert_eq!(std::fs::read_to_string(&bin).unwrap(), old);
-        for suffix in [NEW, PENDING, PREV] {
-            assert!(!sidecar(&bin, suffix).exists(), "{suffix}");
-        }
-        task.abort();
-        let _ = task.await;
-    }
 
-    // Simulate a manual install with a pending confirmation, not a bypass of
-    // the signature requirement in Client::self_update.
-    write_exec(&bin, &served);
-    std::fs::write(sidecar(&bin, PREV), &old).unwrap();
-    std::fs::write(
-        sidecar(&bin, PENDING),
-        format!("{}\n", terrarium_version::FULL),
-    )
-    .unwrap();
+        // Simulate a manual install with a pending confirmation, not a bypass of
+        // the signature requirement in Client::self_update.
+        write_exec(&bin, &served);
+        std::fs::write(sidecar(&bin, PREV), &old).unwrap();
+        std::fs::write(
+            sidecar(&bin, PENDING),
+            format!("{}\n", terrarium_version::FULL),
+        )
+        .unwrap();
     }
 
     // "systemd" starts the new build: it confirms the update, and the
