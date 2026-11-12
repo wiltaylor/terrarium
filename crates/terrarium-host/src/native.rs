@@ -1526,12 +1526,9 @@ impl Helper {
     }
 
     async fn inventory(&self) -> Result<Vec<(String, u32)>, Refusal> {
-        let text = call(
-            &self.nvidia_smi,
-            &["-q".to_owned()],
-        )
-        .await
-        .map_err(|e| Refusal::new(ErrorKind::Unsupported, e))?;
+        let text = call(&self.nvidia_smi, &["-q".to_owned()])
+            .await
+            .map_err(|e| Refusal::new(ErrorKind::Unsupported, e))?;
         parse_gpu_details(&text).map_err(|e| Refusal::new(ErrorKind::Unsupported, e))
     }
 

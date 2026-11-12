@@ -1131,4 +1131,3 @@ fn gpu_details_fail_closed() {
         assert!(parse_gpu_details(&bad).is_err(), "accepted {bad:?}");
     }
 }
-
