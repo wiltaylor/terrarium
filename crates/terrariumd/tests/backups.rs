@@ -25,8 +25,13 @@ async fn the_api_makes_lists_and_serves_backups_for_the_operator_only() {
         .await
         .err(403, "forbidden");
     td.get_as(&sys, "/api/backups").await.err(403, "forbidden");
-    td.post_as(&sys, "/api/backups/recovery-release", json!({"run":"failed"}))
-        .await.err(403, "forbidden");
+    td.post_as(
+        &sys,
+        "/api/backups/recovery-release",
+        json!({"run":"failed"}),
+    )
+    .await
+    .err(403, "forbidden");
 
     // A diff with no full backup is invalid.
     td.post("/api/backups", json!({"kind": "diff"}))
