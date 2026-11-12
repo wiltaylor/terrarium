@@ -9,7 +9,7 @@ metadata:
 
 A monitor is a shell script that Terrarium runs on a target on a schedule.
 The script prints a value or exits with a status code. Terrarium keeps each
-result. The project dashboard shows the monitors as blocks: a big value, a
+result. The project's custom page `dashboard` shows monitors as widgets: a big value, a
 status, a chart, text, or a table. The operator sees the dashboard first
 when they open the project.
 
@@ -130,7 +130,7 @@ full width), an optional `title`, and `options`: `range` of a chart (`1h`,
 `decimals` (0-6). A note has Markdown `text`: use it as a section header.
 
 ```sh
-terrarium dashboard show --json > layout.json   # edit: keep the blocks, drop the monitors
+terrarium dashboard show --json > layout.json   # compatibility alias for page dashboard
 terrarium dashboard set --from-file layout.json
 ```
 
@@ -138,6 +138,14 @@ terrarium dashboard set --from-file layout.json
 block needs a `json` monitor. Several blocks can show the same monitor:
 a stat and a chart of the load, for example. The save replaces the whole
 layout, so read it first and keep the blocks of others.
+
+The Dashboard is now a custom page at `/p/<project>/pages/dashboard`.
+Edit its snap-grid widgets with Edit page or `terrarium page show` and
+`terrarium page set`. Monitors are managed under project Settings, Monitors
+(`/p/<project>/settings/monitors`). The dashboard commands and API remain
+compatibility aliases for at least one release. A deleted dashboard page
+reads as an empty layout. Saving through the alias replaces monitor and
+Markdown widgets, preserving system and wiki widgets.
 
 ## Alerts
 

@@ -45,6 +45,10 @@ pub enum WidgetKind {
     Chart,
     Text,
     Table,
+    Actions,
+    MonitorSummary,
+    JobQueue,
+    EtaAccuracy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,8 +126,8 @@ fn check(c: &Connection, project: &str, slug: &str, input: &PageInput) -> ApiRes
     if input.title.trim().is_empty() || input.title.chars().count() > 120 {
         return Err(ApiError::invalid("page title must be 1-120 characters"));
     }
-    if input.widgets.len() > 100 {
-        return Err(ApiError::invalid("at most 100 widgets"));
+    if input.widgets.len() > 104 {
+        return Err(ApiError::invalid("at most 104 widgets"));
     }
     let mut ids = HashSet::new();
     let mut blocks = Vec::new();
@@ -156,6 +160,11 @@ fn check(c: &Connection, project: &str, slug: &str, input: &PageInput) -> ApiRes
             return Err(bad("decimals must be 0-6"));
         }
         match w.kind {
+            WidgetKind::Actions | WidgetKind::MonitorSummary | WidgetKind::JobQueue | WidgetKind::EtaAccuracy => {
+                if w.monitor.is_some() || w.wiki.is_some() || w.text.is_some() {
+                    return Err(bad("system widgets have no source"));
+                }
+            }
             WidgetKind::Markdown => {
                 if w.monitor.is_some()
                     || w.wiki.is_some()

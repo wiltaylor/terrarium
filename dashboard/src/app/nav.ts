@@ -14,7 +14,6 @@ export const PROJECT_TABS = [
   { path: "schedules", label: "Schedules" },
   // The board rules of the project (docs/api.md §19.12): the rules that run, the lint, the runs, and the switch to rules.
   { path: "rules", label: "Rules" },
-  { path: "dashboard", label: "Dashboard" },
   { path: "agents", label: "Agents" },
   { path: "repos", label: "Repos" },
   { path: "knowledge", label: "Knowledge" },
@@ -44,6 +43,7 @@ export const PROJECT_SETTINGS_TABS = [
   { path: "secrets", label: "Secrets" },
   // The templates that apply to the project: its own and the global ones.
   { path: "templates", label: "Templates" },
+  { path: "monitors", label: "Monitors" },
 ] as const;
 
 /**

@@ -210,7 +210,7 @@ pub fn list(
             };
             if attention {
                 items.push(json!({"id": id, "project": project, "name": name, "status": status,
-                    "link": format!("/p/{project}/{}", if kind == "monitors" { "dashboard" } else { "pipelines" })}));
+                    "link": format!("/p/{project}/{}", if kind == "monitors" { "settings/monitors" } else { "pipelines" })}));
             }
         }
     }

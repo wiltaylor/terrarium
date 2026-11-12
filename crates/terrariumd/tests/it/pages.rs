@@ -27,8 +27,8 @@ async fn crud_rights_order_limits_and_audit() {
     let sys = sys["id"].as_str().unwrap();
     let path = "/api/projects/p/pages/overview";
     assert_eq!(
-        td.get("/api/projects/p/pages").await.ok()["items"],
-        json!([])
+        td.get("/api/projects/p/pages").await.ok()["items"][0]["slug"],
+        json!("dashboard")
     );
     td.get(path).await.err(404, "not_found");
     td.get("/api/projects/missing/pages")
@@ -60,7 +60,7 @@ async fn crud_rights_order_limits_and_audit() {
     );
     td.get_as(outsider, path).await.err(403, "forbidden");
     td.put_as(sys, path, body()).await.ok();
-    for n in 1..10 {
+    for n in 1..9 {
         let mut b = body();
         b["position"] = json!(n);
         td.put(&format!("/api/projects/p/pages/page{n}"), b)
@@ -90,13 +90,13 @@ async fn crud_rights_order_limits_and_audit() {
                 [],
                 |r| r.get(0),
             )?;
-            assert_eq!(audits, 14);
+            assert_eq!(audits, 13);
             let events: i64 = c.query_row(
                 "SELECT count(*) FROM events WHERE kind='page.updated'",
                 [],
                 |r| r.get(0),
             )?;
-            assert_eq!(events, 14);
+            assert_eq!(events, 13);
             Ok(())
         })
         .await
