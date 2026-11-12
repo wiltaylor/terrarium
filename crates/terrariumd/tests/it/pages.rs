@@ -196,7 +196,8 @@ async fn monitor_sources_are_local_compatible_and_preserved_when_deleted() {
         td.put(path, b.clone()).await.err(422, "invalid");
     }
     b["widgets"] = json!([{"id":"metric","kind":"stat","x":0,"y":0,"w":12,"h":2,"monitor":ids[0]}]);
-    td.put(path, b.clone()).await.ok();
+    let saved = td.put(path, b.clone()).await;
+    saved.ok();
     td.delete(&format!("/api/monitors/{}", ids[0])).await.ok();
-    assert_eq!(td.get(path).await.ok()["widgets"], b["widgets"]);
+    assert_eq!(td.get(path).await.ok()["widgets"], saved.body["widgets"]);
 }
