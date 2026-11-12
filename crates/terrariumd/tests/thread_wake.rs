@@ -553,7 +553,7 @@ impl Lab {
                 eph,
                 &format!("/api/agents/{eph}/questions"),
                 json!({"text": "Does it work?", "options": ["works", "found an issue"],
-                       "thread": tid}),
+                       "thread": tid, "test_request": true}),
             )
             .await;
         assert_eq!(r.status, 201, "{}", r.body);

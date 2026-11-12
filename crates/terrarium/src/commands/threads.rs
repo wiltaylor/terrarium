@@ -267,7 +267,9 @@ pub async fn thread(ctx: &Ctx, cmd: &ThreadCmd) -> anyhow::Result<()> {
                 ));
             }
             let mut body = json!({"text": ctx.text(text)?, "thread": id});
-            body["test_request"] = json!(test_request);
+            if *test_request {
+                body["test_request"] = json!(true);
+            }
             if *multi_select {
                 body["multi_select"] = json!(true);
             }
