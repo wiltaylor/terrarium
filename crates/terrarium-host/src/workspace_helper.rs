@@ -5,6 +5,7 @@
 //! No kernel backend is selected by this module and hello never enables B4.
 
 pub mod kernel;
+mod confinement;
 pub mod mountinfo;
 pub mod mounts;
 mod paths;
@@ -158,6 +159,7 @@ impl<B: Backend> Helper<B> {
         }
         let reply = self.journal.commit(e.original.operation)?;
         self.save()?; // committed result and evidence durable BEFORE reply
+        #[cfg(test)] crash("committed");
         Ok(reply)
     }
 }
@@ -217,5 +219,16 @@ pub(super) async fn serve_frame(
 
 #[cfg(test)]
 mod disposable;
+#[cfg(test)]
+mod crash_probe;
+
+/// Test-only hard process death, never present in the installed helper build.
+#[cfg(test)]
+fn crash(point: &str) {
+    if std::env::var("TERRARIUM_B2_DISPOSABLE").as_deref() == Ok("1") && std::env::var("TERRARIUM_B2_CRASH_POINT").as_deref() == Ok(point) {
+        let _ = nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0);
+        std::process::abort();
+    }
+}
 #[cfg(test)]
 mod tests;

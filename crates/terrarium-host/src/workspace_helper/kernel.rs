@@ -34,11 +34,11 @@ pub struct Kernel<I, A> {
     live: BTreeMap<AttachmentId, Holder>,
     known: BTreeMap<WorkspaceId, Holder>,
     pending: Option<Pending>,
-    revoking: Option<(Holder, File)>,
+    revoking: Option<(Holder, super::paths::RevokePoint)>,
     receiver_relative: String,
 }
 
-fn path(fd: &File) -> Result<PathBuf, Reply> {
+pub(super) fn path(fd: &File) -> Result<PathBuf, Reply> {
     let p = std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
         .map_err(|_| Reply::Quarantined)?;
     if !p.is_absolute() || p.to_string_lossy().ends_with(" (deleted)") {
@@ -46,7 +46,7 @@ fn path(fd: &File) -> Result<PathBuf, Reply> {
     }
     Ok(p)
 }
-fn host_view() -> Result<Vec<MountEvidence>, Reply> {
+pub(super) fn host_view() -> Result<Vec<MountEvidence>, Reply> {
     let mut bytes = Vec::new();
     File::open("/proc/self/mountinfo")
         .map_err(|_| Reply::Failed)?
@@ -77,7 +77,7 @@ fn same_source(fd: &File, e: &Enrollment) -> Result<(), Reply> {
     }
     Ok(())
 }
-fn root_of(source: &File, view: &[MountEvidence]) -> Result<(String, String), Reply> {
+pub(super) fn root_of(source: &File, view: &[MountEvidence]) -> Result<(String, String), Reply> {
     let id = mount_id(source)?;
     let mount = view
         .iter()
@@ -379,6 +379,7 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
         let destination = self.publisher.destination(&holder.enrollment)?;
         let tree = mounts::clone_nonrecursive(&source)?;
         mounts::attach(&tree, stage.placeholder()?)?;
+        #[cfg(test)] super::crash("stage_move");
         let staged = stage.mounted()?;
         let view = host_view()?;
         let observed = at(&view, &path(&staged)?)?;
@@ -406,11 +407,13 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
             return Err(Reply::Conflict);
         }
         mounts::make_private(&p.staged)?;
+        #[cfg(test)] super::crash("private");
         let view = host_view()?;
         if !at(&view, &path(&p.staged)?)?.optional_fields.is_empty() {
             return Err(Reply::Quarantined);
         }
         self.attributes.workspace(&p.staged)?;
+        #[cfg(test)] super::crash("attributes");
         let view = host_view()?;
         mountinfo::private_stage(at(&view, &path(&p.staged)?)?, &p.root, &p.device)
     }
@@ -429,6 +432,7 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
         }
         scan_source(&p.source)?;
         mounts::attach(&p.staged, p.destination.placeholder()?)?;
+        #[cfg(test)] super::crash("publish_move");
         p.stage.take().ok_or(Reply::Failed)?.remove()?;
         self.live.insert(holder.attachment, holder.clone());
         Ok(())
@@ -443,10 +447,10 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
             return Err(Reply::Conflict);
         }
         self.topology()?;
-        let mount = self.publisher.workspace_mount(&holder.enrollment)?;
-        same_source(&mount, &holder.enrollment)?;
-        let busy = mounts::ordinary_unmount(&mount)? == Unmount::Busy;
-        self.revoking = Some((holder.clone(), mount));
+        let point = self.publisher.revoke_point(&holder.enrollment)?;
+        let busy = point.ordinary()? == Unmount::Busy;
+        #[cfg(test)] if !busy { super::crash("ordinary_unmount"); }
+        self.revoking = Some((holder.clone(), point));
         Ok(busy)
     }
 
@@ -455,7 +459,9 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
         if e.original.holder.as_ref() != Some(holder) {
             return Err(Reply::Conflict);
         }
-        mounts::lazy_detach(mount)
+        mount.detach()?;
+        #[cfg(test)] super::crash("lazy_unmount");
+        Ok(())
     }
 
     fn remove_placeholder(&mut self, e: &Envelope) -> Result<(), Reply> {
@@ -466,6 +472,7 @@ impl<I: Inspector, A: Attributes> Backend for Kernel<I, A> {
         self.publisher
             .unmounted_destination(&holder.enrollment)?
             .remove()?;
+        #[cfg(test)] super::crash("placeholder_remove");
         self.live.remove(&holder.attachment);
         Ok(())
     }

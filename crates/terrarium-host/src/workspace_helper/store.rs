@@ -67,6 +67,7 @@ impl Store {
         Self::open_owned(
             ProtectedRoot {
                 fd: File::open(path).map_err(|_| Reply::Failed)?,
+                ancestors: Vec::new(),
             },
             nix::unistd::geteuid().as_raw(),
         )

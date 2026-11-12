@@ -119,6 +119,16 @@ non-root host-agent UID. This authenticates the trusted forwarder, not a lease.
 The daemon/host-agent/Docker authority boundary from TER-750 still applies.
 No generic host verb exposes this protocol. Link-originated grants are refused.
 
+Before opening any store (including creating its lock), startup opens every
+registration root and runs a read-only confinement preflight over the whole
+configuration. State, config and socket directories must be disjoint from all
+work, publisher and staging trees. This checks pinned root/ancestor dev+inode
+identities in both directions, namespace paths, and filesystem-relative mount
+roots. It also inspects mounted descendants for aliases of control directories
+or files into a workspace. A bind alias of a state subtree cannot evade the
+check by having a different administrative pathname. No helper is constructed
+and no startup snapshot is written before every registration passes.
+
 Frames have a four-byte big-endian byte length followed by the B1 envelope,
 at most 64 KiB, with a five-second connection deadline. Replies use the same
 framing and a typed `Reply`. Unknown fields, paths, namespace PIDs and arbitrary
@@ -171,6 +181,13 @@ ENOENT in both pinned views before committing `path_revoked_verified`. Open FDs,
 cwd, mmap and copied data survive. A retained directory FD can still perform new
 relative lookups. B4's permanent trust-domain seal is not released by revoke.
 
+Ordinary unmount retains a pinned root-only parent and validates the derived
+leaf's mount ID and source identity immediately before the syscall. It closes
+its own lookup FD first, so it does not manufacture EBUSY by keeping an open
+handle on the very mount being unmounted. The final component is no-follow.
+Lazy detach reopens and revalidates the same mount when genuine users cause
+EBUSY. Namespace and journal FDs remain pinned throughout.
+
 The only unsafe code is the operator-approved `terrarium-sys` mount_setattr
 wrapper. Its API borrows an FD and accepts bounded typed attributes. Every other
 crate retains the workspace forbid lint, checked by a regression test. The
@@ -178,3 +195,15 @@ privileged fixture is ignored by ordinary checks and must be run explicitly on
 the disposable VM in a new private mount namespace with
 `TERRARIUM_B2_DISPOSABLE=1`. Skipping it is not kernel evidence. No helper service
 is installed or activated by any test.
+
+The interrupted-state disposable test aborts a separate helper child with
+SIGABRT immediately after real staging, private/attribute, publication,
+ordinary/lazy unmount and placeholder-removal syscalls, before their next
+durable phase record. It also aborts after committed snapshots before grant
+and revoke replies. Parent and helper child share only the outer private test
+mount namespace, so the mutations survive child death. Reopening the real
+backend must quarantine pending state or return the exact committed retry,
+without changing the surviving mount table, deleting unknown mounts or
+resurrecting a revoked path. An unrelated holder and its canary must survive
+every case. Fault hooks and the aborting child probe are compiled only into
+test builds, never the installed executable.

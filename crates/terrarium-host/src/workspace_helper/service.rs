@@ -31,7 +31,7 @@ fn failed() -> std::io::Error {
     std::io::Error::other("workspace helper refused protected configuration, state or runtime")
 }
 
-fn config() -> Result<Config, Reply> {
+fn config() -> Result<(Config, ProtectedRoot, File), Reply> {
     use nix::fcntl::{OFlag, openat};
     let root = ProtectedRoot::open(std::path::Path::new("/etc/terrarium-workspace-helper"))?;
     let file = File::from(
@@ -48,10 +48,10 @@ fn config() -> Result<Config, Reply> {
         return Err(Reply::Unauthorized);
     }
     let mut bytes = Vec::new();
-    file.take(MAX_FRAME_BYTES as u64 + 1)
+    (&file).take(MAX_FRAME_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| Reply::Failed)?;
-    parse_config(&bytes)
+    Ok((parse_config(&bytes)?, root, file))
 }
 
 fn parse_config(bytes: &[u8]) -> Result<Config, Reply> {
@@ -107,32 +107,37 @@ pub async fn run() -> std::io::Result<()> {
             "workspace helper requires root",
         ));
     }
-    let c = config().map_err(|_| failed())?;
+    let (c, config_root, _config_file) = config().map_err(|_| failed())?;
+    let source = ProtectedRoot::open(&c.work_root).map_err(|_| failed())?;
+    let socket_root = ProtectedRoot::open(std::path::Path::new("/run/terrarium-workspace-helper")).map_err(|_| failed())?;
+    let metadata = socket_root.fd.metadata()?;
+    if metadata.gid() != c.host_agent_gid || metadata.mode() & 0o777 != 0o750 { return Err(failed()); }
+    struct Opened { publisher: ProtectedRoot, staging: ProtectedRoot, state: ProtectedRoot }
+    let mut opened = Vec::new();
+    for r in &c.registrations {
+        opened.push(Opened { publisher: ProtectedRoot::open(&r.publisher_root).map_err(|_| failed())?, staging: ProtectedRoot::open(&r.staging_root).map_err(|_| failed())?, state: ProtectedRoot::open(&r.state_root).map_err(|_| failed())? });
+    }
+    let mut data = vec![&source];
+    let mut controls = vec![&config_root, &socket_root];
+    for r in &opened { data.extend([&r.publisher, &r.staging]); controls.push(&r.state); }
+    // Complete read-only preflight for EVERY registration, not one at a time.
+    // Even lock creation and startup quarantine snapshots must wait until the
+    // state/config/socket roots and their bind aliases are known not to export.
+    confinement::validate(&data, &controls).map_err(|_| failed())?;
     let mut helpers = BTreeMap::new();
-    let mut administrative_roots = std::collections::BTreeSet::new();
     // Take every journal lock before touching the socket. A second process can
     // neither replace a live listener nor mutate this registration stream.
-    for r in c.registrations {
-        let store = Store::open(ProtectedRoot::open(&r.state_root).map_err(|_| failed())?)
-            .map_err(|_| failed())?;
+    for r in opened {
+        let store = Store::open(r.state).map_err(|_| failed())?;
         let journal = store.load().map_err(|_| failed())?;
         let registration = journal.runtime.registration;
         let mut docker = runtime::DockerInspector;
         let pin =
             runtime::PinnedRuntime::acquire(&mut docker, &journal.runtime).map_err(|_| failed())?;
-        let source = ProtectedRoot::open(&c.work_root).map_err(|_| failed())?;
-        let publisher = ProtectedRoot::open(&r.publisher_root).map_err(|_| failed())?;
-        let staging = ProtectedRoot::open(&r.staging_root).map_err(|_| failed())?;
-        for root in [&publisher, &staging] {
-            let metadata = root.fd.metadata()?;
-            if !administrative_roots.insert((metadata.dev(), metadata.ino())) {
-                return Err(failed());
-            }
-        }
         let kernel = kernel::Kernel::new(
-            source,
-            publisher,
-            staging,
+            source.try_clone().map_err(|_| failed())?,
+            r.publisher,
+            r.staging,
             pin,
             docker,
             mounts::LinuxAttributes,
@@ -142,12 +147,6 @@ pub async fn run() -> std::io::Result<()> {
         if helpers.insert(registration, helper).is_some() {
             return Err(failed());
         }
-    }
-    let socket_root = ProtectedRoot::open(std::path::Path::new("/run/terrarium-workspace-helper"))
-        .map_err(|_| failed())?;
-    let metadata = socket_root.fd.metadata()?;
-    if metadata.gid() != c.host_agent_gid || metadata.mode() & 0o777 != 0o750 {
-        return Err(failed());
     }
     let socket = format!("/proc/self/fd/{}/socket", socket_root.fd.as_raw_fd());
     match fstatat(&socket_root.fd, "socket", AtFlags::AT_SYMLINK_NOFOLLOW) {

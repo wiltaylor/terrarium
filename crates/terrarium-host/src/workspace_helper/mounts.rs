@@ -118,3 +118,16 @@ pub fn lazy_detach(mount: &File) -> Result<(), Reply> {
     root()?;
     mount::unmount(fd_path(mount), UnmountFlags::DETACH).map_err(|_| Reply::Failed)
 }
+
+/// Internal path form only for a verified root-owned pinned parent and one
+/// derived plain leaf. NOFOLLOW applies to the final component, not the
+/// helper-generated proc FD link in the parent prefix. No request path/flags.
+pub(super) fn ordinary_unmount_at(parent: &File, leaf: &str) -> Result<Unmount, Reply> {
+    root()?;
+    if leaf.is_empty() || leaf.len() > 128 || leaf == "." || leaf == ".." || !leaf.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)) { return Err(Reply::Unauthorized); }
+    match mount::unmount(format!("{}/{leaf}", fd_path(parent)), UnmountFlags::NOFOLLOW) {
+        Ok(()) => Ok(Unmount::Removed),
+        Err(rustix::io::Errno::BUSY) => Ok(Unmount::Busy),
+        Err(_) => Err(Reply::Failed),
+    }
+}

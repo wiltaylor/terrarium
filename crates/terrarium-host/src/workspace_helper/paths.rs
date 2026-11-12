@@ -9,6 +9,7 @@ use terrarium_core::live_workspace::{Enrollment, Reply};
 /// No canonicalize/use window, symlinks, or administrative repairs.
 pub struct ProtectedRoot {
     pub(super) fd: File,
+    pub(super) ancestors: Vec<File>,
 }
 
 fn protected(fd: &File) -> Result<(), Reply> {
@@ -55,17 +56,28 @@ impl ProtectedRoot {
             .map_err(|_| Reply::Failed)?,
         );
         protected(&fd)?;
+        let mut ancestors = Vec::new();
         for part in path.components() {
             match part {
                 Component::RootDir => {}
                 Component::Normal(name) => {
+                    ancestors.push(fd.try_clone().map_err(|_| Reply::Failed)?);
                     fd = directory(&fd, Path::new(name), false)?;
                     protected(&fd)?;
                 }
                 _ => return Err(Reply::Unauthorized),
             }
         }
-        Ok(Self { fd })
+        Ok(Self { fd, ancestors })
+    }
+
+    pub(super) fn try_clone(&self) -> Result<Self, Reply> {
+        Ok(Self { fd: self.fd.try_clone().map_err(|_| Reply::Failed)?, ancestors: self.ancestors.iter().map(File::try_clone).collect::<std::io::Result<_>>().map_err(|_| Reply::Failed)? })
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture(path: &Path) -> Self {
+        Self { fd: File::open(path).unwrap(), ancestors: path.ancestors().skip(1).map(|p| File::open(p).unwrap()).collect() }
     }
 
     /// Mapping parents are administrative, the final workspace may be owned by
@@ -133,6 +145,33 @@ pub struct Destination {
     owner: u32,
 }
 
+/// Protected parent/leaf identity for ordinary unmount. Holding a File on the
+/// mounted root itself would manufacture EBUSY. The parent stays FD-pinned and
+/// root-only, while the final mount identity is rechecked immediately before
+/// dropping that lookup FD and using a no-follow final-component unmount.
+pub(super) struct RevokePoint {
+    parent: File,
+    name: String,
+    source: terrarium_core::live_workspace::SourceIdentity,
+    mount: u64,
+}
+impl RevokePoint {
+    fn current(&self) -> Result<File, Reply> {
+        protected(&self.parent)?;
+        let fd = directory(&self.parent, Path::new(&self.name), false)?;
+        let m = fd.metadata().map_err(|_| Reply::Failed)?;
+        if (m.dev(), m.ino()) != (self.source.device, self.source.inode) || mount_id(&fd)? != self.mount || self.mount == mount_id(&self.parent)? { return Err(Reply::Quarantined); }
+        Ok(fd)
+    }
+    pub(super) fn ordinary(&self) -> Result<super::mounts::Unmount, Reply> {
+        drop(self.current()?);
+        super::mounts::ordinary_unmount_at(&self.parent, &self.name)
+    }
+    pub(super) fn detach(&self) -> Result<(), Reply> {
+        super::mounts::lazy_detach(&self.current()?)
+    }
+}
+
 fn empty(fd: &File) -> Result<(), Reply> {
     let reopened = directory(fd, Path::new("."), true)?;
     let mut dir = nix::dir::Dir::from_fd(reopened.into()).map_err(|_| Reply::Failed)?;
@@ -146,6 +185,16 @@ fn empty(fd: &File) -> Result<(), Reply> {
 }
 
 impl ProtectedRoot {
+    pub(super) fn revoke_point(&self, e: &Enrollment) -> Result<RevokePoint, Reply> {
+        if !e.matches(e) { return Err(Reply::Unauthorized); }
+        let parent = directory(&self.fd, Path::new(&e.project), true)?;
+        protected(&parent)?;
+        let mounted = directory(&parent, Path::new(&e.name), false)?;
+        let point = RevokePoint { parent, name: e.name.clone(), source: e.source.clone(), mount: mount_id(&mounted)? };
+        drop(mounted);
+        point.current()?;
+        Ok(point)
+    }
     /// `self` is the verified per-registration publisher or private staging
     /// root, not the common workspace root. Its namespace topology is checked
     /// independently before this method is used.

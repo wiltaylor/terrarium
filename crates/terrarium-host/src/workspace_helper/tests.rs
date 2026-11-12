@@ -546,6 +546,7 @@ fn destination_substitution_and_nonempty_scaffold_are_refused() {
     let dir = tempfile::tempdir().unwrap();
     let root = ProtectedRoot {
         fd: File::open(dir.path()).unwrap(),
+        ancestors: Vec::new(),
     };
     let e = envelope(1, Kind::Grant).original.holder.unwrap().enrollment;
     let dest = root.fixture_destination(&e).unwrap();
