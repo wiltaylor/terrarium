@@ -7496,7 +7496,7 @@ plain requests only, so it works through the agent tunnel too
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `POST /api/targets/{name}/exec` | `{"cmd": [..], "cwd"?, "env"?, "pty"?, "shell"?, "timeout_secs"?, "agent"?}` | `201` `{"session_id", "target", "kind"}` |
+| `POST /api/targets/{name}/exec` | `{"cmd": [..], "cwd"?, "env"?, "pty"?, "shell"?, "timeout_secs"?, "agent"?, "durable"?}` | `201` `{"session_id", "target", "kind"}` |
 | `POST /api/targets/{name}/cp` | `{"direction": "push"\|"pull", "path", "mode"?, "agent"?}` | `201` `{"session_id", "target", "kind"}` |
 | `POST /api/targets/{name}/sessions/{id}/input` | `{"data"?, "resize"?, "signal"?, "eof"?, "finish"?}` | `200` `{"session_id", "accepted"}` |
 | `GET /api/targets/{name}/sessions/{id}/output` | `?since=<offset>&wait=<s>&max=<bytes>` | `200` output, below |
@@ -7519,6 +7519,33 @@ The exec body:
   the command. An agent caller uses its own; the operator must name one
   (`422 invalid` without it). A `lab_repo` or `lab_from_workspace` target
   with no instance on the host is `409 conflict`: bring it up first.
+
+On SSH and exe.dev, `durable: true` opts a noninteractive exec into restart
+survival. Agent `run` commands and queue recipes request this mode internally.
+The existing process wait or recipe continues with the original exit code
+and output even when the command finishes while the daemon is down. PTY and
+shell combinations are refused. Sending stdin `data` to a durable session
+is `422 invalid`. Input-fed queue setup and bundle transfer do not opt in.
+Ordinary execs, PTYs, and shells retain the previous interruption behavior.
+The private remote output spool is under the bound card agent's recorded
+owned root, or `<work_root>/.terrarium-runs` for other callers. The latter
+has a daemon-owned marker. No-follow directory-FD checks reject symlinks,
+foreign ownership and group/other writable components. Python 3 is required
+for these checks; missing tools are terminal errors, never installed. The spool
+retains the first 64 MiB per stream, and is removed after 24 hours of result
+retention (at most the command timeout plus 24 hours and two minutes).
+The remote lifetime is at most seven days, measured from the original
+checkpoint even if first launch is delayed. Recovery refuses a changed
+target incarnation, SSH host key or exe.dev VM ID with `interrupted (target
+changed)`, without connecting to the replacement. Startup probes report
+missing tools or spool errors, with a 30-second readiness deadline.
+See host-protocol.md, Reconnect.
+
+Durable SSH/exe.dev runs end when their foreground command exits or their
+absolute deadline passes, whichever comes first. The supervisor sends TERM
+to the command's process group, then KILL after five seconds, so background
+children cannot keep the run or its output streams open indefinitely. A
+foreground exit preserves its exit code. A deadline ends with code 124.
 
 The input body: `data` is base64, at most 1 MiB of bytes (`413
 too_large` above). In a push, `data` is file bytes. `resize` is
@@ -13157,8 +13184,9 @@ cursor, so inaccessible quarantines cannot starve later rows.
 - After a daemon restart, host-agent jobs retain their running slot and
   resume their recorded phase. A live recipe is reattached, not killed or
   requeued, with its exit code and output replayed. The slot's result files
-  are not wiped. SSH and exe.dev runs remain interrupted and requeued as
-  before, with reason `interrupted (ssh transport)`.
+  are not wiped. SSH and exe.dev noninteractive runs and queue recipes
+  reattach to their detached spool. PTY/shell sessions and stdin-fed steps
+  remain interrupted, with reason `interrupted (ssh transport)`.
 - A host that cannot be reached is not a failure (TER-160). A job whose
   target's host agent is offline is not started and stays queued. A job
   whose target could not be reached before the recipe started (the host

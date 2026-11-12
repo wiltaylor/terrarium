@@ -867,7 +867,8 @@ impl Updater {
         let attempt = async {
             let left = budget_left(switch_deadline, Duration::ZERO).map_err(Fail)?;
             let control_timeout = left.as_secs_f64().to_string();
-            let startup_since = Utc::now().to_rfc3339();
+            let now = Utc::now();
+            let startup_since = format!("{}.{:09}", now.timestamp(), now.timestamp_subsec_nanos());
             self.step(
                 "start-daemon",
                 self.exec_ok(&cur.id, hot_argv("start", &[&release, &control_timeout])),
@@ -1027,11 +1028,20 @@ impl Updater {
         let deadline = (tokio::time::Instant::now() + self.cfg.health_timeout).min(hold_deadline);
         // Docker health can still describe the old daemon. Require a new live
         // status answer too, and allow the normal start-period failures.
+        let mut read_startup_log = startup_since;
         loop {
-            if let Some(since) = startup_since
-                && let Some(reason) = self.engine.daemon_failure_since(id, since).await?
-            {
-                return Err(reason);
+            if let Some(since) = read_startup_log {
+                match self.engine.daemon_failure_since(id, since).await {
+                    Ok(Some(reason)) => return Err(reason),
+                    Ok(None) => {}
+                    Err(_) => {
+                        let warning = "cannot read daemon startup log (values hidden); continuing health checks";
+                        tracing::warn!("{warning}");
+                        let idx = self.begin_step("startup-log-warning");
+                        self.end_step(idx, StepState::Failed, warning);
+                        read_startup_log = None;
+                    }
+                }
             }
             let health = self.engine.health(id).await?;
             if matches!(health, Health::Exited(_)) {

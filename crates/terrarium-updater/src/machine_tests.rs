@@ -389,7 +389,13 @@ impl Engine for Fake {
         since: &'a str,
     ) -> BoxFut<'a, Res<Option<String>>> {
         Box::pin(async move {
-            assert!(chrono::DateTime::parse_from_rfc3339(since).is_ok());
+            let (seconds, nanos) = since.split_once('.').unwrap();
+            assert!(seconds.parse::<i64>().is_ok());
+            assert_eq!(nanos.len(), 9);
+            assert!(nanos.parse::<u32>().unwrap() < 1_000_000_000);
+            if self.0.lock().unwrap().fail.contains("startup-log") {
+                return Err("transport error with private values".into());
+            }
             let crashes = self.0.lock().unwrap().startup_crash;
             if crashes && self.image_of(id).as_deref() == Some(new_ref().as_str()) {
                 self.call("daemon-exit-1".into());
@@ -480,6 +486,36 @@ fn rig_with(mode: &'static str, ok: bool) -> Rig {
 
 fn rig() -> Rig {
     rig_with("gh", true)
+}
+
+#[cfg(feature = "bin")]
+#[tokio::test]
+#[ignore = "requires owned tiny containers on terrarium-docker-scratch"]
+async fn real_docker_startup_health() {
+    let healthy = std::env::var("TER984_HEALTHY_CONTAINER").unwrap();
+    let crashed = std::env::var("TER984_CRASHED_CONTAINER").unwrap();
+    assert!(healthy.starts_with("ter-984-"));
+    assert!(crashed.starts_with("ter-984-"));
+    let mut r = rig();
+    let updater = Arc::get_mut(&mut r.updater).unwrap();
+    updater.engine = Arc::new(crate::docker::Docker {
+        socket: "/var/run/docker.sock".into(),
+        target: None,
+    });
+    updater.cfg.health_timeout = Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    // The fixtures are started after the epoch. This exercises dockerd's
+    // fractional UNIX timestamp parser as well as the real health/exec path.
+    updater
+        .wait_hot_healthy_until(&healthy, deadline, Some("0.000000000"))
+        .await
+        .unwrap();
+    let reason = updater
+        .wait_hot_healthy_until(&crashed, deadline, Some("0.000000000"))
+        .await
+        .unwrap_err();
+    assert!(reason.contains("FOREIGN KEY constraint failed"), "{reason}");
+    assert!(!reason.contains("private-fixture-value"));
 }
 
 #[tokio::test]
@@ -657,6 +693,41 @@ async fn hot_swap_failed_health_restores_before_old_release_admission() {
             .unwrap()
             < calls.iter().position(|c| c == "hot:commit").unwrap()
     );
+}
+
+#[tokio::test]
+async fn unreadable_startup_log_does_not_replace_health_checks() {
+    for healthy in [true, false] {
+        let r = rig();
+        r.fake.0.lock().unwrap().hot = true;
+        r.fake.fail("startup-log");
+        if !healthy {
+            r.fake.fail(&format!("health:{}", new_ref()));
+        }
+        let run = r
+            .updater
+            .run_now(RunKind::Update, "latest", "operator")
+            .await;
+        assert_eq!(
+            run.outcome,
+            if healthy {
+                Outcome::Succeeded
+            } else {
+                Outcome::RolledBack
+            },
+            "{run:#?}"
+        );
+        let warnings: Vec<_> = run
+            .steps
+            .iter()
+            .filter(|s| s.name == "startup-log-warning")
+            .collect();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0].detail,
+            "cannot read daemon startup log (values hidden); continuing health checks"
+        );
+    }
 }
 
 #[tokio::test]
