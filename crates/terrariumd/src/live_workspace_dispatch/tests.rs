@@ -12,7 +12,9 @@ struct Call {
     reply: oneshot::Sender<ApiResult<(Envelope, Reply)>>,
 }
 impl Call {
-    fn envelope(&self) -> Envelope { serde_json::from_slice(&self.bytes).unwrap() }
+    fn envelope(&self) -> Envelope {
+        serde_json::from_slice(&self.bytes).unwrap()
+    }
     fn respond(self, result: Reply) {
         let envelope = self.envelope();
         self.reply.send(Ok((envelope, result))).unwrap();
@@ -42,19 +44,30 @@ impl Fixture {
     async fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let lock = Arc::new(crate::lock_state_dir(dir.path()).unwrap());
-        let db = Db::new(db::open(&dir.path().join("terrarium.db")).unwrap(), EventHub::default());
+        let db = Db::new(
+            db::open(&dir.path().join("terrarium.db")).unwrap(),
+            EventHub::default(),
+        );
         let grant = seed(&db).await;
-        Self { _dir: dir, dispatch: Dispatcher::new(db, lock), grant }
+        Self {
+            _dir: dir,
+            dispatch: Dispatcher::new(db, lock),
+            grant,
+        }
     }
     fn command(&self) -> Command {
         Command::Grant(Box::new(operations::Grant {
-            provenance: self.grant.provenance.clone(), operation: self.grant.operation,
-            registration: self.grant.registration, holder: self.grant.holder.clone(),
+            provenance: self.grant.provenance.clone(),
+            operation: self.grant.operation,
+            registration: self.grant.registration,
+            holder: self.grant.holder.clone(),
             owning_sandbox: self.grant.owning_sandbox.clone(),
         }))
     }
     fn submit(&mut self, transport: Arc<dyn Transport>) -> oneshot::Receiver<ApiResult<()>> {
-        self.dispatch.submit(self.grant.registration, self.command(), transport).unwrap()
+        self.dispatch
+            .submit(self.grant.registration, self.command(), transport)
+            .unwrap()
     }
     async fn state(&self) -> (String, u64, u64, u64) {
         let id = self.grant.registration.0.to_string();
@@ -66,21 +79,36 @@ impl Fixture {
     }
     async fn ended(&self) {
         let agent = self.grant.holder.enrollment.agent.to_string();
-        self.dispatch.db.write_full("system", move |t| {
-            t.execute("UPDATE agents SET status = 'stopped' WHERE id = ?1", [agent])?;
-            Ok(())
-        }).await.unwrap();
+        self.dispatch
+            .db
+            .write_full("system", move |t| {
+                t.execute(
+                    "UPDATE agents SET status = 'stopped' WHERE id = ?1",
+                    [agent],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
     async fn fenced(&self) {
         // A barrier on the same connection alone could precede the spawned
         // fence. Await its audit deterministically, without wall-clock sleeps.
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                if self.state().await.0 == "quarantined" { break; }
+                if self.state().await.0 == "quarantined" {
+                    break;
+                }
                 tokio::task::yield_now().await;
             }
-        }).await.unwrap();
-        assert!(self.dispatch.entries[&self.grant.registration].poison.load(Ordering::SeqCst));
+        })
+        .await
+        .unwrap();
+        assert!(
+            self.dispatch.entries[&self.grant.registration]
+                .poison
+                .load(Ordering::SeqCst)
+        );
     }
 }
 
@@ -117,16 +145,27 @@ async fn same_owner_serializes_allocation_through_runtime_and_caller_drop_is_not
     let call = calls.recv().await.unwrap();
     let original = call.envelope();
     drop(wait); // Allocated work belongs to the worker, not its HTTP waiter.
-    let revoke = f.dispatch.submit(f.grant.registration, Command::Revoke {
-        provenance: f.grant.provenance.clone(), operation: OperationId(Ulid::new()),
-        attachment: f.grant.holder.attachment,
-    }, transport).unwrap();
+    let revoke = f
+        .dispatch
+        .submit(
+            f.grant.registration,
+            Command::Revoke {
+                provenance: f.grant.provenance.clone(),
+                operation: OperationId(Ulid::new()),
+                attachment: f.grant.holder.attachment,
+            },
+            transport,
+        )
+        .unwrap();
     assert_eq!(f.state().await, ("verified".into(), 1, 0, 0));
     assert!(calls.try_recv().is_err());
     call.respond(Reply::Applied);
     let cleanup = calls.recv().await.unwrap();
     assert_eq!(cleanup.envelope().original.revision, 2);
-    assert_eq!(cleanup.envelope().original.kind, terrarium_core::live_workspace::Kind::Revoke);
+    assert_eq!(
+        cleanup.envelope().original.kind,
+        terrarium_core::live_workspace::Kind::Revoke
+    );
     cleanup.respond(Reply::PathRevokedVerified);
     revoke.await.unwrap().unwrap();
     assert_eq!(f.state().await, ("verified".into(), 2, 2, 0));
@@ -170,12 +209,32 @@ async fn saturated_same_owner_queue_does_not_take_unrelated_transport_permits() 
     let wait = f.submit(transport.clone());
     let call = calls.recv().await.unwrap();
     let mut queued = Vec::new();
-    for _ in 0..32 { queued.push(f.dispatch.submit(f.grant.registration, Command::Drain, transport.clone()).unwrap()); }
-    assert!(f.dispatch.submit(f.grant.registration, Command::Drain, transport.clone()).is_err());
+    for _ in 0..32 {
+        queued.push(
+            f.dispatch
+                .submit(f.grant.registration, Command::Drain, transport.clone())
+                .unwrap(),
+        );
+    }
+    assert!(
+        f.dispatch
+            .submit(f.grant.registration, Command::Drain, transport.clone())
+            .is_err()
+    );
     let other = seed(&f.dispatch.db).await;
-    let unrelated = f.dispatch.submit(other.registration, Command::Grant(Box::new(other)), transport).unwrap();
+    let unrelated = f
+        .dispatch
+        .submit(
+            other.registration,
+            Command::Grant(Box::new(other)),
+            transport,
+        )
+        .unwrap();
     let other_call = calls.recv().await.unwrap();
-    assert_ne!(other_call.envelope().original.runtime.registration, f.grant.registration);
+    assert_ne!(
+        other_call.envelope().original.runtime.registration,
+        f.grant.registration
+    );
     other_call.respond(Reply::Applied);
     unrelated.await.unwrap().unwrap();
     drop(queued); // Queued dropped callers allocate nothing and release queue space.
@@ -190,13 +249,27 @@ async fn dropped_queued_revoke_never_allocates() {
     let (transport, mut calls) = fake();
     let wait = f.submit(transport.clone());
     let call = calls.recv().await.unwrap();
-    let queued = f.dispatch.submit(f.grant.registration, Command::Revoke {
-        provenance: f.grant.provenance.clone(), operation: OperationId(Ulid::new()), attachment: f.grant.holder.attachment,
-    }, transport.clone()).unwrap();
+    let queued = f
+        .dispatch
+        .submit(
+            f.grant.registration,
+            Command::Revoke {
+                provenance: f.grant.provenance.clone(),
+                operation: OperationId(Ulid::new()),
+                attachment: f.grant.holder.attachment,
+            },
+            transport.clone(),
+        )
+        .unwrap();
     drop(queued);
     call.respond(Reply::Applied);
     wait.await.unwrap().unwrap();
-    f.dispatch.submit(f.grant.registration, Command::Drain, transport).unwrap().await.unwrap().unwrap();
+    f.dispatch
+        .submit(f.grant.registration, Command::Drain, transport)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(f.state().await, ("verified".into(), 1, 1, 1));
 }
 
@@ -215,14 +288,30 @@ async fn wrong_receipt_fences_expected_owner_not_attacker_and_retains_originals(
     call.reply.send(Ok((wrong, Reply::Applied))).unwrap();
     assert!(wait.await.unwrap().is_err());
     f.fenced().await;
-    assert!(f.dispatch.submit(f.grant.registration, Command::Drain, transport).is_err());
-    f.dispatch.db.read(move |c| {
-        let state: String = c.query_row("SELECT state FROM live_workspace_targets WHERE registration_id = ?1", [other_id.0.to_string()], |r| r.get(0))?;
-        assert_eq!(state, "verified");
-        let bytes: Vec<u8> = c.query_row("SELECT original_request FROM live_workspace_operations WHERE operation_id = ?1", [original.original.operation.0.to_string()], |r| r.get(0))?;
-        assert_eq!(bytes, serde_json::to_vec(&original.original).unwrap());
-        Ok(())
-    }).await.unwrap();
+    assert!(
+        f.dispatch
+            .submit(f.grant.registration, Command::Drain, transport)
+            .is_err()
+    );
+    f.dispatch
+        .db
+        .read(move |c| {
+            let state: String = c.query_row(
+                "SELECT state FROM live_workspace_targets WHERE registration_id = ?1",
+                [other_id.0.to_string()],
+                |r| r.get(0),
+            )?;
+            assert_eq!(state, "verified");
+            let bytes: Vec<u8> = c.query_row(
+                "SELECT original_request FROM live_workspace_operations WHERE operation_id = ?1",
+                [original.original.operation.0.to_string()],
+                |r| r.get(0),
+            )?;
+            assert_eq!(bytes, serde_json::to_vec(&original.original).unwrap());
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -239,16 +328,24 @@ async fn unknown_send_and_failed_fence_write_keep_memory_poison_and_slot() {
     assert!(wait.await.unwrap().is_err());
     let entry = &f.dispatch.entries[&f.grant.registration];
     // Wait for the worker's synchronous poison, not the best-effort DB fence.
-    while !entry.task.is_finished() { tokio::task::yield_now().await; }
+    while !entry.task.is_finished() {
+        tokio::task::yield_now().await;
+    }
     assert!(entry.poison.load(Ordering::SeqCst));
-    assert!(f.dispatch.submit(f.grant.registration, Command::Drain, transport).is_err());
+    assert!(
+        f.dispatch
+            .submit(f.grant.registration, Command::Drain, transport)
+            .is_err()
+    );
     assert_eq!(f.dispatch.entries.len(), 1);
     assert_eq!(f.state().await.2, 0);
 }
 
 struct PanicTransport;
 impl Transport for PanicTransport {
-    fn exchange(&self, _: Arc<[u8]>) -> Exchange<'_> { Box::pin(async { panic!("injected exchange panic") }) }
+    fn exchange(&self, _: Arc<[u8]>) -> Exchange<'_> {
+        Box::pin(async { panic!("injected exchange panic") })
+    }
 }
 
 #[tokio::test]
@@ -264,7 +361,11 @@ async fn panic_and_worker_abort_fence_without_replacement() {
     g.dispatch.entries[&g.grant.registration].task.abort();
     assert!(wait.await.is_err());
     g.fenced().await;
-    assert!(g.dispatch.submit(g.grant.registration, Command::Drain, transport).is_err());
+    assert!(
+        g.dispatch
+            .submit(g.grant.registration, Command::Drain, transport)
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -278,33 +379,61 @@ async fn timeout_is_unknown_not_permission_for_newer_revision() {
     assert!(wait.await.unwrap().is_err());
     tokio::time::resume();
     f.fenced().await;
-    assert!(f.dispatch.submit(f.grant.registration, Command::Drain, transport).is_err());
+    assert!(
+        f.dispatch
+            .submit(f.grant.registration, Command::Drain, transport)
+            .is_err()
+    );
     assert_eq!(f.state().await.2, 0);
 }
 
 #[tokio::test]
 async fn saved_helper_receipt_skips_transport_but_startup_quarantine_refuses_it() {
     let mut f = Fixture::new().await;
-    let Command::Grant(grant) = f.command() else { unreachable!() };
-    f.dispatch.db.write_full("system", move |t| {
-        let envelope = operations::allocate_grant(t, &grant)?;
-        operations::acknowledge(t, &envelope, Reply::Applied)?;
-        Ok(())
-    }).await.unwrap();
+    let Command::Grant(grant) = f.command() else {
+        unreachable!()
+    };
+    f.dispatch
+        .db
+        .write_full("system", move |t| {
+            let envelope = operations::allocate_grant(t, &grant)?;
+            operations::acknowledge(t, &envelope, Reply::Applied)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let (transport, mut calls) = fake();
-    f.dispatch.submit(f.grant.registration, Command::Drain, transport).unwrap().await.unwrap().unwrap();
+    f.dispatch
+        .submit(f.grant.registration, Command::Drain, transport)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
     assert!(calls.try_recv().is_err());
     assert_eq!(f.state().await.3, 1);
     let mut g = Fixture::new().await;
-    let Command::Grant(grant) = g.command() else { unreachable!() };
-    g.dispatch.db.write_full("system", move |t| {
-        let envelope = operations::allocate_grant(t, &grant)?;
-        operations::acknowledge(t, &envelope, Reply::Applied)?;
-        crate::store::live_workspaces::quarantine_on_restart(t)?;
-        Ok(())
-    }).await.unwrap();
+    let Command::Grant(grant) = g.command() else {
+        unreachable!()
+    };
+    g.dispatch
+        .db
+        .write_full("system", move |t| {
+            let envelope = operations::allocate_grant(t, &grant)?;
+            operations::acknowledge(t, &envelope, Reply::Applied)?;
+            crate::store::live_workspaces::quarantine_on_restart(t)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let (transport, mut calls) = fake();
-    assert!(g.dispatch.submit(g.grant.registration, Command::Drain, transport).unwrap().await.unwrap().is_err());
+    assert!(
+        g.dispatch
+            .submit(g.grant.registration, Command::Drain, transport)
+            .unwrap()
+            .await
+            .unwrap()
+            .is_err()
+    );
     assert!(calls.try_recv().is_err());
     assert_eq!(g.state().await.3, 0);
 }
@@ -312,15 +441,28 @@ async fn saved_helper_receipt_skips_transport_but_startup_quarantine_refuses_it(
 #[tokio::test]
 async fn authority_loss_before_selection_sends_original_superseded_barrier_then_revoke() {
     let mut f = Fixture::new().await;
-    let Command::Grant(grant) = f.command() else { unreachable!() };
-    let original = f.dispatch.db.write_full("system", move |t| operations::allocate_grant(t, &grant)).await.unwrap();
+    let Command::Grant(grant) = f.command() else {
+        unreachable!()
+    };
+    let original = f
+        .dispatch
+        .db
+        .write_full("system", move |t| operations::allocate_grant(t, &grant))
+        .await
+        .unwrap();
     f.ended().await;
     let (transport, mut calls) = fake();
-    let wait = f.dispatch.submit(f.grant.registration, Command::Drain, transport).unwrap();
+    let wait = f
+        .dispatch
+        .submit(f.grant.registration, Command::Drain, transport)
+        .unwrap();
     let barrier = calls.recv().await.unwrap();
     assert_eq!(barrier.envelope().original, original.original);
     assert_eq!(barrier.envelope().original_hash, original.original_hash);
-    assert_eq!(barrier.envelope().delivery, terrarium_core::live_workspace::Delivery::Superseded);
+    assert_eq!(
+        barrier.envelope().delivery,
+        terrarium_core::live_workspace::Delivery::Superseded
+    );
     barrier.respond(Reply::Superseded);
     let revoke = calls.recv().await.unwrap();
     assert_eq!(revoke.envelope().original.revision, 2);
@@ -336,17 +478,34 @@ async fn receipt_and_runtime_persistence_failures_fence_and_preserve_truth() {
         let (transport, mut calls) = fake();
         let wait = f.submit(transport);
         let call = calls.recv().await.unwrap();
-        let sql = format!("CREATE TRIGGER injected_failure BEFORE UPDATE OF phase ON live_workspace_operations WHEN NEW.phase = '{boundary}' BEGIN SELECT RAISE(ABORT,'injected commit failure'); END;");
-        f.dispatch.db.write_full("system", move |t| { t.execute_batch(&sql)?; Ok(()) }).await.unwrap();
+        let sql = format!(
+            "CREATE TRIGGER injected_failure BEFORE UPDATE OF phase ON live_workspace_operations WHEN NEW.phase = '{boundary}' BEGIN SELECT RAISE(ABORT,'injected commit failure'); END;"
+        );
+        f.dispatch
+            .db
+            .write_full("system", move |t| {
+                t.execute_batch(&sql)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         call.respond(Reply::Applied);
         assert!(wait.await.unwrap().is_err());
         f.fenced().await;
         let expected = boundary == "daemon_committed";
-        f.dispatch.db.read(move |c| {
-            let saved: bool = c.query_row("SELECT result IS NOT NULL FROM live_workspace_operations", [], |r| r.get(0))?;
-            assert_eq!(saved, expected);
-            Ok(())
-        }).await.unwrap();
+        f.dispatch
+            .db
+            .read(move |c| {
+                let saved: bool = c.query_row(
+                    "SELECT result IS NOT NULL FROM live_workspace_operations",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(saved, expected);
+                Ok(())
+            })
+            .await
+            .unwrap();
         assert_eq!(f.state().await.2, 0);
     }
 }
@@ -377,27 +536,49 @@ async fn queue_deadline_precedes_allocation_and_expired_work_does_not_poison_own
     let (transport, mut calls) = fake();
     let wait = f.submit(transport.clone());
     let call = calls.recv().await.unwrap();
-    let expired = f.dispatch.submit(f.grant.registration, Command::Revoke {
-        provenance: f.grant.provenance.clone(), operation: OperationId(Ulid::new()), attachment: f.grant.holder.attachment,
-    }, transport.clone()).unwrap();
+    let expired = f
+        .dispatch
+        .submit(
+            f.grant.registration,
+            Command::Revoke {
+                provenance: f.grant.provenance.clone(),
+                operation: OperationId(Ulid::new()),
+                attachment: f.grant.holder.attachment,
+            },
+            transport.clone(),
+        )
+        .unwrap();
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(6)).await;
     call.respond(Reply::Applied);
     tokio::time::resume();
     wait.await.unwrap().unwrap();
     assert!(expired.await.unwrap().is_err());
-    f.dispatch.submit(f.grant.registration, Command::Drain, transport).unwrap().await.unwrap().unwrap();
+    f.dispatch
+        .submit(f.grant.registration, Command::Drain, transport)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(f.state().await, ("verified".into(), 1, 1, 1));
 }
 
 fn config(root: &std::path::Path, socket: &str) -> crate::DaemonConfig {
     crate::DaemonConfig {
-        socket: root.join(socket), listen: None, token: None,
-        state_dir: root.join("state"), config_dir: root.join("config"),
-        work_dir: root.join("work"), repos_dir: root.join("repos"),
+        socket: root.join(socket),
+        listen: None,
+        token: None,
+        state_dir: root.join("state"),
+        config_dir: root.join("config"),
+        work_dir: root.join("work"),
+        repos_dir: root.join("repos"),
         max_targets_per_project: crate::settings::DEFAULT_MAX_TARGETS_PER_PROJECT,
-        supervisor: Arc::new(crate::supervisor::InMemorySupervisor::new(Duration::from_millis(1))),
-        insecure_agent_header: true, artifact_listen: None, web: Default::default(),
+        supervisor: Arc::new(crate::supervisor::InMemorySupervisor::new(
+            Duration::from_millis(1),
+        )),
+        insecure_agent_header: true,
+        artifact_listen: None,
+        web: Default::default(),
     }
 }
 
@@ -405,14 +586,19 @@ fn config(root: &std::path::Path, socket: &str) -> crate::DaemonConfig {
 async fn actual_daemon_startup_refuses_second_owner_and_worker_fence_outlives_shutdown() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("config")).unwrap();
-    let mut daemon = crate::start(config(root.path(), "first.sock")).await.unwrap();
+    let mut daemon = crate::start(config(root.path(), "first.sock"))
+        .await
+        .unwrap();
     let grant = seed(&daemon.state.db).await;
     let registration = grant.registration;
     let second = crate::start(config(root.path(), "second.sock")).await;
     assert!(second.err().unwrap().to_string().contains("another daemon"));
     assert!(!root.path().join("second.sock").exists());
     let (transport, mut calls) = fake();
-    let wait = daemon.workspace_dispatch.submit(registration, Command::Grant(Box::new(grant)), transport).unwrap();
+    let wait = daemon
+        .workspace_dispatch
+        .submit(registration, Command::Grant(Box::new(grant)), transport)
+        .unwrap();
     let _unknown = calls.recv().await.unwrap();
     let lock = Arc::downgrade(&daemon._state_lock);
     daemon.shutdown(); // Aborts but cannot synchronously destroy an async worker.
@@ -420,11 +606,20 @@ async fn actual_daemon_startup_refuses_second_owner_and_worker_fence_outlives_sh
     assert!(second.err().unwrap().to_string().contains("another daemon"));
     assert!(wait.await.is_err());
     tokio::time::timeout(Duration::from_secs(10), async {
-        while lock.upgrade().is_some() { tokio::task::yield_now().await; }
-    }).await.unwrap();
-    let mut restarted = crate::start(config(root.path(), "third.sock")).await.unwrap();
+        while lock.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut restarted = crate::start(config(root.path(), "third.sock"))
+        .await
+        .unwrap();
     let (transport, mut calls) = fake();
-    let wait = restarted.workspace_dispatch.submit(registration, Command::Drain, transport).unwrap();
+    let wait = restarted
+        .workspace_dispatch
+        .submit(registration, Command::Drain, transport)
+        .unwrap();
     assert!(wait.await.unwrap().is_err());
     assert!(calls.try_recv().is_err());
     restarted.shutdown_and_wait().await;

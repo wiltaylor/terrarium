@@ -325,8 +325,12 @@ pub(crate) fn quarantine_dispatch(
          WHERE registration_id = ?1 AND state NOT IN ('path_revoked_verified','quarantined')",
         [&registration],
     )?;
-    t.audit("workspace.dispatch_quarantined", &registration, None,
-        json!({"operation": selected.map(|id| id.0.to_string())}))?;
+    t.audit(
+        "workspace.dispatch_quarantined",
+        &registration,
+        None,
+        json!({"operation": selected.map(|id| id.0.to_string())}),
+    )?;
     Ok(())
 }
 

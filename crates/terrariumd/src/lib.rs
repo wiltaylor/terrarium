@@ -44,8 +44,8 @@ pub mod jobs;
 pub mod leases;
 pub mod legacy_job_logs;
 pub mod lifecycle;
-mod live_workspace_dispatch;
 pub mod links;
+mod live_workspace_dispatch;
 pub mod login_session;
 pub mod models;
 pub mod monitors;
@@ -448,7 +448,10 @@ async fn start_with_usage_and_executor(
         }
     }
     Ok(Daemon {
-        workspace_dispatch: live_workspace_dispatch::Dispatcher::new(state.db.clone(), state_lock.clone()),
+        workspace_dispatch: live_workspace_dispatch::Dispatcher::new(
+            state.db.clone(),
+            state_lock.clone(),
+        ),
         state,
         _state_lock: state_lock,
         socket: cfg.socket,
