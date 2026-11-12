@@ -72,7 +72,12 @@ pub fn parse(bytes: &[u8], namespace: NamespaceIdentity) -> Result<Vec<MountEvid
         number(device[1])?;
         let root = unescape(parts[3])?;
         let mountpoint = unescape(parts[4])?;
-        if !root.starts_with('/') || !mountpoint.starts_with('/') {
+        // Docker pins network namespaces with nsfs. These kernel pseudo-roots
+        // are not directory paths and must never qualify as workspace roots.
+        let network_namespace = parts[dash + 1] == "nsfs"
+            && root.strip_prefix("net:[").and_then(|s| s.strip_suffix(']'))
+                .is_some_and(|s| number(s).is_ok_and(|n| n > 0));
+        if (!root.starts_with('/') && !network_namespace) || !mountpoint.starts_with('/') {
             return Err(Reply::Failed);
         }
         let optional_fields: Vec<String> = parts[6..dash].iter().map(|s| s.to_string()).collect();
@@ -152,6 +157,7 @@ pub(super) fn publisher_at(
 ) -> Result<u64, Reply> {
     let shared = group(host, "shared:").ok_or(Reply::Quarantined)?;
     if host.namespace == receiver.namespace
+        || !host.root.starts_with('/')
         || host.root != receiver.root
         || host.major_minor != receiver.major_minor
         || receiver.mountpoint != receiver_path
