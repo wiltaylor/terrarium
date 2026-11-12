@@ -9,6 +9,9 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub mod live_workspace;
+
 use serde_json::{Value, json};
 
 use crate::config::PathPolicy;

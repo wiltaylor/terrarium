@@ -360,6 +360,52 @@ fn mountinfo_malformed_records_fail_closed() {
 }
 
 #[test]
+fn docker_nsfs_records_do_not_qualify_as_publishers() {
+    let line =
+        "245 28 0:4 net:[4026532354] /run/docker/netns/synthetic rw shared:216 - nsfs nsfs rw";
+    let host = evidence(line, 1);
+    let mut receiver = host.clone();
+    receiver.namespace.inode = 2;
+    receiver.mountpoint = "/work".into();
+    receiver.optional_fields = vec!["master:216".into()];
+    receiver.vfs_flags = vec!["ro".into(), "nosuid".into(), "nodev".into()];
+    assert!(mountinfo::publisher(&host, &receiver, std::slice::from_ref(&host)).is_err());
+    for kind in [
+        "cgroup",
+        "ipc",
+        "mnt",
+        "net",
+        "pid",
+        "pid_for_children",
+        "time",
+        "time_for_children",
+        "user",
+        "uts",
+    ] {
+        let accepted = evidence(&line.replace("net:[", &format!("{kind}:[")), 1);
+        assert!(
+            mountinfo::publisher(&accepted, &receiver, std::slice::from_ref(&accepted)).is_err()
+        );
+        let mut host_publisher = accepted.clone();
+        host_publisher.root = "/directory".into();
+        // A namespace pseudo-root cannot serve as a receiver either.
+        assert!(
+            mountinfo::publisher(&host_publisher, &accepted, &[host_publisher.clone()]).is_err()
+        );
+    }
+    for bad in [
+        line.replace("nsfs nsfs", "ext4 nsfs"),
+        line.replace("4026532354", "0"),
+        line.replace("4026532354", "not-an-inode"),
+        line.replace("4026532354", "-1"),
+        line.replace("net:[4026532354]", "net:4026532354"),
+        line.replace("net:[", "unknown:["),
+    ] {
+        assert!(mountinfo::parse(bad.as_bytes(), host.namespace.clone()).is_err());
+    }
+}
+
+#[test]
 fn source_scan_never_follows_symlinks_and_refuses_special_objects() {
     use std::fs::File;
     use std::os::unix::fs::symlink;
