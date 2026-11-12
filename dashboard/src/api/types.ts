@@ -1233,6 +1233,7 @@ export const EVENT_KINDS = [
   // A webhook attempt ended (docs/api.md §19.5): `{trigger, name, delivery, status, http_status, attempt, test, event_seq}`.
   "webhook.delivery",
   "dashboard.updated",
+  "page.updated",
   "target.grant",
   "artifact.created",
   "artifact.linked",
