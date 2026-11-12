@@ -385,3 +385,108 @@ async fn connection_cap_rejects_only_connections_above_the_limit() {
     task.abort();
     daemon.abort();
 }
+
+#[tokio::test]
+async fn connection_cap_holds_websocket_slot_until_tunnel_closes() {
+    use axum::extract::ws::WebSocketUpgrade;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let upstream = Router::new().route("/", get(|| async { "ok" })).route(
+            "/ws",
+            get(|ws: WebSocketUpgrade| async {
+                ws.on_upgrade(|mut socket| async move {
+                    while let Some(Ok(message)) = socket.recv().await {
+                        if socket.send(message).await.is_err() {
+                            break;
+                        }
+                    }
+                })
+            }),
+        );
+        let (upstream, daemon) = serve(upstream).await;
+        let limits = terrarium_front::Limits {
+            max_connections: 1,
+            ..Default::default()
+        };
+        let (address, task) = serve_front(front(upstream, false).with_limits(limits)).await;
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+            .await
+            .unwrap();
+        // The HTTP upgrade is complete, but its tunnel must still own the slot.
+        let mut excess = tokio::net::TcpStream::connect(&address).await.unwrap();
+        assert!(read_head(&mut excess).await.starts_with("HTTP/1.1 503"));
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                "alive".into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            socket.next().await.unwrap().unwrap().into_text().unwrap(),
+            "alive"
+        );
+        socket.close(None).await.unwrap();
+        drop(socket);
+        // Closing the tunnel and releasing its permit happen asynchronously.
+        loop {
+            // An over-cap socket gets an unsolicited 503 before the client
+            // writes its request, which reqwest can report as UnexpectedMessage.
+            let Ok(response) = reqwest::get(format!("http://{address}/")).await else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            };
+            if response.status() == 200 {
+                assert_eq!(response.text().await.unwrap(), "ok");
+                break;
+            }
+            assert_eq!(response.status(), 503);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        task.abort();
+        daemon.abort();
+    })
+    .await
+    .expect("WebSocket slot was not released");
+}
+
+#[tokio::test]
+async fn connection_cap_releases_idle_keep_alive_after_header_timeout() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (upstream, daemon) = serve(Router::new().route("/", get(|| async { "ok" }))).await;
+        let limits = terrarium_front::Limits {
+            max_connections: 1,
+            header_timeout: Duration::from_millis(500),
+            ..Default::default()
+        };
+        let (address, task) = serve_front(front(upstream, false).with_limits(limits)).await;
+        let mut idle = tokio::net::TcpStream::connect(&address).await.unwrap();
+        idle.write_all(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+            .await
+            .unwrap();
+        assert!(read_head(&mut idle).await.starts_with("HTTP/1.1 200"));
+        let mut body = [0; 2];
+        idle.read_exact(&mut body).await.unwrap();
+        assert_eq!(&body, b"ok");
+        let mut excess = tokio::net::TcpStream::connect(&address).await.unwrap();
+        assert!(read_head(&mut excess).await.starts_with("HTTP/1.1 503"));
+        // Leave the client open and send no next request. The server must expire it.
+        let mut bytes = Vec::new();
+        idle.read_to_end(&mut bytes).await.unwrap();
+        loop {
+            let Ok(response) = reqwest::get(format!("http://{address}/")).await else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            };
+            if response.status() == 200 {
+                assert_eq!(response.text().await.unwrap(), "ok");
+                break;
+            }
+            assert_eq!(response.status(), 503);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        task.abort();
+        daemon.abort();
+    })
+    .await
+    .expect("idle keep-alive slot was not released");
+}

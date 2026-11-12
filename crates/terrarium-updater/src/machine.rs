@@ -475,13 +475,37 @@ impl Updater {
     /// End both drains after health or an early failure.
     async fn resume(&self, cur: &Container) {
         let idx = self.begin_step("resume");
-        match tokio::time::timeout(
-            Duration::from_secs(30),
-            self.exec_ok(&cur.id, resume_argv()),
-        )
+        match tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                // Old daemons support this same command. A rollback may
+                // expose the API before recovery has settled. Retry only
+                // this idempotent operation, within the existing reserve.
+                if matches!(
+                    tokio::time::timeout(
+                        Duration::from_secs(5),
+                        self.exec_ok(&cur.id, resume_argv())
+                    )
+                    .await,
+                    Ok(Ok(_))
+                ) {
+                    return;
+                }
+                let argv = ["terrarium", "admin", "update", "status", "--json"]
+                    .map(String::from)
+                    .to_vec();
+                if let Ok(out) = self.exec_ok(&cur.id, argv).await
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(&out)
+                    && v["drain"]["on"] == false
+                    && v["drain"].get("jobs_drain").is_some_and(|v| v.is_null())
+                {
+                    return;
+                }
+                tokio::time::sleep(self.cfg.health_poll).await;
+            }
+        })
         .await
         {
-            Ok(Ok(_)) => self.end_step(
+            Ok(()) => self.end_step(
                 idx,
                 StepState::Ok,
                 "the daemon takes new turns and jobs again",

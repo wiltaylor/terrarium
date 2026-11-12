@@ -7543,9 +7543,11 @@ See host-protocol.md, Reconnect.
 
 Durable SSH/exe.dev runs end when their foreground command exits or their
 absolute deadline passes, whichever comes first. The supervisor sends TERM
-to the command's process group, then KILL after five seconds, so background
-children cannot keep the run or its output streams open indefinitely. A
-foreground exit preserves its exit code. A deadline ends with code 124.
+to the command's process group, then KILL after five seconds. A descendant
+that calls `setsid` leaves that group and is not stopped by these signals.
+Bounded logger teardown cuts its inherited output streams, not the escaped
+process, so it cannot keep the run open indefinitely. A foreground exit
+preserves its exit code. A deadline ends with code 124.
 
 The input body: `data` is base64, at most 1 MiB of bytes (`413
 too_large` above). In a push, `data` is file bytes. `resize` is
