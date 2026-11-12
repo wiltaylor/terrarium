@@ -66,6 +66,9 @@ pub struct AgentView {
     /// idle stop or `paused`. Absent when not known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_reason: Option<String>,
+    /// A parked binding retained during an explicit operator start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked: Option<String>,
     /// The turns, the mail, and the card and nudge pointers that wait for
     /// the agent ([`queued_count`]). Absent when 0.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -187,6 +190,7 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
         effective_skills: Vec::new(),
         paused: r.get("paused")?,
         status_reason: r.get("status_reason")?,
+        parked: None,
         queued: 0,
         compact_supported: parse::<HarnessId>(&harness, "harness")?
             .compact_command()

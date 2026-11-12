@@ -594,6 +594,16 @@ pub async fn wake_with_work_report(
 ///
 /// [`Supervisor::send_queued_turn`]: crate::supervisor::Supervisor::send_queued_turn
 async fn deliver_turns(state: &Shared, id: AgentId) {
+    deliver_selected_turns(state, id, false).await;
+}
+
+/// An explicit operator start of a parked agent drains operator turns,
+/// but must not deliver queued card-return work or change the park.
+pub async fn deliver_operator_turns(state: &Shared, id: AgentId) {
+    deliver_selected_turns(state, id, true).await;
+}
+
+async fn deliver_selected_turns(state: &Shared, id: AgentId, operator_only: bool) {
     let key = id.to_string();
     let turns = match state.db.read(move |c| agents::queued_turns(c, &key)).await {
         Ok(t) => t,
@@ -604,6 +614,14 @@ async fn deliver_turns(state: &Shared, id: AgentId) {
     };
     let lock = state.lifecycle.turn_lock(id);
     for t in turns {
+        if operator_only
+            && !matches!(
+                terrarium_core::turn_tag::parse_first(&t.text),
+                Some(terrarium_core::turn_tag::PartSource::User)
+            )
+        {
+            continue;
+        }
         let _held = lock.lock().await;
         let (key, turn) = (id.to_string(), t.id);
         match state
