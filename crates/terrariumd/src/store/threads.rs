@@ -512,7 +512,16 @@ pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResu
         )
         .optional()?
         .ok_or_else(missing)?;
-    read_card_project(t, actor, &project, Some(id)).map_err(|_| missing())?;
+    if read_card_project(t, actor, &project, Some(id)).is_err() {
+        if want.is_none_or(|p| p == project)
+            && read_linked_card(t, actor, &project, Some(&key)).is_ok()
+        {
+            return Err(ApiError::forbidden(format!(
+                "card {project}/{key} is readable from this thread, but linking it needs project {project} or its lead"
+            )));
+        }
+        return Err(missing());
+    }
     if want.is_some_and(|p| p != project) {
         return Err(ApiError::not_found(format!(
             "no card `{key}` in project `{}`",
