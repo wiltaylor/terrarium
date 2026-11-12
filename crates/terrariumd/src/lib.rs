@@ -44,6 +44,7 @@ pub mod jobs;
 pub mod leases;
 pub mod legacy_job_logs;
 pub mod lifecycle;
+mod live_workspace_dispatch;
 pub mod links;
 pub mod login_session;
 pub mod models;
@@ -155,7 +156,9 @@ pub struct DaemonConfig {
 pub struct Daemon {
     pub state: Shared,
     /// The `flock` on [`STATE_LOCK`], held until the daemon drops.
-    _state_lock: nix::fcntl::Flock<std::fs::File>,
+    _state_lock: Arc<nix::fcntl::Flock<std::fs::File>>,
+    // Inactive: no transport or lifecycle caller is installed.
+    workspace_dispatch: live_workspace_dispatch::Dispatcher,
     pub socket: PathBuf,
     pub tcp_addr: Option<std::net::SocketAddr>,
     /// The bound address of the artifact origin, when it listens.
@@ -170,7 +173,8 @@ impl Daemon {
     /// stays. Runner processes keep their harnesses, and the next start
     /// connects to them again; in-process harnesses end, and the next start
     /// launches them again.
-    pub fn shutdown(self) {
+    pub fn shutdown(mut self) {
+        self.workspace_dispatch.stop();
         self.state.executor.hosts.shutdown();
         self.state.job_queue.stop();
         for t in &self.tasks {
@@ -188,6 +192,7 @@ impl Daemon {
     /// an aborted task ends at its next await, but a database call that it
     /// started runs on to its end on the blocking pool (TER-646).
     pub async fn shutdown_and_wait(mut self) {
+        self.workspace_dispatch.stop();
         self.state.executor.hosts.shutdown();
         for task in self.state.job_queue.stop() {
             let _ = task.await;
@@ -287,7 +292,7 @@ async fn start_with_usage_and_executor(
         .with_context(|| format!("cannot create state dir {}", cfg.state_dir.display()))?;
     // One daemon per state dir, for its whole life: a second one stops
     // here, before it opens the database or clears the run dirs.
-    let state_lock = lock_state_dir(&cfg.state_dir)?;
+    let state_lock = Arc::new(lock_state_dir(&cfg.state_dir)?);
     let db_path = cfg.state_dir.join("terrarium.db");
     let conn = db::open(&db_path)?;
     info!(path = %db_path.display(), "database ready");
@@ -443,6 +448,7 @@ async fn start_with_usage_and_executor(
         }
     }
     Ok(Daemon {
+        workspace_dispatch: live_workspace_dispatch::Dispatcher::new(state.db.clone(), state_lock.clone()),
         state,
         _state_lock: state_lock,
         socket: cfg.socket,

@@ -285,6 +285,51 @@ fn conflict() -> ApiError {
     ApiError::new(Code::Conflict, "invalid live workspace operation record")
 }
 
+/// Fence only the durable owner selected by the dispatcher, never an owner
+/// decoded from a response. `None` covers failure during allocation/selection.
+/// Commit the FULL transaction even when dispatch itself has failed. Retains
+/// canonical requests, delivery, saved receipt truth, tombstones and seals.
+pub(crate) fn quarantine_dispatch(
+    t: &Tx<'_>,
+    registration: RegistrationId,
+    selected: Option<OperationId>,
+) -> ApiResult<()> {
+    durable(t)?;
+    no_link(t)?;
+    let registration = registration.0.to_string();
+    if let Some(selected) = selected {
+        let owner: String = t.query_row(
+            "SELECT registration_id FROM live_workspace_operations WHERE operation_id = ?1",
+            [selected.0.to_string()],
+            |r| r.get(0),
+        )?;
+        if owner != registration {
+            return Err(conflict());
+        }
+    }
+    let changed = t.execute(
+        "UPDATE live_workspace_targets SET state = 'quarantined'
+         WHERE registration_id = ?1 AND state != 'destroyed'",
+        [&registration],
+    )?;
+    if changed != 1 {
+        return Err(conflict());
+    }
+    t.execute(
+        "UPDATE live_workspace_operations SET phase = 'quarantined'
+         WHERE registration_id = ?1 AND phase NOT IN ('daemon_committed','quarantined')",
+        [&registration],
+    )?;
+    t.execute(
+        "UPDATE live_workspace_attachments SET state = 'quarantined'
+         WHERE registration_id = ?1 AND state NOT IN ('path_revoked_verified','quarantined')",
+        [&registration],
+    )?;
+    t.audit("workspace.dispatch_quarantined", &registration, None,
+        json!({"operation": selected.map(|id| id.0.to_string())}))?;
+    Ok(())
+}
+
 fn revoked(t: &Tx<'_>, holder: &Holder) -> ApiResult<bool> {
     Ok(t.query_row("SELECT EXISTS(SELECT 1 FROM live_workspace_attachments WHERE attachment_id = ?1 AND revoke_revision IS NOT NULL)",
         [holder.attachment.0.to_string()], |r| r.get(0))?)
