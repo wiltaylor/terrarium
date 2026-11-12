@@ -10,6 +10,15 @@ use terrarium_core::config::TargetDef;
 
 const PYTHON_PROBE: &str = "command -v python3 >/dev/null || printf missing-python3";
 
+fn commands_only_host(kind: terrarium_core::config::TargetKind, os: &str, no_workspaces: bool) -> bool {
+    kind == terrarium_core::config::TargetKind::Host && os == "windows" && no_workspaces
+}
+
+fn is_commands_only_host(state: &Shared, def: &TargetDef) -> bool {
+    def.host.as_deref().and_then(|host| state.executor.hosts.view(host).info)
+        .is_some_and(|info| commands_only_host(def.kind, &info.os, info.capabilities.no_workspaces))
+}
+
 fn measurement(stdout: &[u8]) -> Option<u64> {
     std::str::from_utf8(stdout).ok()?.trim().parse().ok()
 }
@@ -445,6 +454,9 @@ pub async fn prepare(
     def: &TargetDef,
     dest: Option<&str>,
 ) -> ApiResult<Option<String>> {
+    // Windows host sessions are commands only. Do not create Linux build
+    // roots, run sh/python probes, or arrange automatic workspace cleanup.
+    if is_commands_only_host(state, def) { return Ok(None); }
     let Some(a) = actor.agent() else {
         return Ok(None);
     };
@@ -678,6 +690,7 @@ pub async fn prepare_exec(
     def: &TargetDef,
     cmd: &mut RemoteCmd,
 ) -> ApiResult<()> {
+    if is_commands_only_host(state, def) { return Ok(()); }
     let Some(a) = actor.agent() else {
         return Ok(());
     };
@@ -914,6 +927,16 @@ pub fn spawn(state: Shared) -> tokio::task::JoinHandle<()> {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn only_native_windows_commands_skip_owned_linux_roots() {
+        use terrarium_core::config::TargetKind;
+        assert!(commands_only_host(TargetKind::Host, "windows", true));
+        assert!(!commands_only_host(TargetKind::Host, "linux", true));
+        assert!(!commands_only_host(TargetKind::Host, "windows", false));
+        assert!(!commands_only_host(TargetKind::Ssh, "windows", true));
+        assert!(!commands_only_host(TargetKind::Docker, "windows", true));
+    }
 
     /// TER-566: the error of a failed python3 probe says why.
     #[test]
