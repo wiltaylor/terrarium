@@ -1268,6 +1268,36 @@ continuation checkpoints also use kill/requeue.
 
 ## Self-update
 
+Windows and Linux host agents authenticate the transport through the daemon's
+pinned-fingerprint TLS connection and independently verify the downloaded
+asset's cosign signature against the built-in release public key before
+staging it. Both platforms use the same offline verifier and refusal reasons.
+The offered and release checksums are additional integrity checks, not trust
+roots. A development build without a built-in key refuses self-update.
+
+**Windows service installation and recovery.** The installer places binaries
+under `C:\Program Files\Terrarium\host\versions\<version>\terrarium-host.exe`.
+Only state and configuration live under `C:\ProgramData\Terrarium\host`.
+Both trees have protected SYSTEM/Administrators ACLs. Existing untrusted
+owners, writable ancestors, explicit foreign access rules and reparse points
+are refused rather than adopted.
+
+Windows uses the same download, checksum and executable-version checks as
+Linux, but not the Linux rename/guard sequence below. It copies the verified
+image into a new version directory and flushes a durable `update.json`
+journal containing the old and new image paths. One SCM configuration change
+switches ImagePath to the already existing new executable. The service exits
+with failure and the installer's SCM failure actions restart it. No helper
+process or scheduled task participates. Neither executable is renamed.
+
+The new service must reach `welcome` within 120 seconds. Otherwise it switches
+ImagePath back to the previous existing executable and exits with failure
+again. A restart resolves an interrupted transaction using the journal and
+SCM's configured image. Welcome marks the transaction confirmed. A later
+service start collects the previous version directory, never the executable
+currently selected by SCM. The failed version is recorded and refused on
+later offers. Sessions run as LocalSystem, the service account.
+
 A host agent follows the daemon's build. When the daemon gets a new build
 (for example a new release image), each host agent replaces itself at its
 next connect. The code is `crates/terrarium-host/src/selfupdate.rs` (the

@@ -407,7 +407,11 @@ fn start_named_inner(
     } else {
         start_cmd
     };
-    if !wraps(def, cmd) {
+    // Native Windows sessions already own kill-on-close Job Objects. A
+    // POSIX PID-file wrapper would both fail to start and lose that boundary.
+    if !wraps(def, cmd)
+        || crate::executor::path_kind(state, def) == terrarium_host::protocol::PathKind::Windows
+    {
         return Ok((initial_start(state, def, cmd)?, None));
     }
     let weak = Arc::downgrade(state);

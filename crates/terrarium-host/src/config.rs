@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 use crate::protocol::{CONNECT_PATH, DEFAULT_BUFFER_LIMIT};
 
 /// The default config path.
+#[cfg(unix)]
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/terrarium-host/config.toml";
+#[cfg(windows)]
+pub const DEFAULT_CONFIG_PATH: &str = r"C:\ProgramData\Terrarium\host\config.toml";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -225,6 +228,9 @@ impl Default for HostPaths {
 
 /// `$XDG_DATA_HOME`, else `~/.local/share`, else `/var/lib`.
 pub fn data_dir() -> PathBuf {
+    #[cfg(windows)]
+    return PathBuf::from(r"C:\ProgramData\Terrarium");
+    #[cfg(unix)]
     std::env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
@@ -237,6 +243,7 @@ pub fn data_dir() -> PathBuf {
 /// nor `HOME`, [`data_dir`] is `/var/lib`, which a user agent cannot write:
 /// then `<temp_dir>/terrarium-host-<euid>/env`. The host agent checks the
 /// dir and deletes the leftover files in it at the start.
+#[cfg(unix)]
 pub fn default_env_dir() -> PathBuf {
     let has_home = ["XDG_DATA_HOME", "HOME"]
         .iter()
@@ -244,9 +251,18 @@ pub fn default_env_dir() -> PathBuf {
     let base = if has_home {
         data_dir().join("terrarium-host")
     } else {
-        std::env::temp_dir().join(format!("terrarium-host-{}", nix::unistd::geteuid()))
+        #[cfg(unix)]
+        let suffix = nix::unistd::geteuid().to_string();
+        #[cfg(windows)]
+        let suffix = "system".to_owned();
+        std::env::temp_dir().join(format!("terrarium-host-{suffix}"))
     };
     absolute(base.join("env"))
+}
+
+#[cfg(windows)]
+pub fn default_env_dir() -> PathBuf {
+    data_dir().join("host").join("env")
 }
 
 fn absolute(p: PathBuf) -> PathBuf {
@@ -387,6 +403,9 @@ impl Config {
         if let Some(n) = self.name.as_deref().filter(|n| !n.trim().is_empty()) {
             return n.trim().to_owned();
         }
+        #[cfg(windows)]
+        return std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".into());
+        #[cfg(unix)]
         nix::unistd::gethostname()
             .ok()
             .and_then(|h| h.into_string().ok())
@@ -476,22 +495,25 @@ pub fn connect_url(raw: &str) -> Result<String, ConfigError> {
 /// parent directory is made with mode 0700.
 pub fn write_secret(path: &Path, secret: &str) -> std::io::Result<()> {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)?;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        builder.mode(0o700);
+        builder.create(parent)?;
+        #[cfg(windows)]
+        crate::session::private_dir(parent)?;
     }
     let mut name = path.file_name().unwrap_or_default().to_owned();
     name.push(".tmp");
     let tmp = path.with_file_name(name);
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut f = options.open(&tmp)?;
     writeln!(f, "{}", secret.trim())?;
     f.sync_all()?;
     drop(f);

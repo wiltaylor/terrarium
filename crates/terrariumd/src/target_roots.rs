@@ -445,6 +445,11 @@ pub async fn prepare(
     def: &TargetDef,
     dest: Option<&str>,
 ) -> ApiResult<Option<String>> {
+    // Windows host sessions are commands only. Do not create Linux build
+    // roots, run sh/python probes, or arrange automatic workspace cleanup.
+    if crate::executor::path_kind(state, def) == terrarium_host::protocol::PathKind::Windows {
+        return Ok(None);
+    }
     let Some(a) = actor.agent() else {
         return Ok(None);
     };
@@ -694,6 +699,11 @@ pub async fn prepare_exec(
             .is_some_and(|p| !kind.inside(&root, p, true))
         {
             return Err(ApiError::invalid(format!("cwd must be inside {root}")));
+        }
+        // TER-271 serves commands only. Keep lexical scope checks, but do
+        // not invent a cwd or build paths that this host never creates.
+        if host_caps(state, def).is_some_and(|caps| caps.no_workspaces) {
+            return Ok(());
         }
         cmd.cwd.get_or_insert(root.clone());
         for (key, suffix) in [("CARGO_TARGET_DIR", "target"), ("RESULTS_DIR", "results")] {

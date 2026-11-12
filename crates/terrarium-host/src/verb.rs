@@ -124,6 +124,8 @@ pub fn plan_exec(req: &ExecRequest, policy: &PathPolicy) -> Result<VerbPlan, Bui
         None => None,
     };
     Ok(VerbPlan::plain(ExecPlan {
+        #[cfg(windows)]
+        windows_holder: None,
         program: req.cmd.clone(),
         args: req.args.clone(),
         cwd,

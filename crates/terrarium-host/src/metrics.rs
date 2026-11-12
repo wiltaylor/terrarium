@@ -370,6 +370,7 @@ impl FsSpace {
 }
 
 /// `statvfs` of a path.
+#[cfg(unix)]
 pub fn statvfs(path: &Path) -> Option<FsSpace> {
     let s = nix::sys::statvfs::statvfs(path).ok()?;
     let frag = s.fragment_size() as u64;
@@ -378,6 +379,11 @@ pub fn statvfs(path: &Path) -> Option<FsSpace> {
         free: (s.blocks_free() as u64).saturating_mul(frag),
         avail: (s.blocks_available() as u64).saturating_mul(frag),
     })
+}
+
+#[cfg(windows)]
+pub fn statvfs(_path: &Path) -> Option<FsSpace> {
+    None
 }
 
 fn pct(part: u64, whole: u64) -> f64 {

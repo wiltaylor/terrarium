@@ -6,22 +6,34 @@
 //! [`ExitInfo`] when the process has exited and its output is drained.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nix::sys::signal::{Signal, killpg};
+use crate::protocol::SessionSignal as Signal;
+#[cfg(unix)]
+use nix::sys::signal::killpg;
+#[cfg(unix)]
 use nix::unistd::Pid;
+#[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot};
+#[cfg(unix)]
+use tokio::sync::mpsc;
+#[cfg(unix)]
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::outbox::Outbox;
-use crate::protocol::{CHUNK_SIZE, ExitReason, PtySize, StreamTag};
+#[cfg(unix)]
+use crate::protocol::{CHUNK_SIZE, StreamTag};
+use crate::protocol::{ExitReason, PtySize};
 
 /// How long to wait for the output pipes to close after the process exits.
 /// A background grandchild can hold them open.
+#[cfg(unix)]
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// The largest stdout a session keeps for a result parser.
@@ -30,6 +42,9 @@ pub const CAPTURE_LIMIT: usize = 4 * 1024 * 1024;
 /// What to run.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExecPlan {
+    /// Shared Windows holder budget. Each session also gets its own child job.
+    #[cfg(windows)]
+    pub windows_holder: Option<Arc<terrarium_winapi::Job>>,
     pub program: String,
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
@@ -60,12 +75,14 @@ impl PrivateFile {
     /// Write `data` to a new file `<prefix><random>` in `dir`. The dir is
     /// checked with [`private_dir`] first.
     pub fn new(dir: &Path, prefix: &str, data: &[u8]) -> std::io::Result<Self> {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         private_dir(dir)?;
-        let mut f = tempfile::Builder::new()
-            .prefix(prefix)
-            .permissions(std::fs::Permissions::from_mode(0o600))
-            .tempfile_in(dir)?;
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(prefix);
+        #[cfg(unix)]
+        builder.permissions(std::fs::Permissions::from_mode(0o600));
+        let mut f = builder.tempfile_in(dir)?;
         f.write_all(data)?;
         f.flush()?;
         Ok(Self(Arc::new(f.into_temp_path())))
@@ -88,6 +105,7 @@ impl Eq for PrivateFile {}
 /// it is private: `dir` must be a real dir (not a symlink) of this user, and
 /// its parent a real dir of this user or a sticky dir of root (like `/tmp`,
 /// where no other user can rename or delete `dir`). `dir` gets mode 0700.
+#[cfg(unix)]
 pub fn private_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     std::fs::DirBuilder::new()
@@ -113,8 +131,53 @@ pub fn private_dir(dir: &Path) -> std::io::Result<()> {
 
 /// The ownership rule of [`private_dir`] for one dir: a real dir of `euid`,
 /// or for the parent also a sticky (`S_ISVTX`) dir of root.
+#[cfg(unix)]
 fn owned_ok(is_dir: bool, uid: u32, mode: u32, euid: u32, is_parent: bool) -> bool {
     is_dir && (uid == euid || (is_parent && uid == 0 && mode & 0o1000 != 0))
+}
+
+/// Windows service private storage: reject reparse points and grant only
+/// LocalSystem and local administrators. The installer protects its parent.
+#[cfg(windows)]
+pub fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    for ancestor in dir.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(m) if !m.is_dir() || m.file_attributes() & 0x400 != 0 => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "private directory has a reparse point or non-directory ancestor",
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    std::fs::create_dir_all(dir)?;
+    let script = r#"$ErrorActionPreference = 'Stop';
+        $acl = New-Object System.Security.AccessControl.DirectorySecurity;
+        $acl.SetAccessRuleProtection($true, $false);
+        $acl.SetOwner((New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')));
+        foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+            $id = New-Object System.Security.Principal.SecurityIdentifier($sid);
+            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow');
+            $acl.AddAccessRule($rule);
+        }
+        Set-Acl -LiteralPath $env:TERRARIUM_PRIVATE_DIR -AclObject $acl;
+    "#;
+    let status = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("TERRARIUM_PRIVATE_DIR", dir)
+        .stdout(std::process::Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "cannot protect private directory ACL",
+        ));
+    }
+    Ok(())
 }
 
 /// Delete the files in `dir` whose name starts with `prefix`: the private
@@ -170,9 +233,14 @@ pub struct ExitInfo {
 }
 
 /// A started session.
+#[cfg(unix)]
+pub type InputSender = mpsc::UnboundedSender<SessionInput>;
+#[cfg(windows)]
+pub use crate::session_windows::InputSender;
+
 pub struct Running {
     pub pid: Option<u32>,
-    pub input: mpsc::UnboundedSender<SessionInput>,
+    pub input: InputSender,
     pub done: JoinHandle<ExitInfo>,
 }
 
@@ -224,6 +292,14 @@ fn check_cwd(plan: &ExecPlan) -> Result<(), SpawnError> {
 /// Start the plan. Output goes to `outbox`.
 pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError> {
     check_cwd(&plan)?;
+    #[cfg(windows)]
+    return crate::session_windows::spawn(plan, outbox);
+    #[cfg(unix)]
+    spawn_direct(plan, outbox)
+}
+
+#[cfg(unix)]
+pub(crate) fn spawn_direct(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError> {
     if plan.pty.is_some() {
         spawn_pty(plan, outbox)
     } else {
@@ -233,8 +309,10 @@ pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
 
 /// Shared stdout capture for result parsers.
 #[derive(Clone, Default)]
+#[cfg(unix)]
 struct Capture(Option<Arc<std::sync::Mutex<Vec<u8>>>>);
 
+#[cfg(unix)]
 impl Capture {
     fn new(on: bool) -> Self {
         Self(on.then(Default::default))
@@ -256,6 +334,7 @@ impl Capture {
     }
 }
 
+#[cfg(unix)]
 fn signal_group(pid: Option<u32>, sig: Signal) {
     let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) else {
         return;
@@ -267,6 +346,7 @@ fn signal_group(pid: Option<u32>, sig: Signal) {
 
 /// Kill the process group, and the scope when the session has one: a
 /// process that left the group ends too.
+#[cfg(unix)]
 fn kill_all(pid: Option<u32>, scope: Option<&str>) {
     signal_group(pid, Signal::SIGKILL);
     if let Some(scope) = scope {
@@ -280,8 +360,10 @@ fn kill_all(pid: Option<u32>, scope: Option<&str>) {
 /// the session. `kill_on_drop` alone kills only the group leader, and the
 /// children of a recipe kept running with its open fds. The guard sends no
 /// scope kill: that needs a runtime, and a drop can run without one.
+#[cfg(unix)]
 struct GroupGuard(Option<u32>);
 
+#[cfg(unix)]
 impl GroupGuard {
     /// The process exited: its group id may be reused, so do not kill it.
     fn disarm(&mut self) {
@@ -289,6 +371,7 @@ impl GroupGuard {
     }
 }
 
+#[cfg(unix)]
 impl Drop for GroupGuard {
     fn drop(&mut self) {
         signal_group(self.0, Signal::SIGKILL);
@@ -296,6 +379,7 @@ impl Drop for GroupGuard {
 }
 
 /// Sleep until the deadline, or forever without one.
+#[cfg(unix)]
 async fn deadline(timeout: Option<Duration>) {
     match timeout {
         Some(t) => tokio::time::sleep(t).await,
@@ -305,6 +389,7 @@ async fn deadline(timeout: Option<Duration>) {
 
 // ------------------------------------------------------------------ pipes
 
+#[cfg(unix)]
 fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError> {
     let mut cmd = tokio::process::Command::new(&plan.program);
     // Agent commands use checkout Git configuration. Do not inherit the
@@ -324,8 +409,9 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .process_group(0)
         .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
     if let Some(cwd) = &plan.cwd {
         cmd.current_dir(cwd);
     }
@@ -430,8 +516,13 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
         }
         let (code, signal) = match &status {
             Ok(st) => {
+                #[cfg(unix)]
                 use std::os::unix::process::ExitStatusExt;
-                (st.code(), st.signal())
+                #[cfg(unix)]
+                let signal = st.signal();
+                #[cfg(windows)]
+                let signal = None;
+                (st.code(), signal)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "wait failed");
@@ -452,6 +543,7 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
     })
 }
 
+#[cfg(unix)]
 fn reason_for(forced: Option<ExitReason>, signal: Option<i32>) -> ExitReason {
     match (forced, signal) {
         (Some(r), _) => r,
@@ -460,6 +552,7 @@ fn reason_for(forced: Option<ExitReason>, signal: Option<i32>) -> ExitReason {
     }
 }
 
+#[cfg(unix)]
 async fn drain(pumps: Vec<JoinHandle<()>>) {
     for mut p in pumps {
         if tokio::time::timeout(DRAIN_GRACE, &mut p).await.is_err() {
@@ -468,6 +561,7 @@ async fn drain(pumps: Vec<JoinHandle<()>>) {
     }
 }
 
+#[cfg(unix)]
 async fn pump<R: tokio::io::AsyncRead + Unpin>(
     mut r: R,
     stream: StreamTag,
@@ -492,6 +586,7 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
 
 // ------------------------------------------------------------------ pty
 
+#[cfg(unix)]
 fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError> {
     use portable_pty::{CommandBuilder, PtySize as PortableSize, native_pty_system};
 
@@ -534,11 +629,11 @@ fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
             }
         }
     }
+    let mut reader = pair.master.try_clone_reader().map_err(pty_err)?;
+    let mut writer = pair.master.take_writer().map_err(pty_err)?;
     let mut child = pair.slave.spawn_command(cmd).map_err(pty_err)?;
     drop(pair.slave);
     let pid = child.process_id();
-    let mut reader = pair.master.try_clone_reader().map_err(pty_err)?;
-    let mut writer = pair.master.take_writer().map_err(pty_err)?;
     let master = pair.master;
 
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
@@ -679,6 +774,7 @@ fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
 
 /// portable-pty reports a signal by its `strsignal` text. Map the common ones
 /// back to numbers (glibc and musl agree on these).
+#[cfg(unix)]
 pub fn signal_number(text: &str) -> Option<i32> {
     use Signal as S;
     let sig = match text {
@@ -704,6 +800,11 @@ pub fn signal_number(text: &str) -> Option<i32> {
         }
     };
     Some(sig as i32)
+}
+
+#[cfg(windows)]
+pub fn signal_number(_text: &str) -> Option<i32> {
+    None
 }
 
 #[cfg(test)]

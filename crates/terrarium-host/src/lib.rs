@@ -43,17 +43,26 @@ pub mod labcheck;
 pub mod limits;
 pub mod logging;
 pub mod metrics;
+#[cfg(unix)]
+pub mod native;
+#[cfg(windows)]
+#[path = "native_windows.rs"]
 pub mod native;
 pub mod outbox;
 pub mod prepare;
 pub mod protocol;
 pub mod selfupdate;
 pub mod session;
+#[cfg(windows)]
+mod session_windows;
 pub mod tls;
 pub mod transfer;
+pub mod update_journal;
 pub mod update_signature;
 pub mod verb;
 pub mod vmlab;
+#[cfg(windows)]
+pub mod windows_update;
 pub mod workspace;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub mod workspace_helper;

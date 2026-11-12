@@ -613,7 +613,7 @@ fn destination_substitution_and_nonempty_scaffold_are_refused() {
 }
 
 #[test]
-fn unsafe_exception_is_confined_to_sys_crate() {
+fn unsafe_exception_is_confined_to_audited_syscall_crates() {
     fn walk(
         path: &std::path::Path,
         manifests: &mut Vec<std::path::PathBuf>,
@@ -621,7 +621,12 @@ fn unsafe_exception_is_confined_to_sys_crate() {
     ) {
         for entry in std::fs::read_dir(path).unwrap() {
             let path = entry.unwrap().path();
-            if path.file_name().unwrap() == "terrarium-sys" {
+            // Both exact exceptions were approved by the operator. All other
+            // crates must inherit forbid, including future platform ports.
+            if matches!(
+                path.file_name().unwrap().to_str(),
+                Some("terrarium-sys" | "terrarium-winapi")
+            ) {
                 continue;
             }
             if path.is_dir() {

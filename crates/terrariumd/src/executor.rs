@@ -764,9 +764,19 @@ fn host_frame_paths(
     cmd.check_paths(kind)?;
     let def = def.clone();
     let cmd = cmd.clone();
-    let shell = shell.unwrap_or("/bin/sh").to_owned();
+    let windows = kind == terrarium_host::protocol::PathKind::Windows;
+    let shell = shell
+        .unwrap_or(if windows { "cmd.exe" } else { "/bin/sh" })
+        .to_owned();
     let (program, args) = if cmd.shell && cmd.argv.is_empty() {
-        (shell, vec!["-l".to_owned()])
+        (
+            shell,
+            if windows {
+                Vec::new()
+            } else {
+                vec!["-l".to_owned()]
+            },
+        )
     } else {
         (cmd.argv[0].clone(), cmd.argv[1..].to_vec())
     };
@@ -6255,6 +6265,7 @@ mod tests {
         h.name = "box".into();
         let mut caps = HostCapabilities {
             limits: Some(terrarium_core::limits::LimitsCapability {
+                job_objects: false,
                 systemd: true,
                 controllers: vec!["cpu".into(), "memory".into()],
                 reason: None,
