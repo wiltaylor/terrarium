@@ -2,8 +2,96 @@
 //! advance the runtime barrier or claim that an attachment is usable.
 use super::*;
 use terrarium_core::live_workspace::{
-    Caller, DaemonOperation, DaemonPhase, Delivery, Envelope, Reply, Request, decode_frame,
+    Caller, DaemonOperation, DaemonPhase, Delivery, Envelope, Holder, Kind, NamespaceIdentity,
+    OperationId, Provenance, RegistrationId, Reply, Request, RuntimeId, RuntimeIdentity,
+    PROTOCOL_VERSION, decode_frame,
 };
+
+/// Internal daemon input, not a wire payload. The sandbox incarnation must be
+/// selected from the owning sandbox by the daemon, never a request pathname.
+pub struct Grant {
+    pub provenance: Provenance,
+    pub operation: OperationId,
+    pub registration: RegistrationId,
+    pub holder: Holder,
+    pub owning_sandbox: String,
+}
+
+/// Allocate an immutable grant intent and its reservation in one FULL immediate
+/// transaction. Errors must abort the caller's transaction. This allocates no
+/// attachment and performs no helper I/O. Activation remains disabled.
+#[allow(clippy::type_complexity)]
+pub fn allocate_grant(t: &Tx<'_>, grant: &Grant) -> ApiResult<Envelope> {
+    durable(t)?;
+    no_link(t)?;
+    if matches!(grant.provenance.caller, Caller::Link(_)) {
+        return Err(ApiError::new(Code::LinkForbidden, "link provenance cannot allocate a grant"));
+    }
+    let operation = grant.operation.0.to_string();
+    let registration = grant.registration.0.to_string();
+    let exists: bool = t.query_row("SELECT EXISTS(SELECT 1 FROM live_workspace_operations WHERE operation_id = ?1)", [&operation], |r| r.get(0))?;
+    if exists {
+        let saved = load(t, &operation)?;
+        let original = &saved.envelope.original;
+        let sandbox: Option<String> = t.query_row(
+            "SELECT owning_sandbox_incarnation FROM workspace_reservations WHERE workspace_id = ?1",
+            [grant.holder.enrollment.workspace.0.to_string()], |r| r.get(0),
+        )?;
+        if original.kind != Kind::Grant || original.provenance != grant.provenance
+            || original.runtime.registration != grant.registration
+            || original.holder.as_ref() != Some(&grant.holder)
+            || sandbox.as_deref() != Some(grant.owning_sandbox.as_str())
+        {
+            return Err(conflict());
+        }
+        return Ok(saved.envelope);
+    }
+    let (host, target, domain, runtime, container, dev, ino, allocated, state): (
+        String, String, String, String, String, String, String, u64, String,
+    ) = t.query_row(
+        "SELECT host_id,target_id,trust_domain_id,runtime_id,container_id,namespace_dev,
+         namespace_ino,allocated_revision,state FROM live_workspace_targets WHERE registration_id = ?1",
+        [&registration], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+    )?;
+    let revision = allocated.checked_add(1).filter(|n| *n <= i64::MAX as u64).ok_or_else(conflict)?;
+    if state != "verified" || host != grant.holder.enrollment.host.to_string()
+        || domain != grant.holder.domain.0.to_string()
+    {
+        return Err(conflict());
+    }
+    // Attachment IDs are permanent. A tombstone or any previous grant with
+    // this attachment ID cannot be reinterpreted as a new publication.
+    let used: bool = t.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_workspace_attachments WHERE attachment_id = ?1)",
+        [grant.holder.attachment.0.to_string()], |r| r.get(0),
+    )?;
+    if used { return Err(conflict()); }
+    let mut pending = t.prepare("SELECT original_request FROM live_workspace_operations WHERE kind = 'grant'")?;
+    for bytes in pending.query_map([], |r| r.get::<_, Vec<u8>>(0))? {
+        let previous: Request = serde_json::from_slice(&bytes?).map_err(|_| conflict())?;
+        if previous.holder.is_none_or(|h| h.attachment == grant.holder.attachment) {
+            return Err(conflict());
+        }
+    }
+    let request = Request {
+        version: PROTOCOL_VERSION, provenance: grant.provenance.clone(), operation: grant.operation,
+        host: host.parse().map_err(|_| conflict())?, target,
+        runtime: RuntimeIdentity {
+            registration: grant.registration,
+            incarnation: RuntimeId(runtime.parse().map_err(|_| conflict())?), container_id: container,
+            namespace: NamespaceIdentity { device: dev.parse().map_err(|_| conflict())?, inode: ino.parse().map_err(|_| conflict())? },
+        }, revision, kind: Kind::Grant, holder: Some(grant.holder.clone()),
+    };
+    let envelope = Envelope { original_hash: request.hash().map_err(|_| conflict())?, original: request, delivery: Delivery::Apply };
+    decode_frame(&serde_json::to_vec(&envelope).map_err(|_| conflict())?).map_err(|_| conflict())?;
+    super::reserve(t, &grant.holder.enrollment, &registration, &domain, &grant.owning_sandbox)?;
+    t.execute("INSERT INTO live_workspace_operations VALUES (?1,?2,?3,'grant',?4,?5,'apply','intent',NULL)",
+        params![operation, registration, revision, serde_json::to_vec(&envelope.original).map_err(|_| conflict())?, envelope.original_hash.as_slice()])?;
+    let changed = t.execute("UPDATE live_workspace_targets SET allocated_revision = ?2 WHERE registration_id = ?1 AND allocated_revision = ?3",
+        params![registration, revision, allocated])?;
+    if changed != 1 { return Err(conflict()); }
+    Ok(envelope)
+}
 
 fn conflict() -> ApiError {
     ApiError::new(Code::Conflict, "invalid live workspace operation record")
@@ -277,5 +365,52 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn grant_allocation_seals_once_and_retains_original_on_expired_retry() {
+        use terrarium_core::live_workspace::{AttachmentId, SourceIdentity, TrustDomainId, WorkspaceId};
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::new(crate::db::open(&dir.path().join("test.sqlite")).unwrap(), EventHub::default());
+        let grant = db.write_full("system", |t| {
+            let seed = insert(t)?;
+            let enrollment = Enrollment {
+                workspace: WorkspaceId(Ulid::new()), host: seed.original.host,
+                agent: terrarium_core::AgentId::new(), project: "fixture".into(), name: "holder".into(),
+                source: SourceIdentity { device: 1, inode: 2 },
+            };
+            let domain: String = t.query_row("SELECT trust_domain_id FROM live_workspace_targets", [], |r| r.get(0))?;
+            t.execute("INSERT INTO agents (id,name,project,harness,workspace,created_at,updated_at,status,policy,source)
+                VALUES (?1,'holder','fixture','codex','/synthetic','now','now','idle',?2,'api')",
+                params![enrollment.agent.to_string(), r#"{"targets":["synthetic"]}"#])?;
+            t.execute("INSERT INTO live_workspaces VALUES (?1,?2,?3,'fixture','holder','1','2','fresh')",
+                params![enrollment.workspace.0.to_string(), enrollment.host.to_string(), enrollment.agent.to_string()])?;
+            Ok(Grant {
+                provenance: seed.original.provenance, operation: OperationId(Ulid::new()),
+                registration: seed.original.runtime.registration,
+                holder: Holder { enrollment, attachment: AttachmentId(Ulid::new()), domain: TrustDomainId(domain.parse().unwrap()) },
+                owning_sandbox: "daemon-selected-incarnation".into(),
+            })
+        }).await.unwrap();
+        db.write_full("system", move |t| {
+            let first = allocate_grant(t, &grant)?;
+            assert_eq!(first.original.revision, 2);
+            assert_eq!(first.original.runtime.registration, grant.registration);
+            assert_eq!(allocate_grant(t, &grant)?, first);
+            t.execute("UPDATE agents SET status = 'stopped'", [])?;
+            // Returning the immutable intent is not permission to dispatch it.
+            assert_eq!(allocate_grant(t, &grant)?, first);
+            let mut duplicate = Grant { operation: OperationId(Ulid::new()), ..grant };
+            assert!(allocate_grant(t, &duplicate).is_err());
+            duplicate.holder.attachment = AttachmentId(Ulid::new());
+            assert!(allocate_grant(t, &duplicate).is_err());
+            let allocated: u64 = t.query_row("SELECT allocated_revision FROM live_workspace_targets", [], |r| r.get(0))?;
+            assert_eq!(allocated, 2);
+            let count: u64 = t.query_row("SELECT count(*) FROM workspace_reservations", [], |r| r.get(0))?;
+            assert_eq!(count, 1);
+            let attachments: u64 = t.query_row("SELECT count(*) FROM live_workspace_attachments", [], |r| r.get(0))?;
+            assert_eq!(attachments, 0);
+            Ok(())
+        }).await.unwrap();
     }
 }
