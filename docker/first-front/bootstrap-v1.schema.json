@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:terrarium:bootstrap-v1",
+  "oneOf": [
+    {"$ref": "#/$defs/descriptor"},
+    {"$ref": "#/$defs/receipt"},
+    {"$ref": "#/$defs/marker"},
+    {"$ref": "#/$defs/admission"}
+  ],
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decimal": {"type": "string", "pattern": "^(0|[1-9][0-9]{0,19})$"},
+    "binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["device", "inode", "mount_binding_sha256"],
+      "properties": {
+        "device": {"$ref": "#/$defs/decimal"},
+        "inode": {"$ref": "#/$defs/decimal"},
+        "mount_binding_sha256": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "descriptor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "protocol", "run_id", "generation_id", "mode", "manifest_sha256", "platform_digest", "payload_sha256", "state_binding"],
+      "properties": {
+        "schema": {"type": "integer", "const": 1},
+        "protocol": {"const": "bootstrap-v1"},
+        "run_id": {"$ref": "#/$defs/id"},
+        "generation_id": {"$ref": "#/$defs/id"},
+        "mode": {"enum": ["destination", "recovery"]},
+        "manifest_sha256": {"$ref": "#/$defs/hash"},
+        "platform_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "payload_sha256": {"$ref": "#/$defs/hash"},
+        "state_binding": {"$ref": "#/$defs/binding"}
+      }
+    },
+    "receipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "protocol", "run_id", "generation_id", "descriptor_sha256", "payload_sha256", "release_id", "state_binding", "marker_sha256", "phase"],
+      "properties": {
+        "schema": {"type": "integer", "const": 1},
+        "protocol": {"const": "bootstrap-v1"},
+        "run_id": {"$ref": "#/$defs/id"},
+        "generation_id": {"$ref": "#/$defs/id"},
+        "descriptor_sha256": {"$ref": "#/$defs/hash"},
+        "payload_sha256": {"$ref": "#/$defs/hash"},
+        "release_id": {"$ref": "#/$defs/hash"},
+        "state_binding": {"$ref": "#/$defs/binding"},
+        "marker_sha256": {"$ref": "#/$defs/hash"},
+        "phase": {"const": "prepared"}
+      }
+    },
+    "marker": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "run_id", "generation_id", "descriptor_sha256"],
+      "properties": {
+        "schema": {"type": "integer", "const": 1},
+        "run_id": {"$ref": "#/$defs/id"},
+        "generation_id": {"$ref": "#/$defs/id"},
+        "descriptor_sha256": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "admission": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "protocol", "run_id", "generation_id", "descriptor_sha256", "receipt_sha256", "commit_sha256"],
+      "properties": {
+        "schema": {"type": "integer", "const": 1},
+        "protocol": {"const": "bootstrap-v1"},
+        "run_id": {"$ref": "#/$defs/id"},
+        "generation_id": {"$ref": "#/$defs/id"},
+        "descriptor_sha256": {"$ref": "#/$defs/hash"},
+        "receipt_sha256": {"$ref": "#/$defs/hash"},
+        "commit_sha256": {"$ref": "#/$defs/hash"}
+      }
+    }
+  }
+}

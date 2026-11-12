@@ -18,6 +18,16 @@ SPEC.loader.exec_module(HOT)
 
 
 class HotSwapTests(unittest.TestCase):
+    def test_bootstrap_generation_rejects_generic_updater_marker_removal(self):
+        HOT.main(["init"])
+        root = self.state / "releases"
+        (root / "bootstrap-v1.json").write_text('{}')
+        (root / "probation").write_text('held')
+        for command in (["init"], ["stage", "{}"], ["commit"], ["probe"], ["start", "a" * 64]):
+            with self.subTest(command=command), self.assertRaisesRegex(RuntimeError, 'host transaction'):
+                HOT.main(command)
+        self.assertEqual((root / "probation").read_text(), 'held')
+
     def test_supervisor_reports_daemon_exit_one_immediately(self):
         source = (ROOT / "docker/entrypoint.sh").read_text()
         loop = source[source.index('RUN_DIR="'):]

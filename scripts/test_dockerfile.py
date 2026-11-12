@@ -26,8 +26,12 @@ class HostArtifacts(unittest.TestCase):
         self.assertIn('sha256sum "$dist" > "$dist.sha256"', DOCKERFILE)
         self.assertIn("COPY --from=host-build /dist/ /payload/dist/", DOCKERFILE)
         self.assertIn(
-            "COPY --from=release-payload /payload/ /opt/terrarium/bundled/", DOCKERFILE
+            "COPY --from=release-payload /payload/ /bootstrap-layer/opt/terrarium/bundled/", DOCKERFILE
         )
+        self.assertIn("COPY --from=bootstrap-payload /bootstrap-layer/ /", DOCKERFILE)
+        final = DOCKERFILE.split('FROM runtime AS final', 1)[1]
+        self.assertEqual(sum(line.startswith(('COPY ', 'RUN ', 'ADD '))
+                             for line in final.splitlines()), 1)
 
     def test_dist_is_available_without_an_initialized_state_volume(self):
         # Image extraction does not run the entrypoint. The public dist link

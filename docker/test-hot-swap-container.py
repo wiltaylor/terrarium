@@ -38,13 +38,14 @@ class ContainerHotSwap(unittest.TestCase):
         created_images = []
         with tempfile.TemporaryDirectory(prefix="ter-261-context-") as temp:
             context = Path(temp)
-            for src in ("entrypoint.sh", "hot-swap.py"):
+            for src in ("entrypoint.sh", "hot-swap.py", "bootstrap.py"):
                 shutil.copy2(REPO / "docker" / src, context / src)
             (context / "Dockerfile.base").write_text('''FROM node:22.23.4-trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends python3 git tini util-linux procps && rm -rf /var/lib/apt/lists/*
 RUN userdel node && useradd -u 1000 -m terrarium && mkdir -p /state /work /config/terrarium /opt/terrarium/tools /run/terrarium /auth/claude /auth/codex /auth/copilot /auth/pi && chown -R terrarium:terrarium /state /work /config /opt/terrarium /run/terrarium /auth
 COPY entrypoint.sh /usr/local/bin/terrarium-entrypoint
 COPY hot-swap.py /usr/local/lib/terrarium-hot-swap.py
+COPY bootstrap.py /usr/local/lib/terrarium-bootstrap.py
 RUN chmod +x /usr/local/bin/terrarium-entrypoint && ln -s /state/releases/current/bin/terrariumd /usr/local/bin/terrariumd && ln -s /state/releases/current/bin/terrarium /usr/local/bin/terrarium && ln -s /state/releases/current/bin/terrarium-runner /usr/local/bin/terrarium-runner
 ENV TERRARIUM_STATE_DIR=/state TERRARIUM_CONFIG_REPO=/config/terrarium TERRARIUM_CONFIG_DIR=/config/terrarium TERRARIUM_API_SOCKET=/run/terrarium/api.sock TERRARIUM_RUNTIME_DIR=/run/terrarium TERRARIUM_RUNNER=/usr/local/bin/terrarium-runner TERRARIUM_RUNNER_MODE=process TERRARIUM_HARNESS_INSTALL=0 TERRARIUM_NO_HARNESS_INSTALL=true TERRARIUM_HOST_LISTEN="" TERRARIUM_DEFAULTS_DIR=/state/releases/current/defaults
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/terrarium-entrypoint"]

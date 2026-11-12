@@ -57,6 +57,12 @@ never change the live release or probation marker. A state-volume lock rejects
 a second service, including an accidental `compose run terrarium` without a
 replacement command.
 
+First-front bootstrap is a separate held-generation startup contract. It
+requires fixed read-only controls, skips entrypoint harness installation and
+validates the entire selected payload before every supervised child. See
+[bootstrap-v1 source contract](../docs/first-front-bootstrap.md). This source
+does not authorize historical-image assembly, publication or a migration.
+
 The updater normalizes the service prefix for the destination image when it
 creates a long-running container. This installs the new supervisor from an old
 image default command, and strips the prefix again for rollback to an old image.

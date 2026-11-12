@@ -286,6 +286,7 @@ COPY docker/release/ /opt/terrarium/release/
 # TERRARIUM_HOST_DIST_DIR). One arch for now: the arch of the build.
 COPY docker/entrypoint.sh /usr/local/bin/terrarium-entrypoint
 COPY docker/hot-swap.py /usr/local/lib/terrarium-hot-swap.py
+COPY docker/bootstrap.py /usr/local/lib/terrarium-bootstrap.py
 # The pins of the first install (`terrariumd harness install`).
 # The packaged defaults (PLAN §8.3): the prompts and the harness settings.
 # The daemon copies them into the config repo (/config/terrarium) at each
@@ -303,9 +304,17 @@ EXPOSE 8080 8081 8082 8083
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/terrarium-entrypoint"]
 CMD ["--daemon-service", "terrariumd"]
 
+FROM runtime AS bootstrap-payload
+COPY --from=release-payload /payload/ /bootstrap-layer/opt/terrarium/bundled/
+COPY docker/bootstrap-image-metadata.py /tmp/bootstrap-image-metadata.py
+USER root
+RUN /usr/bin/python3 -I -B /tmp/bootstrap-image-metadata.py
+
+FROM runtime AS final
 # Must remain the LAST filesystem layer. Everything before it is the runtime
-# base and must be byte-identical for a hot swap. Metadata below adds no layer.
-COPY --from=release-payload /payload/ /opt/terrarium/bundled/
+# base and must be byte-identical for a hot swap. Bundle and its bootstrap
+# inventory are copied in ONE layer. No OCI digest is embedded in metadata.
+COPY --from=bootstrap-payload /bootstrap-layer/ /
 LABEL io.terrarium.hot-swap-layout="1" \
       io.terrarium.runner-compat-epoch="1"
 

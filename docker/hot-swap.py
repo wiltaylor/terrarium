@@ -360,6 +360,12 @@ def prune(root):
 
 def main(argv):
     root, run = paths()
+    # Held bootstrap generations are owned by their host transaction. The
+    # generic updater must not select, prune or remove their probation marker.
+    if (os.path.lexists('/run/terrarium-bootstrap')
+            or os.path.lexists(root / 'bootstrap-v1.json')
+            or os.path.lexists(root / 'bootstrap-intent-v1.json')):
+        raise RuntimeError('bootstrap generation is held by its host transaction')
     command = argv[0]
     if command == "init":
         if os.environ.get("TERRARIUM_DAEMON_SERVICE") != "1":

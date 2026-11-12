@@ -17,6 +17,16 @@
 #    crashes, so the agent runners live on (see docker/README.md).
 set -euo pipefail
 
+# Read-only bootstrap checks precede even mkdir/chown. A recovery artifact
+# cannot opt out by dropping an environment variable or replacing the CMD.
+bootstrap="$(/usr/bin/python3 -I -B /usr/local/lib/terrarium-bootstrap.py preflight "$@")"
+if [ "$bootstrap" = 1 ] && [ "${TERRARIUM_BOOTSTRAP_LOCKED:-0}" != 1 ]; then
+	exec /usr/bin/python3 -I -B /usr/local/lib/terrarium-bootstrap.py lock
+fi
+if [ "$bootstrap" = 1 ]; then
+	/usr/bin/python3 -I -B /usr/local/lib/terrarium-bootstrap.py init
+fi
+
 TERRARIUM_USER="${TERRARIUM_USER:-terrarium}"
 AUTH_DIRS=(/auth/claude /auth/codex /auth/copilot /auth/pi)
 TOOLS_DIR="${TERRARIUM_TOOLS_DIR:-/opt/terrarium/tools}"
@@ -68,7 +78,12 @@ if [ "$service" != 1 ]; then
 	log "daemon initialization requires --daemon-service (set by the image CMD)"
 	exit 1
 fi
-if [ -f /usr/local/lib/terrarium-hot-swap.py ]; then
+if [ "$bootstrap" = 1 ]; then
+	# Already initialized under service.lock, before directory preparation.
+	# Do not resolve the daemon through the writable harness PATH at exec.
+	set -- /usr/local/bin/terrariumd
+else
+	[ -f /usr/local/lib/terrarium-hot-swap.py ] || { log "mandatory init helper missing"; exit 1; }
 	mkdir -p "${TERRARIUM_STATE_DIR:-/state}/releases"
 	exec 9> "${TERRARIUM_STATE_DIR:-/state}/releases/service.lock"
 	flock -n 9 || { log "another daemon container owns this state volume"; exit 1; }
@@ -89,7 +104,7 @@ fi
 # The harnesses (docs/getting-started.md §7). A failure does not stop the
 # start: the daemon tries again at its own start, and the agents of a
 # missing harness fail to launch with a clear error.
-if [ "${TERRARIUM_HARNESS_INSTALL:-1}" != 0 ] && command -v terrariumd > /dev/null 2>&1; then
+if [ "$bootstrap" != 1 ] && [ "${TERRARIUM_HARNESS_INSTALL:-1}" != 0 ] && command -v terrariumd > /dev/null 2>&1; then
 	log "checking the harnesses in $TOOLS_DIR"
 	started="$(date +%s)"
 	if terrariumd harness install 9>&-; then
@@ -239,6 +254,11 @@ while :; do
 		if [ -n "$stop_signal" ]; then break; fi
 	fi
 	started="$(now)"
+	# Validation only, still under the inherited service.lock. Never repair
+	# probation or selection on crash retry or upgrade-resume.
+	if [ "${bootstrap:-0}" = 1 ]; then
+		/usr/bin/python3 -I -B /usr/local/lib/terrarium-bootstrap.py validate || exit 1
+	fi
 	# A background job of a shell without job control ignores SIGINT and
 	# SIGQUIT; `env --default-signal` gives terrariumd and the runners the
 	# default dispositions back.
