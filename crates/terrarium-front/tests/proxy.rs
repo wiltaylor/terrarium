@@ -16,7 +16,9 @@ async fn serve(router: Router) -> (String, tokio::task::JoinHandle<()>) {
 async fn serve_front(front: Front) -> (String, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap().to_string();
-    let task = tokio::spawn(async move { terrarium_front::serve(listener, front).await.unwrap(); });
+    let task = tokio::spawn(async move {
+        terrarium_front::serve(listener, front).await.unwrap();
+    });
     (address, task)
 }
 fn front(upstream: String, webhook: bool) -> Front {
@@ -305,11 +307,20 @@ async fn inactive_upload_closes_both_connections() {
     };
     let (address, task) = serve_front(front(upstream_address, false).with_limits(limits)).await;
     let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
-    client.write_all(b"POST /upload HTTP/1.1\r\nHost: test\r\nContent-Length: 100\r\n\r\nabc").await.unwrap();
+    client
+        .write_all(b"POST /upload HTTP/1.1\r\nHost: test\r\nContent-Length: 100\r\n\r\nabc")
+        .await
+        .unwrap();
     // Keep the write side open. Only the front's idle policy can end this.
     let mut reply = Vec::new();
-    tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut reply)).await.unwrap().unwrap();
-    let body = tokio::time::timeout(Duration::from_secs(2), observed).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    let body = tokio::time::timeout(Duration::from_secs(2), observed)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(body, b"abc");
     daemon.await.unwrap();
     task.abort();
@@ -323,12 +334,18 @@ async fn missing_headers_close_at_the_header_deadline() {
         ..Default::default()
     };
     assert_eq!(terrarium_front::HEADER_TIMEOUT, Duration::from_secs(15));
-    assert_eq!(terrarium_front::UPLOAD_IDLE_TIMEOUT, Duration::from_secs(60));
+    assert_eq!(
+        terrarium_front::UPLOAD_IDLE_TIMEOUT,
+        Duration::from_secs(60)
+    );
     let (address, task) = serve_front(front("127.0.0.1:1".into(), false).with_limits(limits)).await;
     let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
     let start = std::time::Instant::now();
     let mut bytes = Vec::new();
-    tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut bytes)).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
     assert!(start.elapsed() >= limits.header_timeout);
     task.abort();
 }
@@ -338,12 +355,18 @@ async fn connection_cap_rejects_only_connections_above_the_limit() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     assert_eq!(terrarium_front::MAX_CONNECTIONS, 1024);
     let (upstream, daemon) = serve(Router::new().route("/", get(|| async { "ok" }))).await;
-    let limits = terrarium_front::Limits { max_connections: 2, ..Default::default() };
+    let limits = terrarium_front::Limits {
+        max_connections: 2,
+        ..Default::default()
+    };
     let (address, task) = serve_front(front(upstream, false).with_limits(limits)).await;
     let mut clients = Vec::new();
     for _ in 0..limits.max_connections {
         let mut client = tokio::net::TcpStream::connect(&address).await.unwrap();
-        client.write_all(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n").await.unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+            .await
+            .unwrap();
         assert!(read_head(&mut client).await.starts_with("HTTP/1.1 200"));
         let mut body = [0; 2];
         client.read_exact(&mut body).await.unwrap();
@@ -354,7 +377,10 @@ async fn connection_cap_rejects_only_connections_above_the_limit() {
     assert!(read_head(&mut excess).await.starts_with("HTTP/1.1 503"));
     // The last admitted connection remains usable while the cap is reached.
     let client = clients.last_mut().unwrap();
-    client.write_all(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n").await.unwrap();
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+        .await
+        .unwrap();
     assert!(read_head(client).await.starts_with("HTTP/1.1 200"));
     task.abort();
     daemon.abort();

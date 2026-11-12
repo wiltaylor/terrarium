@@ -49,7 +49,7 @@ pub async fn serve(listener: tokio::net::TcpListener, front: Front) -> std::io::
     let router = front.router();
     let slots = Arc::new(tokio::sync::Semaphore::new(limits.max_connections));
     loop {
-        let (mut stream, _) = listener.accept().await?;
+        let (stream, _) = listener.accept().await?;
         let Ok(permit) = slots.clone().try_acquire_owned() else {
             // No task or wait queue for rejected connections. A small write is
             // attempted once, then the socket is dropped even if it would block.
@@ -63,13 +63,19 @@ pub async fn serve(listener: tokio::net::TcpListener, front: Front) -> std::io::
                 _permit: Arc::new(permit),
             };
             let close = client.close.clone();
-            let service = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
-                req.extensions_mut().insert(client.clone());
-                router.clone().oneshot(req.map(Body::new))
-            });
+            let service = hyper::service::service_fn(
+                move |mut req: hyper::Request<hyper::body::Incoming>| {
+                    req.extensions_mut().insert(client.clone());
+                    router.clone().oneshot(req.map(Body::new))
+                },
+            );
             let mut builder = hyper::server::conn::http1::Builder::new();
-            builder.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(limits.header_timeout);
-            let connection = builder.serve_connection(TokioIo::new(&mut stream), service).with_upgrades();
+            builder
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(limits.header_timeout);
+            let connection = builder
+                .serve_connection(TokioIo::new(stream), service)
+                .with_upgrades();
             tokio::select! {
                 _ = connection => (),
                 _ = close.notified() => (),
@@ -176,9 +182,14 @@ async fn proxy(State(front): State<Arc<Front>>, mut req: Request) -> Response {
         } else {
             Some(sent)
         };
-        let req = Request::from_parts(parts, Body::new(UploadBody {
-            body, sent, progress,
-        }));
+        let req = Request::from_parts(
+            parts,
+            Body::new(UploadBody {
+                body,
+                sent,
+                progress,
+            }),
+        );
         let response = sender.send_request(req);
         tokio::pin!(response);
         let response = tokio::select! {

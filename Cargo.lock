@@ -3995,6 +3995,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "tower",
 ]
 
 [[package]]
