@@ -9,7 +9,8 @@ use std::process::Command;
 use terrarium_core::live_workspace::NamespaceIdentity;
 
 fn docker(args: &[String]) -> Vec<u8> {
-    let result = Command::new("/usr/bin/docker")
+    let result = Command::new("/usr/bin/timeout")
+        .args(["--signal=TERM", "60", "/usr/bin/docker"])
         .args(["--host", "unix:///var/run/docker.sock"])
         .args(args)
         .env_clear()
@@ -28,7 +29,8 @@ fn cmd(args: &[&str]) -> Vec<u8> {
 struct Container(String);
 impl Drop for Container {
     fn drop(&mut self) {
-        let _ = Command::new("/usr/bin/docker")
+        let _ = Command::new("/usr/bin/timeout")
+            .args(["--signal=TERM", "60", "/usr/bin/docker"])
             .args([
                 "--host",
                 "unix:///var/run/docker.sock",
@@ -94,6 +96,16 @@ fn docker_readonly_scaffold_later_publish_and_revoke() {
     mounts::make_private(&publisher).unwrap();
     LinuxAttributes.scaffold(&publisher).unwrap();
     mounts::make_shared(&publisher).unwrap();
+    // move_mount refuses moving a mount out of a shared parent. Isolate the
+    // empty staging parent, as B2 does, before importing any synthetic source.
+    let staging_path = root.path().join("staging");
+    std::fs::create_dir(&staging_path).unwrap();
+    let staging_dir = File::open(&staging_path).unwrap();
+    let staging_tree = mounts::clone_nonrecursive(&staging_dir).unwrap();
+    mounts::attach(&staging_tree, &staging_dir).unwrap();
+    let staging = File::open(&staging_path).unwrap();
+    cleanup.0.push(staging.try_clone().unwrap());
+    mounts::make_private(&staging).unwrap();
 
     let (mut r, mut req, _) = super::tests::fixture();
     req.name = format!("ter926-{}", std::process::id());
@@ -149,7 +161,7 @@ fn docker_readonly_scaffold_later_publish_and_revoke() {
         let destination = publisher_path.join("project").join(name);
         std::fs::create_dir(&destination).unwrap();
         let tree = mounts::clone_nonrecursive(&File::open(&source).unwrap()).unwrap();
-        let stage_path = root.path().join(format!("stage-{name}"));
+        let stage_path = staging_path.join(format!("stage-{name}"));
         std::fs::create_dir(&stage_path).unwrap();
         mounts::attach(&tree, &File::open(&stage_path).unwrap()).unwrap();
         let stage = File::open(&stage_path).unwrap();

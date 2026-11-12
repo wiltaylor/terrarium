@@ -370,10 +370,21 @@ fn docker_nsfs_records_do_not_qualify_as_publishers() {
     receiver.optional_fields = vec!["master:216".into()];
     receiver.vfs_flags = vec!["ro".into(), "nosuid".into(), "nodev".into()];
     assert!(mountinfo::publisher(&host, &receiver, &[host.clone()]).is_err());
+    for kind in ["cgroup", "ipc", "mnt", "net", "pid", "pid_for_children", "time", "time_for_children", "user", "uts"] {
+        let accepted = evidence(&line.replace("net:[", &format!("{kind}:[")), 1);
+        assert!(mountinfo::publisher(&accepted, &receiver, &[accepted.clone()]).is_err());
+        let mut host_publisher = accepted.clone();
+        host_publisher.root = "/directory".into();
+        // A namespace pseudo-root cannot serve as a receiver either.
+        assert!(mountinfo::publisher(&host_publisher, &accepted, &[host_publisher.clone()]).is_err());
+    }
     for bad in [
         line.replace("nsfs nsfs", "ext4 nsfs"),
         line.replace("4026532354", "0"),
         line.replace("4026532354", "not-an-inode"),
+        line.replace("4026532354", "-1"),
+        line.replace("net:[4026532354]", "net:4026532354"),
+        line.replace("net:[", "unknown:["),
     ] {
         assert!(mountinfo::parse(bad.as_bytes(), host.namespace.clone()).is_err());
     }
