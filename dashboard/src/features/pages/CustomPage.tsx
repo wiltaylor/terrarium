@@ -2,13 +2,14 @@ import { useParams } from "@solidjs/router";
 import { createEffect, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { useInstance } from "../../instance";
 import { A, useNavigate } from "../../instance/navigation";
-import type { PageWidget, ProjectPageInput } from "../../api/types";
+import type { DashboardRange, PageWidget, ProjectPageInput } from "../../api/types";
 import { SnapGrid } from "../../components/SnapGrid";
 import { Markdown } from "../../components/Markdown";
 import { PostEditor } from "../../components/PostEditor";
 import { ErrorBanner, PageHead, useNow } from "../../components/ui";
 import { renderMarkdown } from "../../lib/markdown";
 import { BlockView } from "../dashboard/blocks";
+import { kindsFor, RANGES } from "../dashboard/model";
 import { WikiWidget } from "./WikiWidget";
 
 export default function CustomPage() {
@@ -42,7 +43,7 @@ export default function CustomPage() {
   function addWidget() {
     const k = kind();
     const widget: PageWidget = { id: crypto.randomUUID(), kind: k, x: 0, y: Math.max(0, ...widgets().map(w => w.y + w.h)), w: 12, h: 3,
-      ...(k === "markdown" ? { text: "" } : k === "wiki" ? { wiki: "index" } : { monitor: monitors.latest?.[0]?.id ?? "" }) };
+      ...(k === "markdown" ? { text: "" } : k === "wiki" ? { wiki: "index" } : { monitor: monitors.latest?.find(m => kindsFor(m.kind).includes(k))?.id ?? "" }) };
     setDraft(d => d && { ...d, widgets: [...d.widgets, widget] });
     setEditingWidget(widget.id);
   }
@@ -90,7 +91,11 @@ export default function CustomPage() {
           <p class={new TextEncoder().encode(w.text ?? "").length > 16384 ? "error" : "muted"}>{new TextEncoder().encode(w.text ?? "").length} / 16384 bytes</p>
         </Show>
         <Show when={w.kind === "wiki"}><label>Wiki path (this project)<input value={w.wiki ?? ""} onInput={e => patchWidget(w.id, { wiki: e.currentTarget.value })} /></label></Show>
-        <Show when={w.kind !== "wiki" && w.kind !== "markdown"}><label>Monitor<select value={w.monitor ?? ""} onChange={e => patchWidget(w.id, { monitor: e.currentTarget.value })}><option value="">Choose a monitor</option><For each={monitors.latest}>{m => <option value={m.id}>{m.name} ({m.kind})</option>}</For></select></label></Show>
+        <Show when={w.kind !== "wiki" && w.kind !== "markdown"}><label>Monitor<select value={w.monitor ?? ""} onChange={e => patchWidget(w.id, { monitor: e.currentTarget.value })}><option value="">Choose a monitor</option><For each={monitors.latest?.filter(m => kindsFor(m.kind).includes(w.kind as "stat"))}>{m => <option value={m.id}>{m.name} ({m.kind})</option>}</For></select></label>
+          <label>Range<select value={w.options?.range ?? "24h"} onChange={e => patchWidget(w.id, { options: { ...w.options, range: e.currentTarget.value as DashboardRange } })}><For each={RANGES}>{r => <option value={r.id}>Last {r.label}</option>}</For></select></label>
+          <label>Decimals<select value={w.options?.decimals ?? ""} onChange={e => patchWidget(w.id, { options: { ...w.options, decimals: e.currentTarget.value === "" ? undefined : Number(e.currentTarget.value) } })}><option value="">Automatic</option><For each={[0, 1, 2, 3]}>{d => <option value={d}>{d}</option>}</For></select></label>
+          <Show when={w.kind === "stat"}><label><input type="checkbox" checked={w.options?.sparkline ?? true} onChange={e => patchWidget(w.id, { options: { ...w.options, sparkline: e.currentTarget.checked } })} />Sparkline</label></Show>
+        </Show>
         <Show when={w.kind === "wiki" || w.kind === "markdown"}><label><input type="checkbox" checked={w.auto_height !== false} onChange={e => patchWidget(w.id, { auto_height: e.currentTarget.checked })} />Grow to content (uncheck to scroll within resized height)</label></Show>
       </Show>
       <Show when={w.title}><h3>{w.title}</h3></Show>
