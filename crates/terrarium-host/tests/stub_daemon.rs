@@ -201,6 +201,7 @@ fn start_client(
 
 fn exec(session: SessionId, cmd: &str, args: &[&str], pty: Option<PtySize>) -> DaemonFrame {
     DaemonFrame::Exec(ExecRequest {
+        windows_run_as: None,
         session,
         cmd: cmd.into(),
         args: args.iter().map(|s| s.to_string()).collect(),

@@ -819,6 +819,14 @@ impl HostRegistry {
             .and_then(|e| e.info.as_ref().map(|i| i.capabilities.clone()))
     }
 
+    pub fn supports_windows_run_as(&self, host: &str) -> bool {
+        self.lock().get(host).is_some_and(|e| {
+            e.conn.is_some() && e.info.as_ref().is_some_and(|i| {
+                i.os == "windows" && i.capabilities.windows_run_as
+            })
+        })
+    }
+
     fn send(&self, host: &str, out: Outgoing) -> bool {
         match self.lock().get(host).and_then(|e| e.conn.clone()) {
             Some(c) => c.tx.send(out).is_ok(),

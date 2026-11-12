@@ -189,6 +189,20 @@ fn need(kind: &str, field: &str, present: bool) -> ApiResult<()> {
 /// Check a definition against the rules of its kind (PLAN §19).
 pub fn validate(def: &TargetDef) -> ApiResult<()> {
     check_name("target", &def.name)?;
+    if let Some(run_as) = &def.windows_run_as {
+        if def.kind != TargetKind::Host {
+            return Err(ApiError::invalid("windows_run_as requires a host target"));
+        }
+        let parts: Vec<_> = run_as.account.split('\\').collect();
+        if parts.len() > 2
+            || parts.iter().any(|p| p.trim().is_empty())
+            || run_as.account.len() > 256
+            || run_as.account.chars().any(char::is_control)
+        {
+            return Err(ApiError::invalid("windows_run_as.account must be NAME or DOMAIN\\NAME without control characters"));
+        }
+        check_name("secret", &run_as.password_secret)?;
+    }
     if let Some(base) = &def.work_root {
         crate::target_roots::check_base(base)?;
     }

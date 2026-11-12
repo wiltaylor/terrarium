@@ -167,6 +167,7 @@ mod tests {
             roots: Some(vec![PathBuf::from("/srv/allowed")]),
         };
         let mut req = ExecRequest {
+            windows_run_as: None,
             session: 1,
             cmd: "ls".into(),
             args: vec![],
