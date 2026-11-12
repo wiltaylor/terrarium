@@ -7,6 +7,10 @@ async fn main() -> std::io::Result<()> {
         .with_target(false)
         .init();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args == ["--version"] {
+        println!("terrarium-workspace-helper {}", terrarium_version::FULL);
+        return Ok(());
+    }
     if args == ["--capabilities"] {
         println!(
             "{}",
@@ -17,7 +21,7 @@ async fn main() -> std::io::Result<()> {
     if !args.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "only --capabilities is supported",
+            "only --version or --capabilities is supported",
         ));
     }
     terrarium_host::workspace_helper::service::run().await
