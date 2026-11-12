@@ -12,12 +12,30 @@ fn conflict() -> ApiError {
 #[allow(clippy::type_complexity)]
 fn load(t: &Tx<'_>, operation: &str) -> ApiResult<DaemonOperation> {
     let (registration, revision, kind, bytes, hash, delivery, phase, result): (
-        String, u64, String, Vec<u8>, Vec<u8>, String, String, Option<Vec<u8>>,
+        String,
+        u64,
+        String,
+        Vec<u8>,
+        Vec<u8>,
+        String,
+        String,
+        Option<Vec<u8>>,
     ) = t.query_row(
         "SELECT registration_id, revision, kind, original_request, original_hash,
          delivery, phase, result FROM live_workspace_operations WHERE operation_id = ?1",
         [operation],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        },
     )?;
     let original: Request = serde_json::from_slice(&bytes).map_err(|_| conflict())?;
     let envelope = Envelope {
@@ -50,12 +68,18 @@ fn load(t: &Tx<'_>, operation: &str) -> ApiResult<DaemonOperation> {
     let helper_result = result
         .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| conflict()))
         .transpose()?;
-    if matches!(phase, DaemonPhase::HelperCommitted | DaemonPhase::RuntimeCommitted)
-        && helper_result.is_none()
+    if matches!(
+        phase,
+        DaemonPhase::HelperCommitted | DaemonPhase::RuntimeCommitted
+    ) && helper_result.is_none()
     {
         return Err(conflict());
     }
-    Ok(DaemonOperation { envelope, phase, helper_result })
+    Ok(DaemonOperation {
+        envelope,
+        phase,
+        helper_result,
+    })
 }
 
 /// Return quarantine as a successful transaction value, not an error which
@@ -70,21 +94,42 @@ pub fn acknowledge(t: &Tx<'_>, receipt: &Envelope, result: Reply) -> ApiResult<R
     // Select the quarantine target from durable ownership, never the receipt.
     let registration: String = t.query_row(
         "SELECT registration_id FROM live_workspace_operations WHERE operation_id = ?1",
-        [&operation], |r| r.get(0),
+        [&operation],
+        |r| r.get(0),
     )?;
     let valid = (|| -> ApiResult<DaemonOperation> {
         let mut stored = load(t, &operation)?;
         let r = &stored.envelope.original;
         let (host, target, runtime, container, dev, ino, state, last): (
-            String, String, String, String, String, String, String, u64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            u64,
         ) = t.query_row(
             "SELECT host_id, target_id, runtime_id, container_id, namespace_dev,
              namespace_ino, state, last_contiguous_revision FROM live_workspace_targets
-             WHERE registration_id = ?1", [&registration],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+             WHERE registration_id = ?1",
+            [&registration],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
         )?;
         let next = last.checked_add(1).ok_or_else(conflict)?;
-        if host != r.host.to_string() || target != r.target
+        if host != r.host.to_string()
+            || target != r.target
             || runtime != r.runtime.incarnation.0.to_string()
             || container != r.runtime.container_id
             || dev != r.runtime.namespace.device.to_string()
@@ -98,11 +143,16 @@ pub fn acknowledge(t: &Tx<'_>, receipt: &Envelope, result: Reply) -> ApiResult<R
         {
             return Err(conflict());
         }
-        stored.acknowledge(receipt, result).map_err(|_| conflict())?;
+        stored
+            .acknowledge(receipt, result)
+            .map_err(|_| conflict())?;
         Ok(stored)
     })();
     if valid.is_err() {
-        t.execute("UPDATE live_workspace_operations SET phase = 'quarantined' WHERE operation_id = ?1", [&operation])?;
+        t.execute(
+            "UPDATE live_workspace_operations SET phase = 'quarantined' WHERE operation_id = ?1",
+            [&operation],
+        )?;
         t.execute("UPDATE live_workspace_targets SET state = 'quarantined' WHERE registration_id = ?1 AND state != 'destroyed'", [&registration])?;
         return Ok(Reply::Quarantined);
     }
@@ -122,19 +172,32 @@ mod tests {
     use super::*;
     use crate::{db::Db, events::EventHub};
     use terrarium_core::live_workspace::{
-        Kind, NamespaceIdentity, OperationId, Provenance, RegistrationId, RuntimeId,
-        RuntimeIdentity, PROTOCOL_VERSION,
+        Kind, NamespaceIdentity, OperationId, PROTOCOL_VERSION, Provenance, RegistrationId,
+        RuntimeId, RuntimeIdentity,
     };
 
     fn insert(t: &Tx<'_>) -> ApiResult<Envelope> {
         let r = Request {
             version: PROTOCOL_VERSION,
-            provenance: Provenance { daemon_instance: Ulid::new(), caller: Caller::LocalOperator },
-            operation: OperationId(Ulid::new()), host: Ulid::new(), target: "synthetic".into(),
+            provenance: Provenance {
+                daemon_instance: Ulid::new(),
+                caller: Caller::LocalOperator,
+            },
+            operation: OperationId(Ulid::new()),
+            host: Ulid::new(),
+            target: "synthetic".into(),
             runtime: RuntimeIdentity {
-                registration: RegistrationId(Ulid::new()), incarnation: RuntimeId(Ulid::new()),
-                container_id: "a".repeat(64), namespace: NamespaceIdentity { device: 1, inode: 2 },
-            }, revision: 1, kind: Kind::Reconcile, holder: None,
+                registration: RegistrationId(Ulid::new()),
+                incarnation: RuntimeId(Ulid::new()),
+                container_id: "a".repeat(64),
+                namespace: NamespaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+            },
+            revision: 1,
+            kind: Kind::Reconcile,
+            holder: None,
         };
         let registration = r.runtime.registration.0.to_string();
         t.execute("INSERT INTO live_workspace_targets (registration_id,host_id,target_id,trust_domain_id,runtime_id,container_id,namespace_dev,namespace_ino)
@@ -142,7 +205,11 @@ mod tests {
             params![registration, r.host.to_string(), r.target, Ulid::new().to_string(), r.runtime.incarnation.0.to_string(), r.runtime.container_id])?;
         t.execute("UPDATE live_workspace_targets SET state = 'reconcile_pending' WHERE registration_id = ?1", [&registration])?;
         t.execute("UPDATE live_workspace_targets SET state = 'verified', allocated_revision = 1 WHERE registration_id = ?1", [&registration])?;
-        let envelope = Envelope { original_hash: r.hash().unwrap(), original: r, delivery: Delivery::Apply };
+        let envelope = Envelope {
+            original_hash: r.hash().unwrap(),
+            original: r,
+            delivery: Delivery::Apply,
+        };
         t.execute("INSERT INTO live_workspace_operations VALUES (?1,?2,1,'reconcile',?3,?4,'apply','intent',NULL)",
             params![envelope.original.operation.0.to_string(), registration, serde_json::to_vec(&envelope.original).unwrap(), envelope.original_hash.as_slice()])?;
         Ok(envelope)
@@ -151,7 +218,10 @@ mod tests {
     #[tokio::test]
     async fn exact_receipt_is_durable_but_never_commits_runtime() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::new(crate::db::open(&dir.path().join("test.sqlite")).unwrap(), EventHub::default());
+        let db = Db::new(
+            crate::db::open(&dir.path().join("test.sqlite")).unwrap(),
+            EventHub::default(),
+        );
         let receipt = db.write_full("system", insert).await.unwrap();
         let check = receipt.clone();
         db.write_full("system", move |t| {
@@ -159,34 +229,53 @@ mod tests {
             assert_eq!(acknowledge(t, &check, Reply::Applied)?, Reply::Applied);
             let record = load(t, &check.original.operation.0.to_string())?;
             assert_eq!(record.phase, DaemonPhase::HelperCommitted);
-            let last: u64 = t.query_row("SELECT last_contiguous_revision FROM live_workspace_targets", [], |r| r.get(0))?;
+            let last: u64 = t.query_row(
+                "SELECT last_contiguous_revision FROM live_workspace_targets",
+                [],
+                |r| r.get(0),
+            )?;
             assert_eq!(last, 0);
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         db.write_full("system", move |t| {
             let saved = load(t, &receipt.original.operation.0.to_string())?;
             assert_eq!(saved.helper_result, Some(Reply::Applied));
             assert_eq!(saved.phase, DaemonPhase::HelperCommitted);
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn receipt_substitution_fences_durable_owner_not_supplied_registration() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::new(crate::db::open(&dir.path().join("test.sqlite")).unwrap(), EventHub::default());
+        let db = Db::new(
+            crate::db::open(&dir.path().join("test.sqlite")).unwrap(),
+            EventHub::default(),
+        );
         let mut receipt = db.write_full("system", insert).await.unwrap();
         let operation = receipt.original.operation.0.to_string();
         receipt.original.runtime.registration = RegistrationId(Ulid::new());
         db.write_full("system", move |t| {
-            assert_eq!(acknowledge(t, &receipt, Reply::Applied)?, Reply::Quarantined);
+            assert_eq!(
+                acknowledge(t, &receipt, Reply::Applied)?,
+                Reply::Quarantined
+            );
             Ok(()) // Commit the fence rather than returning an error.
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         db.write_full("system", move |t| {
             assert_eq!(load(t, &operation)?.phase, DaemonPhase::Quarantined);
-            let state: String = t.query_row("SELECT state FROM live_workspace_targets", [], |r| r.get(0))?;
+            let state: String =
+                t.query_row("SELECT state FROM live_workspace_targets", [], |r| r.get(0))?;
             assert_eq!(state, "quarantined");
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 }
