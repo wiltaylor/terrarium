@@ -4950,14 +4950,30 @@ caller. Requests go only to `api.github.com`, without redirects.
 Cards are matched by `GitHub #<number>:` titles (with no repository or the
 selected repository) or exact issue URL links. Every matched card, including
 archived cards, must be unheld, in the done role, and labelled with a version
-acknowledged by `group built`. No match means no closure. The comment names
+acknowledged by `group built` or published as a repository tag. Label
+`version:X.Y.Z` matches tag `vX.Y.Z` or `vX.Y.Z-alpha`, including hand cuts.
+Remote tags are read with daemon-owned `git ls-remote --tags` and the registered
+repo's normal credentials, never agent assertions. No match means no closure. The comment names
 every card and its published versions. A hidden comment marker lets a retry
 finish closing without posting again after a failed close. Concurrent callers
-are serialized. A reopened issue with the marker is closed without a second
-comment. Reads use project/number keyset pages (200 cards, at most 20,000 cards)
-and indexed card-link lookups. Comment history is limited to 10,000 comments
-per issue. Exceeding either bound refuses rather than guessing eligibility.
-The command stops on the first API error, without undoing earlier closures.
+are serialized. Successfully observed closures are cached and require no more
+GitHub issue calls. Reads use project/number keyset pages (200 cards, at most
+20,000 cards and issue identities), indexed URL link lookups (at most 100 per
+card), and at most 1000 comments per issue. Exceeding a bound refuses rather
+than guessing eligibility. Each run examines at most 20 eligible issues and
+makes at most 60 remote calls, including the tag lookup. It reserves 13 calls
+before starting each issue. A persisted cursor continues in issue-number order,
+wrapping at the end and skipping cached closed issues. Failed attempts advance
+the cursor too, so one problematic issue cannot starve the others. Dry runs
+change neither the cursor nor the closed cache. The command stops on the first
+API error without undoing earlier closures.
+
+For legacy issues without version labels, the operator alone can use
+`terrarium issue close-done --repo terrarium --issue 20 --version 0.1.0-alpha`
+(optionally `--dry-run`). API fields are `issue` and `version`, required
+together. This verifies the exact published tag `v0.1.0-alpha` and still
+requires every matched card to be done and unheld. It overrides only missing
+or different version labels, never unfinished work or a missing publication.
 
 **Import an issue** (TER-124): `POST /api/projects/{name}/github-issues/import`
 with `{"repo":"configured-repo-name","number":123}` returns `200` and the
