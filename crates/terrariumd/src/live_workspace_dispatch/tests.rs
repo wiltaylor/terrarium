@@ -694,3 +694,116 @@ async fn transport_permit_bound_is_shared_only_by_runnable_owners() {
     third.await.unwrap().unwrap();
     assert_eq!(f.dispatch.permits.available_permits(), 2);
 }
+
+#[tokio::test]
+async fn retained_transaction_owns_flock_after_callback_through_commit_and_rollback() {
+    for boundary in ["commit", "commit_error", "callback_error", "callback_panic"] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("config")).unwrap();
+        let daemon = crate::start(config(root.path(), "first.sock")).await.unwrap();
+        let db = daemon.state.db.clone();
+        let lock = daemon._state_lock.clone();
+        let weak = Arc::downgrade(&lock);
+        let marked = Arc::new(AtomicBool::new(false));
+        let hook_marked = marked.clone();
+        let (arrived, arrival) = oneshot::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let mut arrived = Some(arrived);
+        db.read_now(move |c| {
+            if boundary.starts_with("callback") {
+                c.rollback_hook(Some(move || {
+                    if hook_marked.load(Ordering::SeqCst) && let Some(arrived) = arrived.take() {
+                        let _ = arrived.send(());
+                        let _ = gate.recv();
+                    }
+                }));
+            } else {
+                c.commit_hook(Some(move || {
+                    if hook_marked.load(Ordering::SeqCst) && let Some(arrived) = arrived.take() {
+                        let _ = arrived.send(());
+                        let _ = gate.recv();
+                    }
+                    hook_marked.load(Ordering::SeqCst) && boundary == "commit_error"
+                }));
+            }
+            Ok(())
+        }).unwrap();
+        let job = tokio::spawn(async move {
+            db.write_full_retained("system", lock, move |t| {
+                t.execute("INSERT INTO projects(name,created_at,updated_at) VALUES('retained','now','now')", [])?;
+                marked.store(true, Ordering::SeqCst);
+                match boundary {
+                    "callback_error" => Err::<(), _>(fenced()),
+                    "callback_panic" => panic!("injected callback panic"),
+                    _ => Ok(()),
+                }
+            }).await
+        });
+        // SQLite's commit/rollback hook runs after callback return/unwind,
+        // while the transaction and connection guard still belong to the job.
+        tokio::time::timeout(Duration::from_secs(20), arrival).await.unwrap().unwrap();
+        job.abort();
+        assert!(job.await.unwrap_err().is_cancelled());
+        daemon.shutdown();
+        assert_eq!(weak.strong_count(), 1, "{boundary}: only blocking retention remains");
+        let second = crate::start(config(root.path(), "second.sock")).await;
+        assert!(second.err().unwrap().to_string().contains("another daemon"), "{boundary}");
+        assert!(!root.path().join("second.sock").exists());
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while weak.upgrade().is_some() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        crate::start(config(root.path(), "third.sock")).await.unwrap().shutdown_and_wait().await;
+    }
+}
+
+#[tokio::test]
+async fn final_dispatch_poison_transaction_retains_flock_after_fence_waiter_is_aborted() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("config")).unwrap();
+    let mut daemon = crate::start(config(root.path(), "first.sock")).await.unwrap();
+    let grant = seed(&daemon.state.db).await;
+    let (transport, mut calls) = fake();
+    let wait = daemon.workspace_dispatch.submit(grant.registration, Command::Grant(Box::new(grant)), transport).unwrap();
+    let _unknown = calls.recv().await.unwrap();
+    let marked = Arc::new(AtomicBool::new(false));
+    let commit_marked = marked.clone();
+    let (arrived, arrival) = oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let mut arrived = Some(arrived);
+    daemon.state.db.read_now(move |c| {
+        // The production tables are WITHOUT ROWID and do not fire SQLite's
+        // update_hook. A test-only rowid marker identifies the precise fence
+        // transaction, without catching unrelated background commits.
+        c.execute_batch("CREATE TABLE dispatcher_fence_gate(value INTEGER);
+            CREATE TRIGGER mark_dispatcher_fence AFTER UPDATE OF state ON live_workspace_targets
+            WHEN NEW.state = 'quarantined' BEGIN INSERT INTO dispatcher_fence_gate VALUES(1); END;")?;
+        c.update_hook(Some(move |_: rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
+            if table == "dispatcher_fence_gate" { marked.store(true, Ordering::SeqCst); }
+        }));
+        c.commit_hook(Some(move || {
+            if commit_marked.load(Ordering::SeqCst) && let Some(arrived) = arrived.take() {
+                let _ = arrived.send(());
+                let _ = gate.recv();
+            }
+            false
+        }));
+        Ok(())
+    }).unwrap();
+    let fences = daemon.workspace_dispatch.fences.clone();
+    let weak = Arc::downgrade(&daemon._state_lock);
+    daemon.shutdown();
+    assert!(wait.await.is_err());
+    tokio::time::timeout(Duration::from_secs(20), arrival).await.unwrap().unwrap();
+    let tasks = std::mem::take(&mut *fences.lock().unwrap());
+    assert_eq!(tasks.len(), 1);
+    for task in tasks { task.abort(); assert!(task.await.unwrap_err().is_cancelled()); }
+    assert_eq!(weak.strong_count(), 1); // Not held by any cancelable waiter.
+    let second = crate::start(config(root.path(), "second.sock")).await;
+    assert!(second.err().unwrap().to_string().contains("another daemon"));
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while weak.upgrade().is_some() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    crate::start(config(root.path(), "third.sock")).await.unwrap().shutdown_and_wait().await;
+}

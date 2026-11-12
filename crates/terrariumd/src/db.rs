@@ -2718,7 +2718,7 @@ impl Db {
         T: Send + 'static,
         F: for<'c> FnOnce(&mut Tx<'c>) -> ApiResult<T> + Send + 'static,
     {
-        self.write_with_durability(actor, f, false)
+        self.write_with_durability(actor, f, false, ())
     }
 
     /// Security intents must survive power loss before a helper may act.
@@ -2733,19 +2733,39 @@ impl Db {
         T: Send + 'static,
         F: for<'c> FnOnce(&mut Tx<'c>) -> ApiResult<T> + Send + 'static,
     {
-        self.write_with_durability(actor, f, true)
+        self.write_with_durability(actor, f, true, ())
     }
 
+    /// Retain ownership in the blocking job, not the cancelable async waiter or
+    /// SQL callback. Drop only after commit/rollback and connection release,
+    /// including callback error/panic and commit failure paths.
     #[track_caller]
-    fn write_with_durability<T, F>(
+    pub(crate) fn write_full_retained<T, F, G>(
         &self,
         actor: impl Into<String>,
+        retention: G,
         f: F,
-        full: bool,
     ) -> impl std::future::Future<Output = ApiResult<T>> + '_
     where
         T: Send + 'static,
         F: for<'c> FnOnce(&mut Tx<'c>) -> ApiResult<T> + Send + 'static,
+        G: Send + 'static,
+    {
+        self.write_with_durability(actor, f, true, retention)
+    }
+
+    #[track_caller]
+    fn write_with_durability<T, F, G>(
+        &self,
+        actor: impl Into<String>,
+        f: F,
+        full: bool,
+        retention: G,
+    ) -> impl std::future::Future<Output = ApiResult<T>> + '_
+    where
+        T: Send + 'static,
+        F: for<'c> FnOnce(&mut Tx<'c>) -> ApiResult<T> + Send + 'static,
+        G: Send + 'static,
     {
         let conn = self.conn.clone();
         let actor = actor.into();
@@ -2767,6 +2787,9 @@ impl Db {
         };
         async move {
             let (value, events, audits) = crate::links::spawn_blocking(move || {
+                // Bind before the connection guard so unwinding also drops
+                // ownership after transaction rollback and guard destruction.
+                let ownership = retention;
                 let started = queued.map(|_| std::time::Instant::now());
                 let mut guard = match conn.lock() {
                     Ok(g) => g,
@@ -2845,6 +2868,7 @@ impl Db {
                     sql_us = finished.duration_since(acquired).as_micros() as u64,
                     "database access");
                 }
+                drop(ownership);
                 result
             })
             .await

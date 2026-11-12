@@ -195,8 +195,7 @@ impl Drop for InFlight<'_> {
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let task = runtime.spawn(async move {
                 let result = db
-                    .write_full("system", move |t| {
-                        let _lock = lock;
+                    .write_full_retained("system", lock, move |t| {
                         operations::quarantine_dispatch(t, registration, selected)
                     })
                     .await;
@@ -256,8 +255,7 @@ impl Owner {
         let lock = self.lock.clone();
         let mut selected = self
             .db
-            .write_full("system", move |t| {
-                let _lock = lock;
+            .write_full_retained("system", lock, move |t| {
                 match command {
                     Command::Drain => {}
                     Command::Grant(grant) => {
@@ -304,8 +302,7 @@ impl Owner {
                 let lock = self.lock.clone();
                 let result = self
                     .db
-                    .write_full("system", move |t| {
-                        let _lock = lock;
+                    .write_full_retained("system", lock, move |t| {
                         operations::acknowledge(t, &receipt, result)
                     })
                     .await?;
@@ -316,8 +313,7 @@ impl Owner {
             let lock = self.lock.clone();
             selected = self
                 .db
-                .write_full("system", move |t| {
-                    let _lock = lock;
+                .write_full_retained("system", lock, move |t| {
                     operations::commit_runtime(t, operation)?;
                     operations::next(t, registration)
                 })
