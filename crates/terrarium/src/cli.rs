@@ -2809,7 +2809,7 @@ pub enum WaitCmd {
     },
     /// Show one wait with its result
     Show { id: String },
-    /// Cancel an open wait. `--kill` also ends the run of a process wait
+    /// Cancel an open wait. `--kill` requests cleanup and fails unless termination is verified
     Cancel {
         id: String,
         #[arg(long)]
@@ -3317,7 +3317,7 @@ pub enum RunCmd {
         #[arg(long)]
         bytes: Option<usize>,
     },
-    /// Kill a run; its wait is cancelled
+    /// Cancel a run's wait and request cleanup; nonzero unless termination is verified
     Kill { id: String },
 }
 

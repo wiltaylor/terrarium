@@ -151,6 +151,16 @@ pub async fn wait(ctx: &Ctx, cmd: &WaitCmd) -> anyhow::Result<()> {
                 .api
                 .delete(&format!("/api/waits/{}", encode(id)), q)
                 .await?;
+            if *kill {
+                ctx.emit(&v, |c, v| {
+                    c.line(format!("wait {}: {}", field(v, "id"), field(v, "state")));
+                    c.line(format!("cleanup: {} (operation {})", cleanup_status(v), field(&v["cleanup"], "operation_id")));
+                })?;
+                if !cleanup_verified(&v) {
+                    anyhow::bail!("termination is not verified (cleanup: {}); inspect the same wait operation, do not start a fresh kill", cleanup_status(&v));
+                }
+                return Ok(());
+            }
             return ctx.emit(&v, |c, v| {
                 c.line(format!(
                     "wait {} cancelled: {}",
@@ -245,35 +255,43 @@ pub async fn run(ctx: &Ctx, cmd: Option<&RunCmd>, a: &RunArgs) -> anyhow::Result
                 )
                 .await?;
             ctx.emit(&v, |c, v| {
-                c.line(format!("killed the run of wait {}", field(v, "id")));
-                let k = &v["kill"];
-                let pids = |key: &str| -> String {
-                    k[key]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .map(ToString::to_string)
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        })
-                        .unwrap_or_default()
-                };
-                if let Some(e) = k["error"].as_str() {
-                    c.line(format!("the kill on the target failed: {e}"));
-                } else if k.is_object() && k["pid"].is_null() {
-                    c.line("no process group of the run on the target");
-                } else if k.is_object() {
-                    c.line(format!("TERM: {}", pids("term")));
-                    if !pids("kill").is_empty() {
-                        c.line(format!("KILL after the grace time: {}", pids("kill")));
-                    }
-                    match pids("left").as_str() {
-                        "" => c.line("no process of the run is left"),
-                        left => c.line(format!("still running on the target: {left}")),
-                    }
-                }
-            })
+                c.line(format!("wait {}: {}", field(v, "id"), field(v, "state")));
+                c.line(format!("cleanup: {} (operation {})", cleanup_status(v), field(&v["cleanup"], "operation_id")));
+            })?;
+            // Emit JSON first, so callers retain the durable operation ID.
+            if !cleanup_verified(&v) {
+                anyhow::bail!("termination is not verified (cleanup: {}); inspect the same wait operation, do not start a fresh kill", cleanup_status(&v));
+            }
+            Ok(())
         }
+    }
+}
+
+fn cleanup_status(v: &Value) -> &str {
+    v["cleanup"]["status"].as_str().unwrap_or("unknown")
+}
+
+fn cleanup_verified(v: &Value) -> bool {
+    cleanup_status(v) == "verified_terminated"
+        && v["cleanup"]["operation_id"].as_str().is_some_and(|id| !id.is_empty())
+        && v["cleanup"]["evidence_kind"].as_str() == Some("bound_complete_scope")
+        && v["cleanup"]["observed_at"].as_str().is_some_and(|at| !at.is_empty())
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn only_complete_bound_evidence_can_allow_success() {
+        for status in ["not_requested", "pending", "unknown", "unavailable", "remaining", "unrecognized", "verified_terminated"] {
+            assert!(!cleanup_verified(&json!({"cleanup":{"operation_id":"same-op","status":status}})));
+        }
+        for legacy in [json!({}), json!({"kill":{"pid":null,"left":[]}}), json!({"kill":{"pid":1,"left":[]}})] {
+            assert!(!cleanup_verified(&legacy));
+            assert_eq!(cleanup_status(&legacy), "unknown");
+        }
+        assert!(cleanup_verified(&json!({"cleanup":{"operation_id":"op","status":"verified_terminated","evidence_kind":"bound_complete_scope","observed_at":"2026-11-12T00:00:00Z"}})));
     }
 }
 

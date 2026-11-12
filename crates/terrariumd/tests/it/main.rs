@@ -10,6 +10,7 @@ mod host_restart;
 mod live_workspace;
 mod pages;
 mod read_positions;
+mod run_cancel;
 mod remotes;
 mod ssh_restart;
 mod ter221_latency;

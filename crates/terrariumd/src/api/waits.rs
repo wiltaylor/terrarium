@@ -622,8 +622,21 @@ async fn show(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
-) -> ApiResult<Json<Wait>> {
-    Ok(Json(find_wait(&state, &actor, id).await?))
+) -> ApiResult<Json<Value>> {
+    let w = find_wait(&state, &actor, id).await?;
+    Ok(Json(cleanup_view(&state, w, false).await?))
+}
+
+async fn cleanup_view(state: &Shared, w: Wait, kill: bool) -> ApiResult<Value> {
+    let snapshot = w.clone();
+    let op = state.db.read(move |c| crate::store::run_cleanup::get(c, &snapshot)).await?;
+    let mut v = serde_json::to_value(w).map_err(|e| ApiError::internal(e.to_string()))?;
+    v["cleanup"] = match op {
+        Some(op) => serde_json::to_value(op).map_err(|e| ApiError::internal(e.to_string()))?,
+        None if kill => json!({"operation_id":null,"status":"unavailable","reason":"no_recorded_intent","evidence_kind":"none"}),
+        None => json!({"operation_id":null,"status":"not_requested","evidence_kind":"none"}),
+    };
+    Ok(v)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -632,11 +645,8 @@ struct CancelQuery {
     kill: Option<bool>,
 }
 
-/// `DELETE /api/waits/{id}[?kill=true]`: cancel an open wait. `kill` also
-/// ends the run of a `process` wait; without it, the run goes on. A kill
-/// ends the process group and session of the run on the target (`TERM`,
-/// then `KILL` after a grace time), and the answer has the report as
-/// `kill`: `{pid, term, kill, left}` (TER-99).
+/// `DELETE /api/waits/{id}[?kill=true]`: cancel a wait, optionally recording
+/// one cleanup attempt. Acceptance is not proof of process termination.
 async fn cancel(
     State(state): State<Shared>,
     actor: Actor,
@@ -645,6 +655,28 @@ async fn cancel(
 ) -> ApiResult<Json<Value>> {
     let w = find_wait(&state, &actor, id).await?;
     policy::manage_waits(&actor, &w.agent, &w.project, "cancelling a wait")?;
+    if q.kill.unwrap_or(false) {
+        if w.kind != WaitKind::Process {
+            return Err(ApiError::invalid("kill requires a process wait"));
+        }
+        let by_waiter = actor.agent().is_some_and(|a| a.id == w.agent);
+        let requester = actor.label();
+        // Spawn BEFORE the first durable write. Dropping the HTTP request
+        // cannot strand a committed intent without its bounded collector.
+        return tokio::spawn(async move {
+            let snapshot = w.clone();
+            let (op, created) = state.db.write_full(requester.clone(), move |t| {
+                crate::store::run_cleanup::cancel(t, &snapshot, &requester, !by_waiter)
+            }).await?;
+            if created && let Some(op) = op
+                && let Err(e) = rt::collect_cleanup(&state, &w, op.operation_id).await {
+                tracing::warn!("cleanup collector could not persist its outcome: {e}");
+            }
+            let id = w.id;
+            let current = state.db.read(move |c| waits::get(c, &id)).await?;
+            Ok(Json(cleanup_view(&state, current, true).await?))
+        }).await.map_err(|e| ApiError::internal(format!("cleanup task failed: {e}")))?;
+    }
     if w.state != WaitState::Open {
         return Err(ApiError::conflict(format!(
             "wait {} is {} already",
@@ -667,21 +699,11 @@ async fn cancel(
             )
         })
         .await?;
-    let report = if q.kill.unwrap_or(false) && w.kind == WaitKind::Process {
-        rt::kill_run_report(&state, &w).await
-    } else {
-        None
-    };
     let id = w.id.clone();
     match done {
         Some(_) => {
             let wait = state.db.read(move |c| waits::get(c, &id)).await?;
-            let mut v = serde_json::to_value(wait)
-                .map_err(|e| ApiError::internal(format!("cannot encode the wait: {e}")))?;
-            if let (Some(r), Value::Object(m)) = (report, &mut v) {
-                m.insert("kill".into(), r);
-            }
-            Ok(Json(v))
+            Ok(Json(cleanup_view(&state, wait, false).await?))
         }
         None => Err(ApiError::conflict(format!("wait {} ended meanwhile", w.id))),
     }

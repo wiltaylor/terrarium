@@ -309,6 +309,37 @@ pub async fn kill_run_report(state: &Shared, w: &Wait) -> Option<Value> {
     s.kill_and_report().await
 }
 
+/// One bounded attempt, owned by the daemon task rather than the HTTP caller.
+/// Legacy reports cannot prove identity-bound remaining or termination.
+pub async fn collect_cleanup(state: &Shared, w: &Wait, id: String) -> ApiResult<()> {
+    use crate::store::run_cleanup as cleanup;
+    let route = w.session().and_then(|s| state.executor.find(s)).filter(|s| {
+        s.owner.as_deref() == Some(w.agent.as_str()) && Some(s.target.as_str()) == w.exec_target()
+    });
+    let report = route.as_ref().and_then(|s| s.claim_cleanup());
+    let Some((route, report)) = route.zip(report) else {
+        return state.db.write_full("system", move |t| cleanup::finish(t, &id, false, "no_live_owned_cleanup_route", None)).await;
+    };
+    let op = id.clone();
+    if !state.db.write_full("system", move |t| cleanup::dispatch(t, &op)).await? { return Ok(()); }
+    let (reason, diagnostic) = match route.attempt_cleanup(report).await {
+        crate::executor::CleanupAttempt::DeliveryUnknown => ("control_delivery_unknown", None),
+        crate::executor::CleanupAttempt::MissingReport => ("missing_report", None),
+        crate::executor::CleanupAttempt::Deadline => ("report_deadline", None),
+        crate::executor::CleanupAttempt::LegacyReport(report) => ("legacy_report_not_identity_bound", Some(legacy_diagnostic(&report))),
+    };
+    // Do not persist raw PID/path/error output, which may contain secrets.
+    state.db.write_full("system", move |t| cleanup::finish(t, &id, true, reason, diagnostic)).await
+}
+
+/// Counts are untrusted diagnostics only. No raw error, path or PID is stored.
+fn legacy_diagnostic(report: &Value) -> Value {
+    let count = |key: &str| report[key].as_array().map(Vec::len);
+    json!({"kind":"untrusted_legacy", "reported_term_count":count("term"),
+        "reported_kill_count":count("kill"), "reported_left_count":count("left"),
+        "error_present":report.get("error").is_some()})
+}
+
 /// The result of a process wait from the end of its run.
 fn run_result(end: &End, started: Instant, tail: Option<&TailBuf>) -> (WaitState, Value) {
     let mut r = match end {
@@ -631,6 +662,20 @@ async fn flush_watches(state: &Shared) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_diagnostics_never_authenticate_any_report() {
+        for report in [Value::Null, json!({}), json!("truncated"),
+            json!({"error":"private/path/token"}), json!({"pid":null,"left":[]}),
+            json!({"pid":1,"term":[],"kill":[],"left":[]}),
+            json!({"pid":1,"left":[2]}), json!({"left":["malformed"]})] {
+            let diagnostic = legacy_diagnostic(&report);
+            assert_eq!(diagnostic["kind"], "untrusted_legacy");
+            assert!(diagnostic.get("status").is_none());
+            assert!(diagnostic.get("pid").is_none());
+            assert!(!diagnostic.to_string().contains("private/path/token"));
+        }
+    }
 
     #[test]
     fn tails_keep_the_last_bytes() {

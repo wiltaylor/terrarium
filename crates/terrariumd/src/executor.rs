@@ -866,6 +866,14 @@ struct Buf {
     result: Option<Value>,
 }
 
+/// Reporting outcomes are not termination receipts.
+pub enum CleanupAttempt {
+    DeliveryUnknown,
+    MissingReport,
+    Deadline,
+    LegacyReport(Value),
+}
+
 /// One exec, shell, or copy that a client drives over HTTP.
 pub struct ExecSession {
     pub id: String,
@@ -1146,6 +1154,26 @@ impl ExecSession {
         match rx {
             Some(rx) if !done => crate::run_kill::report(rx).await,
             _ => None,
+        }
+    }
+
+    /// Claim only a live wrapped route. Restored bare sessions are unavailable.
+    /// Taking the channel prevents a second reporting attempt from claiming it.
+    pub fn claim_cleanup(&self) -> Option<crate::run_kill::Report> {
+        if self.is_done() { return None; }
+        self.kill_report.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// Called only after a durable dispatch marker. Exactly one control send,
+    /// followed by bounded observation of the original channel, never replay.
+    pub async fn attempt_cleanup(&self, report: crate::run_kill::Report) -> CleanupAttempt {
+        if !self.control(Control::Kill) {
+            return CleanupAttempt::DeliveryUnknown;
+        }
+        match tokio::time::timeout(Duration::from_secs(12), crate::run_kill::report(report)).await {
+            Ok(Some(report)) => CleanupAttempt::LegacyReport(report),
+            Ok(None) => CleanupAttempt::MissingReport,
+            Err(_) => CleanupAttempt::Deadline,
         }
     }
 
@@ -5748,6 +5776,64 @@ pub async fn checkout_on_target(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_attempt_fakes_never_produce_verified_outcomes() {
+        for value in [json!({}), json!("truncated"), json!({"error":"failed"}),
+            json!({"pid":null,"left":[]}), json!({"pid":1,"left":[]}),
+            json!({"pid":1,"left":[2]}), json!({"left":["bad"]})] {
+            let (s, mut controls) = ExecSession::new("fake", Some("owner".into()), "exec", 1);
+            let (_tx, rx) = tokio::sync::watch::channel(Some(value.clone()));
+            match s.attempt_cleanup(rx).await {
+                CleanupAttempt::LegacyReport(report) => assert_eq!(report,value),
+                _ => panic!("legacy reports must remain diagnostics"),
+            }
+            assert!(matches!(controls.try_recv(), Ok(Control::Kill)));
+            assert!(controls.try_recv().is_err());
+        }
+        let (s, mut controls) = ExecSession::new("fake", Some("owner".into()), "exec", 1);
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        drop(tx);
+        assert!(matches!(s.attempt_cleanup(rx).await,CleanupAttempt::MissingReport));
+        assert!(matches!(controls.try_recv(), Ok(Control::Kill)));
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let pending = {
+            let s = s.clone();
+            tokio::spawn(async move { s.attempt_cleanup(rx).await })
+        };
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(13)).await;
+        assert!(matches!(pending.await.unwrap(),CleanupAttempt::Deadline));
+        tx.send(Some(json!({"left":[]}))).unwrap_err(); // late collector is gone
+        assert!(matches!(controls.try_recv(), Ok(Control::Kill)));
+        assert!(controls.try_recv().is_err());
+        let (tx, rx) = tokio::sync::watch::channel(Some(Value::Null));
+        assert!(matches!(s.attempt_cleanup(rx).await,CleanupAttempt::MissingReport));
+        drop(tx);
+        drop(controls);
+        let (_tx, rx) = tokio::sync::watch::channel(None);
+        assert!(matches!(s.attempt_cleanup(rx).await,CleanupAttempt::DeliveryUnknown));
+    }
+
+    #[tokio::test]
+    async fn cleanup_route_claim_is_live_wrapped_and_single_use() {
+        let (s, mut controls) = ExecSession::new("fake", Some("owner".into()), "exec", 1);
+        assert!(s.claim_cleanup().is_none()); // missing/restored report recipe
+        let (_tx, rx) = tokio::sync::watch::channel(None);
+        s.set_kill_report(Some(rx));
+        let claimed = s.claim_cleanup();
+        assert!(claimed.is_some());
+        assert!(s.claim_cleanup().is_none());
+        assert!(s.control(Control::Kill));
+        assert!(matches!(controls.recv().await, Some(Control::Kill)));
+        assert!(controls.try_recv().is_err());
+        drop(controls);
+        assert!(!s.control(Control::Kill));
+        s.finish(End::error("fake", "done"));
+        let (_tx, rx) = tokio::sync::watch::channel(None);
+        s.set_kill_report(Some(rx));
+        assert!(s.claim_cleanup().is_none());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn target_admission_waits_for_reconciliation_without_holding_its_lock() {
         let executor = Arc::new(Executor::default());

@@ -3190,8 +3190,42 @@ redacted from the output, the log, and the tail, and writes a
 | `POST /api/agents/{id}/waits` | below | `201` the wait | the agent itself, the operator |
 | `POST /api/agents/{id}/run` | `{"target", "cmd": [..], "name"?, "cwd"?, "env"?, "timeout"?, "reason"?, "agent"?}` | `201 {"wait", "session_id", "target"}` | the agent itself, the operator; the run uses the agent's rights |
 | `GET /api/waits/{id}` | | `200` the wait | as for the list; else `404` |
-| `DELETE /api/waits/{id}` | `?kill=true` also ends the run of a `process` wait: on a `host`, `docker`, or `ssh` target each process of the process group and session of the run gets `TERM`, then `KILL` after 5 s | `200` the cancelled wait; with a kill on such a target also `kill`: `{pid, term, kill, left}` (the PIDs on the target that got `TERM`, needed `KILL`, and still run), with `pid_dir_refused` (the path) when the private PID directory `/tmp/terrarium-run-<uid>` was refused as a symlink or another user's, so the run had no PID file, or `{error}`; a wait that is not open is `409 conflict` | as for the list |
+| `DELETE /api/waits/{id}` | `?kill=true` requests one cleanup attempt for a `process` wait; other kinds are rejected before mutation | `200` wait plus `cleanup` for kill requests. HTTP success means accepted/retrieved, not termination. Ordinary cancel still returns `409` for a terminal wait. | as for the list |
 | `GET /api/waits/{id}/log` | `?max=` bytes (at most 65536) | `200 {"wait_id", "session_id", "target", "running", "output", "end"?}` | as for the list; a wait that is not `process` is `422` |
+
+Cleanup reporting (TER-1059):
+
+- `wait.state` describes notification/cancellation, not whether processes or
+  inherited resource locks survive. `GET /api/waits/{id}` exposes the same
+  persisted `cleanup` after the wait becomes terminal.
+- `cleanup` contains `operation_id`, `status`, `reason`, `requested_at`,
+  `updated_at`, `evidence_kind`, and optional bounded `diagnostic` counts.
+  Counts from legacy reports are untrusted diagnostics, not owned identities.
+  Raw errors, paths and PIDs are not stored in cleanup diagnostics.
+- Current statuses are `pending`, `unknown`, and `unavailable`. No legacy
+  report, including an empty list, can produce `remaining` or
+  `verified_terminated`. Missing, null, malformed or error reports cannot
+  prove cleanup. Ordinary cancellation with no intent is `not_requested` on
+  GET. A kill retry without recorded intent is `unavailable/no_recorded_intent`
+  with a null operation ID.
+- The open-to-cancelled CAS and unique intent insert commit together before
+  control. The daemon claims a live owned wrapped route, durably records
+  dispatch with status `unknown`, and attempts control at most once. Report collection has a 12-second
+  deadline and survives an HTTP disconnect. A failed dispatch/receipt write
+  leaves conservative durable state. Startup marks orphaned queued operations
+  unavailable and dispatched ones unknown. It never replays a kill.
+- Concurrent or terminal kill retries read the same operation. Legacy terminal
+  waits and ordinary cancelled waits never acquire fresh kill authority. Each
+  request uses the wait's existing authorization, including project-admin
+  delegation. The operation ID is not a bearer capability. Project, owner,
+  logical session and target snapshots cannot be rebound and are attribution,
+  not physical kill selectors.
+- `terrarium run kill` prints wait and cleanup status separately and emits JSON
+  before returning nonzero unless termination is actually verified. The current
+  legacy route cannot provide that proof. Missing/old-server cleanup is also
+  nonzero. Inspect the same wait operation rather than starting a fresh kill.
+  Ordinary wait cancellation retains its success semantics. Persisted physical
+  identities, trusted termination receipts and host update lifetime are TER-1060.
 
 The create body:
 
