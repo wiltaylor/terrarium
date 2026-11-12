@@ -470,14 +470,11 @@ fn write_exec(path: &Path, text: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Self-update (docs/host-protocol.md, "Self-update"): a stale host agent
-/// gets the daemon's binary in `welcome.update`, downloads it from the
-/// host listener, checks it, swaps it in, and stops; the new build then
-/// connects, and the daemon records `host.updated` and the audit
-/// `host.update`. A failed update that a host agent reports is recorded
-/// once.
+/// Missing signatures suppress offers, and dev hosts cannot stage even a
+/// cached bundle. A manually installed build still reports update confirmation
+/// and rollback events through the same protocol.
 #[tokio::test]
-async fn a_stale_host_agent_updates_itself_from_the_host_listener() {
+async fn a_stale_dev_host_refuses_unsigned_updates_and_reports_manual_updates() {
     if terrarium_version::this().git_ref.is_none() {
         return; // no git: nothing is stale, so nothing is offered
     }
@@ -543,20 +540,39 @@ async fn a_stale_host_agent_updates_itself_from_the_host_listener() {
         });
         o
     };
-    // The old build updates itself, and its run ends.
-    tokio::time::timeout(
-        Duration::from_secs(30),
-        Client::new(options("0.0.9+0000000")).run(),
-    )
-    .await
-    .expect("the host agent stops after the update");
-    use terrarium_host::selfupdate::{PENDING, PREV, sidecar};
-    assert_eq!(std::fs::read_to_string(&bin).unwrap(), served);
-    assert_eq!(std::fs::read_to_string(sidecar(&bin, PREV)).unwrap(), old);
-    assert_eq!(
-        std::fs::read_to_string(sidecar(&bin, PENDING)).unwrap(),
-        format!("{}\n", terrarium_version::FULL)
-    );
+    use terrarium_host::selfupdate::{NEW, PENDING, PREV, sidecar};
+    let bundle_url = format!("http://{addr}/install/terrarium-host.sigstore.json?arch={}", std::env::consts::ARCH);
+    assert_eq!(reqwest::get(&bundle_url).await.unwrap().status(), reqwest::StatusCode::NOT_FOUND);
+    for cached in [false, true] {
+        if cached {
+            let name = format!("terrarium-host-{}-linux.{}.sigstore.json", std::env::consts::ARCH, sha(served.as_bytes()));
+            std::fs::write(dist.path().join(name), b"untrusted bundle").unwrap();
+            let response = reqwest::get(&bundle_url).await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.bytes().await.unwrap().as_ref(), b"untrusted bundle");
+        }
+        let task = tokio::spawn(Client::new(options("0.0.9+0000000")).run());
+        wait_until(&trace, "missing signature refusal was not logged", async || {
+            if cached {
+                trace.text().contains("no release verification key")
+            } else {
+                trace.text().contains("cannot obtain release signature bundle")
+            }
+        }).await;
+        assert!(!task.is_finished());
+        assert_eq!(std::fs::read_to_string(&bin).unwrap(), old);
+        for suffix in [NEW, PENDING, PREV] {
+            assert!(!sidecar(&bin, suffix).exists(), "{suffix}");
+        }
+        task.abort();
+        let _ = task.await;
+    }
+
+    // Simulate a manual install with a pending confirmation, not a bypass of
+    // the signature requirement in Client::self_update.
+    write_exec(&bin, &served);
+    std::fs::write(sidecar(&bin, PREV), &old).unwrap();
+    std::fs::write(sidecar(&bin, PENDING), format!("{}\n", terrarium_version::FULL)).unwrap();
 
     // "systemd" starts the new build: it confirms the update, and the
     // daemon records it.
