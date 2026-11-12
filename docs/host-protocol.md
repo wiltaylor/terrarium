@@ -1230,8 +1230,10 @@ readiness within 30 seconds or the reader ends with a startup error.
 
 The command has a dedicated process group. Foreground exit or the absolute
 deadline selects its result, then TERM and five seconds later KILL stop the
-group and close background children. Logger teardown is bounded too, so a
-background child inheriting stdout cannot keep the wait or queue slot open.
+group and close background children that remain in it. A descendant that
+calls `setsid` leaves the run's process group and is not stopped by these
+signals. Bounded logger teardown cuts its inherited output streams, not the
+escaped process, so it cannot keep the wait or queue slot open.
 
 PTY and shell sessions, ordinary SSH execs without `durable: true`, and
 stdin-fed queue setup/bundle transfers stay on the existing transport. They
