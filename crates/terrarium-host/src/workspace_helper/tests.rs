@@ -361,7 +361,8 @@ fn mountinfo_malformed_records_fail_closed() {
 
 #[test]
 fn docker_nsfs_records_do_not_qualify_as_publishers() {
-    let line = "245 28 0:4 net:[4026532354] /run/docker/netns/synthetic rw shared:216 - nsfs nsfs rw";
+    let line =
+        "245 28 0:4 net:[4026532354] /run/docker/netns/synthetic rw shared:216 - nsfs nsfs rw";
     let host = evidence(line, 1);
     let mut receiver = host.clone();
     receiver.namespace.inode = 2;
@@ -369,7 +370,11 @@ fn docker_nsfs_records_do_not_qualify_as_publishers() {
     receiver.optional_fields = vec!["master:216".into()];
     receiver.vfs_flags = vec!["ro".into(), "nosuid".into(), "nodev".into()];
     assert!(mountinfo::publisher(&host, &receiver, &[host.clone()]).is_err());
-    for bad in [line.replace("nsfs nsfs", "ext4 nsfs"), line.replace("4026532354", "0"), line.replace("4026532354", "not-an-inode")] {
+    for bad in [
+        line.replace("nsfs nsfs", "ext4 nsfs"),
+        line.replace("4026532354", "0"),
+        line.replace("4026532354", "not-an-inode"),
+    ] {
         assert!(mountinfo::parse(bad.as_bytes(), host.namespace.clone()).is_err());
     }
 }
