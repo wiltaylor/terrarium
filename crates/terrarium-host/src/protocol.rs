@@ -427,10 +427,12 @@ pub struct CpPull {
     pub path: PathBuf,
 }
 
-/// A managed git checkout into a Windows account workspace (TER-274). The
-/// host runs its trusted Git for Windows as the run-as account and answers
-/// with a `result` frame (`action`, `head`, `branch`, `path`, `note`), then
-/// `exit`. Never persist or log `credential` or `windows_run_as`.
+/// A git checkout into a Windows account workspace (TER-274). The daemon
+/// sends it only to a host whose hello has `windows_git_checkout`. The host
+/// runs its trusted Git for Windows as the run-as account and answers with a
+/// `result` frame (`action`, `head`, `branch`, `path`, `note`), then `exit`.
+/// `session`, `url`, `dest` and `mode` are required: none of them defaults.
+/// Never persist or log `credential` or `windows_run_as`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitCheckout {
@@ -441,20 +443,29 @@ pub struct GitCheckout {
     pub url: String,
     /// The checkout directory, strictly inside one workspace.
     pub dest: PathBuf,
+    /// Explicit: an omitted mode is a decode error, never unmanaged.
+    pub mode: CheckoutMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth: Option<u32>,
-    /// Required for an agent checkout: the provenance and push-deny hooks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub managed: Option<ManagedHooks>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<GitCredential>,
-    /// Seeds the session's `known_hosts` for SSH (the daemon's).
+    /// The daemon's pinned SSH host keys. Required for an SSH URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known_hosts: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+}
+
+/// `managed`: the agent checkout with the provenance and push-deny hooks
+/// (all fields required and checked before clone or fetch). `unmanaged`:
+/// no hooks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CheckoutMode {
+    Managed(ManagedHooks),
+    Unmanaged,
 }
 
 /// The managed hooks and repo config of an agent checkout.

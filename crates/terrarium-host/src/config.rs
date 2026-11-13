@@ -107,6 +107,9 @@ pub struct Config {
     /// Windows account workspaces (TER-274), configured only here.
     #[serde(default)]
     pub windows_workspaces: crate::windows_workspace::Policy,
+    /// The trusted Git for Windows root (TER-274), configured only here.
+    #[serde(default)]
+    pub windows_git: crate::git_checkout::Policy,
 }
 
 /// `[native_gpu]` in the config. When it is on, every native `exec` that
@@ -344,6 +347,7 @@ impl Default for Config {
             native_gpu: NativeGpuConfig::default(),
             windows_run_as: Default::default(),
             windows_workspaces: Default::default(),
+            windows_git: Default::default(),
         }
     }
 }
@@ -381,7 +385,10 @@ impl Config {
         })?;
         let config = Self::parse(&text, path)?;
         #[cfg(windows)]
-        if config.windows_run_as.enabled || config.windows_workspaces.enabled {
+        if config.windows_run_as.enabled
+            || config.windows_workspaces.enabled
+            || config.windows_git.root.is_some()
+        {
             // Re-read from the verified, locked native handle, not the pathname
             // we read above. Untrusted config can never enable full-token logon.
             let protected = terrarium_winapi::read_host_policy_file(path).map_err(|source| {

@@ -1,11 +1,13 @@
 //! The trusted Git for Windows runtime and the session-private credential
 //! directory of a managed checkout (TER-274 D10, D11).
 //!
-//! The runtime root comes only from the protected host file. Its ancestors,
-//! the root, the directories on the way to each listed binary, and those
-//! binaries are opened without reparse following, audited, and held without
-//! write or delete sharing for the whole checkout. Only these are audited,
-//! not every file in the tree.
+//! The runtime root comes only from the protected host file. Its ancestors
+//! and every entry below it are opened without reparse following and
+//! audited (bounded: [`MAX_ENTRIES`], [`MAX_DEPTH`]). A reparse point, an
+//! alias or an unsupported name anywhere in the tree refuses the layout. No
+//! untrusted trustee may change any directory or file of the runtime, so the
+//! DLLs and support files that git, sh and ssh load are covered too. The
+//! directories and the listed executables stay held for the whole checkout.
 //!
 //! Credential files live in `C:\Terrarium\git\<session>-<pid>-<n>`, with a
 //! protected DACL for SYSTEM and the run-as account. They are created with
@@ -20,6 +22,7 @@ use crate::workspace::{
 };
 use std::io::Write as _;
 use std::path::PathBuf;
+use windows_sys::Win32::Storage::FileSystem::{FindClose, FindFirstFileW, FindNextFileW, WIN32_FIND_DATAW};
 use std::sync::atomic::{AtomicU64, Ordering};
 use windows_sys::Win32::Storage::FileSystem::*;
 
@@ -36,6 +39,49 @@ const FILE_FORBIDDEN: u32 = DELETE
     | FILE_APPEND_DATA
     | FILE_WRITE_EA
     | FILE_WRITE_ATTRIBUTES;
+
+/// The most entries audited under a runtime root.
+pub const MAX_ENTRIES: usize = 100_000;
+/// The deepest directory level audited under a runtime root.
+pub const MAX_DEPTH: usize = 32;
+
+struct Find(HANDLE);
+impl Drop for Find {
+    fn drop(&mut self) {
+        // SAFETY: a live find handle from FindFirstFileW, closed once.
+        unsafe { FindClose(self.0) };
+    }
+}
+
+/// The names in a directory (without `.` and `..`).
+fn list(dir: &Path) -> io::Result<Vec<String>> {
+    let pattern = wide(dir.join("*").as_os_str())?;
+    // SAFETY: zero is a valid initial state of this POD output.
+    let mut data: WIN32_FIND_DATAW = unsafe { zeroed() };
+    // SAFETY: NUL-terminated pattern and a writable POD output.
+    let handle = unsafe { FindFirstFileW(pattern.as_ptr(), &mut data) };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let find = Find(handle);
+    let mut names = Vec::new();
+    loop {
+        let len = data.cFileName.iter().position(|c| *c == 0).unwrap_or(260);
+        let name = String::from_utf16(&data.cFileName[..len])
+            .map_err(|_| refused("runtime file name is not UTF-16"))?;
+        if name != "." && name != ".." {
+            names.push(name);
+        }
+        // SAFETY: live find handle and writable POD output.
+        if unsafe { FindNextFileW(find.0, &mut data) } == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                return Ok(names);
+            }
+            return Err(error);
+        }
+    }
+}
 
 /// Split a local drive path into its prefix (`C:\`) and checked names.
 fn drive_components(path: &Path) -> io::Result<(PathBuf, Vec<String>)> {
@@ -98,22 +144,53 @@ impl TrustedFiles {
                 .map_err(|_| refused("the runtime root or an ancestor is not protected"))?;
             held.push(handle);
         }
-        for file in files {
-            let parts: Vec<&str> = file.split('\\').collect();
-            let (leaf, dirs) = parts
-                .split_last()
-                .ok_or_else(|| refused("empty runtime file name"))?;
-            let mut current = path.clone();
-            for dir in dirs {
-                check_name(dir)?;
-                current.push(dir);
-                let handle = open_dir(&current, DIR_ACCESS)?;
-                audit_acl(&handle, &trusted, &trusted, &[], STRICT_FORBIDDEN, false)
-                    .map_err(|_| refused("a runtime directory is not protected"))?;
-                held.push(handle);
+        // Every entry under the root: directories held, files audited.
+        let mut stack = vec![(path.clone(), 0usize)];
+        let mut entries = 0usize;
+        while let Some((dir, depth)) = stack.pop() {
+            for name in list(&dir)? {
+                entries += 1;
+                if entries > MAX_ENTRIES {
+                    return Err(refused("the runtime root has too many entries"));
+                }
+                check_name(&name).map_err(|_| refused("unsupported name in the runtime root"))?;
+                let entry = dir.join(&name);
+                let wide_path = wide(entry.as_os_str())?;
+                // SAFETY: NUL-terminated path; opens the entry itself, never a
+                // target. No write or delete sharing while it is checked.
+                let handle = owned(unsafe {
+                    CreateFileW(
+                        wide_path.as_ptr(),
+                        READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                        FILE_SHARE_READ,
+                        null(),
+                        OPEN_EXISTING,
+                        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                        null_mut(),
+                    )
+                })?;
+                let attributes = crate::workspace::info(&handle)?.dwFileAttributes;
+                let is_dir = attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+                verify(&handle, &entry, is_dir)?;
+                let forbidden = if is_dir { STRICT_FORBIDDEN } else { FILE_FORBIDDEN };
+                audit_acl(&handle, &trusted, &trusted, &[], forbidden, false)
+                    .map_err(|_| refused("a runtime file or directory is not protected"))?;
+                if is_dir {
+                    if depth + 1 > MAX_DEPTH {
+                        return Err(refused("the runtime root is too deep"));
+                    }
+                    held.push(handle);
+                    stack.push((entry, depth + 1));
+                }
             }
-            check_name(leaf)?;
-            current.push(leaf);
+        }
+        // The exact executables must exist as regular files, and stay held.
+        for file in files {
+            let mut current = path.clone();
+            for part in file.split('\\') {
+                check_name(part)?;
+                current.push(part);
+            }
             let wide_path = wide(current.as_os_str())?;
             // SAFETY: NUL-terminated path; opens the file itself, never a
             // target. Share read only: nobody can replace it while held.
@@ -129,8 +206,6 @@ impl TrustedFiles {
                 )
             })?;
             verify(&handle, &current, false)?;
-            audit_acl(&handle, &trusted, &trusted, &[], FILE_FORBIDDEN, false)
-                .map_err(|_| refused("a runtime binary is not protected"))?;
             held.push(handle);
         }
         Ok(Self {

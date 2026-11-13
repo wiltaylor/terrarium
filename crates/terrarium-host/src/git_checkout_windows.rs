@@ -21,7 +21,7 @@ use crate::git_checkout::{
     RUNTIME_FILES, TOKEN_HELPER, UNSET_ENV, check_request, is_managed, overrides, refused_key,
     result, ssh_command,
 };
-use crate::protocol::{GitCheckout, GitCredential};
+use crate::protocol::{CheckoutMode, GitCheckout, GitCredential};
 use crate::windows_workspace::{locate, split_file};
 
 /// A failed checkout: the exit code and a message for stderr.
@@ -69,12 +69,12 @@ impl Git<'_> {
     /// `g()` of the script: with the credential when one is set.
     fn g(&self, args: &[&str]) -> Result<Vec<u8>, Failure> {
         let (env, extra) = self.credential.clone().unwrap_or_default();
-        self.exec(&extra, args, &env, true)
+        self.exec(&extra, args, &env)
     }
 
     /// `G()` of the script: no credential.
     fn plain(&self, args: &[&str]) -> Result<Vec<u8>, Failure> {
-        self.exec(&[], args, &BTreeMap::new(), true)
+        self.exec(&[], args, &BTreeMap::new())
     }
 
     /// `G` that may fail: the exit code and stdout, never an error for a
@@ -88,10 +88,9 @@ impl Git<'_> {
         extra: &[String],
         args: &[&str],
         env: &BTreeMap<String, String>,
-        check: bool,
     ) -> Result<Vec<u8>, Failure> {
         let (code, out) = self.run(extra, args, env)?;
-        if check && code != 0 {
+        if code != 0 {
             return Err(fail(code, format!("git {} failed", args.first().unwrap_or(&""))));
         }
         Ok(out)
@@ -158,7 +157,7 @@ impl Git<'_> {
                     }
                 });
             }
-            loop {
+            let code = loop {
                 match process.try_wait() {
                     Ok(Some(code)) => break Ok(code as i32),
                     Ok(None) => {}
@@ -167,15 +166,23 @@ impl Git<'_> {
                 if self.cancel.load(Ordering::SeqCst)
                     || self.deadline.is_some_and(|d| Instant::now() >= d)
                 {
-                    let _ = job.terminate();
                     break Err(fail(124, "checkout cancelled or timed out"));
                 }
                 std::thread::sleep(Duration::from_millis(20));
-            }
+            };
+            // End any descendant (ssh, sh) still holding the pipes, so the
+            // stderr reader of this scope can finish.
+            let _ = job.terminate();
+            code
         });
-        // The job (and its kill-on-close) ends every descendant here.
+        // Wait for the job to drain before the caller may remove the
+        // credential files (D20).
+        let drained = job.wait_empty(Duration::from_secs(10));
         drop(job);
         let out = out.join().unwrap_or_default();
+        if !drained {
+            return Err(fail(2, "git processes did not end: cleanup is unconfirmed"));
+        }
         code.map(|c| (c, out))
     }
 }
@@ -373,7 +380,7 @@ pub fn run(
         ("cloned", String::new())
     };
     drop(known_hosts);
-    if let Some(managed) = &req.managed
+    if let CheckoutMode::Managed(managed) = &req.mode
         && action != "not_updated"
     {
         install_hooks(&parent, name, managed, identity, u64::from(req.session))?;

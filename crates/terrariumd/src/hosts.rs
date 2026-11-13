@@ -216,6 +216,8 @@ pub enum HostError {
     JournalBusy,
     #[error("Windows run-as requires a Windows host with the windows_run_as capability")]
     WindowsRunAsUnsupported,
+    #[error("git.checkout requires a Windows host with the windows_git_checkout capability")]
+    GitCheckoutUnsupported,
 }
 
 impl From<HostError> for ApiError {
@@ -225,7 +227,9 @@ impl From<HostError> for ApiError {
             HostError::Busy(..) => ApiError::new(Code::RateLimited, e.to_string()),
             HostError::Persistence => ApiError::internal(e.to_string()),
             HostError::JournalBusy => ApiError::new(Code::ResourceBusy, e.to_string()),
-            HostError::WindowsRunAsUnsupported => ApiError::invalid(e.to_string()),
+            HostError::WindowsRunAsUnsupported | HostError::GitCheckoutUnsupported => {
+                ApiError::invalid(e.to_string())
+            }
         }
     }
 }
@@ -1129,8 +1133,19 @@ impl HostRegistry {
             DaemonFrame::Exec(req) => req.windows_run_as.is_some(),
             DaemonFrame::CpPush(req) => req.windows_run_as.is_some(),
             DaemonFrame::CpPull(req) => req.windows_run_as.is_some(),
+            DaemonFrame::GitCheckout(req) => req.windows_run_as.is_some(),
             _ => false,
         };
+        // D17: only the capability makes a new frame kind safe to send.
+        if matches!(frame, DaemonFrame::GitCheckout(_))
+            && !e
+                .info
+                .as_ref()
+                .is_some_and(|i| i.os == "windows" && i.capabilities.windows_git_checkout)
+        {
+            e.next_id = previous_next;
+            return Err(HostError::GitCheckoutUnsupported);
+        }
         if has_run_as
             && !e
                 .info

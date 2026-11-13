@@ -99,6 +99,8 @@ pub struct ClientOptions {
     pub windows_run_as: crate::windows_run_as::Policy,
     /// `[windows_workspaces]` of the host file (TER-274).
     pub windows_workspaces: crate::windows_workspace::Policy,
+    /// `[windows_git]` of the host file (TER-274).
+    pub windows_git: crate::git_checkout::Policy,
 }
 
 impl ClientOptions {
@@ -132,6 +134,7 @@ impl ClientOptions {
             native: None,
             windows_run_as: Default::default(),
             windows_workspaces: Default::default(),
+            windows_git: Default::default(),
         }
     }
 }
@@ -1163,6 +1166,7 @@ impl Client {
                 DaemonFrame::Exec(req) => req.windows_run_as.take(),
                 DaemonFrame::CpPush(req) => req.windows_run_as.take(),
                 DaemonFrame::CpPull(req) => req.windows_run_as.take(),
+                DaemonFrame::GitCheckout(req) => req.windows_run_as.take(),
                 _ => None,
             };
             if let Some(credentials) = credentials {
@@ -1170,6 +1174,7 @@ impl Client {
                     DaemonFrame::Exec(req) => req.session,
                     DaemonFrame::CpPush(req) => req.session,
                     DaemonFrame::CpPull(req) => req.session,
+                    DaemonFrame::GitCheckout(req) => req.session,
                     _ => unreachable!("credentials only on native admission frames"),
                 };
                 let Ok(_admission) = self.shared.admission.try_lock() else {
@@ -1296,6 +1301,7 @@ impl Client {
             }
             F::CpPush(req) => self.start_push(req, tx, identity, owner).await,
             F::CpPull(req) => self.start_pull(req, tx, identity, owner).await,
+            F::GitCheckout(req) => self.start_git_checkout(*req, tx, identity, owner).await,
             F::Exec(req) => {
                 let id = req.session;
                 #[cfg(not(windows))]
@@ -2140,6 +2146,121 @@ impl Client {
                 }
             };
             outbox.finish(vec![frame]);
+        });
+    }
+
+    /// A managed checkout (TER-274). Only a Windows host with the
+    /// `windows_git_checkout` capability runs it; every other host refuses.
+    #[cfg(not(windows))]
+    async fn start_git_checkout(
+        &self,
+        req: crate::protocol::GitCheckout,
+        tx: &Link,
+        _identity: Option<PreparedIdentity>,
+        owner: Option<&Arc<Pending>>,
+    ) {
+        if self.admit_reserved(req.session, tx, owner) {
+            send_error(
+                tx,
+                req.session,
+                ErrorCode::BadRequest,
+                "git.checkout is supported only on a Windows host".into(),
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    async fn start_git_checkout(
+        &self,
+        req: crate::protocol::GitCheckout,
+        tx: &Link,
+        identity: Option<PreparedIdentity>,
+        owner: Option<&Arc<Pending>>,
+    ) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let session = req.session;
+        let admission = if owner.is_some() {
+            Some(self.shared.admission.lock().await)
+        } else {
+            None
+        };
+        if !self.admit_reserved(session, tx, owner) {
+            return;
+        }
+        let root = match &self.opts.windows_git.root {
+            Some(root) if self.opts.capabilities.windows_git_checkout => root.clone(),
+            _ => {
+                return send_error(
+                    tx,
+                    session,
+                    ErrorCode::BadRequest,
+                    "Windows git checkout is not enabled on this host".into(),
+                );
+            }
+        };
+        let outbox = self.new_outbox(session, tx);
+        outbox.send_now(HostFrame::Started { session, pid: None });
+        let (input, data, mut control) = crate::session::InputSender::channels();
+        drop(data);
+        self.sessions().insert(
+            session,
+            Entry {
+                outbox: outbox.clone(),
+                input: Some(input),
+                push: None,
+                detached_since: None,
+            },
+        );
+        drop(admission);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let watch = cancel.clone();
+        // A kill, a signal, or a release (the sender drops) cancels it.
+        tokio::spawn(async move {
+            while let Some(message) = control.recv().await {
+                if matches!(message, SessionInput::Kill(_) | SessionInput::Signal(_)) {
+                    break;
+                }
+            }
+            watch.store(true, Ordering::SeqCst);
+        });
+        tokio::spawn(async move {
+            let rt = tokio::runtime::Handle::current();
+            let errors = outbox.clone();
+            let ran = tokio::task::spawn_blocking(move || {
+                let forward = move |data: &[u8]| {
+                    let _ = rt.block_on(errors.push(StreamTag::Stderr, data.to_vec()));
+                };
+                crate::git_checkout_windows::run(&req, identity.as_ref(), &root, &cancel, &forward)
+            })
+            .await;
+            let frames = match ran {
+                Ok(Ok(value)) => vec![
+                    HostFrame::Result { session, value },
+                    HostFrame::Exit {
+                        session,
+                        code: Some(0),
+                        signal: None,
+                        reason: ExitReason::Exited,
+                    },
+                ],
+                Ok(Err(failure)) => {
+                    let mut text = failure.message;
+                    text.push('\n');
+                    let _ = outbox.push(StreamTag::Stderr, text.into_bytes()).await;
+                    vec![HostFrame::Exit {
+                        session,
+                        code: Some(failure.code),
+                        signal: None,
+                        reason: ExitReason::Exited,
+                    }]
+                }
+                Err(_) => vec![HostFrame::Error {
+                    session,
+                    code: ErrorCode::Io,
+                    message: "the checkout worker failed".into(),
+                }],
+            };
+            outbox.finish(frames);
         });
     }
 

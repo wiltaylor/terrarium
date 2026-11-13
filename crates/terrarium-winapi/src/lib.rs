@@ -8,10 +8,10 @@ mod policy_file;
 pub use policy_file::read_host_policy_file;
 mod diagnostics;
 mod workspace;
-pub use workspace::{BASE as WORKSPACE_BASE, Dir, Entry, TempFile, Workspace, check_name};
+pub use diagnostics::{TokenSnapshot, current_token_snapshot};
 mod git_runtime;
 pub use git_runtime::{GIT_SESSIONS, PrivateDir, SecretFile, TrustedFiles};
-pub use diagnostics::{TokenSnapshot, current_token_snapshot};
+pub use workspace::{BASE as WORKSPACE_BASE, Dir, Entry, TempFile, Workspace, check_name};
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -150,6 +150,33 @@ impl Job {
     pub fn terminate(&self) -> io::Result<()> {
         // SAFETY: handle remains owned by self throughout the call.
         checked(unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) })
+    }
+
+    /// Wait until no process of the job is alive. `false`: not confirmed
+    /// within `timeout` (or the query failed).
+    pub fn wait_empty(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            // SAFETY: valid zero-initialized POD and owned job handle.
+            let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
+            // SAFETY: live job and output matching class and documented size.
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.0.as_raw_handle(),
+                    JobObjectBasicAccountingInformation,
+                    (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                    size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    null_mut(),
+                )
+            };
+            if ok != 0 && info.ActiveProcesses == 0 {
+                return true;
+            }
+            if ok == 0 || std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
 

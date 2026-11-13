@@ -1,9 +1,8 @@
 # Windows account workspaces (TER-274)
 
 A Windows host agent can hold agent workspaces at
-`C:\Terrarium\work\<project>\<agent>`. `terrarium cp` and the default exec
-cwd use them. A git checkout on a Windows host is refused for now
-(TER-1102).
+`C:\Terrarium\work\<project>\<agent>`. `terrarium cp`, the default exec
+cwd and the managed `terrarium repo checkout --target` use them.
 
 ## Turn it on
 
@@ -57,12 +56,44 @@ creates are owned by SYSTEM or Administrators.
 - A pull refuses a file with more than one hard link.
 - An exec cwd in the base is provisioned and checked before the spawn.
 
+## Managed git checkout
+
+Off unless the host also names a trusted Git for Windows root:
+
+```toml
+[windows_git]
+root = 'C:\Program Files\Git'
+```
+
+- The host reports `windows_git_checkout` only with workspaces on and a
+  root whose whole tree passes the audit: no reparse point, alias or
+  unsupported name, every directory and file protected against untrusted
+  change (at most 100000 entries, depth 32). Each checkout audits it again.
+- The daemon sends the typed `git.checkout` frame only to such a host, only
+  for an agent, always in `managed` mode (provenance and push-deny hooks),
+  into that agent's workspace. Any other case is refused before a frame.
+- Git runs from the root by exact path, as the run-as account, in a job
+  object, with the `-c` overrides of the Linux checkout script, a pinned
+  `PATH`, `GIT_CONFIG_NOSYSTEM=1` and hooks off during clone or fetch.
+- SSH uses `StrictHostKeyChecking=yes` with the daemon's pinned host keys
+  only. No pin, no SSH checkout.
+- The token goes only into the git child env. The SSH key and host keys are
+  delete-on-close files in a session directory of `C:\Terrarium\git` with a
+  DACL for SYSTEM and the account. Cancel waits for the job to drain.
+- Hooks are written by handle through the no-reparse walk. A repo hook that
+  is not managed is kept as `<name>.repo`.
+
 ## Limits
 
 - R1: the DACL separates different ordinary accounts only. The same
   account and elevated administrators are not isolated. A command that runs
   as the account keeps all of its rights.
 - Paths outside `C:\Terrarium\work` keep the TER-272 handling.
+- The checkout token is readable by the same account and administrators
+  while git runs.
+- Unproven until native tests: msys `ssh.exe` reading a delete-on-close key
+  file, the hook `-x` test of Git for Windows `sh`, and crash cleanup (after
+  a host crash an empty session directory can stay in `C:\Terrarium\git`).
 
 ## Native acceptance (not yet run)
 
@@ -76,3 +107,7 @@ window, fixture accounts and roots, and a matching deployment:
   link escapes refused, outside sentinels unchanged
 - a bounded rename-swap race on an inner directory during a push
 - the default exec cwd for a run-as session
+- checkout: token and SSH clone with an exact head hash, fast-forward,
+  diverged, local changes, config injection refused, hooks installed and
+  enforced, repo hook kept, pin missing or mismatched, unprotected or
+  reparse runtime refused, cancel leaves no key file and no git process

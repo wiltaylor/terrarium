@@ -218,6 +218,22 @@ fn windows_workspaces(cfg: &Config) -> bool {
     cfg.windows_workspaces.enabled && terrarium_host::windows_workspace::base_ready()
 }
 
+/// The managed checkout needs workspaces and a `[windows_git]` root whose
+/// whole tree passes the runtime audit at start (TER-274 D9, D19). Each
+/// checkout audits it again.
+#[cfg(windows)]
+fn windows_git_checkout(cfg: &Config) -> bool {
+    windows_workspaces(cfg)
+        && cfg.windows_git.root.as_deref().is_some_and(|root| {
+            terrarium_winapi::TrustedFiles::open(
+                root,
+                &terrarium_host::git_checkout::RUNTIME_FILES,
+            )
+            .inspect_err(|e| tracing::warn!(error = %e, "[windows_git] root refused"))
+            .is_ok()
+        })
+}
+
 async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
     let mut caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
     let paths = cfg.paths();
@@ -226,6 +242,7 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
     #[cfg(windows)]
     {
         caps.no_workspaces = !windows_workspaces(cfg);
+        caps.windows_git_checkout = windows_git_checkout(cfg);
     }
     if cfg.native_gpu.enabled {
         caps.native_gpu = Some(terrarium_host::native::capability(&cfg.native_gpu.socket).await);
@@ -411,6 +428,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     #[cfg(windows)]
     {
         caps.no_workspaces = !windows_workspaces(&cfg);
+        caps.windows_git_checkout = windows_git_checkout(&cfg);
     }
     if caps.no_workspaces {
         tracing::warn!(
@@ -470,6 +488,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let mut opts = ClientOptions::new(url, token, name);
     opts.windows_run_as = cfg.windows_run_as.clone();
     opts.windows_workspaces = cfg.windows_workspaces.clone();
+    opts.windows_git = cfg.windows_git.clone();
     opts.native = opts_native;
     opts.capabilities = caps;
     opts.max_sessions = cfg.max_sessions;

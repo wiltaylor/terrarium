@@ -18,6 +18,18 @@ pub struct InputSender {
 }
 
 impl InputSender {
+    /// A sender and its two receivers (data, control), for a session that
+    /// is not a process spawned here (the managed checkout, TER-274).
+    pub fn channels() -> (
+        Self,
+        mpsc::UnboundedReceiver<SessionInput>,
+        mpsc::UnboundedReceiver<SessionInput>,
+    ) {
+        let (data, data_rx) = mpsc::unbounded_channel();
+        let (control, control_rx) = mpsc::unbounded_channel();
+        (Self { data, control }, data_rx, control_rx)
+    }
+
     pub fn send(&self, message: SessionInput) -> Result<(), mpsc::error::SendError<SessionInput>> {
         match message {
             SessionInput::Stdin(_) | SessionInput::Eof => self.data.send(message),

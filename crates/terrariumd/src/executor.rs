@@ -5848,10 +5848,119 @@ pub fn parse_checkout(stdout: &str) -> Option<Value> {
 /// Clone or update a repo on a target, through an exec on the host agent
 /// (or ssh). The secret goes in the env of that one run.
 #[allow(clippy::too_many_arguments)]
-/// A checkout on a Windows host is not supported yet: copy files with
-/// `terrarium cp` into the workspace instead.
-pub const WINDOWS_CHECKOUT_REFUSED: &str = "a git checkout on a Windows host is not supported yet; \
+/// A Windows host without the `windows_git_checkout` capability (the
+/// default): copy files with `terrarium cp` into the workspace instead.
+pub const WINDOWS_CHECKOUT_REFUSED: &str = "a git checkout on this Windows host is not supported yet; \
      copy files into the workspace with `terrarium cp`";
+
+/// The managed checkout of an agent on a Windows host (TER-274). The
+/// request goes once over the live host link: no journal keeps it (D18).
+#[allow(clippy::too_many_arguments)]
+async fn checkout_on_windows_host(
+    state: &Shared,
+    actor: &Actor,
+    row: &TargetRow,
+    repo: &crate::store::repos::Repo,
+    url: &str,
+    dest: &str,
+    branch: Option<&str>,
+    depth: Option<u32>,
+    secret: Option<&Secret>,
+) -> ApiResult<Value> {
+    use terrarium_host::protocol::{
+        CheckoutMode, GitCheckout, GitCredential, ManagedHooks, PathKind,
+    };
+    let def = &row.def;
+    let host = host_of(def)?;
+    let capable = state
+        .executor
+        .hosts
+        .capabilities(host)
+        .is_some_and(|c| c.windows_git_checkout);
+    if !capable {
+        return Err(ApiError::invalid(WINDOWS_CHECKOUT_REFUSED));
+    }
+    // D16: only the managed agent checkout exists on Windows.
+    let Some(a) = actor.agent() else {
+        return Err(ApiError::invalid(
+            "a git checkout on a Windows host goes into an agent's workspace; run it as the agent",
+        ));
+    };
+    // The URL and branch rules of the Linux checkout.
+    let _ = checkout_cmd(url, "/checked", branch, depth, None)?;
+    let kind = PathKind::Windows;
+    let root = kind
+        .workspace(&a.project, &a.name)
+        .ok_or_else(|| ApiError::invalid("invalid Windows workspace name"))?;
+    let dest = if kind.key(dest).is_some() {
+        dest.to_owned()
+    } else {
+        format!(r"{root}\{}", dest.replace('/', r"\"))
+    };
+    if !kind.inside(&root, &dest, false) {
+        return Err(ApiError::invalid(format!(
+            "bad checkout path `{dest}`: it must be inside {root}"
+        )));
+    }
+    let known_hosts = git_known_hosts(state);
+    if terrarium_host::git_checkout::is_ssh_url(url)
+        && known_hosts.as_deref().is_none_or(|k| k.trim().is_empty())
+    {
+        return Err(ApiError::invalid(
+            "an SSH checkout on a Windows host needs the daemon's pinned repo host keys",
+        ));
+    }
+    terrarium_core::config::check_push_deny(&repo.push_deny)
+        .map_err(|_| ApiError::invalid("invalid checkout push deny list"))?;
+    let p = crate::git_identity::for_repo(state, &a.id, repo).await?;
+    let mode = CheckoutMode::Managed(ManagedHooks {
+        commit_hook: p.hook(),
+        push_hook: crate::git::push_deny_hook(&repo.push_deny),
+        name: p.identity.name.clone(),
+        email: p.identity.email.clone(),
+        provenance: !p.trailers.is_empty(),
+        warn_only: p.warn_only,
+        repo_id: repo.id.clone(),
+    });
+    let credential = match secret {
+        Some(Secret::Token { username, token }) => Some(GitCredential::Token {
+            username: username.clone(),
+            password: token.to_string(),
+        }),
+        Some(Secret::SshKey(k)) => Some(GitCredential::SshKey {
+            key: k.trim_end().to_owned(),
+        }),
+        Some(Secret::Login { .. } | Secret::Other(_)) | None => None,
+    };
+    let windows_run_as = windows_run_as(state, def)?;
+    let _root_guard = crate::target_roots::lock_card(state, actor, &def.name).await?;
+    let request = GitCheckout {
+        windows_run_as,
+        session: 0,
+        url: url.to_owned(),
+        dest: PathBuf::from(&dest),
+        mode,
+        branch: branch.map(str::to_owned),
+        depth,
+        credential,
+        known_hosts,
+        timeout_secs: Some(VERB_TIMEOUT),
+    };
+    let session = state.executor.hosts.open_bound(host, None, move |id| {
+        let mut request = request;
+        request.session = id;
+        DaemonFrame::GitCheckout(Box::new(request))
+    })?;
+    let c = pump_host(session).collect(256 * 1024).await;
+    if !c.end().success() {
+        let e = verb_failed("git checkout on the target", &c);
+        return Err(ApiError::invalid(e.message).with_details(json!({
+            "command": "checkout", "status": c.end(), "stderr": c.stderr_tail(),
+        })));
+    }
+    c.result
+        .ok_or_else(|| ApiError::internal("the Windows host sent no checkout result"))
+}
 
 pub async fn checkout_on_target(
     state: &Shared,
@@ -5871,9 +5980,10 @@ pub async fn checkout_on_target(
         ));
     }
     if path_kind(state, &row.def) == terrarium_host::protocol::PathKind::Windows {
-        // The managed checkout (commit provenance and push-deny hooks) is a
-        // POSIX sh script. Never send it to a Windows host (TER-274 D6).
-        return Err(ApiError::invalid(WINDOWS_CHECKOUT_REFUSED));
+        // `CHECKOUT_SCRIPT` is POSIX sh: a Windows host gets the typed frame,
+        // and only when it has the capability (TER-274 D8, D17).
+        return checkout_on_windows_host(state, actor, row, repo, url, dest, branch, depth, secret)
+            .await;
     }
     let mut cmd = checkout_cmd(url, dest, branch, depth, secret)?;
     let _root_guard = crate::target_roots::lock_card(state, actor, &row.def.name).await?;

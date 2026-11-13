@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::GitCheckout;
+use crate::protocol::{CheckoutMode, GitCheckout};
 
 /// `[windows_git]` in the host file: the Git for Windows root. Unset, the
 /// host reports no `windows_git_checkout` capability.
@@ -156,19 +156,43 @@ pub fn check_request(req: &GitCheckout) -> Result<(), String> {
     if req.depth == Some(0) {
         return Err("depth must be at least 1".into());
     }
-    if let Some(m) = &req.managed {
-        if m.commit_hook.is_empty() {
+    if is_ssh_url(url) && req.known_hosts.as_deref().is_none_or(|k| k.trim().is_empty()) {
+        return Err("an SSH checkout needs the daemon's pinned known_hosts".into());
+    }
+    if let CheckoutMode::Managed(m) = &req.mode {
+        // TER-1061: every managed control is required, checked before git.
+        if m.commit_hook.is_empty()
+            || m.name.is_empty()
+            || m.email.is_empty()
+            || m.repo_id.is_empty()
+        {
             return Err("checkout managed hook failed: control".into());
         }
         check_push_hook(&m.push_hook)
             .map_err(|stage| format!("checkout managed hook failed: {stage}"))?;
-        for v in [&m.name, &m.email, &m.repo_id] {
-            if v.chars().any(char::is_control) {
-                return Err("checkout managed hook failed: control".into());
-            }
+        if m.commit_hook.contains('\0')
+            || [&m.name, &m.email, &m.repo_id]
+                .iter()
+                .any(|v| v.chars().any(char::is_control))
+        {
+            return Err("checkout managed hook failed: control".into());
         }
     }
     Ok(())
+}
+
+/// Does git reach this URL over SSH? `ssh://`, `git+ssh://`, `ssh+git://`,
+/// or the scp form `[user@]host:path` (no `://`, a colon before any slash).
+pub fn is_ssh_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    if let Some((scheme, _)) = lower.split_once("://") {
+        return matches!(scheme, "ssh" | "git+ssh" | "ssh+git");
+    }
+    match (url.find(':'), url.find('/')) {
+        (Some(colon), Some(slash)) => colon < slash,
+        (Some(_), None) => true,
+        _ => false,
+    }
 }
 
 /// The environment names the checkout removes (as `CHECKOUT_SCRIPT`).
@@ -250,7 +274,7 @@ pub fn sh_quote_path(path: &str) -> Result<String, String> {
 pub fn ssh_command(ssh: &str, known_hosts: &str, key: Option<&str>) -> Result<String, String> {
     let mut cmd = format!(
         "{} -F /dev/null -o UserKnownHostsFile={} -o GlobalKnownHostsFile=/dev/null \
-         -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+         -o BatchMode=yes -o StrictHostKeyChecking=yes",
         sh_quote_path(ssh)?,
         sh_quote_path(known_hosts)?
     );
@@ -335,7 +359,7 @@ mod tests {
             dest: r"C:\Terrarium\work\p\a\r".into(),
             branch: Some("main".into()),
             depth: None,
-            managed: Some(ManagedHooks {
+            mode: CheckoutMode::Managed(ManagedHooks {
                 commit_hook: "#!/bin/sh\n# terrarium managed provenance hook\n".into(),
                 push_hook: push_hook(),
                 name: "a".into(),
@@ -345,7 +369,7 @@ mod tests {
                 repo_id: "r1".into(),
             }),
             credential: None,
-            known_hosts: None,
+            known_hosts: Some("github.com ssh-ed25519 AAAA".into()),
             timeout_secs: None,
         }
     }
@@ -363,12 +387,86 @@ mod tests {
             r.branch = Some(branch.into());
             assert!(check_request(&r).is_err(), "{branch:?}");
         }
+        for clear in [0, 1, 2, 3] {
+            let mut r = request();
+            let CheckoutMode::Managed(m) = &mut r.mode else {
+                unreachable!()
+            };
+            [&mut m.commit_hook, &mut m.name, &mut m.email, &mut m.repo_id][clear].clear();
+            assert!(check_request(&r).is_err(), "managed control {clear}");
+        }
         let mut r = request();
-        r.managed.as_mut().unwrap().commit_hook.clear();
-        assert!(check_request(&r).is_err());
+        let CheckoutMode::Managed(m) = &mut r.mode else {
+            unreachable!()
+        };
+        m.push_hook = "#!/bin/sh\nexit 0\n".into();
+        assert!(check_request(&r).is_err(), "unmarked push hook");
         let mut r = request();
         r.depth = Some(0);
         assert!(check_request(&r).is_err());
+    }
+
+    #[test]
+    fn ssh_urls_need_the_pinned_known_hosts() {
+        for url in ["git@github.com:o/r.git", "ssh://git@h/r", "GIT+SSH://h/r", "h:r"] {
+            assert!(is_ssh_url(url), "{url}");
+            let mut r = request();
+            r.url = url.into();
+            r.known_hosts = None;
+            assert!(check_request(&r).is_err(), "{url} without pin");
+            r.known_hosts = Some(" \n".into());
+            assert!(check_request(&r).is_err(), "{url} with empty pin");
+        }
+        for url in ["https://h/r.git", "http://h/r", "file:///C:/r", "./r"] {
+            assert!(!is_ssh_url(url), "{url}");
+            let mut r = request();
+            r.url = url.into();
+            r.known_hosts = None;
+            assert!(check_request(&r).is_ok(), "{url}");
+        }
+    }
+
+    /// D16/D17: required fields have no defaults; old capabilities are off.
+    #[test]
+    fn frames_need_explicit_mode_and_capability_defaults_off() {
+        use crate::protocol::{DaemonFrame, decode_control, encode_control};
+        let frame = DaemonFrame::GitCheckout(Box::new(request()));
+        let text = encode_control(&frame).unwrap();
+        assert_eq!(decode_control::<DaemonFrame>(&text).unwrap(), frame);
+        let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for field in ["mode", "dest", "url", "session"] {
+            let mut w = v.clone();
+            w.as_object_mut().unwrap().remove(field);
+            assert!(
+                decode_control::<DaemonFrame>(&w.to_string()).is_err(),
+                "{field} must be required"
+            );
+        }
+        v["mode"] = serde_json::json!({"kind": "managed"});
+        assert!(decode_control::<DaemonFrame>(&v.to_string()).is_err());
+        let caps: crate::protocol::HostCapabilities = serde_json::from_str("{}").unwrap();
+        assert!(!caps.windows_git_checkout);
+    }
+
+    /// D18: Debug of the request never shows a credential.
+    #[test]
+    fn request_debug_redacts_credentials() {
+        let mut r = request();
+        r.credential = Some(crate::protocol::GitCredential::Token {
+            username: "u".into(),
+            password: "sentinel-token-1".into(),
+        });
+        r.windows_run_as = Some(crate::protocol::WindowsRunAs {
+            account: "D\\a".into(),
+            password: "sentinel-password-2".into(),
+        });
+        let debug = format!("{r:?}");
+        assert!(!debug.contains("sentinel-token-1"), "{debug}");
+        assert!(!debug.contains("sentinel-password-2"), "{debug}");
+        r.credential = Some(crate::protocol::GitCredential::SshKey {
+            key: "sentinel-key-3".into(),
+        });
+        assert!(!format!("{r:?}").contains("sentinel-key-3"));
     }
 
     #[test]
@@ -391,6 +489,8 @@ mod tests {
         )
         .unwrap();
         assert!(cmd.starts_with("'C:/Program Files/Git/usr/bin/ssh.exe' -F /dev/null"));
+        assert!(cmd.contains("StrictHostKeyChecking=yes"));
+        assert!(!cmd.contains("accept-new"));
         assert!(cmd.contains("-i 'C:/Terrarium/git/1/key' -o IdentitiesOnly=yes"));
         assert!(ssh_command("C:\\it's\\ssh.exe", "k", None).is_err());
     }
