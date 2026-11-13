@@ -5246,7 +5246,8 @@ async fn column_rules_fix_then_split_a_red_merge_batch() {
     assert_eq!(card_ids(&rest), vec![a.clone(), b.clone()]);
 
     // The red half of one card: the fix card goes to the top of ready
-    // with the failure block, and leaves the merge group.
+    // with the failure block. A fix card stays in its merge group while
+    // it is worked (`groups::remove`), so the returned rule is a no-op.
     end_job(&td, &one, false).await;
     let x = card(&td, &f1).await;
     assert_eq!(x["column"], "ready", "{x}");
@@ -5258,28 +5259,67 @@ async fn column_rules_fix_then_split_a_red_merge_batch() {
     let fail = runs_of(&td, "p", "merge_queue/job-fail-red").await;
     assert_eq!(fail.last().unwrap()["state"], "done", "{fail:?}");
     let back = runs_of(&td, "p", "ready/merge-group-returned").await;
-    assert_eq!(
-        states(&back),
-        vec!["done"],
-        "{back:?} {:?}",
-        card_writes(&td, &f1).await
-    );
-    assert!(x.get("group").is_none_or(Value::is_null), "{x}");
+    assert_eq!(states(&back), vec!["noop"], "{back:?}");
+    assert_eq!(x["group"]["id"], json!(merge_group), "{x}");
 
-    // The group's own cards pass: they go to accepted, the merge group
-    // closes, and the version is cut and built.
+    // The group's own cards pass and go to accepted. The merge group
+    // waits for its fix card, so a and b are not cut yet: a card is in
+    // one group at a time.
     end_job(&td, &rest, true).await;
     for id in [&a, &b] {
         let x = card(&td, id).await;
         assert_eq!(x["column"], "accepted", "{x}");
         assert_eq!(x["labels"], json!(["version:vnext"]), "{x}");
+        assert_eq!(x["group"]["id"], json!(merge_group), "{x}");
     }
+    let g = card(&td, &a).await["group"].clone();
+    assert_eq!((g["done"].clone(), g["total"].clone()), (json!(4), json!(5)), "{g}");
+
+    // The fix card is fixed and goes through review to the merge queue.
+    // The last batch has left, so it waits for a batch of 2 or for the
+    // wait of the column. After the wait it lands, and the `lands` rule
+    // queues its merge.
+    move_to(&td, &f1, "review").await;
+    move_to(&td, &f1, "merge_queue").await;
+    settle(&td).await;
+    assert_eq!(card(&td, &f1).await["queued"]["place"], 1);
+    assert!(open_jobs(&td).await.is_empty());
+    state(&td)
+        .db
+        .write("operator", |t| {
+            t.execute(
+                "UPDATE card_queue SET queued_at = '2000-01-01T00:00:00.000Z'
+                  WHERE admitted_at IS NULL",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    state(&td)
+        .db
+        .write("system", terrariumd::store::board::queues::sweep_all)
+        .await
+        .unwrap();
+    settle(&td).await;
+    let last = the_open_job(&td).await;
+    assert_eq!(card_ids(&last), vec![f1.clone()]);
+    assert_eq!(last.created_by, "rule:p/merge_queue/merge-batch");
+
+    // It passes: the merge group has every member done and closes, and
+    // the fix card's landing in accepted cuts the version of a and b
+    // (the fix cards carry no version label).
+    end_job(&td, &last, true).await;
+    assert_eq!(column_of(&td, &f1).await, "accepted");
     assert_eq!(card(&td, &merge_group).await["archived"], true);
-    let key = card(&td, &a).await["group"]["key"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    assert!(key.starts_with("version:"), "{key}");
+    let v = card(&td, &a).await["group"].clone();
+    let key = v["key"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        key.starts_with("version:"),
+        "{v} {:?}",
+        runs_of(&td, "p", "accepted/version-cut").await
+    );
+    assert_eq!(v["members"], json!([a, b]), "{v}");
     let built = td
         .post(
             &format!("/api/projects/p/version-groups/{key}/built"),
