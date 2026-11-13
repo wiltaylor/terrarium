@@ -1461,7 +1461,10 @@ mod tests {
         .await
         .unwrap();
         let s = db.read(|c| get(c, "x-super")).await.unwrap();
-        assert_eq!((s.provider.as_str(), s.plan.as_deref()), ("xai", Some("Super")));
+        assert_eq!(
+            (s.provider.as_str(), s.plan.as_deref()),
+            ("xai", Some("Super"))
+        );
         assert_eq!(s.harnesses, [g]);
         assert!(s.is_plan());
         let k = db.read(|c| get(c, "x-key")).await.unwrap();
@@ -1500,7 +1503,11 @@ mod tests {
         let why = plan_refusal(p, &s).unwrap();
         assert!(why.contains("pi uses API keys only"), "{why}");
         assert!(plan_refusal(g, &k).unwrap().contains("pi harness only"));
-        assert!(plan_refusal(HarnessId::Claude, &s).unwrap().contains("grok harness only"));
+        assert!(
+            plan_refusal(HarnessId::Claude, &s)
+                .unwrap()
+                .contains("grok harness only")
+        );
         let max = db
             .write("system", |t| upsert_def(t, &def("max"), SOURCE_API))
             .await

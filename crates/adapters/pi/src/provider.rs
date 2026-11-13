@@ -302,7 +302,10 @@ mod tests {
             let s = sub("xai", Some(plan));
             assert!(is_plan(&s), "{plan}");
             assert_eq!(refusal(&s), Some(PLAN_REFUSAL), "{plan}");
-            assert_eq!(start_refusal(&s, Some("grok-4.3")).as_deref(), Some(PLAN_REFUSAL));
+            assert_eq!(
+                start_refusal(&s, Some("grok-4.3")).as_deref(),
+                Some(PLAN_REFUSAL)
+            );
             assert_eq!(provider_for(&s), None, "{plan}");
             assert_eq!(required_env(&s), None, "{plan}");
         }

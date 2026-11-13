@@ -656,9 +656,8 @@ pub async fn check_status_in(
                 CheckHome::Shared => None,
             };
             let Some(file) = file else {
-                st.detail = Some(
-                    "a Grok Build login lives only in the account of its xai plan row".into(),
-                );
+                st.detail =
+                    Some("a Grok Build login lives only in the account of its xai plan row".into());
                 return st;
             };
             let found = tokio::task::spawn_blocking(move || grok_login_in(&file))

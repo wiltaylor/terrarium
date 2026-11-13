@@ -154,9 +154,7 @@ mod tests {
     fn the_refused_combinations() {
         let r = |p: &str, plan: Option<&str>, h: &[HarnessId]| refusal(p, plan, h).unwrap();
         assert!(r("xai", Some("Super"), &[HarnessId::Pi]).contains("grok harness only"));
-        assert!(
-            r("xai", Some("Plus"), &[HarnessId::Grok, HarnessId::Pi]).contains("not pi")
-        );
+        assert!(r("xai", Some("Plus"), &[HarnessId::Grok, HarnessId::Pi]).contains("not pi"));
         assert!(r("xai", Some("Premium"), &[]).contains("needs a harness"));
         assert!(r("xai", Some("API key"), &[HarnessId::Grok]).contains("pi harness only"));
         assert!(r("xai", None, &[HarnessId::Claude]).contains("pi harness only"));

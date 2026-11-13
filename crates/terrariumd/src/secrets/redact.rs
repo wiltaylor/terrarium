@@ -421,12 +421,15 @@ mod tests {
         .unwrap();
         let r = build(&c, dir.path()).unwrap();
         assert_eq!(
-            r.redact_str("at=xai-at-Q7w9Zk2LmP4rT8vB rt=xai-rt-H3nJ6sD1fG5kL0pX Bearer access_token"),
+            r.redact_str(
+                "at=xai-at-Q7w9Zk2LmP4rT8vB rt=xai-rt-H3nJ6sD1fG5kL0pX Bearer access_token"
+            ),
             "at=[secret:subscription/x-super] rt=[secret:subscription/x-super] Bearer access_token"
         );
         // A project agent sees no name.
         assert_eq!(
-            r.redact_str_as("xai-rt-H3nJ6sD1fG5kL0pX", &View::Scope("p".into())).0,
+            r.redact_str_as("xai-rt-H3nJ6sD1fG5kL0pX", &View::Scope("p".into()))
+                .0,
             "[secret]"
         );
         // Grok refreshes its file: the next build has the new token.
@@ -439,7 +442,10 @@ mod tests {
         )
         .unwrap();
         let stale = r.redact_str("xai-at-N4eW8tOk3nV6yU2c").into_owned();
-        assert_eq!(stale, "xai-at-N4eW8tOk3nV6yU2c", "the old matcher does not know it");
+        assert_eq!(
+            stale, "xai-at-N4eW8tOk3nV6yU2c",
+            "the old matcher does not know it"
+        );
         let r = build(&c, dir.path()).unwrap();
         assert_eq!(
             r.redact_str("xai-at-N4eW8tOk3nV6yU2c"),
@@ -470,7 +476,10 @@ mod tests {
         });
         redact_block(&r, &View::All, &mut b);
         let text = serde_json::to_string(&b).unwrap();
-        assert!(!text.contains("xai-at-") && !text.contains("xai-rt-"), "{text}");
+        assert!(
+            !text.contains("xai-at-") && !text.contains("xai-rt-"),
+            "{text}"
+        );
         // An event payload or an audit detail (`Tx::emit`, `Tx::audit`).
         let v = crate::db::redact_json_values(
             &r,
@@ -479,7 +488,10 @@ mod tests {
                                "lines": ["xai-at-N4eW8tOk3nV6yU2c"]}),
         );
         let text = v.to_string();
-        assert!(!text.contains("xai-at-") && !text.contains("xai-rt-"), "{text}");
+        assert!(
+            !text.contains("xai-at-") && !text.contains("xai-rt-"),
+            "{text}"
+        );
         // The logout removes the account: the next build has no Grok entry.
         assert!(crate::accounts::remove(dir.path(), "x-super").unwrap());
         let r = build(&c, dir.path()).unwrap();

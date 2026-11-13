@@ -1963,7 +1963,11 @@ mod tests {
         assert_eq!(cred, store.join("grok").join("auth.json"));
         assert_eq!(fs::read_to_string(&cred).unwrap(), login);
         assert_eq!(mode(&cred), 0o600);
-        for d in [&store, &store.join(GROK_DIR), &account_dir(&state, "x-super")] {
+        for d in [
+            &store,
+            &store.join(GROK_DIR),
+            &account_dir(&state, "x-super"),
+        ] {
             assert_eq!(mode(d), 0o700, "{d:?}");
         }
         assert!(!store.join(GROK_DIR).join("config.toml").exists());
@@ -1975,7 +1979,10 @@ mod tests {
         assert_eq!(meta.source, "login");
         // account.json has no secret.
         let raw = fs::read_to_string(account_dir(&state, "x-super").join(META_FILE)).unwrap();
-        assert!(!raw.contains("grok-access") && !raw.contains("grok-refresh"), "{raw}");
+        assert!(
+            !raw.contains("grok-access") && !raw.contains("grok-refresh"),
+            "{raw}"
+        );
         assert!(plan_provider(HarnessId::Grok, "xai"));
         assert!(!plan_provider(HarnessId::Grok, "anthropic"));
 
@@ -1983,8 +1990,16 @@ mod tests {
         let values = grok_secret_values(&state);
         assert_eq!(values.len(), 1);
         assert_eq!(values[0].0, "x-super");
-        assert!(values[0].1.contains(&"grok-access-AAAA1111bbbb2222".to_owned()));
-        assert!(values[0].1.contains(&"grok-refresh-CCCC3333dddd4444".to_owned()));
+        assert!(
+            values[0]
+                .1
+                .contains(&"grok-access-AAAA1111bbbb2222".to_owned())
+        );
+        assert!(
+            values[0]
+                .1
+                .contains(&"grok-refresh-CCCC3333dddd4444".to_owned())
+        );
 
         // A relogin replaces the file in place.
         let ino = fs::metadata(&cred).unwrap().ino();
@@ -1993,7 +2008,10 @@ mod tests {
         import_login(&state, "x-super", HarnessId::Grok, "xai", &scratch).unwrap();
         assert_eq!(fs::metadata(&cred).unwrap().ino(), ino);
         assert_eq!(fs::read_to_string(&cred).unwrap(), again);
-        assert_eq!(read_meta(&state, "x-super").unwrap().created_at, meta.created_at);
+        assert_eq!(
+            read_meta(&state, "x-super").unwrap().created_at,
+            meta.created_at
+        );
 
         // The launch: only the account's grok/auth.json, read-write, over
         // `~/.grok/auth.json`; no store bind, no env, no credential var.

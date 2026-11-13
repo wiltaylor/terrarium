@@ -33,9 +33,7 @@ pub fn file_name(harness: HarnessId) -> &'static str {
     match harness {
         HarnessId::Codex => "config.toml",
         // Grok: not read until its adapter (TER-1192) names its file.
-        HarnessId::Claude | HarnessId::Copilot | HarnessId::Pi | HarnessId::Grok => {
-            "settings.json"
-        }
+        HarnessId::Claude | HarnessId::Copilot | HarnessId::Pi | HarnessId::Grok => "settings.json",
     }
 }
 
