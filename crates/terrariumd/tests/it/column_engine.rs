@@ -477,13 +477,15 @@ async fn a_removal_checks_the_roles_of_the_board_after_the_change() {
     assert_eq!(o["rules"][0]["actions"][0]["args"]["to"], "@accepted");
 }
 
-/// The board of [`board`] with the role of `review` set to `role`.
-fn board_review_role(role: Option<&str>) -> Value {
+/// The board of [`board`] with the column `review` named `qa` and with the
+/// role `role`, and with `extra` before it. `qa` exists already.
+fn board_qa(role: Option<&str>, extra: Option<Value>) -> Value {
     let mut b = board(Some("ready"));
-    for c in b["columns"].as_array_mut().unwrap() {
-        if c["name"] == "review" {
-            c["role"] = role.into();
-        }
+    let cols = b["columns"].as_array_mut().unwrap();
+    let at = cols.iter().position(|c| c["name"] == "review").unwrap();
+    cols[at] = json!({"name": "qa", "role": role});
+    if let Some(e) = extra {
+        cols.insert(at, e);
     }
     b
 }
@@ -500,10 +502,21 @@ async fn a_role_change_that_leaves_a_dangling_role_ref_is_refused() {
     )
     .await;
     let b = "/api/projects/flow/board";
+    // The column with the role `review` gets another name: `@review` is a
+    // role and stays.
+    let mut renamed = board_qa(Some("review"), None);
+    for c in renamed["columns"].as_array_mut().unwrap() {
+        if c["name"] == "qa" {
+            c["rename_from"] = "review".into();
+        }
+    }
+    td.patch(b, renamed).await.ok();
+    let o = options(&td, "flow", "accepted").await;
+    assert_eq!(o["rules"][0]["actions"][0]["args"]["to"], "@review");
     let before = td.get(b).await.ok().clone();
     // The role `review` is cleared and no column is removed: `@review`
-    // would name no column (TER-1210).
-    let r = td.patch(b, board_review_role(None)).await;
+    // would name no column, neither by role nor by name (TER-1210).
+    let r = td.patch(b, board_qa(None, None)).await;
     r.err(409, "conflict");
     let d = &r.body["error"]["details"];
     assert_eq!(d["reason"], "role_in_use", "{}", r.body);
@@ -515,20 +528,19 @@ async fn a_role_change_that_leaves_a_dangling_role_ref_is_refused() {
     assert_eq!(td.get(b).await.ok().clone(), before);
     // The role moves to another column in the same change: `@review`
     // follows it, so the change goes and the rule keeps its reference.
-    let mut moved = board_review_role(None);
-    let cols = moved["columns"].as_array_mut().unwrap();
-    let at = cols.iter().position(|c| c["name"] == "review").unwrap();
-    cols.insert(at, json!({"name": "check", "role": "review"}));
-    td.patch(b, moved).await.ok();
+    td.patch(
+        b,
+        board_qa(None, Some(json!({"name": "check", "role": "review"}))),
+    )
+    .await
+    .ok();
     let o = options(&td, "flow", "accepted").await;
     assert_eq!(o["rules"][0]["actions"][0]["args"]["to"], "@review");
     // A rule without the reference: the role may go.
     set_rules(&td, "flow", "accepted", json!([])).await;
-    let mut cleared = board_review_role(None);
-    let cols = cleared["columns"].as_array_mut().unwrap();
-    let at = cols.iter().position(|c| c["name"] == "review").unwrap();
-    cols.insert(at, json!({"name": "check"}));
-    td.patch(b, cleared).await.ok();
+    td.patch(b, board_qa(None, Some(json!({"name": "check"}))))
+        .await
+        .ok();
 }
 
 #[tokio::test]
