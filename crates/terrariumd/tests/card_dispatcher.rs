@@ -976,19 +976,21 @@ async fn estimated_usage_admits_start_and_daemon_entrypoints() {
         .agent("p", "started", json!({"subscription":"dispatch-estimated"}))
         .await;
     assert_eq!(started["subscription"], "dispatch-estimated");
-    let lead = lead_id(&td).await;
-    td.patch(
-        &format!("/api/agents/{lead}"),
-        json!({"subscription":"dispatch-estimated"}),
-    )
-    .await
-    .ok();
-    td.post(
-        "/api/templates",
-        json!({"name":"card-review","project":"p","spec":{"harness":"codex"}}),
-    )
-    .await
-    .ok();
+    let worker_template = td
+        .patch(
+            "/api/templates/p%2Fcard-small",
+            json!({"spec":{"harness":"codex","subscription":"dispatch-estimated"}}),
+        )
+        .await;
+    assert_eq!(worker_template.status, 200, "{}", worker_template.body);
+    let review_template = td
+        .post(
+            "/api/templates",
+            json!({"name":"card-review","project":"p",
+                   "spec":{"harness":"codex","subscription":"dispatch-estimated"}}),
+        )
+        .await;
+    assert_eq!(review_template.status, 201, "{}", review_template.body);
     let id = card(&td, "small").await;
     enabled(&td).await;
     assert!(dispatch(&state(&td), "p").await.unwrap());
