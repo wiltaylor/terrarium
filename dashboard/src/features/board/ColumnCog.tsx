@@ -8,17 +8,25 @@
 // The rules do not run yet: the engine switch is C2 and the queue is C3.
 // So the panel shows no last runs and no queue strip, and says so.
 
-import { createMemo, createResource, createSignal, createUniqueId, For, Index, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, createUniqueId, For, Index, onCleanup, Show, type JSX } from "solid-js";
 import { useInstance } from "../../instance";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { CatalogField, ColumnChecks, ColumnOptions, ColumnQueue, ColumnRule, QueueRelease, RuleAction, RuleCatalog, RuleWhen } from "../../api/types";
 import {
-  CHECK_KEYS, CHECK_TEXT, cleanRule, fieldText, fieldValue, isStale, newRule, problemsByPath, problemsUnder, putBody, queueText, ruleSentence, triggerOf,
+  CHECK_KEYS, CHECK_TEXT, cleanRule, DEFAULT_RULE_PER_HOUR, fieldText, fieldValue, isStale, MAX_RULE_PER_HOUR, newRule, problemsByPath, problemsUnder, putBody, queueText, rateText, ruleSentence, triggerOf,
 } from "./columnRules";
 
 /** The cog button and its panel. `column` is a column name or a role alias. */
 export function ColumnCog(props: { project: string; column: string; title: string; columns?: string[] }) {
   const [open, setOpen] = createSignal(false);
+  // Unsaved edits in the panel: closing asks first (Escape, the scrim, the close button).
+  const [dirty, setDirty] = createSignal(false);
+  const close = () => {
+    if (dirty() && !window.confirm(`Close the options of ${props.title}? Your changes are not saved.`)) return;
+    setDirty(false);
+    setOpen(false);
+    button?.focus();
+  };
   let button: HTMLButtonElement | undefined;
   return <>
     <button
@@ -37,15 +45,15 @@ export function ColumnCog(props: { project: string; column: string; title: strin
       </svg>
     </button>
     <Show when={open()}>
-      <Modal title={`${props.title} options`} class="modal-full column-options-modal" onClose={() => { setOpen(false); button?.focus(); }}>
-        <ColumnOptionsPanel project={props.project} column={props.column} columns={props.columns} />
+      <Modal title={`${props.title} options`} class="modal-full column-options-modal" onClose={close}>
+        <ColumnOptionsPanel project={props.project} column={props.column} columns={props.columns} onDirty={setDirty} />
       </Modal>
     </Show>
   </>;
 }
 
 /** The panel: loads the options and the catalog, then shows the editor or the viewer. */
-export function ColumnOptionsPanel(props: { project: string; column: string; columns?: string[] }) {
+export function ColumnOptionsPanel(props: { project: string; column: string; columns?: string[]; onDirty?: (dirty: boolean) => void }) {
   const { api } = useInstance();
   const [options, { mutate, refetch }] = createResource(() => [props.project, props.column] as const, ([p, c]) => api.board.options(p, c));
   // The viewer needs no catalog: a failed catalog read only stops the editor.
@@ -59,7 +67,7 @@ export function ColumnOptionsPanel(props: { project: string; column: string; col
       {(o) => <Show when={o.can_edit === true} fallback={<OptionsViewer options={o} />}>
         <ErrorBanner error={catalog.error} />
         <Show when={catalog.latest} keyed fallback={<Show when={!catalog.error}><p class="muted">Loading the rule catalog…</p></Show>}>
-          {(cat) => <OptionsEditor options={o} catalog={cat} columns={props.columns ?? []} saved={savedVersion() === o.version}
+          {(cat) => <OptionsEditor options={o} catalog={cat} columns={props.columns ?? []} saved={savedVersion() === o.version} onDirty={props.onDirty}
             onSaved={(next) => { setSavedVersion(next.version); mutate(next); }} onReload={() => { setSavedVersion(undefined); void refetch(); }} />}
         </Show>
       </Show>}
@@ -111,7 +119,7 @@ function Problem(props: { problems: Record<string, string>; path: string }) {
   return <Show when={props.problems[props.path]}>{(m) => <span class="bad small" role="alert" data-problem={props.path}>{m()}</span>}</Show>;
 }
 
-function OptionsEditor(props: { options: ColumnOptions; catalog: RuleCatalog; columns: string[]; saved: boolean; onSaved: (o: ColumnOptions) => void; onReload: () => void }) {
+function OptionsEditor(props: { options: ColumnOptions; catalog: RuleCatalog; columns: string[]; saved: boolean; onDirty?: (dirty: boolean) => void; onSaved: (o: ColumnOptions) => void; onReload: () => void }) {
   const { api } = useInstance();
   const listId = createUniqueId();
   // The props are a snapshot: the panel makes a new editor for each read (keyed).
@@ -124,7 +132,11 @@ function OptionsEditor(props: { options: ColumnOptions; catalog: RuleCatalog; co
   const [error, setError] = createSignal<unknown>(null);
   const [busy, setBusy] = createSignal(false);
   const body = createMemo(() => putBody(start, { checks: checks(), queue: queue(), rules: rules() }));
-  const dirty = () => JSON.stringify(body()) !== JSON.stringify(putBody(start, start));
+  // A max_per_hour over the ceiling shows its message at the field; Save waits for a fix.
+  const overCeiling = () => rules().some((r) => (r.max_per_hour ?? 0) > (props.catalog.limits.max_per_hour ?? MAX_RULE_PER_HOUR));
+  const dirty = createMemo(() => JSON.stringify(body()) !== JSON.stringify(putBody(start, start)));
+  createEffect(() => props.onDirty?.(dirty()));
+  onCleanup(() => props.onDirty?.(false));
   const columnWords = createMemo(() => {
     const roles = ["working", "blocked", "validating", "review", "merge_queue", "accepted"].map((r) => `@${r}`);
     return [...props.columns, ...roles];
@@ -228,7 +240,7 @@ function OptionsEditor(props: { options: ColumnOptions; catalog: RuleCatalog; co
 
     <NotYet />
     <div class="row">
-      <button class="primary" type="submit" disabled={busy() || stale() || !dirty()}>{busy() ? "Saving…" : "Save"}</button>
+      <button class="primary" type="submit" disabled={busy() || stale() || !dirty() || overCeiling()}>{busy() ? "Saving…" : "Save"}</button>
       <Show when={props.saved && !dirty()}><span class="good small" role="status">Saved.</span></Show>
       <span class="small muted">Version {start.version}</span>
     </div>
@@ -239,6 +251,8 @@ function RuleEditor(props: { rule: ColumnRule; path: string; catalog: RuleCatalo
   const trigger = () => props.catalog.triggers.find((t) => t.kind === props.rule.trigger.kind);
   const p = (rest: string) => `${props.path}${rest}`;
   const folded = () => problemsUnder(props.problems, props.path);
+  const ceiling = () => props.catalog.limits.max_per_hour ?? MAX_RULE_PER_HOUR;
+  const overCeiling = () => (props.rule.max_per_hour ?? 0) > ceiling();
   return <details open={!props.rule.id || folded().length > 0} class="column-rule">
     <summary>
       <strong class="mono">{props.rule.name || "(no name)"}</strong> <Show when={props.rule.enabled === false}><span class="chip">off</span></Show>
@@ -284,9 +298,12 @@ function RuleEditor(props: { rule: ColumnRule; path: string; catalog: RuleCatalo
         <button type="button" class="small" onClick={() => props.onChange((r) => ({ ...r, actions: [...r.actions, { verb: props.catalog.actions[0]?.verb ?? "card.comment", args: {} }] }))}>Add action</button>
       </fieldset>
 
-      <label>At most this many runs an hour (optional)
-        <input type="number" min="1" value={props.rule.max_per_hour ?? ""} aria-label="Most runs an hour" onInput={(e) => { const v = e.currentTarget.value; props.onChange((r) => ({ ...r, max_per_hour: v === "" ? undefined : Number(v) })); }} />
+      <label>At most this many runs an hour (optional; empty is the default of {DEFAULT_RULE_PER_HOUR})
+        <input type="number" min="1" max={ceiling()} placeholder={`${DEFAULT_RULE_PER_HOUR} (default)`} value={props.rule.max_per_hour ?? ""} aria-label="Most runs an hour"
+          onInput={(e) => { const v = e.currentTarget.value; props.onChange((r) => ({ ...r, max_per_hour: v === "" ? undefined : Number(v) })); }} />
+        <Show when={overCeiling()}><span class="bad small" role="alert" data-rate-over>At most {ceiling()} runs an hour: the daemon refuses more.</span></Show>
         <Problem problems={props.problems} path={p(".max_per_hour")} />
+        <span class="small muted" data-rate>{rateText(props.rule, ceiling())} A set value also raises the cap for one card to that value.</span>
       </label>
     </div>
   </details>;

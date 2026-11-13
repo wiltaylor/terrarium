@@ -33,6 +33,8 @@ it("is a viewer when the server says the caller may not write (a sysadmin)", asy
   expect(root.querySelector('[data-rule="merge-pass"]')?.textContent).toContain("When the merge job of a card here has a verdict, if the job outcome is passed: move the card to done.");
   expect(root.querySelector('[data-rule="merge-red-note"]')?.textContent).toContain("off");
   expect(text()).toContain("Last runs and the queue strip come with");
+  // C2a D4: both caps for every rule, the defaults marked.
+  expect(root.querySelector('[data-rule="merge-pass"]')?.textContent).toContain("At most 30 runs an hour, 10 for one card (the defaults).");
   expect(root.querySelector("input, select, button[type=submit]")).toBeNull();
   expect(catalog).not.toHaveBeenCalled();
 });
@@ -91,4 +93,42 @@ it("adds a rule from the catalog lists and shows the daemon's problem in that ru
   root.querySelector<HTMLButtonElement>("button[type=submit]")!.click();
   await waitFor(() => expect(root.querySelector('[data-field="to"] [role=alert]')?.textContent).toBe("required"));
   expect(root.querySelector(".column-rule summary")?.textContent).toContain("1 problem");
+});
+
+it("shows the effective caps in the editor and stops a max_per_hour over 600", async () => {
+  const root = mount(() => <ColumnOptionsPanel project="terrarium" column="review" />);
+  await waitFor(() => expect(root.querySelector("[data-options-edit]")).not.toBeNull());
+  const rule = root.querySelector('[data-rule="merge-pass"]')!;
+  expect(rule.querySelector("[data-rate]")?.textContent).toContain("At most 30 runs an hour, 10 for one card (the defaults).");
+  const input = rule.querySelector<HTMLInputElement>('input[aria-label="Most runs an hour"]')!;
+  expect(input.max).toBe("600");
+  input.value = "120"; input.dispatchEvent(new Event("input", { bubbles: true }));
+  await waitFor(() => expect(root.querySelector('[data-rule="merge-pass"] [data-rate]')?.textContent).toContain("At most 120 runs an hour, 120 for one card."));
+  expect(root.querySelector('[data-rule="merge-pass"] summary')?.textContent).toContain("At most 120 runs an hour, 120 for one card.");
+  const again = root.querySelector<HTMLInputElement>('[data-rule="merge-pass"] input[aria-label="Most runs an hour"]')!;
+  again.value = "601"; again.dispatchEvent(new Event("input", { bubbles: true }));
+  await waitFor(() => expect(root.querySelector("[data-rate-over]")?.textContent).toContain("At most 600 runs an hour"));
+  expect(root.querySelector<HTMLButtonElement>("button[type=submit]")!.disabled).toBe(true);
+});
+
+it("asks before closing with unsaved changes", async () => {
+  const root = mount(() => <ColumnCog project="terrarium" column="backlog" title="Backlog" />);
+  root.querySelector<HTMLButtonElement>("[data-column-cog]")!.click();
+  await waitFor(() => expect(document.querySelector("[data-options-edit]")).not.toBeNull());
+  const ask = vi.spyOn(window, "confirm").mockReturnValue(false);
+  const closeButton = () => document.querySelector<HTMLButtonElement>('[role="dialog"] button[aria-label="Close"]')!;
+  // No change: closes without asking.
+  closeButton().click();
+  expect(ask).not.toHaveBeenCalled();
+  expect(document.querySelector("[data-options-edit]")).toBeNull();
+  root.querySelector<HTMLButtonElement>("[data-column-cog]")!.click();
+  await waitFor(() => expect(document.querySelector("[data-options-edit]")).not.toBeNull());
+  document.querySelector<HTMLInputElement>("[data-options-edit] fieldset input[type=checkbox]")!.click();
+  closeButton().click();
+  expect(ask).toHaveBeenCalledTimes(1);
+  expect(document.querySelector("[data-options-edit]")).not.toBeNull();
+  ask.mockReturnValue(true);
+  closeButton().click();
+  expect(ask).toHaveBeenCalledTimes(2);
+  expect(document.querySelector("[data-options-edit]")).toBeNull();
 });

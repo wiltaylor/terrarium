@@ -97,8 +97,34 @@ export function ruleSentence(r: ColumnRule): string {
     ...(r.if_job ?? []).map(jobConditionText),
   ].filter(Boolean);
   const actions = r.actions.map(actionText);
-  const limit = r.max_per_hour ? ` At most ${r.max_per_hour} times an hour.` : "";
-  return `${triggerText(r.trigger)}${ifs.length ? `, if ${orList(ifs, "and")}` : ""}: ${actions.length ? orList(actions, "and then") : "nothing"}.${limit}`;
+  return `${triggerText(r.trigger)}${ifs.length ? `, if ${orList(ifs, "and")}` : ""}: ${actions.length ? orList(actions, "and then") : "nothing"}. ${rateText(r)}`;
+}
+
+/** The runs of a rule in an hour without `max_per_hour` (`DEFAULT_MAX_PER_HOUR`, crates/terrariumd/src/rules_engine.rs). */
+export const DEFAULT_RULE_PER_HOUR = 30;
+/** The runs of a rule for one card in an hour without `max_per_hour` (`MAX_PER_CARD_PER_HOUR`, rules_engine.rs). */
+export const DEFAULT_CARD_PER_HOUR = 10;
+/** The ceiling of `max_per_hour` and of the raised card cap (`MAX_PER_HOUR`, crates/terrarium-core/src/rules_file.rs; the catalog's `limits.max_per_hour`). */
+export const MAX_RULE_PER_HOUR = 600;
+
+/**
+ * The effective loop guards of a rule (C2a, TER-1113, lead decision D4): `max_per_hour` or the default of 30 runs an
+ * hour, and a card cap of 10 runs an hour for one card, which an explicit `max_per_hour` raises to that value, up to
+ * the ceiling of 600. When C2a applies another rule, it updates this function.
+ */
+export function rateLimits(r: Pick<ColumnRule, "max_per_hour">, ceiling = MAX_RULE_PER_HOUR): { perRule: number; perCard: number; defaults: boolean } {
+  const explicit = typeof r.max_per_hour === "number" && r.max_per_hour > 0 ? Math.min(r.max_per_hour, ceiling) : undefined;
+  return explicit === undefined
+    ? { perRule: DEFAULT_RULE_PER_HOUR, perCard: DEFAULT_CARD_PER_HOUR, defaults: true }
+    : { perRule: explicit, perCard: explicit, defaults: false };
+}
+
+/** Both caps of a rule in words, with the defaults marked as defaults. */
+export function rateText(r: Pick<ColumnRule, "max_per_hour">, ceiling = MAX_RULE_PER_HOUR): string {
+  const l = rateLimits(r, ceiling);
+  return l.defaults
+    ? `At most ${l.perRule} runs an hour, ${l.perCard} for one card (the defaults).`
+    : `At most ${l.perRule} runs an hour, ${l.perCard} for one card.`;
 }
 
 export const CHECK_TEXT: Record<keyof ColumnChecks, string> = {

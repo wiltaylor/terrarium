@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../../api/http";
 import type { ColumnOptions, ColumnRule } from "../../api/types";
-import { cleanRule, isStale, problemsByPath, problemsUnder, putBody, queueText, ruleSentence, seconds, triggerText } from "./columnRules";
+import { cleanRule, isStale, rateLimits, rateText, problemsByPath, problemsUnder, putBody, queueText, ruleSentence, seconds, triggerText } from "./columnRules";
 
 const read: ColumnOptions = {
   project: "p", column: "merge_queue", version: 3, can_edit: true,
@@ -25,7 +25,7 @@ describe("column rules in plain words (TER-1116)", () => {
       if_card: [{ lacks_labels: ["hold"] }], if_job: [{ outcome: ["passed"] }], max_per_hour: 60,
       actions: [{ verb: "card.move", args: { to: "@accepted" } }, { verb: "card.label", args: { add: ["merged"] } }],
     };
-    expect(ruleSentence(r)).toBe("When the merge job of a card here has a verdict, if the card: it has none of the labels hold and the job outcome is passed: move the card to the accepted column and then add the label merged. At most 60 times an hour.");
+    expect(ruleSentence(r)).toBe("When the merge job of a card here has a verdict, if the card: it has none of the labels hold and the job outcome is passed: move the card to the accepted column and then add the label merged. At most 60 runs an hour, 60 for one card.");
   });
 
   it("says the queue", () => {
@@ -57,5 +57,17 @@ describe("the PUT of the cog", () => {
     expect(problemsUnder(p, "rules[1]")).toEqual(["rules[1].actions[0].args.to: unknown column"]);
     expect(problemsByPath(new ApiError(422, "queue.batch_size: needed", undefined, "invalid", { path: "queue.batch_size" }))).toEqual({ "queue.batch_size": "queue.batch_size: needed" });
     expect(problemsByPath(new Error("x"))).toEqual({});
+  });
+});
+
+describe("the loop guards of a rule (C2a D4)", () => {
+  it("shows the defaults of 30 an hour and 10 for one card, marked as defaults", () => {
+    expect(rateLimits({})).toEqual({ perRule: 30, perCard: 10, defaults: true });
+    expect(rateText({})).toBe("At most 30 runs an hour, 10 for one card (the defaults).");
+  });
+  it("raises the card cap to an explicit max_per_hour, up to the ceiling of 600", () => {
+    expect(rateText({ max_per_hour: 120 })).toBe("At most 120 runs an hour, 120 for one card.");
+    expect(rateText({ max_per_hour: 5 })).toBe("At most 5 runs an hour, 5 for one card.");
+    expect(rateLimits({ max_per_hour: 900 })).toEqual({ perRule: 600, perCard: 600, defaults: false });
   });
 });
