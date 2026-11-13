@@ -1189,6 +1189,61 @@ pub fn column_refs(rule: &Rule) -> Vec<String> {
     out
 }
 
+/// Rename the columns that a rule names (TER-1159, TER-1113): in
+/// `if_card` (`column`, `not_column`) and in each verb argument of a column
+/// kind. `renames` maps an old name to its new name, all at once (a swap
+/// works). A reference `@x` is a role when a column has the role `x`
+/// (`roles`): it stays. Returns whether anything changed.
+pub fn rename_columns(
+    if_card: &mut [CardCondition],
+    actions: &mut [Action],
+    renames: &std::collections::HashMap<String, String>,
+    roles: &[String],
+) -> bool {
+    let one = |r: &mut String| -> bool {
+        let (at, name) = match r.strip_prefix('@') {
+            Some(x) if roles.iter().any(|role| role == x) => return false,
+            Some(x) => ("@", x),
+            None => ("", r.as_str()),
+        };
+        match renames.get(name) {
+            Some(to) if to != name => {
+                *r = format!("{at}{to}");
+                true
+            }
+            _ => false,
+        }
+    };
+    let mut changed = false;
+    for c in if_card.iter_mut() {
+        for r in c.column.iter_mut().chain(c.not_column.iter_mut()) {
+            changed |= one(r);
+        }
+    }
+    for a in actions.iter_mut() {
+        let Some(verb) = VERBS.iter().find(|v| v.name == a.verb) else {
+            continue;
+        };
+        for (key, arg) in verb.args {
+            if !matches!(arg, Arg::Column | Arg::Columns) {
+                continue;
+            }
+            match a.args.get_mut(*key) {
+                Some(Value::String(r)) => changed |= one(r),
+                Some(Value::Array(list)) => {
+                    for v in list.iter_mut() {
+                        if let Value::String(r) = v {
+                            changed |= one(r);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    changed
+}
+
 /// The column of `columns` that `reference` names ([`column_exists`]):
 /// `@<x>` is the column with the role `x`, else the column named `x`.
 pub fn resolve_column<'a>(columns: &'a [BoardColumn], reference: &str) -> Option<&'a BoardColumn> {

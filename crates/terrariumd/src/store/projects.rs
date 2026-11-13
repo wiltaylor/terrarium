@@ -409,24 +409,45 @@ pub fn board_flow(conn: &Connection, project: &str) -> ApiResult<BoardFlow> {
     Ok(BoardFlow::parse(raw.flatten().as_deref()))
 }
 
-/// Does the board rules run the card flow of `project` (`board_flow =
-/// rules`)? Then the job queue and the bound agent driver only emit their
-/// events, and the built-in pack acts on them.
+/// Does a rule engine run the card flow of `project` (`board_flow =
+/// rules`, the built-in pack, or `columns`, the column rules of TER-1113)?
+/// Then the job queue and the bound agent driver only emit their events,
+/// and the rules act on them.
 pub fn rules_flow(conn: &Connection, project: &str) -> ApiResult<bool> {
-    Ok(board_flow(conn, project)? == BoardFlow::Rules)
+    Ok(board_flow(conn, project)?.engine_runs())
 }
 
 /// Set who runs the card flow of a project. A change writes the time of
 /// the switch (`board_flow_at`): the built-in pack does not act on the
 /// events before it. The caller checks the rights and writes the audit.
+///
+/// `columns` stays (TER-1113): a project file or the legacy migrate tool
+/// that names `code` or `rules` does not take a converted board back to the
+/// pack or the coded flow. Only [`set_columns_flow`] sets it.
 pub fn set_board_flow(t: &mut Tx<'_>, name: &str, flow: BoardFlow) -> ApiResult<bool> {
-    if board_flow(t, name)? == flow {
+    let before = board_flow(t, name)?;
+    if before == flow || before == BoardFlow::Columns {
         return Ok(false);
     }
-    let stored = (flow == BoardFlow::Rules).then_some(flow.as_str());
+    let stored = (flow != BoardFlow::Code).then_some(flow.as_str());
     t.execute(
         "UPDATE projects SET board_flow = ?2, board_flow_at = ?3 WHERE name = ?1",
         params![name, stored, now()],
+    )?;
+    Ok(true)
+}
+
+/// Switch `project` to the column rules (`board_flow = columns`, TER-1113).
+/// Only the upgrade that converts the board (kanban rework C5) calls it,
+/// and the tests. The switch time starts the runs: an older event starts no
+/// column rule. The caller writes the audit.
+pub fn set_columns_flow(t: &mut Tx<'_>, name: &str) -> ApiResult<bool> {
+    if board_flow(t, name)? == BoardFlow::Columns {
+        return Ok(false);
+    }
+    t.execute(
+        "UPDATE projects SET board_flow = 'columns', board_flow_at = ?2 WHERE name = ?1",
+        params![name, now()],
     )?;
     Ok(true)
 }

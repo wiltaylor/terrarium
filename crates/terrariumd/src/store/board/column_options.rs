@@ -3,8 +3,14 @@
 //! queue. `GET` and `PUT /api/projects/{name}/board/columns/{column}/options`.
 //!
 //! The options also hold the structured rules of the column (TER-1120,
-//! C1b): [`terrarium_core::board_rules`]. They are stored and checked only;
-//! the engine runs the legacy rules until C2 (TER-1113).
+//! C1b): [`terrarium_core::board_rules`]. The engine runs them for a
+//! project with `board_flow = columns` (TER-1113,
+//! [`crate::rules_engine::columns`]).
+//!
+//! A column that a rule names by name (TER-1159, decided on TER-1113): a
+//! rename of the column rewrites the name in every rule of the board
+//! ([`rename_in_rules`]); a removal is refused while a rule of another
+//! column names it ([`check_removal`]). A reference `@x` to a role stays.
 //!
 //! The options belong to the column ID: a rename keeps them, and a role
 //! change does not move them. The queue settings are stored only; the
@@ -17,7 +23,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::board_rules::{self, ColumnRule};
-use terrarium_core::rules_file::{BoardColumn, Context};
+use terrarium_core::rules_file::{self, BoardColumn, Context};
 
 use super::{BLOCKED, ColumnRow, DONE, WORKING, column, column_rows};
 use crate::actor::Actor;
@@ -658,4 +664,142 @@ mod tests {
         assert!(!review.require_comment_on_enter && !review.require_dependencies_met);
         assert!(!review.terminal_for_members && review.clear_eta_on_enter);
     }
+}
+
+/// Every column rule of `project`: (rule ID, column ID, column name, rule).
+fn project_rules(conn: &Connection, project: &str) -> ApiResult<Vec<(String, i64, String, ColumnRule)>> {
+    let mut q = conn.prepare(
+        "SELECT r.id, r.column_id, c.name, r.name, r.definition_json
+           FROM board_column_rules r JOIN board_columns c ON c.id = r.column_id
+          WHERE c.project = ?1 ORDER BY c.position, r.position",
+    )?;
+    let rows = q
+        .query_map([project], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|(id, col_id, col, name, def)| {
+            let mut v: Value = serde_json::from_str(&def)
+                .map_err(|e| ApiError::internal(format!("column rule {id}: {e}")))?;
+            v["id"] = id.clone().into();
+            v["name"] = name.into();
+            let rule: ColumnRule = serde_json::from_value(v)
+                .map_err(|e| ApiError::internal(format!("column rule {id}: {e}")))?;
+            Ok((id, col_id, col, rule))
+        })
+        .collect()
+}
+
+/// The legacy board PATCH (`super::set_columns`) removes the columns
+/// `removed` (TER-1159): refused with `409` while a rule of a column that
+/// stays names one of them. A reference `@x` where a column of the board has
+/// the role `x` is a role, not a name: it does not hold the column. Nothing
+/// is written.
+pub(super) fn check_removal(
+    t: &Tx<'_>,
+    project: &str,
+    current: &[ColumnRow],
+    removed: &[&ColumnRow],
+) -> ApiResult<()> {
+    if removed.is_empty() {
+        return Ok(());
+    }
+    let gone: Vec<&str> = removed.iter().map(|c| c.name.as_str()).collect();
+    let gone_ids: Vec<i64> = removed.iter().map(|c| c.id).collect();
+    let is_role = |x: &str| current.iter().any(|c| c.role.as_deref() == Some(x));
+    let mut users: Vec<Value> = Vec::new();
+    let mut named: Vec<&str> = Vec::new();
+    for (_, col_id, col, rule) in project_rules(t, project)? {
+        if gone_ids.contains(&col_id) {
+            continue;
+        }
+        let legacy = crate::rules_engine::columns::engine_rule(&col, &rule);
+        for r in rules_file::column_refs(&legacy) {
+            let name = match r.strip_prefix('@') {
+                Some(x) if is_role(x) => continue,
+                Some(x) => x,
+                None => r.as_str(),
+            };
+            if let Some(g) = gone.iter().find(|g| **g == name) {
+                if !named.contains(g) {
+                    named.push(*g);
+                }
+                users.push(json!({"column": col, "rule": rule.name, "names": g}));
+            }
+        }
+    }
+    if users.is_empty() {
+        return Ok(());
+    }
+    let list: Vec<String> = users
+        .iter()
+        .map(|u| {
+            format!(
+                "{}/{}",
+                u["column"].as_str().unwrap_or_default(),
+                u["rule"].as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    Err(ApiError::conflict(format!(
+        "column `{}` is named by the column rule(s) {}; change those rules first",
+        named.join("`, `"),
+        list.join(", ")
+    ))
+    .with_details(json!({"reason": "column_in_use", "columns": named, "rules": users})))
+}
+
+/// The legacy board PATCH (`super::set_columns`) renamed columns
+/// (`renames`: old name to new name, all at once) (TER-1159): rewrite the
+/// names in every column rule of the board, in the same write. The roles
+/// are those of the board after the change. Each column whose rules
+/// changed gets a new options version. Returns the rules changed, for the
+/// audit row of the PATCH: `{column, rule, before, after}`.
+pub(super) fn rename_in_rules(
+    t: &Tx<'_>,
+    project: &str,
+    renames: &HashMap<String, String>,
+) -> ApiResult<Vec<Value>> {
+    if renames.iter().all(|(a, b)| a == b) {
+        return Ok(Vec::new());
+    }
+    let roles: Vec<String> = column_rows(t, project)?
+        .into_iter()
+        .filter_map(|c| c.role)
+        .collect();
+    let at = now();
+    let mut out = Vec::new();
+    let mut bumped: Vec<i64> = Vec::new();
+    for (id, col_id, col, mut rule) in project_rules(t, project)? {
+        let before = rule.clone();
+        if !rules_file::rename_columns(&mut rule.if_card, &mut rule.actions, renames, &roles) {
+            continue;
+        }
+        let mut def = serde_json::to_value(&rule)
+            .map_err(|e| ApiError::internal(format!("column rule {id}: {e}")))?;
+        if let Some(o) = def.as_object_mut() {
+            o.remove("id");
+            o.remove("name");
+        }
+        t.execute(
+            "UPDATE board_column_rules SET definition_json = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, def.to_string(), at],
+        )?;
+        if !bumped.contains(&col_id) {
+            t.execute(
+                "UPDATE board_columns SET options_version = options_version + 1 WHERE id = ?1",
+                [col_id],
+            )?;
+            bumped.push(col_id);
+        }
+        out.push(json!({"column": col, "rule": rule.name, "before": before, "after": rule}));
+    }
+    Ok(out)
 }

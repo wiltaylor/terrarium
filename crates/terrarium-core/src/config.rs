@@ -1090,6 +1090,12 @@ pub enum BoardFlow {
     /// The board rules do it: the built-in pack and the project's
     /// `rules.wcl`. The code only emits the events.
     Rules,
+    /// The rules of the board's columns do it (TER-1113, kanban rework C2):
+    /// no pack, no `rules.wcl`. The code only emits the events. Only the
+    /// upgrade that converts the boards (C5) sets it, so a project file
+    /// cannot (`skip_deserializing`), and a sync does not change it back.
+    #[serde(skip_deserializing)]
+    Columns,
 }
 
 impl BoardFlow {
@@ -1097,13 +1103,21 @@ impl BoardFlow {
         match self {
             Self::Code => "code",
             Self::Rules => "rules",
+            Self::Columns => "columns",
         }
+    }
+
+    /// Does the daemon's code leave the card flow to a rule engine (`rules`
+    /// or `columns`)? Then the code only emits the events.
+    pub fn engine_runs(self) -> bool {
+        self != Self::Code
     }
 
     /// The flow of a stored word; anything else is `code`.
     pub fn parse(s: Option<&str>) -> Self {
         match s {
             Some("rules") => Self::Rules,
+            Some("columns") => Self::Columns,
             _ => Self::Code,
         }
     }

@@ -44,6 +44,11 @@
 //!   with the guards, the conditions on the current state, and the
 //!   rendered actions, and writes nothing.
 //!
+//! - **Column rules** (TER-1113, [`columns`]): a project with `board_flow
+//!   = columns` runs the rules of its board columns, with their triggers,
+//!   in place of the pack and `rules.wcl`. The outbox, the guards, the run,
+//!   and the verbs are the same.
+//!
 //! The verbs are in [`crate::rules_verbs`] (TER-169). What a verb cannot
 //! do in its write (the queue tick, a kill, a wake, the close of a bound
 //! agent) runs after the action's commit.
@@ -73,6 +78,8 @@ use crate::rule_script;
 use crate::rules_verbs::{self, Effect};
 use crate::store::schedules::{self, MAX_CHAIN_DEPTH, event_view};
 use crate::store::{board, jobs, rules};
+
+pub mod columns;
 
 /// The most events that one [`plan_pass`] reads.
 pub const BATCH: usize = 500;
@@ -142,6 +149,9 @@ pub struct ProjectRules {
     pub set: Arc<RuleSet>,
     /// Names inherited from the built-in pack, excluding every user replacement.
     pub builtin_rules: std::collections::HashSet<String>,
+    /// `board_flow = columns` (TER-1113): the column of each rule of `set`,
+    /// at the same index. `None`: the pack and `rules.wcl`.
+    pub columns: Option<Arc<Vec<columns::ColumnRuleMeta>>>,
 }
 
 /// The parsed rules files, by project, with their hash: a file is parsed
@@ -171,6 +181,7 @@ struct LoadRow {
     project: String,
     file: Option<(String, String)>,
     rules_flow: bool,
+    columns_flow: bool,
     flow_at: Option<String>,
 }
 
@@ -187,7 +198,7 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
             let mut st = c.prepare(
                 "SELECT p.name, r.hash, r.updated_at, p.board_flow, p.board_flow_at
                    FROM projects p LEFT JOIN project_rules r ON r.project = p.name
-                  WHERE r.project IS NOT NULL OR p.board_flow = 'rules'
+                  WHERE r.project IS NOT NULL OR p.board_flow IN ('rules', 'columns')
                   ORDER BY p.name",
             )?;
             let rows = st
@@ -199,6 +210,7 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
                         project: r.get(0)?,
                         file: hash.zip(at),
                         rules_flow: flow.as_deref() == Some("rules"),
+                        columns_flow: flow.as_deref() == Some("columns"),
                         flow_at: r.get(4)?,
                     })
                 })?
@@ -215,8 +227,27 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
             project,
             file,
             rules_flow,
+            columns_flow,
             flow_at,
         } = row;
+        if columns_flow {
+            // The column rules only: no pack, no `rules.wcl` (TER-1113).
+            // They are read on each load (at most a few hundred rows), so a
+            // write of the options or a rename is seen at the next pass.
+            let p = project.clone();
+            let (hash, rules) = db.read(move |c| columns::read(c, &p)).await?;
+            cache.sets.remove(&project);
+            let (meta, set): (Vec<_>, Vec<_>) = rules.into_iter().unzip();
+            out.push(ProjectRules {
+                project,
+                hash,
+                updated_at: flow_at.unwrap_or_default(),
+                set: Arc::new(RuleSet { rules: set }),
+                builtin_rules: std::collections::HashSet::new(),
+                columns: Some(Arc::new(meta)),
+            });
+            continue;
+        }
         let file_hash = file.as_ref().map_or("-", |(h, _)| h.as_str());
         let hash = if rules_flow {
             format!("pack+{file_hash}")
@@ -326,6 +357,7 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
             updated_at,
             set,
             builtin_rules,
+            columns: None,
         });
     }
     Ok(out)
@@ -576,6 +608,18 @@ fn plan_events(
         let Some(pr) = e.project.as_deref().and_then(|p| by_project.get(p)) else {
             continue;
         };
+        if let Some(meta) = pr.columns.as_deref() {
+            for c in columns::plan(t, pr, e, Some(&pr.updated_at), now)? {
+                let rule = &pr.set.rules[c.index];
+                let m = &meta[c.index];
+                insert_run(t, pr, c.ord, rule, Some(m), e, &c.planned, now)?;
+                written += 1;
+            }
+            if !touched.contains(&pr.project) {
+                touched.push(pr.project.clone());
+            }
+            continue;
+        }
         for (ord, rule) in pr.set.rules.iter().enumerate() {
             let planned = decide_with_source(
                 t,
@@ -587,7 +631,7 @@ fn plan_events(
                 pr.builtin_rules.contains(&rule.name),
             )?;
             for p in planned {
-                insert_run(t, pr, ord, rule, e, &p, now)?;
+                insert_run(t, pr, ord, rule, None, e, &p, now)?;
                 written += 1;
             }
         }
@@ -602,11 +646,13 @@ fn plan_events(
     Ok((written, evs.len() == BATCH))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_run(
     t: &Tx<'_>,
     pr: &ProjectRules,
     ord: usize,
     rule: &Rule,
+    column: Option<&columns::ColumnRuleMeta>,
     e: &StoredEvent,
     p: &Planned,
     now: DateTime<Utc>,
@@ -623,8 +669,9 @@ fn insert_run(
     let at = schedules::stamp(now);
     t.execute(
         "INSERT INTO rule_runs (id, project, rule, rule_hash, ord, event_seq, card, lane,
-                                rule_json, cause, state, reason, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+                                rule_json, cause, state, reason, created_at, updated_at,
+                                rule_id, column_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14, ?15)
          ON CONFLICT (project, rule, event_seq, lane) DO NOTHING",
         params![
             id,
@@ -640,6 +687,8 @@ fn insert_run(
             state,
             reason,
             at,
+            column.map(|m| m.id.as_str()),
+            column.map(|m| m.column.as_str()),
         ],
     )?;
     Ok(())
@@ -685,10 +734,16 @@ pub struct RunRow {
     pub rule_def: Option<Rule>,
     #[serde(skip)]
     pub cause: Value,
+    /// A column rule (TER-1113): its stable ID and its column. `rule` is
+    /// then `<column>/<name>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
 }
 
 const RUN_COLS: &str = "id, project, rule, rule_hash, event_seq, card, state, step, steps,
-                        reason, created_at, updated_at, rule_json, cause";
+                        reason, created_at, updated_at, rule_json, cause, rule_id, column_name";
 
 fn run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
     let steps: String = r.get(8)?;
@@ -709,6 +764,8 @@ fn run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         updated_at: r.get(11)?,
         rule_def: serde_json::from_str(&rule_json).ok(),
         cause: serde_json::from_str(&cause).unwrap_or(Value::Null),
+        rule_id: r.get(14)?,
+        column: r.get(15)?,
     })
 }
 
@@ -1545,6 +1602,8 @@ pub fn try_verb(
         updated_at: String::new(),
         rule_def: None,
         cause: Value::Null,
+        rule_id: None,
+        column: None,
     };
     let ctx = load_ctx(t, &row)?;
     Ok(rules_verbs::perform(t, actor, &ctx, action)?.0)
@@ -1797,7 +1856,9 @@ pub async fn fire_timers(
     fired.retain(|(p, r), _| {
         (r == HOURLY_CACHE_KEY && projects.iter().any(|project| project.project == *p))
             || timers.iter().any(|t| t.project == *p && t.rule == *r)
+            || columns::live_timer(projects, p, r)
     });
+    written += columns::fire_timers(db, projects, fired, now).await;
     for t in timers {
         match fire_timer(db, &t, fired, now).await {
             Ok(true) => written += 1,
@@ -2226,6 +2287,8 @@ pub fn dry_run(
                     updated_at: String::new(),
                     rule_def: None,
                     cause: Value::Null,
+                    rule_id: None,
+                    column: None,
                 };
                 let ctx = load_ctx(conn, &row)?;
                 if let Err((failed, why)) = check_start(rule, &row, &ctx) {
