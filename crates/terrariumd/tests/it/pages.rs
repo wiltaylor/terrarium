@@ -890,15 +890,33 @@ async fn page_list_reports_the_existing_domain_rights() {
         .await;
     let review = format!("/api/wiki/{}/review", page.ok()["id"].as_str().unwrap());
     let got = td.get_as(member["id"].as_str().unwrap(), path).await;
-    assert!(!rights(got.ok())["review_as"].as_array().unwrap().contains(&json!("rev")));
-    td.post_as(member["id"].as_str().unwrap(), &review, json!({"decision":"approve"}))
-        .await
-        .err(403, "forbidden");
+    assert!(
+        !rights(got.ok())["review_as"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("rev"))
+    );
+    td.post_as(
+        member["id"].as_str().unwrap(),
+        &review,
+        json!({"decision":"approve"}),
+    )
+    .await
+    .err(403, "forbidden");
     let got = td.get_as(reviewer["id"].as_str().unwrap(), path).await;
     assert_eq!(rights(got.ok())["review_wiki"], false);
-    assert!(rights(&got.body)["review_as"].as_array().unwrap().contains(&json!("rev")));
+    assert!(
+        rights(&got.body)["review_as"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("rev"))
+    );
     let done = td
-        .post_as(reviewer["id"].as_str().unwrap(), &review, json!({"decision":"approve"}))
+        .post_as(
+            reviewer["id"].as_str().unwrap(),
+            &review,
+            json!({"decision":"approve"}),
+        )
         .await;
     assert_eq!(done.ok()["status"], "reviewed");
 }

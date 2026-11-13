@@ -69,7 +69,11 @@ async fn list(
     let review_wiki = write && policy::review_page(&actor, &project, None).is_ok();
     let review_as = match &actor {
         Actor::Agent(a) if write => {
-            vec![a.name.clone(), a.id.clone(), format!("{}/{}", a.project, a.name)]
+            vec![
+                a.name.clone(),
+                a.id.clone(),
+                format!("{}/{}", a.project, a.name),
+            ]
         }
         _ => Vec::new(),
     };
