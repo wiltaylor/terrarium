@@ -10291,9 +10291,12 @@ change does not block it.
 A change that leaves `@x` resolving by name to another column than
 before (the role `x` cleared while another column is named `x`) is
 refused the same way (TER-1246): `role_in_use`, or `column_in_use` when
-the column it named is removed. `@x` may still follow the role `x` to
-another column, and it may keep its own column by name, also renamed in
-the same change (`@x` rewritten to `@<new name>`).
+the column it named is removed. So is the reverse (TER-1252): `@x` named
+the column `x` by name (no column had the role `x`), and the change gives
+the role `x` to another column. `@x` may still follow the role `x` to
+another column when it named the column with that role before, and it may
+keep its own column by name, also renamed in the same change (`@x`
+rewritten to `@<new name>`).
 
 ## 20. Event sources and ingest
 
