@@ -24,7 +24,18 @@ export function leavesProject(href: (path: string) => string, base: string, to: 
   return path !== target && !path.startsWith(`${target}/`);
 }
 
-// A history step has no known target, so the text must be true inside and outside the project.
+type Url = { pathname: string; search: string; hash: string };
+const full = (url: Url) => url.pathname + url.search + url.hash;
+/**
+ * The browser Router asks beforeLeave on Back and Forward with the delta only,
+ * after `popstate`: the address bar already shows the target, and the router
+ * location (`from`) is still the old page. A memory router leaves the address
+ * bar alone, so the two agree and the step stays unknown (it leaves).
+ */
+export function historyTarget(to: string | number, from: Url, address: Url = window.location): string | number {
+  return typeof to !== "number" || full(address) === full(from) ? to : full(address);
+}
+
 export const LEAVE_DRAFT = "Unsaved page layout changes are lost if you leave this project. Continue?";
 
 export default function ProjectScreen(props: RouteSectionProps) {
@@ -44,10 +55,10 @@ export default function ProjectScreen(props: RouteSectionProps) {
   const editor = createLayoutEditor(api, events, instance.key, project);
   // Links, history and instance switches (RemoteScope is a route) all leave
   // through the router, so one guard covers them. It never ends the draft:
-  // a confirmed Back inside the project keeps it, and leaving the project
-  // unmounts this screen or changes the scope, which ends it.
+  // Back inside the project keeps it without a prompt, and leaving the
+  // project unmounts this screen or changes the scope, which ends it.
   useBeforeLeave(event => {
-    if (!editor.dirty() || !leavesProject(instance.href, base(), event.to)) return;
+    if (!editor.dirty() || !leavesProject(instance.href, base(), historyTarget(event.to, event.from))) return;
     if (!window.confirm(LEAVE_DRAFT)) event.preventDefault();
   });
   const unload = (event: BeforeUnloadEvent) => {

@@ -6673,7 +6673,11 @@ async fn system_prompt_flags() {
         vec![req(Get, "/api/agents/w")],
     )
     .await;
-    assert_eq!(out, "name  w\nsystem_prompt:\nLine one.\nLine two.\n");
+    // `held_mail` is absent: the caller may not see it (TER-1105).
+    assert_eq!(
+        out,
+        "held_mail  unavailable\nname       w\nsystem_prompt:\nLine one.\nLine two.\n"
+    );
 
     // Templates: the flag sets the key; `--no-system-prompt` removes it.
     ok(
@@ -8506,6 +8510,96 @@ async fn agent_lifecycle_commands() {
     assert!(Cli::try_parse_from(["terrarium", "agent", "pause"]).is_err());
 }
 
+/// TER-1105 (T9): `agent ls` shows `HELD` apart from `QUEUED`: the count,
+/// `0`, or `-` when the caller may not see it. `agent show` says
+/// `unavailable` for an absent count, and names the operator command for
+/// held mail. `mail ls` shows `delivered (held)` until a release.
+#[tokio::test]
+async fn held_mail_shows_apart_from_queued() {
+    let out = ok(
+        false,
+        &["-p", "terra", "agent", "ls"],
+        vec![(
+            200,
+            json!([
+                {"id": "A1", "name": "a", "project": "terra", "status": "idle",
+                 "queued": 2, "held_mail": 3},
+                {"id": "A2", "name": "b", "project": "terra", "status": "idle",
+                 "held_mail": 0},
+                {"id": "A3", "name": "c", "project": "terra", "status": "idle"},
+            ]),
+        )],
+        vec![(
+            Get,
+            "/api/agents",
+            vec![("project", "terra"), ("include", "card")],
+            None,
+        )],
+    )
+    .await;
+    let head = out.lines().next().unwrap();
+    assert!(head.contains("QUEUED") && head.contains("HELD"), "{out}");
+    let col = |line: &str| -> String {
+        let at = head.find("HELD").unwrap();
+        line[at..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_owned()
+    };
+    let rows: Vec<&str> = out.lines().skip(1).collect();
+    assert_eq!(col(rows[0]), "3", "{out}");
+    assert_eq!(col(rows[1]), "0", "{out}");
+    assert_eq!(col(rows[2]), "-", "{out}");
+
+    let show = |held: Value| async move {
+        let mut a = json!({"id": "A1", "name": "w"});
+        if !held.is_null() {
+            a["held_mail"] = held;
+        }
+        ok(
+            false,
+            &["agent", "show", "w"],
+            vec![(200, a)],
+            vec![req(Get, "/api/agents/w")],
+        )
+        .await
+    };
+    let out = show(json!(3)).await;
+    assert!(
+        out.contains("3 (operator: terrarium admin inbox resume <thread>)"),
+        "{out}"
+    );
+    let out = show(json!(0)).await;
+    assert!(!out.contains("resume"), "{out}");
+    let out = show(Value::Null).await;
+    assert!(out.contains("unavailable"), "{out}");
+
+    let out = ok(
+        false,
+        &["mail", "ls"],
+        vec![(
+            200,
+            json!([
+                {"id": "M1", "state": "delivered", "held": true, "subject": "one"},
+                {"id": "M2", "state": "queued", "held": true,
+                 "released_at": "2026-11-13T00:00:00Z", "subject": "two"},
+                {"id": "M3", "state": "delivered", "held": false, "subject": "three"},
+            ]),
+        )],
+        vec![(Get, "/api/mail", vec![], None)],
+    )
+    .await;
+    let line = |id: &str| out.lines().find(|l| l.starts_with(id)).unwrap().to_owned();
+    assert!(line("M1").contains("delivered (held)"), "{out}");
+    assert!(!line("M2").contains("(held)"), "{out}");
+    assert!(!line("M3").contains("(held)"), "{out}");
+    assert_eq!(
+        super::mail::mail_state(&json!({"state": "read", "held": true})),
+        "read (held)"
+    );
+}
+
 /// `agent compact`, and the auto compact flags of `agent new`, `agent set`,
 /// and `template new` (PLAN §18, "Auto compact").
 #[tokio::test]
@@ -9610,7 +9704,8 @@ async fn default_skill_flags_and_effective_skills() {
     .await;
     assert_eq!(
         out,
-        "effective_skills  fern-check (explicit), terrarium-db (default)\nname              w\n"
+        "effective_skills  fern-check (explicit), terrarium-db (default)\n\
+         held_mail         unavailable\nname              w\n"
     );
 }
 
@@ -11665,4 +11760,291 @@ async fn uploads_retry_a_429_after_retry_after() {
     assert_eq!(reqs[1].path, "/api/projects/terra/test-runs");
     assert_eq!(reqs[0].body, reqs[1].body);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The options of a column as `GET .../options` gives them (TER-1112).
+fn column_options_reply() -> Value {
+    json!({"project": "terra", "column": "merge_queue", "version": 3,
+           "checks": {"require_comment_on_enter": false, "require_dependencies_met": false,
+                      "terminal_for_members": false, "clear_eta_on_enter": true},
+           "queue": {"release": "batch", "batch_size": 4, "max_wait_seconds": 1800,
+                     "max_batch_cards": 8}})
+}
+
+#[tokio::test]
+async fn board_column_options_show_set_and_from_file() {
+    const PATH: &str = "/api/projects/terra/board/columns/merge_queue/options";
+    let base = &["-p", "terra", "board", "column", "options", "merge_queue"];
+    // No change flag: one GET, and the options as text.
+    let out = ok(
+        false,
+        base,
+        vec![(200, column_options_reply())],
+        vec![req(Get, PATH)],
+    )
+    .await;
+    assert!(
+        out.contains("column merge_queue (options version 3)"),
+        "{out}"
+    );
+    assert!(out.contains("clear_eta_on_enter"), "{out}");
+    assert!(
+        out.contains("queue_release") && out.contains("batch, batch_size 4"),
+        "{out}"
+    );
+    // Flags: GET, then PUT of the whole options with the version read.
+    let put = |args: &[&'static str], stdin: Option<&'static str>, want: Value| {
+        let mut full = base.to_vec();
+        full.extend_from_slice(args);
+        async move {
+            let r = exec(
+                false,
+                &full,
+                vec![(200, column_options_reply()), (200, column_options_reply())],
+                stdin,
+            )
+            .await;
+            if let Err(e) = &r.result {
+                panic!("{full:?} failed: {e:#}");
+            }
+            assert_eq!(r.reqs.len(), 2, "{full:?}");
+            assert_eq!(r.reqs[1].method, Put);
+            assert_eq!(r.reqs[1].path, PATH);
+            assert_eq!(r.reqs[1].body, Some(want), "{full:?}");
+        }
+    };
+    let mut want = column_options_reply();
+    let o = want.as_object_mut().unwrap();
+    for k in ["project", "column"] {
+        o.remove(k);
+    }
+    let v = o.remove("version").unwrap();
+    o.insert("base_version".into(), v);
+    let mut w = want.clone();
+    w["checks"]["require_comment_on_enter"] = true.into();
+    w["checks"]["terminal_for_members"] = true.into();
+    w["queue"]["max_batch_cards"] = Value::Null;
+    put(
+        &[
+            "--require-comment",
+            "true",
+            "--terminal",
+            "true",
+            "--no-max-batch-cards",
+        ],
+        None,
+        w,
+    )
+    .await;
+    // A release other than batch drops the batch settings.
+    let mut w = want.clone();
+    w["queue"] = json!({"release": "job", "batch_size": null, "max_wait_seconds": null,
+                        "max_batch_cards": null});
+    put(&["--queue-release", "job"], None, w).await;
+    let mut w = want.clone();
+    w["queue"]["batch_size"] = 6.into();
+    w["queue"]["max_wait_seconds"] = 600.into();
+    put(&["--batch-size", "6", "--max-wait-seconds", "600"], None, w).await;
+    // --from-file: the file's own base_version wins; the --json output of
+    // a read is a valid file too (its version becomes the base).
+    put(
+        &["--from-file", "-"],
+        Some(r#"{"base_version": 2, "checks": {"x": 1}, "queue": {"release": "wip"}}"#),
+        json!({"base_version": 2, "checks": {"x": 1}, "queue": {"release": "wip"}}),
+    )
+    .await;
+    put(
+        &["--from-file", "-"],
+        Some(r#"{"project": "terra", "column": "merge_queue", "version": 9, "checks": {}, "queue": {}}"#),
+        json!({"base_version": 3, "checks": {}, "queue": {}}),
+    )
+    .await;
+    // Flags do not mix with --from-file, and a bool needs a value.
+    for bad in [
+        vec![
+            "terrarium",
+            "board",
+            "column",
+            "options",
+            "x",
+            "--from-file",
+            "-",
+            "--terminal",
+            "true",
+        ],
+        vec!["terrarium", "board", "column", "options", "x", "--terminal"],
+        vec![
+            "terrarium",
+            "board",
+            "column",
+            "options",
+            "x",
+            "--queue-release",
+            "lifo",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(&bad).is_err(), "{bad:?}");
+    }
+}
+
+/// The options of a column with two rules (TER-1120).
+fn column_rules_reply() -> Value {
+    let mut o = column_options_reply();
+    o["rules"] = json!([
+        {"id": "R1", "name": "a", "enabled": true, "trigger": {"kind": "lands"},
+         "actions": [{"verb": "card.done_mail"}]},
+        {"id": "R2", "name": "b", "enabled": true,
+         "trigger": {"kind": "job_result", "events": ["ended"], "job_kinds": ["merge"]},
+         "actions": [{"verb": "card.move", "args": {"to": "done"}}]},
+    ]);
+    o
+}
+
+#[tokio::test]
+async fn board_column_rule_ls_show_and_catalog() {
+    const PATH: &str = "/api/projects/terra/board/columns/merge_queue/options";
+    let base = ["-p", "terra", "board", "column", "rule"];
+    let args = |more: &[&'static str]| {
+        let mut a = base.to_vec();
+        a.extend_from_slice(more);
+        a
+    };
+    let out = ok(
+        false,
+        &args(&["ls", "merge_queue"]),
+        vec![(200, column_rules_reply())],
+        vec![req(Get, PATH)],
+    )
+    .await;
+    assert!(out.contains("job_result ended (merge)"), "{out}");
+    assert!(out.contains("card.move") && out.contains("R2"), "{out}");
+    let out = ok(
+        false,
+        &args(&["show", "merge_queue", "b"]),
+        vec![(200, column_rules_reply())],
+        vec![req(Get, PATH)],
+    )
+    .await;
+    assert!(out.contains("\"id\": \"R2\""), "{out}");
+    let r = exec(
+        false,
+        &args(&["show", "merge_queue", "nope"]),
+        vec![(200, column_rules_reply())],
+        None,
+    )
+    .await;
+    let e = format!("{:#}", r.result.unwrap_err());
+    assert!(e.contains("no rule `nope`") && e.contains("a, b"), "{e}");
+    let out = ok(
+        false,
+        &args(&["catalog"]),
+        vec![(
+            200,
+            json!({"model_version": 1,
+                   "triggers": [{"kind": "lands", "description": "a card enters", "fields": []}],
+                   "actions": [{"verb": "card.move",
+                                "args": [{"name": "to", "type": "column", "required": true}]}]}),
+        )],
+        vec![req(Get, "/api/rules/catalog")],
+    )
+    .await;
+    assert!(out.contains("lands") && out.contains("to*"), "{out}");
+}
+
+#[tokio::test]
+async fn board_column_rule_changes_put_the_whole_list_with_the_read_version() {
+    const PATH: &str = "/api/projects/terra/board/columns/merge_queue/options";
+    let put = |more: &[&'static str], stdin: Option<&'static str>, want: Value| {
+        let mut full = vec!["-p", "terra", "board", "column", "rule"];
+        full.extend_from_slice(more);
+        async move {
+            let r = exec(
+                false,
+                &full,
+                vec![(200, column_rules_reply()), (200, column_rules_reply())],
+                stdin,
+            )
+            .await;
+            if let Err(e) = &r.result {
+                panic!("{full:?} failed: {e:#}");
+            }
+            assert_eq!(r.reqs.len(), 2, "{full:?}");
+            assert_eq!(r.reqs[1].method, Put);
+            assert_eq!(r.reqs[1].path, PATH);
+            let body = r.reqs[1].body.clone().unwrap();
+            assert_eq!(body["base_version"], 3, "{full:?}");
+            assert_eq!(body["queue"]["release"], "batch");
+            assert_eq!(body["rules"], want, "{full:?}");
+        }
+    };
+    let reply = column_rules_reply();
+    let (a, b) = (reply["rules"][0].clone(), reply["rules"][1].clone());
+    // A new rule goes last, without an ID; its name comes from the argument.
+    let new =
+        r#"{"id": "X", "trigger": {"kind": "leaves"}, "actions": [{"verb": "card.done_mail"}]}"#;
+    let c = json!({"name": "c", "trigger": {"kind": "leaves"},
+                   "actions": [{"verb": "card.done_mail"}]});
+    put(
+        &["set", "merge_queue", "c", "--from-file", "-"],
+        Some(new),
+        json!([a, b, c]),
+    )
+    .await;
+    put(
+        &[
+            "set",
+            "merge_queue",
+            "c",
+            "--from-file",
+            "-",
+            "--before",
+            "b",
+        ],
+        Some(new),
+        json!([a, c, b]),
+    )
+    .await;
+    // A replaced rule keeps its ID and its place.
+    let mut b2 = c.clone();
+    b2["name"] = "b".into();
+    b2["id"] = "R2".into();
+    put(
+        &["set", "merge_queue", "b", "--from-file", "-"],
+        Some(new),
+        json!([a, b2]),
+    )
+    .await;
+    put(&["rm", "merge_queue", "a"], None, json!([b])).await;
+    put(
+        &["move", "merge_queue", "a", "--after", "b"],
+        None,
+        json!([b, a]),
+    )
+    .await;
+    let mut off = a.clone();
+    off["enabled"] = false.into();
+    put(&["disable", "merge_queue", "a"], None, json!([off, b])).await;
+    put(&["enable", "merge_queue", "a"], None, json!([a, b])).await;
+    // A file that names another rule, an unknown rule, and a move without a
+    // place are refused before any write.
+    for (more, stdin) in [
+        (
+            vec!["set", "merge_queue", "c", "--from-file", "-"],
+            Some(r#"{"name": "d", "trigger": {"kind": "lands"}, "actions": []}"#),
+        ),
+        (
+            vec!["set", "merge_queue", "c", "--from-file", "-"],
+            Some("[1]"),
+        ),
+        (vec!["rm", "merge_queue", "zzz"], None),
+        (vec!["move", "merge_queue", "a", "--before", "a"], None),
+    ] {
+        let mut full = vec!["-p", "terra", "board", "column", "rule"];
+        full.extend_from_slice(&more);
+        let r = exec(false, &full, vec![(200, column_rules_reply())], stdin).await;
+        assert!(r.result.is_err(), "{full:?}");
+        assert!(r.reqs.iter().all(|q| q.method == Get), "{full:?}");
+    }
+    let bad = ["terrarium", "board", "column", "rule", "move", "x", "a"];
+    assert!(Cli::try_parse_from(bad).is_err());
 }

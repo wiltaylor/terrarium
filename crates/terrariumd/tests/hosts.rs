@@ -1340,6 +1340,23 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
         std::fs::read_to_string(dest.join("README")).unwrap(),
         "owned checkout\n"
     );
+    // Without a path the checkout goes to the repo's path under the
+    // agent's work root on the target (TER-1109).
+    let checkout = lab
+        .td
+        .post_as(
+            &id,
+            &format!("/api/repos/{}/checkout", repo["id"].as_str().unwrap()),
+            json!({"target": "terra-box", "branch": "main"}),
+        )
+        .await;
+    let default = root.join(repo["path"].as_str().unwrap());
+    assert_eq!(checkout.ok()["action"], "cloned", "{}", checkout.body);
+    assert_eq!(checkout.body["path"], default.display().to_string());
+    assert_eq!(
+        std::fs::read_to_string(default.join("README")).unwrap(),
+        "owned checkout\n"
+    );
     assert_eq!(
         std::fs::read_to_string(root.join(".terrarium-owner")).unwrap(),
         id
@@ -2610,6 +2627,17 @@ async fn repo_checkout_runs_on_the_target() {
     );
     let audit = lab.td.get("/api/audit?action=repo.checkout").await;
     assert_eq!(audit.ok()[0]["detail"]["target"], "box");
+    // The operator has no workspace: without a path the checkout says to
+    // give one (TER-1109), and does not send the bare repo path.
+    let r = lab
+        .td
+        .post(
+            &format!("/api/repos/{repo_id}/checkout"),
+            json!({"target": "box", "branch": "main"}),
+        )
+        .await;
+    assert!(r.body.to_string().contains("--path"), "{}", r.body);
+    r.err(422, "invalid");
     // An agent needs the target in its policy.
     let a = lab.td.agent("terra", "worker", json!({})).await;
     lab.td

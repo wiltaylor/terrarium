@@ -3769,6 +3769,76 @@ mod tests {
     }
 
     #[test]
+    fn column_options_backfill_todays_checks_on_a_populated_board() {
+        const FILE: &str = "ter-1112-column-options.sql";
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
+        let before: Vec<_> = NAMED_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|(name, _)| *name != FILE)
+            .collect();
+        migrate_named(&mut conn, &before).unwrap();
+        conn.execute_batch(
+            "INSERT INTO projects(name,created_at,updated_at) VALUES ('p','t','t');
+             INSERT INTO boards(project,created_at) VALUES ('p','t');
+             INSERT INTO board_columns(project,name,position,role) VALUES
+               ('p','backlog',0,NULL),('p','doing',1,'working'),('p','review',2,'review'),
+               ('p','stuck',3,'blocked'),('p','done',4,NULL);",
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), 1);
+        let mut q = conn
+            .prepare(
+                "SELECT name, require_comment_on_enter, require_dependencies_met,
+                        terminal_for_members, clear_eta_on_enter, queue_release,
+                        queue_batch_size, options_version
+                 FROM board_columns ORDER BY position",
+            )
+            .unwrap();
+        // name, comment, dependencies, terminal, ETA, release, batch, version
+        type Options = (String, i64, i64, i64, i64, String, Option<i64>, i64);
+        let rows: Vec<Options> = q
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let want = |n: &str, c, d, t| (n.to_owned(), c, d, t, 1, "wip".to_owned(), None, 1);
+        assert_eq!(
+            rows,
+            [
+                want("backlog", 0, 0, 0),
+                want("doing", 0, 1, 0),
+                want("review", 0, 0, 0),
+                want("stuck", 1, 0, 0),
+                want("done", 0, 0, 1),
+            ]
+        );
+        drop(q);
+        // The CHECKs refuse a bad release and a zero batch.
+        assert!(
+            conn.execute("UPDATE board_columns SET queue_release = 'lifo'", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute("UPDATE board_columns SET queue_batch_size = 0", [])
+                .is_err()
+        );
+        assert_eq!(migrate(&mut conn).unwrap(), 0);
+    }
+
+    #[test]
     fn e2e_migration_preserves_release_history_and_all_job_kinds() {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate_with(&mut conn, MIGRATIONS).unwrap();

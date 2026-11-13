@@ -561,17 +561,21 @@ pub fn refresh_status(t: &mut Tx<'_>, agent: &str, depth: u8) -> ApiResult<()> {
     crate::apply_status_at(t, agent, want, Some(&reason), depth)
 }
 
-/// Is `agent` done: `idle` (no open wait), no mail queued for it, and no
-/// wake mail that has still to go out?
+/// Is `agent` done: `idle` (no open wait), no mail queued for it (also
+/// project-inbox mail routed to it), and no wake mail that has still to go
+/// out? Only `queued` mail counts: `delivered` mail was already typed into
+/// the agent, as in [`agents::queued_count`].
 pub fn is_done(conn: &Connection, agent: &str, status: AgentStatus) -> ApiResult<bool> {
     if status != AgentStatus::Idle || open_count(conn, agent)? > 0 {
         return Ok(false);
     }
+    let inbox = mail::routed_inbox(conn, agent)?;
     let pending: i64 = conn.query_row(
         "SELECT (SELECT count(*) FROM waits WHERE agent = ?1 AND state <> 'open'
                    AND notified_at IS NULL)
-              + (SELECT count(*) FROM messages WHERE to_agent = ?1 AND state = 'queued')",
-        [agent],
+              + (SELECT count(*) FROM messages WHERE state = 'queued'
+                 AND (to_agent = ?1 OR (to_agent = ?2 AND to_kind = 'project')))",
+        params![agent, inbox],
         |r| r.get(0),
     )?;
     Ok(pending == 0)
@@ -1350,5 +1354,39 @@ mod tests {
     #[test]
     fn quoting_marks_each_line() {
         assert_eq!(quoted("a\nb"), "> a\n> b\n");
+    }
+
+    /// Queued project-inbox mail routed to the lead keeps the lead from
+    /// being done; delivered inbox mail and inbox mail of another project
+    /// do not (TER-1108).
+    #[test]
+    fn queued_inbox_mail_keeps_the_lead_from_done() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO agents (id, name, project, harness, workspace, created_at, updated_at)
+               VALUES ('L1', 'lead', 'p', 'claude', '/w', 't', 't'),
+                      ('W1', 'w1', 'p', 'claude', '/w', 't', 't');
+             INSERT INTO roles (agent_id, role, project, granted_by, granted_at)
+               VALUES ('L1', 'project_admin', 'p', 'operator', 't');",
+        )
+        .unwrap();
+        let mail = |id: &str, to: &str, state: &str| {
+            conn.execute(
+                "INSERT INTO messages (id, thread_id, from_agent, from_kind, to_agent, to_kind,
+                                       body, state, created_at)
+                 VALUES (?1, ?1, 'operator', 'operator', ?2, 'project', 'b', ?3, 't')",
+                rusqlite::params![id, to, state],
+            )
+            .unwrap();
+        };
+        assert!(is_done(&conn, "L1", Idle).unwrap());
+        mail("M1", "project:other", "queued");
+        mail("M2", "project:p", "delivered");
+        assert!(is_done(&conn, "L1", Idle).unwrap());
+        mail("M3", "project:p", "queued");
+        assert!(!is_done(&conn, "L1", Idle).unwrap());
+        // Not the inbox recipient: the project mail is not for w1.
+        assert!(is_done(&conn, "W1", Idle).unwrap());
     }
 }

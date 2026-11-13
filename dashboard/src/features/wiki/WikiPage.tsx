@@ -57,21 +57,28 @@ export default function WikiPage() {
   return <WikiContent project={params.project} path={params.path && params.path.length ? decodeURIComponent(params.path) : "index"} />;
 }
 
-/** `search` seeds the local page-tree search. Only a changed configured value replaces it. */
-export function WikiBrowserPanel(props: { project: string; search?: string }) {
-  return <Show when={props.project} keyed>{(project) => <LocalWiki project={project} search={props.search} />}</Show>;
+/**
+ * `search` seeds the local page-tree search. Only a changed configured value replaces it.
+ * `canWrite` false (no write_project) hides Edit, review and Restore (TER-1134).
+ */
+export function WikiBrowserPanel(props: { project: string; search?: string; canWrite?: boolean }) {
+  return <Show when={props.project} keyed>{(project) => <LocalWiki project={project} search={props.search} canWrite={props.canWrite} />}</Show>;
 }
 
-function LocalWiki(props: { project: string; search?: string }) {
+function LocalWiki(props: { project: string; search?: string; canWrite?: boolean }) {
   const [path, setPath] = createSignal("index");
-  return <WikiContent project={props.project} path={path()} onPath={setPath} search={props.search} />;
+  return <WikiContent project={props.project} path={path()} onPath={setPath} search={props.search} canWrite={props.canWrite} />;
 }
 
-function WikiContent(props: { project: string; path: string; onPath?: (path: string) => void; search?: string }) {
+function WikiContent(props: { project: string; path: string; onPath?: (path: string) => void; search?: string; canWrite?: boolean }) {
   const { api, projects, bookmarks } = useInstance();
   const path = () => props.path;
   const bookmarkUrl = () => wikiHref(props.project, path());
-  const [tab, setTab] = createSignal<(typeof TABS)[number]["id"]>("page");
+  const [chosenTab, setTab] = createSignal<(typeof TABS)[number]["id"]>("page");
+  const canWrite = () => props.canWrite !== false;
+  // Without the write right the Edit tab is gone; a lost right leaves it.
+  const tab = () => (chosenTab() === "edit" && !canWrite() ? "page" : chosenTab());
+  const tabs = () => (canWrite() ? TABS : TABS.filter((t) => t.id !== "edit"));
   const [error, setError] = createSignal<unknown>(null);
   const [q, setQ] = createSignal(props.search ?? "");
   createEffect(on(() => props.search, (search, old) => { if (search !== old) setQ(search ?? ""); }, { defer: true }));
@@ -184,7 +191,7 @@ function WikiContent(props: { project: string; path: string; onPath?: (path: str
                 </div>
               </div>
 
-              <Show when={p().status === "ready_for_review"}>
+              <Show when={p().status === "ready_for_review" && canWrite()}>
                 <div class="review-bar">
                   <strong>Ready for review</strong>
                   <span class="muted small">reviewer: {meta().reviewer ?? p().reviewer ?? "operator"}</span>
@@ -199,7 +206,7 @@ function WikiContent(props: { project: string; path: string; onPath?: (path: str
               </Show>
 
               <Tabs
-                tabs={TABS}
+                tabs={tabs()}
                 active={tab()}
                 onChange={(t) => {
                   if (t === "edit") {
@@ -278,7 +285,7 @@ function WikiContent(props: { project: string; path: string; onPath?: (path: str
                                     Diff
                                   </button>
                                 </Show>
-                                <Show when={r.rev !== p().rev}>
+                                <Show when={r.rev !== p().rev && canWrite()}>
                                   <button class="small" onClick={() => run(async () => (setPage(await api.wiki.restore(p().id, r.rev)), void refetchRevs()))}>
                                     Restore
                                   </button>

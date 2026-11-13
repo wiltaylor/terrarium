@@ -8,7 +8,7 @@ use super::{delimited, event_line, print_table, set_list, set_opt, set_replace_l
 use crate::api::{CliError, query};
 use crate::cli::{
     BoardCmd, CardCmd, CardEditArgs, CardFilesCmd, CardNewArgs, CardWaitArgs, CardWaitCmd,
-    ColumnCmd,
+    ColumnCmd, ColumnRuleCmd,
 };
 use crate::commands::projects::project_path;
 use crate::commands::system::as_items;
@@ -72,6 +72,15 @@ pub async fn board(ctx: &Ctx, cmd: Option<&BoardCmd>) -> anyhow::Result<()> {
             return ctx.emit(&b["columns"], print_columns);
         }
         Some(BoardCmd::Columns { from_file: Some(f) }) => columns_from(ctx, f)?,
+        Some(BoardCmd::Column {
+            command: command @ ColumnCmd::Options { name, .. },
+        }) => {
+            let path = format!("{path}/columns/{}/options", encode(name));
+            return column_options(ctx, &path, command).await;
+        }
+        Some(BoardCmd::Column {
+            command: ColumnCmd::Rule { command },
+        }) => return column_rule(ctx, &path, command).await,
         Some(BoardCmd::Column { command }) => {
             let b = ctx.api.get(&path, vec![]).await?;
             edit_columns(as_items(&b["columns"]), command)?
@@ -171,6 +180,400 @@ fn give_role(specs: &mut [Value], at: usize, role: &str) {
     specs[at]["role"] = role.into();
 }
 
+/// `board column options`: show the options of a column, or read them,
+/// change them, and write them back with the version that was read.
+async fn column_options(ctx: &Ctx, path: &str, cmd: &ColumnCmd) -> anyhow::Result<()> {
+    let current = ctx.api.get(path, vec![]).await?;
+    let body = match cmd {
+        ColumnCmd::Options {
+            from_file: Some(f), ..
+        } => options_from(ctx, f, &current)?,
+        _ => match options_put(&current, cmd)? {
+            Some(b) => b,
+            None => return ctx.emit(&current, print_options),
+        },
+    };
+    let after = ctx.api.put(path, body).await?;
+    ctx.emit(&after, print_options)
+}
+
+/// The `PUT` body of `--from-file`: `{"checks", "queue"}`, and the read
+/// version as `base_version` when the file has none.
+fn options_from(ctx: &Ctx, arg: &str, current: &Value) -> anyhow::Result<Value> {
+    let text = if arg == "-" {
+        ctx.text("-")?
+    } else {
+        std::fs::read_to_string(arg)
+            .map_err(|e| CliError::usage(format!("cannot read {arg}: {e}")))?
+    };
+    let mut v: Value = serde_json::from_str(&text)
+        .map_err(|e| CliError::usage(format!("{arg} is not JSON: {e}")))?;
+    let Some(o) = v.as_object_mut() else {
+        return Err(CliError::usage(format!(
+            "{arg}: give an object with `checks` and `queue`"
+        )));
+    };
+    // The output of `board column options --json` is also a valid file.
+    for k in ["project", "column", "version"] {
+        o.remove(k);
+    }
+    o.entry("base_version")
+        .or_insert_with(|| current["version"].clone());
+    Ok(v)
+}
+
+/// The `PUT` body of the change flags, or `None` when no flag is given.
+pub fn options_put(current: &Value, cmd: &ColumnCmd) -> anyhow::Result<Option<Value>> {
+    let ColumnCmd::Options {
+        require_comment,
+        require_dependencies,
+        terminal,
+        clear_eta,
+        queue_release,
+        batch_size,
+        max_wait_seconds,
+        max_batch_cards,
+        no_max_batch_cards,
+        ..
+    } = cmd
+    else {
+        return Ok(None);
+    };
+    let mut checks = current["checks"].clone();
+    let mut queue = current["queue"].clone();
+    let mut changed = false;
+    for (key, value) in [
+        ("require_comment_on_enter", require_comment),
+        ("require_dependencies_met", require_dependencies),
+        ("terminal_for_members", terminal),
+        ("clear_eta_on_enter", clear_eta),
+    ] {
+        if let Some(v) = value {
+            checks[key] = (*v).into();
+            changed = true;
+        }
+    }
+    if let Some(r) = queue_release {
+        queue["release"] = r.as_str().into();
+        if r != "batch" {
+            for k in ["batch_size", "max_wait_seconds", "max_batch_cards"] {
+                queue[k] = Value::Null;
+            }
+        }
+        changed = true;
+    }
+    for (key, value) in [
+        ("batch_size", batch_size),
+        ("max_wait_seconds", max_wait_seconds),
+        ("max_batch_cards", max_batch_cards),
+    ] {
+        if let Some(v) = value {
+            queue[key] = (*v).into();
+            changed = true;
+        }
+    }
+    if *no_max_batch_cards {
+        queue["max_batch_cards"] = Value::Null;
+        changed = true;
+    }
+    Ok(changed
+        .then(|| json!({"base_version": current["version"], "checks": checks, "queue": queue})))
+}
+
+fn print_options(ctx: &Ctx, o: &Value) {
+    ctx.line(format!(
+        "column {} (options version {})",
+        field(o, "column"),
+        field(o, "version")
+    ));
+    for k in [
+        "require_comment_on_enter",
+        "require_dependencies_met",
+        "terminal_for_members",
+        "clear_eta_on_enter",
+    ] {
+        ctx.line(format!("  {k:<26} {}", o["checks"][k]));
+    }
+    let q = &o["queue"];
+    let mut line = format!("  {:<26} {}", "queue_release", field(q, "release"));
+    for k in ["batch_size", "max_wait_seconds", "max_batch_cards"] {
+        if !q[k].is_null() {
+            line.push_str(&format!(", {k} {}", q[k]));
+        }
+    }
+    ctx.line(line);
+}
+
+/// `board column rule` (TER-1120): read the options of the column, show a
+/// rule, or change the rule list and write the options back with the
+/// version that was read.
+async fn column_rule(ctx: &Ctx, board: &str, cmd: &ColumnRuleCmd) -> anyhow::Result<()> {
+    let column = match cmd {
+        ColumnRuleCmd::Catalog => {
+            let c = ctx.api.get("/api/rules/catalog", vec![]).await?;
+            return ctx.emit(&c, print_catalog);
+        }
+        ColumnRuleCmd::Ls { column }
+        | ColumnRuleCmd::Show { column, .. }
+        | ColumnRuleCmd::Set { column, .. }
+        | ColumnRuleCmd::Rm { column, .. }
+        | ColumnRuleCmd::Move { column, .. }
+        | ColumnRuleCmd::Enable { column, .. }
+        | ColumnRuleCmd::Disable { column, .. } => column,
+    };
+    let path = format!("{board}/columns/{}/options", encode(column));
+    let current = ctx.api.get(&path, vec![]).await?;
+    let rules = as_items(&current["rules"]).to_vec();
+    let file = match cmd {
+        ColumnRuleCmd::Ls { .. } => return ctx.emit(&current["rules"], print_rules),
+        ColumnRuleCmd::Show { rule, .. } => {
+            let at = rule_index(&rules, rule, column)?;
+            return ctx.emit(&rules[at], print_rule);
+        }
+        ColumnRuleCmd::Set { from_file, .. } => Some(rule_from(ctx, from_file)?),
+        _ => None,
+    };
+    let new = edit_rules(&rules, cmd, file)?;
+    let body = json!({"base_version": current["version"], "checks": current["checks"],
+                      "queue": current["queue"], "rules": new});
+    let after = ctx.api.put(&path, body).await?;
+    match cmd {
+        ColumnRuleCmd::Rm { .. } | ColumnRuleCmd::Move { .. } => {
+            ctx.emit(&after["rules"], print_rules)
+        }
+        ColumnRuleCmd::Set { rule, .. }
+        | ColumnRuleCmd::Enable { rule, .. }
+        | ColumnRuleCmd::Disable { rule, .. } => {
+            let items = as_items(&after["rules"]);
+            match items.iter().find(|r| r["name"] == rule.as_str()) {
+                Some(r) => ctx.emit(r, print_rule),
+                None => ctx.emit(&after["rules"], print_rules),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The place of the rule `name` in `rules`.
+fn rule_index(rules: &[Value], name: &str, column: &str) -> anyhow::Result<usize> {
+    rules.iter().position(|r| r["name"] == name).ok_or_else(|| {
+        let names: Vec<String> = rules.iter().map(|r| field(r, "name")).collect();
+        CliError::usage(format!(
+            "column `{column}` has no rule `{name}`; rules: {}",
+            if names.is_empty() {
+                "none".to_owned()
+            } else {
+                names.join(", ")
+            }
+        ))
+    })
+}
+
+/// The rule of `rule set --from-file`: one JSON object.
+fn rule_from(ctx: &Ctx, arg: &str) -> anyhow::Result<Value> {
+    let text = if arg == "-" {
+        ctx.text("-")?
+    } else {
+        std::fs::read_to_string(arg)
+            .map_err(|e| CliError::usage(format!("cannot read {arg}: {e}")))?
+    };
+    let v: Value = serde_json::from_str(&text)
+        .map_err(|e| CliError::usage(format!("{arg} is not JSON: {e}")))?;
+    if !v.is_object() {
+        return Err(CliError::usage(format!(
+            "{arg}: give one rule as an object, with `trigger` and `actions`"
+        )));
+    }
+    Ok(v)
+}
+
+/// The whole rule list of a column after one `board column rule` change.
+/// `file` is the rule of `set`. The daemon checks the rules.
+pub fn edit_rules(
+    rules: &[Value],
+    cmd: &ColumnRuleCmd,
+    file: Option<Value>,
+) -> anyhow::Result<Vec<Value>> {
+    let mut rules = rules.to_vec();
+    let place = |rules: &mut Vec<Value>,
+                 r: Value,
+                 before: &Option<String>,
+                 after: &Option<String>,
+                 column: &str|
+     -> anyhow::Result<()> {
+        match (before, after) {
+            (Some(b), _) => {
+                let at = rule_index(rules, b, column)?;
+                rules.insert(at, r);
+            }
+            (_, Some(a)) => {
+                let at = rule_index(rules, a, column)?;
+                rules.insert(at + 1, r);
+            }
+            _ => rules.push(r),
+        }
+        Ok(())
+    };
+    match cmd {
+        ColumnRuleCmd::Set {
+            column,
+            rule,
+            before,
+            after,
+            ..
+        } => {
+            let mut r = file.unwrap_or_else(|| json!({}));
+            match r.get("name").and_then(Value::as_str) {
+                Some(n) if n != rule => {
+                    return Err(CliError::usage(format!(
+                        "the file names the rule `{n}`, not `{rule}`"
+                    )));
+                }
+                _ => r["name"] = rule.as_str().into(),
+            }
+            let o = r
+                .as_object_mut()
+                .ok_or_else(|| CliError::usage("a rule is an object"))?;
+            o.remove("id");
+            match rules.iter().position(|x| x["name"] == rule.as_str()) {
+                Some(at) => {
+                    if let Some(id) = rules[at].get("id").cloned() {
+                        o.insert("id".into(), id);
+                    }
+                    if before.is_none() && after.is_none() {
+                        rules[at] = r;
+                    } else {
+                        if before.as_deref() == Some(rule) || after.as_deref() == Some(rule) {
+                            return Err(CliError::usage("a rule cannot go next to itself"));
+                        }
+                        rules.remove(at);
+                        place(&mut rules, r, before, after, column)?;
+                    }
+                }
+                None => place(&mut rules, r, before, after, column)?,
+            }
+        }
+        ColumnRuleCmd::Rm { column, rule } => {
+            let at = rule_index(&rules, rule, column)?;
+            rules.remove(at);
+        }
+        ColumnRuleCmd::Move {
+            column,
+            rule,
+            before,
+            after,
+        } => {
+            if before.as_deref() == Some(rule) || after.as_deref() == Some(rule) {
+                return Err(CliError::usage("a rule cannot go next to itself"));
+            }
+            let at = rule_index(&rules, rule, column)?;
+            let r = rules.remove(at);
+            place(&mut rules, r, before, after, column)?;
+        }
+        ColumnRuleCmd::Enable { column, rule } | ColumnRuleCmd::Disable { column, rule } => {
+            let at = rule_index(&rules, rule, column)?;
+            rules[at]["enabled"] = matches!(cmd, ColumnRuleCmd::Enable { .. }).into();
+        }
+        ColumnRuleCmd::Ls { .. } | ColumnRuleCmd::Show { .. } | ColumnRuleCmd::Catalog => {}
+    }
+    Ok(rules)
+}
+
+/// The trigger of a rule in a few words: `job_result ended (merge)`.
+fn trigger_text(t: &Value) -> String {
+    let mut s = field(t, "kind");
+    let words = |k: &str| {
+        as_items(&t[k])
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    match s.as_str() {
+        "job_result" => {
+            s.push_str(&format!(" {}", words("events")));
+            if !as_items(&t["job_kinds"]).is_empty() {
+                s.push_str(&format!(" ({})", words("job_kinds")));
+            }
+        }
+        "timer" => s.push_str(&format!(" {}s", t["every_seconds"])),
+        "count_reached" => s.push_str(&format!(" {}", t["count"])),
+        _ => {}
+    }
+    s
+}
+
+fn print_rules(ctx: &Ctx, rules: &Value) {
+    let rows: Vec<Value> = as_items(rules)
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let verbs: Vec<String> = as_items(&r["actions"])
+                .iter()
+                .map(|a| field(a, "verb"))
+                .collect();
+            json!({"pos": i, "name": r["name"],
+                   "enabled": r["enabled"].as_bool().unwrap_or(true),
+                   "trigger": trigger_text(&r["trigger"]), "actions": verbs.join(", "),
+                   "id": r["id"]})
+        })
+        .collect();
+    print_table(
+        ctx,
+        &rows,
+        &[
+            ("POS", "pos"),
+            ("NAME", "name"),
+            ("ON", "enabled"),
+            ("TRIGGER", "trigger"),
+            ("ACTIONS", "actions"),
+            ("ID", "id"),
+        ],
+        "no rules",
+    );
+}
+
+fn print_rule(ctx: &Ctx, r: &Value) {
+    ctx.line(serde_json::to_string_pretty(r).unwrap_or_default());
+}
+
+fn print_catalog(ctx: &Ctx, c: &Value) {
+    ctx.line(format!("rule model {}", field(c, "model_version")));
+    ctx.line("triggers:");
+    for t in as_items(&c["triggers"]) {
+        let fields: Vec<String> = as_items(&t["fields"])
+            .iter()
+            .map(|f| field(f, "name"))
+            .collect();
+        let with = if fields.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", fields.join(", "))
+        };
+        ctx.line(format!(
+            "  {:<14} {}{with}",
+            field(t, "kind"),
+            field(t, "description")
+        ));
+    }
+    ctx.line("actions:");
+    for v in as_items(&c["actions"]) {
+        let args: Vec<String> = as_items(&v["args"])
+            .iter()
+            .map(|a| {
+                let name = field(a, "name");
+                if a["required"] == true {
+                    format!("{name}*")
+                } else {
+                    name
+                }
+            })
+            .collect();
+        ctx.line(format!("  {:<18} {}", field(v, "verb"), args.join(", ")));
+    }
+    ctx.line("conditions: when, if_card, if_job (`--json` for the fields)");
+}
+
 /// The whole column list after one `board column` change. The daemon
 /// checks the rules (the fixed columns, the roles, cards in a removed
 /// column).
@@ -241,6 +644,11 @@ pub fn edit_columns(cols: &[Value], cmd: &ColumnCmd) -> anyhow::Result<Vec<Value
                 specs[at]["rename_from"] = name.as_str().into();
                 specs[at]["name"] = new.into();
             }
+        }
+        ColumnCmd::Options { .. } | ColumnCmd::Rule { .. } => {
+            return Err(CliError::usage(
+                "`board column options` and `board column rule` are no change of the column list",
+            ));
         }
         ColumnCmd::Rm { name } => {
             let at = index_of(&specs, name)?;

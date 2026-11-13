@@ -783,6 +783,12 @@ export interface Agent {
   status_reason?: string;
   /** The turns, mail, and card or nudge pointers that wait for the agent. Absent when 0. */
   queued?: number;
+  /**
+   * The held mail of the agent that the operator did not release yet (docs/api.md §6, TER-1105). It is not in `queued`: the
+   * loop guard held it, and no pointer went out. Present for the operator, the agent itself, an admin of its project, and a
+   * reader of every project (`0` when none). Absent: unavailable to the caller.
+   */
+  held_mail?: number;
   /** An ephemeral agent (docs/api.md §6.10): it does one task for its owner. Absent when false. */
   ephemeral?: boolean;
   /** The owner of an ephemeral agent: an agent ULID, or `operator`. */
@@ -1395,6 +1401,10 @@ export interface Message extends LogSessionLink {
   read_by_name?: string;
   /** The loop guard paused the thread (docs/api.md §6.2). Absent when false. */
   thread_paused?: boolean;
+  /** The loop guard held the message (docs/api.md §7): it is stored as `delivered`, but no pointer went out until a release. */
+  held?: boolean;
+  /** Why the loop guard held it. */
+  held_reason?: string;
   /** The operator released a message that the loop guard held: the recipient got its pointer then. */
   released_at?: string;
   released_by?: string;

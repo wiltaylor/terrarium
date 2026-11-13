@@ -1228,7 +1228,9 @@ The remote side needs the usual POSIX shell and coreutils, including
 Python 3. No host
 installation is performed. Bound card agents use their recorded owned root
 and owner marker. Other callers use `<work_root>/.terrarium-runs` with a
-daemon-owned marker (the normal default root is `/src/terrarium`). All root,
+daemon-owned marker (the normal default root is `/src/terrarium`, else
+`~/.terrarium-work` when the remote user may not create it; a set
+`work_root` never falls back). All root,
 parent and claim opens use no-follow directory FDs. From the owned root
 down, directories must belong to the remote UID without group/other write.
 New directories are created individually mode 0700. Recovery refuses changed

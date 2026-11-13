@@ -2084,6 +2084,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `status_reason` | The reason of the last status change: `idle` after an idle stop, `paused` after the stop of a pause, `subscription_disabled` (the subscription is disabled, §16.2), `stream_limit: waiting for a free stream on `<sub>`` (the work waits for a stream of a self-hosted subscription, §16.2), `stopped`, an exit, or an error text. Absent when not known. |
 | `paused` | `true` while the agent is paused (§6.2): nothing wakes it, and its work waits. Always present. |
 | `queued` | The work that waits for the agent: queued turns, `queued` mail, card and nudge lines, and a pending reset with a `then` prompt (§6.2). Absent when 0. |
+| `held_mail` | The mail to the agent that the loop guard held and the operator did not release yet (`held` and no `released_at`, whatever its `state`; §7.4). It is not in `queued`: held mail is not deliverable work, and nothing releases it but `release` or `resume` (§7.4). A count only, in `GET /api/agents` and `GET /api/agents/{id}`. Present (`0` when none) for the operator, the agent itself, a `project_admin` of its project, a `sysadmin`, and an `architect`. Absent for any other caller: absent means unavailable, not 0. It can differ from the Inbox `system` count, which counts threads (§6.9). |
 | `idle_stop` | The idle stop of the agent (§6.2): `off`, or a duration such as `30m`. Absent: the daemon's `TERRARIUM_IDLE_STOP`. |
 | `compact_on_idle` | `true` or `false`: the agent compacts its session at its idle stop (§6.2, "Auto compact"). Absent: the daemon's `TERRARIUM_COMPACT_ON_IDLE`. |
 | `compact_max_age` | The maximum age of the session context (§6.2, "Auto compact"): `off`, or a duration such as `24h`. Absent: the daemon's `TERRARIUM_COMPACT_MAX_AGE`. |
@@ -4498,6 +4499,10 @@ of agent-to-agent mail on thread T since the last operator or project-inbox
 message (limit 6)`. The daemon sets both at the send and does not change
 them. Messages from before migration 16 have `held: false`.
 `thread_paused` is about the thread now; `held` is about the message.
+So a held message is never `queued` until a release: its `state` is
+`delivered` (later `read` or `replied` when the recipient reads it), and
+only `released_at` ends the hold. The CLI shows its state as
+`delivered (held)`, and the agent's `held_mail` counts it (§6).
 
 A message from an agent in `GET /api/mail` and `GET /api/mail/{id}` can
 have `session_id` and `session_label`: the sender's session at
@@ -4809,6 +4814,10 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 
 ### 8.2 Rules (PLAN §13)
 
+The checks of dependencies, blocked, done, and ETA below are **column
+options** (TER-1112, §8.2.1). Their defaults are the rules as written here.
+Own cards, the GitHub hold, and the WIP limit stay fixed.
+
 - **Own cards.** A member may move, edit, and link its own cards. A card is
   its own when it is assigned to the member, or when it is unassigned and the
   member made it. A member claims unassigned cards and comments on any card
@@ -4857,12 +4866,127 @@ archived cards. The columns are configurable (§8.3, "Columns"):
   previous_planned_secs}`).
 - **Events.** Every change is a `card` event with the actor (§9).
 
+#### 8.2.1 Column options (TER-1112)
+
+Each column has options: four move checks and the settings of its queue.
+
+| Check | Default | What it does |
+|---|---|---|
+| `require_dependencies_met` | the `working` column | a move into the column needs met dependencies (`409 dependencies_unmet`), also for a claim and a wait action |
+| `require_comment_on_enter` | the `blocked` column | a move into the column needs a non-blank comment (`422 comment_required`) |
+| `terminal_for_members` | `done` | the **Done** rule above for a card in the column: only a project admin or the operator moves it out, edits it, or reassigns it (`403`); nobody claims it or gives it a new ETA (`409`); only an admin makes a card in it (`403`) |
+| `clear_eta_on_enter` | every column | a card that enters the column loses its ETA (**ETA per column** above) |
+
+The mails on a move to `blocked` and `done`, `done_at`, and the reopen
+audit stay with the column role and the name `done`, not with the options.
+
+The queue settings are stored but not used yet (C3 runs the queue):
+`release` is `wip` (the default), `batch`, or `job`. Only `batch` takes
+`batch_size` (1 to 1000) and `max_wait_seconds` (1 to 2592000), both
+required, and `max_batch_cards` (optional, `batch_size` to 1000).
+
+The options belong to the column: a rename or a reorder keeps them. The
+board `PATCH` (§8.3) does not carry them, with one exception that keeps
+today's behaviour: when a column gets or loses the role `working`, its
+`require_dependencies_met` follows the role, and the same for `blocked`
+and `require_comment_on_enter`. Such a change needs the right to write the
+options (below): for another actor with the board `PATCH` right (a
+`sysadmin`), the whole `PATCH` is `403 forbidden` with `details.column` and
+`details.options`, and nothing changes. An allowed change raises the
+version and is recorded as a `PUT` is. A new column from the board `PATCH`
+gets the defaults of its role. Migration `ter-1112-column-options.sql` sets the
+defaults on each existing board from its roles and the name `done`.
+
+`GET /api/projects/{name}/board/columns/{column}/options` (a project
+reader; a role alias names the column with that role):
+
+```json
+{"project": "p", "column": "merge_queue", "version": 3,
+ "checks": {"require_comment_on_enter": false, "require_dependencies_met": false,
+            "terminal_for_members": false, "clear_eta_on_enter": true},
+ "queue": {"release": "batch", "batch_size": 4, "max_wait_seconds": 1800,
+           "max_batch_cards": 8}}
+```
+
+`PUT` on the same path takes the whole `checks` and `queue` and the
+`base_version` that was read, and returns the new options. Only the
+operator and a `project_admin` of that project write (`403` for every other
+actor, a `sysadmin` too: it reads only). A `base_version` that is not the
+current `version` is `409 stale_base` with `details.version`, and nothing is
+written. A bad queue is `422 invalid` with `details.path` (for example
+`queue.batch_size`). A write that changes something raises `version` by
+one, writes one audit row `board.column_options` (`{column, version,
+before, after}`), and emits one `board` event (`{column, options_version,
+checks, queue, rule_count}`). A write that changes nothing keeps the version and writes
+nothing.
+
+##### Column rules (TER-1120)
+
+The options also hold the column's rules, in order, in `rules` (C1b of the
+kanban rework). They are stored and checked only: the engine still runs
+the legacy rules (§19.8) until C2. Each rule has a stable `id` (the daemon
+gives it), a `name` (unique in the column: a-z, A-Z, 0-9, `.`, `_`, `-`, at
+most 64), an optional `description`, `enabled` (default `true`), a
+`trigger`, conditions, and actions:
+
+```json
+{"id": "01M7...", "name": "merge-pass", "enabled": true,
+ "trigger": {"kind": "job_result", "events": ["ended"], "job_kinds": ["merge"]},
+ "when": [{"path": "data.state", "op": "eq", "value": "passed"}],
+ "if_card": [{"lacks_labels": ["hold"]}],
+ "if_job": [{"state": ["passed"]}],
+ "max_per_hour": 600,
+ "actions": [{"verb": "card.move", "args": {"to": "@accepted"}}]}
+```
+
+| Trigger | Fields | When |
+|---|---|---|
+| `lands` | | a card enters the column (after the column's queue) |
+| `leaves` | | a card leaves the column |
+| `job_result` | `events` (at least one of `queued`, `started`, `requeued`, `verdict`, `cancelled`, `ended`), `job_kinds` (optional: `validate`, `merge`, `e2e`, `release`) | while a card is in the column: an event of its job |
+| `timer` | `every_seconds` (60 to 2592000) | while a card is in the column: every period |
+| `count_reached` | `count` (1 to 1000) | the column holds that many cards |
+| `wait_met` | | while a card is in the column: its wait is met |
+| `archived` | | a card in the column is archived |
+
+`when`, `if_card`, `if_job`, `max_per_hour` and the verbs of `actions` are
+those of the rules file (§19.8), with the same checks: known paths and
+values, known placeholders in texts, columns of the board (`@<role>` or a
+name), and the required arguments of each verb. `if_job` needs a
+`job_result` trigger. Limits: 50 rules in a column, 300 in a project, 20
+actions in a rule, 32 KiB for a rule.
+
+A `PUT` may carry `rules`: the whole list, in order. A rule with an `id`
+replaces that rule of the column; a rule without one is new; a rule that
+is left out is removed. Without `rules` the rules stay as they are. A bad
+list is `422 invalid` with `details.path` (for example
+`rules[1].actions[0].args.to`) and `details.problems` (each `{path,
+message}`), and nothing of the `PUT` is written. An `id` that is not a rule
+of this column, or an `id` twice, is a problem at `rules[i].id`. A rule
+write raises the version and is recorded as above; the audit row holds the
+rules before and after. A rename of the column keeps its rules; a removed
+column takes its rules with it. A board `PATCH` (§8.3) that removes a
+column with rules needs the right to write the options: for another actor
+with the board `PATCH` right (a `sysadmin`) the whole `PATCH` is `403
+forbidden` with `details.column` and `details.rules`, and nothing changes.
+An allowed removal puts the rules in the `board.columns` audit row, as
+`dropped_rules: [{column, before, after}]`.
+
+`GET /api/rules/catalog` (any caller) lists the rule model for an editor:
+`model_version`, `triggers` (each with its fields), `conditions` (`when`
+paths and ops, `if_card` and `if_job` fields), `actions` (each verb with its
+arguments: `name`, `type`, `required`, and `values` of a `one_of`),
+`placeholders`, and `limits`.
+
 ### 8.3 Endpoints
 
 | Endpoint | Body | Answer |
 |---|---|---|
 | `GET /api/projects/{name}/board?done=&limit=&cursor=` | | `200` board with card summaries; Done pages are opt-in |
 | `PATCH /api/projects/{name}/board` | `{"columns": [column, ...]}` | `200` board; project_admin |
+| `GET /api/projects/{name}/board/columns/{column}/options` | | `200` column options (§8.2.1) |
+| `PUT /api/projects/{name}/board/columns/{column}/options` | `{"base_version", "checks", "queue", "rules"?}` | `200` column options; the operator or project_admin of the project |
+| `GET /api/rules/catalog` | | `200` the column rule model (§8.2.1) |
 | `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards in board order: by column, then by place in the column (the top first), then by number. Each card has its `position` in its column, from 0. Cursor: opaque |
 | `POST /api/projects/{name}/cards` | new card | `201` card |
 | `GET /api/cards?columns=working,research` | | `200` the active cards of every board the caller may read (below) |
@@ -6920,7 +7044,7 @@ all projects. Targets are project targets by default: a global target
 
 | Field | Meaning |
 |---|---|
-| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Without `work_root`, when the agent user cannot create `/src/terrarium` (permission denied or a read-only file system), the root falls back to `~/.terrarium-work/<project>/<agent-name>` of that user, with one daemon warning per target; the root keeps that base until cleanup. A `work_root` that is set never falls back: its failure names it. Set it with `terrarium admin target edit <t> --work-root <path>`. Keep project shared caches outside each agent root. |
+| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Without `work_root`, when the agent user cannot create `/src/terrarium` (permission denied or a read-only file system), the root falls back to `~/.terrarium-work/<project>/<agent-name>` of that user, with one daemon warning per target; the root keeps that base until cleanup. The run spool of other callers (`<work_root>/.terrarium-runs`, below) falls back the same way, to `~/.terrarium-work/.terrarium-runs`, and a run keeps the spool it started in. A `work_root` that is set never falls back: its failure names it and `--work-root`. Set it with `terrarium admin target edit <t> --work-root <path>`. Keep project shared caches outside each agent root. |
 | `scope` | `global` (no `project`) or `project`. Every target view has it, also in `GET /api/projects/{name}/targets`. |
 | `state` | `running`, `stopped`, `absent`, or `unknown`: what the last lifecycle verb saw. |
 | `snapshots` | The snapshot names that `POST .../snapshot` or `snapshot_before_task` took. A destroy (the state `absent`) clears them. A snapshot delete removes a name. A snapshot list removes the names that the host no longer has (§17.3, "Snapshots"). |
@@ -7608,11 +7732,20 @@ is `422 invalid`. Input-fed queue setup and bundle transfer do not opt in.
 Ordinary execs, PTYs, and shells retain the previous interruption behavior.
 The private remote output spool is under the bound card agent's recorded
 owned root, or `<work_root>/.terrarium-runs` for other callers. The latter
-has a daemon-owned marker. No-follow directory-FD checks reject symlinks,
+has a daemon-owned marker. Without `work_root` it is
+`/src/terrarium/.terrarium-runs`, else `~/.terrarium-work/.terrarium-runs`
+when the remote user may not create `/src/terrarium` (permission denied, a
+read-only file system, or a missing parent); a spool that is not usable either
+way fails at once with a `spool error` that names `--work-root` (TER-1129). No-follow directory-FD checks reject symlinks,
 foreign ownership and group/other writable components. Python 3 is required
 for these checks; missing tools are terminal errors, never installed. The spool
 retains the first 64 MiB per stream, and is removed after 24 hours of result
 retention (at most the command timeout plus 24 hours and two minutes).
+The command, an agent `run` or a queue recipe, runs under the login umask
+of the remote user (often `0022` or `0002`), as a plain ssh command does. The
+spool, its markers and logs stay owner-only (`0700`/`0600`). Before TER-1150
+the command inherited the spool's `077`, so the files that it made were
+`700`/`600`: run `chmod -R go+rX` on such output.
 The remote lifetime is at most seven days, measured from the original
 checkpoint even if first launch is delayed. Recovery refuses a changed
 target incarnation, SSH host key or exe.dev VM ID with `interrupted (target

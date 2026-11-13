@@ -219,7 +219,50 @@ async fn list(
         v.harness_version = harness_version(&runs, v.agent.id);
     }
     mark_skills(&state, &runs, &mut rows.items).await;
+    mark_held(&state, &actor, &mut rows.items).await?;
     Ok(paged(rows))
+}
+
+/// True when `actor` may see the held mail count of agent `view`
+/// (TER-1105): the operator, the agent itself, an admin of its project
+/// (`policy::is_admin_of`), or a reader of every project. A plain member
+/// does not: the count would show that mail exists that it may not read.
+fn sees_held(actor: &Actor, view: &AgentView) -> bool {
+    match actor {
+        Actor::Operator => true,
+        Actor::Agent(a) => {
+            a.id == view.agent.id.to_string()
+                || a.reads_all()
+                || policy::is_admin_of(actor, &view.agent.project)
+        }
+    }
+}
+
+/// Fill `held_mail` of each agent of `views` that `actor` may see it of
+/// ([`sees_held`]). The others keep `None`, so the field stays absent.
+async fn mark_held(state: &Shared, actor: &Actor, views: &mut [AgentView]) -> ApiResult<()> {
+    let ids: Vec<String> = views
+        .iter()
+        .filter(|v| sees_held(actor, v))
+        .map(|v| v.agent.id.to_string())
+        .collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let counts = state
+        .db
+        .read(move |c| {
+            ids.into_iter()
+                .map(|id| Ok((crate::store::mail::held_count(c, &id)?, id)))
+                .collect::<ApiResult<Vec<_>>>()
+        })
+        .await?;
+    for (n, id) in counts {
+        if let Some(v) = views.iter_mut().find(|v| v.agent.id.to_string() == id) {
+            v.held_mail = Some(n);
+        }
+    }
+    Ok(())
 }
 
 /// Fill `effective_skills` of each agent of `views`, and set
@@ -399,6 +442,7 @@ async fn show(
     let runs = state.supervisor.harness_runs();
     view.harness_version = harness_version(&runs, view.agent.id);
     mark_skills(&state, &runs, std::slice::from_mut(&mut view)).await;
+    mark_held(&state, &actor, std::slice::from_mut(&mut view)).await?;
     let subscription_detail = match view.agent.subscription.clone() {
         Some(name) => {
             let harness = view.agent.harness;

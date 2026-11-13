@@ -11,6 +11,14 @@ struct Spool {
     root: String,
     owner: String,
     card: bool,
+    /// The root is the default base (no `work_root`): the remote helper
+    /// falls back to `~/.terrarium-work` when the agent user may not create
+    /// it (TER-1129). Older checkpoints have no fallback.
+    #[serde(default)]
+    fallback: bool,
+    /// The target name, only for the `--work-root` hint in spool errors.
+    #[serde(default)]
+    target: String,
 }
 
 fn spool(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Spool> {
@@ -33,6 +41,8 @@ fn spool(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Spool> {
                 root: format!("{base}/{project}/{name}"),
                 owner: agent,
                 card: true,
+                fallback: false,
+                target: def.name.clone(),
             });
         }
     }
@@ -54,19 +64,23 @@ fn spool(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Spool> {
             .to_owned(),
         owner,
         card: false,
+        fallback: def.work_root.is_none(),
+        target: def.name.clone(),
     })
 }
 
 fn checked_paths(spool: &Spool, token: &str, mode: &str, script: &str) -> String {
     format!(
-        "command -v python3 >/dev/null 2>&1 || {{ printf 'Bunsupported: python3 missing\\n'; exit 1; }}; exec python3 -S -c {} {} {} {} {} {} {}",
+        "command -v python3 >/dev/null 2>&1 || {{ printf 'Bunsupported: python3 missing\\n'; exit 1; }}; exec python3 -S -c {} {} {} {} {} {} {} {} {}",
         sh_quote(PATHS),
         sh_quote(&spool.root),
         sh_quote(&spool.owner),
         if spool.card { "1" } else { "0" },
         sh_quote(token),
         sh_quote(mode),
-        sh_quote(script)
+        sh_quote(script),
+        if spool.fallback { "1" } else { "0" },
+        sh_quote(&spool.target)
     )
 }
 
@@ -501,6 +515,8 @@ fn script_with_retention(path: &str, cmd: &RemoteCmd, created: i64, retain: u64)
             root: root.into(),
             owner: "test-owner".into(),
             card: false,
+            fallback: false,
+            target: String::new(),
         },
     )
 }
@@ -538,7 +554,9 @@ fn script_for_spool(
         r#"
 p=.
 trap ':' TERM
-sh -c {command} &
+# Only the user command runs under the login umask (TER-1150). The spool,
+# its markers and logs keep the private 077 of this script.
+(umask "${{TERRARIUM_LOGIN_UMASK:-077}}" && unset TERRARIUM_LOGIN_UMASK && exec sh -c {command}) &
 f=$!
 # The coordinator anchors the group identity, not the output streams.
 exec >/dev/null 2>&1
@@ -710,8 +728,217 @@ mod tests {
                 root: root.to_str().unwrap().into(),
                 owner: "test-owner".into(),
                 card,
+                fallback: false,
+                target: String::new(),
             },
         )
+    }
+
+    /// A default base that no user may create, also root: sysfs refuses a
+    /// mkdir (EROFS, EPERM or EACCES), like a root-owned `/` without `/src`.
+    fn uncreatable_spool(fallback: bool) -> Spool {
+        Spool {
+            root: format!("/sys/terrarium-{}/terrarium", ulid::Ulid::new()),
+            owner: "test-owner".into(),
+            card: false,
+            fallback,
+            target: "box".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_default_root_falls_back_to_home() {
+        use std::os::unix::fs::PermissionsExt;
+        // TER-1129: without work_root the spool uses ~/.terrarium-work when
+        // the agent user may not create the default base.
+        let home = tempfile::tempdir().unwrap();
+        let spool = uncreatable_spool(true);
+        let path = format!("{}/.terrarium-runs/claim", spool.root);
+        let cmd = RemoteCmd {
+            argv: vec!["true".into()],
+            ..RemoteCmd::default()
+        };
+        let script = script_for_spool(&path, &cmd, chrono::Utc::now().timestamp(), RETAIN, &spool);
+        let output = tokio::time::timeout(
+            Duration::from_secs(12),
+            tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .env("HOME", home.path())
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let base = home.path().join(".terrarium-work");
+        let claim = base.join(".terrarium-runs/claim");
+        for _ in 0..100 {
+            if let Ok(pid) = std::fs::read_to_string(claim.join("janitor")) {
+                assert!(
+                    std::process::Command::new("kill")
+                        .args(["-KILL", "--", &format!("-{}", pid.trim())])
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("X0\n"), "{stdout}");
+        // The fallback and the spool stay private.
+        for dir in [&base, &base.join(".terrarium-runs"), &claim] {
+            assert_eq!(
+                std::fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "{}",
+                dir.display()
+            );
+        }
+        assert!(!std::path::Path::new(&spool.root).exists());
+    }
+
+    #[tokio::test]
+    async fn durable_command_gets_the_login_umask_and_the_spool_stays_private() {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        // TER-1150: the command ran under the spool's umask 077, so a clone
+        // or build output was 700/600 for a container user.
+        let mode = |p: &std::path::Path| {
+            std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777
+        };
+        for (umask, file, dir) in [("0022", 0o644, 0o755), ("0002", 0o664, 0o775)] {
+            let (temp, spool) = secure_root(false);
+            let work = temp.path().join("work");
+            std::fs::create_dir(&work).unwrap();
+            let path = format!("{}/.terrarium-runs/claim", spool.root);
+            let cmd = RemoteCmd {
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "umask > seen; touch made; mkdir dir; printf %s \"${TERRARIUM_LOGIN_UMASK-unset}\" > env"
+                        .into(),
+                ],
+                cwd: Some(work.to_str().unwrap().into()),
+                ..RemoteCmd::default()
+            };
+            let script =
+                script_for_spool(&path, &cmd, chrono::Utc::now().timestamp(), RETAIN, &spool);
+            let output = tokio::time::timeout(
+                Duration::from_secs(12),
+                tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(format!("umask {umask}\n{script}"))
+                    .output(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let claim = std::path::Path::new(&path);
+            for _ in 0..100 {
+                if let Ok(pid) = std::fs::read_to_string(claim.join("janitor")) {
+                    assert!(
+                        std::process::Command::new("kill")
+                            .args(["-KILL", "--", &format!("-{}", pid.trim())])
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains("X0\n"), "{umask}: {stdout}");
+            assert_eq!(
+                std::fs::read_to_string(work.join("seen")).unwrap().trim(),
+                umask
+            );
+            assert_eq!(mode(&work.join("made")), file, "{umask}");
+            assert_eq!(mode(&work.join("dir")), dir, "{umask}");
+            assert_eq!(
+                std::fs::read_to_string(work.join("env")).unwrap(),
+                "unset",
+                "{umask}"
+            );
+            // The spool, its markers and logs stay owner-only.
+            let parent = claim.parent().unwrap();
+            let mut seen = Vec::new();
+            for dir in [parent, claim] {
+                assert_eq!(mode(dir), 0o700, "{umask}: {}", dir.display());
+                for entry in std::fs::read_dir(dir).unwrap() {
+                    let entry = entry.unwrap();
+                    let kind = entry.file_type().unwrap();
+                    if kind.is_dir() {
+                        continue;
+                    }
+                    assert!(
+                        kind.is_file() || kind.is_fifo(),
+                        "{}",
+                        entry.path().display()
+                    );
+                    assert_eq!(
+                        mode(&entry.path()),
+                        0o600,
+                        "{umask}: {}",
+                        entry.path().display()
+                    );
+                    seen.push(entry.file_name().into_string().unwrap());
+                }
+            }
+            for name in [
+                "out",
+                "err",
+                "exit",
+                "pid",
+                "foreground",
+                "ready",
+                "live",
+                "o",
+                "e",
+            ] {
+                assert!(
+                    seen.iter().any(|s| s == name),
+                    "{umask}: {name} in {seen:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_set_work_root_names_the_flag() {
+        // A work_root that is set never falls back: its error names it.
+        let home = tempfile::tempdir().unwrap();
+        let spool = uncreatable_spool(false);
+        let path = format!("{}/.terrarium-runs/claim", spool.root);
+        let cmd = RemoteCmd {
+            argv: vec!["true".into()],
+            ..RemoteCmd::default()
+        };
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(script_for_spool(
+                &path,
+                &cmd,
+                chrono::Utc::now().timestamp(),
+                RETAIN,
+                &spool,
+            ))
+            .env("HOME", home.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        let message = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            message.starts_with("Bspool error: work_root /sys/"),
+            "{message}"
+        );
+        assert!(
+            message.contains("terrarium admin target edit box --work-root <absolute path>"),
+            "{message}"
+        );
+        assert!(!home.path().join(".terrarium-work").exists());
     }
 
     async fn path_refusal(attack: &str) {

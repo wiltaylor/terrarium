@@ -38,6 +38,7 @@ pub const AGENT_COLS: &[(&str, &str)] = &[
     ("HARNESS", "harness"),
     ("STATUS", "state"),
     ("QUEUED", "queued"),
+    ("HELD", "held_mail"),
     ("ROLES", "roles"),
     ("CARD", "current_card"),
     ("WAITING ON", "waiting_on"),

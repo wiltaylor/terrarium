@@ -42,6 +42,15 @@ export function lifecycleBadge(a: Lifecycle): LifecycleBadge {
 /** "3 queued", or null when nothing waits for the agent. */
 export const queuedLabel = (a: Pick<Agent, "queued">): string | null => (a.queued && a.queued > 0 ? `${a.queued} queued` : null);
 
+/** "2 held", or null when no held mail waits for a release or the caller may not see it. Apart from {@link queuedLabel}. */
+export const heldLabel = (a: Pick<Agent, "held_mail">): string | null => (a.held_mail && a.held_mail > 0 ? `${a.held_mail} held` : null);
+
+/** The held mail line of the agent page: the count, or `unavailable` when the daemon left the field out for the caller. */
+export const heldText = (a: Pick<Agent, "held_mail">): string => (a.held_mail === undefined ? "unavailable" : String(a.held_mail));
+
+/** The tooltip of the held chip. */
+export const HELD_TITLE = "Mail that the loop guard held. No pointer went to the agent, and it is not in the queued count. The operator resumes the thread in the Inbox.";
+
 /** One lifecycle button of the agent page. */
 export interface LifecycleAction {
   kind: "pause" | "resume" | "restart";

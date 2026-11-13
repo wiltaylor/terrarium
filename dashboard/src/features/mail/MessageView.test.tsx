@@ -10,7 +10,7 @@ vi.mock("../../stores", async () => {
   const { instanceTestStores } = await import("../../test/instance");
   return instanceTestStores({ api, agents: { state: { agents: api.world.agents } } });
 });
-const { MessageView } = await import("./parts");
+const { MessageView, heldOpen } = await import("./parts");
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.replaceChildren(); });
 
@@ -30,4 +30,23 @@ it("links mail authors and known sessions, leaving operator and removed agents p
     expect(post.querySelector("strong a")).toBeNull();
     expect(post.querySelector(".session-link")).toBeNull();
   }
+});
+
+it("shows a held chip only for held mail that is not released (TER-1105)", () => {
+  expect(heldOpen({ held: true })).toBe(true);
+  expect(heldOpen({ held: true, released_at: "2026-11-13T00:00:00Z" })).toBe(false);
+  expect(heldOpen({})).toBe(false);
+  const agent = api.world.agents[0]!;
+  const base: Message = { id: "h", thread_id: "t", from: agent.id, from_name: agent.name, from_kind: "agent", to: "operator", to_name: "operator", to_kind: "operator", body: "Message", subject: "", state: "delivered", created_at: "2026-11-12T00:00:00Z", held: true, held_reason: "loop guard" };
+  const root = document.createElement("div"); document.body.append(root);
+  dispose = render(() => <MemoryRouter><Route path="/" component={() => <>
+    <MessageView message={base} />
+    <MessageView message={{ ...base, id: "r", released_at: "2026-11-13T00:00:00Z", released_by: "operator" }} />
+  </>} /></MemoryRouter>, root);
+  const posts = root.querySelectorAll(".thread-post");
+  const chips = (i: number) => [...posts[i]!.querySelectorAll(".chip")].map((c) => c.textContent?.trim());
+  expect(chips(0)).toContain("held");
+  expect(chips(0)).not.toContain("released");
+  expect(chips(1)).not.toContain("held");
+  expect(chips(1)).toContain("released");
 });

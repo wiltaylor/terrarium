@@ -1433,6 +1433,52 @@ pub enum ColumnCmd {
         #[arg(long, value_name = "NEW")]
         rename: Option<String>,
     },
+    /// Show or change the options of a column: its move checks and its
+    /// queue settings (TER-1112). With no change flag it shows them. A
+    /// change needs project_admin of the project or the operator; it reads
+    /// the options, then writes them with the version it read
+    Options {
+        /// A column name, or a role alias (`working`, `blocked`)
+        name: String,
+        /// A move into the column needs a comment
+        #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
+        require_comment: Option<bool>,
+        /// A move into the column needs every dependency accepted or done
+        #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
+        require_dependencies: Option<bool>,
+        /// A card in the column is final for members: only a project admin
+        /// or the operator moves, edits, or assigns it
+        #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
+        terminal: Option<bool>,
+        /// A card that enters the column loses its ETA
+        #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
+        clear_eta: Option<bool>,
+        /// When a card leaves the column's queue; a release other than
+        /// `batch` drops the batch settings. Stored only: the queue is not
+        /// run yet
+        #[arg(long, value_parser = ["wip", "batch", "job"])]
+        queue_release: Option<String>,
+        /// `batch`: the cards that release a batch
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        batch_size: Option<u32>,
+        /// `batch`: the seconds the oldest card waits before a smaller batch
+        #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u32).range(1..))]
+        max_wait_seconds: Option<u32>,
+        /// `batch`: the most cards of one batch
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "no_max_batch_cards")]
+        max_batch_cards: Option<u32>,
+        /// `batch`: no cap on the cards of one batch
+        #[arg(long)]
+        no_max_batch_cards: bool,
+        /// The whole options as JSON, `{"checks": {...}, "queue": {...}}`,
+        /// with an optional `base_version`; `-` reads stdin
+        #[arg(long, value_name = "FILE", conflicts_with_all = [
+            "require_comment", "require_dependencies", "terminal", "clear_eta",
+            "queue_release", "batch_size", "max_wait_seconds", "max_batch_cards",
+            "no_max_batch_cards",
+        ])]
+        from_file: Option<String>,
+    },
     /// Remove a column; it must have no cards
     Rm { name: String },
     /// Move a column
@@ -1448,6 +1494,66 @@ pub enum ColumnCmd {
         #[arg(long, value_name = "COLUMN")]
         before: Option<String>,
     },
+    /// The structured rules of a column (TER-1120): list, show, set,
+    /// remove, move, enable, or disable one, and the catalog of triggers,
+    /// conditions and verbs. A change needs project_admin of the project
+    /// or the operator; it reads the options, then writes them with the
+    /// version it read. The engine does not run these rules yet
+    Rule {
+        #[command(subcommand)]
+        command: ColumnRuleCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ColumnRuleCmd {
+    /// List the rules of a column, in order
+    Ls {
+        /// A column name, or a role alias (`working`, `blocked`)
+        column: String,
+    },
+    /// Show one rule as JSON
+    Show { column: String, rule: String },
+    /// Add a rule, or replace the rule of that name, from JSON: `{"trigger":
+    /// {...}, "actions": [...], ...}` (see `rule catalog`). A replaced rule
+    /// keeps its ID and place; a new one goes last
+    Set {
+        column: String,
+        rule: String,
+        /// The rule as JSON; `-` reads stdin. The output of `rule show
+        /// --json` is a valid file
+        #[arg(long, value_name = "FILE")]
+        from_file: String,
+        /// Put the rule before this rule
+        #[arg(long, value_name = "RULE", conflicts_with = "after")]
+        before: Option<String>,
+        /// Put the rule after this rule
+        #[arg(long, value_name = "RULE")]
+        after: Option<String>,
+    },
+    /// Remove a rule
+    Rm { column: String, rule: String },
+    /// Move a rule in the order of its column
+    Move {
+        column: String,
+        rule: String,
+        #[arg(
+            long,
+            value_name = "RULE",
+            required_unless_present = "before",
+            conflicts_with = "before"
+        )]
+        after: Option<String>,
+        #[arg(long, value_name = "RULE")]
+        before: Option<String>,
+    },
+    /// Turn a rule on
+    Enable { column: String, rule: String },
+    /// Turn a rule off; it stays in the column
+    Disable { column: String, rule: String },
+    /// The rule model: triggers, conditions, verbs with their arguments,
+    /// placeholders, and limits
+    Catalog,
 }
 
 #[derive(Debug, Subcommand)]

@@ -37,6 +37,9 @@ use crate::store::session_refs::{self, SessionRef};
 use crate::store::{Page, Paged, agents, github_gate, json_col, questions};
 
 pub mod card_waits;
+pub mod column_options;
+
+pub use column_options::ColumnChecks;
 
 /// The columns of a new board, in order, with their roles.
 pub const DEFAULT_COLUMNS: [(&str, Option<&str>); 9] = [
@@ -255,6 +258,8 @@ struct ColumnRow {
     title: Option<String>,
     wip_limit: Option<i64>,
     role: Option<String>,
+    /// The move checks of the column (TER-1112, [`ColumnChecks`]).
+    checks: ColumnChecks,
 }
 
 impl ColumnRow {
@@ -272,6 +277,8 @@ struct CardRow {
     column: String,
     /// The role of the card's column.
     column_role: Option<String>,
+    /// The `terminal_for_members` check of the card's column (TER-1112).
+    column_terminal: bool,
     position: i64,
     title: String,
     body: String,
@@ -305,6 +312,7 @@ fn card_row(r: &Row<'_>) -> rusqlite::Result<CardRow> {
         column_id: r.get("column_id")?,
         column: r.get("column_name")?,
         column_role: r.get("column_role")?,
+        column_terminal: r.get::<_, i64>("column_terminal")? != 0,
         position: r.get("position")?,
         title: r.get("title")?,
         body: r.get("body")?,
@@ -324,7 +332,8 @@ fn card_row(r: &Row<'_>) -> rusqlite::Result<CardRow> {
     })
 }
 
-const CARD_SELECT: &str = "SELECT c.*, k.name AS column_name, k.role AS column_role FROM cards c
+const CARD_SELECT: &str = "SELECT c.*, k.name AS column_name, k.role AS column_role,
+                                  k.terminal_for_members AS column_terminal FROM cards c
                            JOIN board_columns k ON k.id = c.column_id";
 
 /// A readable name for a stored address.
@@ -342,9 +351,21 @@ pub fn create_board(t: &mut Tx<'_>, project: &str) -> ApiResult<()> {
         params![project, now()],
     )?;
     for (i, (name, role)) in DEFAULT_COLUMNS.iter().enumerate() {
+        let c = ColumnChecks::default_for(name, *role);
         t.execute(
-            "INSERT INTO board_columns (project, name, position, role) VALUES (?1, ?2, ?3, ?4)",
-            params![project, name, i as i64, role],
+            "INSERT INTO board_columns (project, name, position, role, require_comment_on_enter,
+                 require_dependencies_met, terminal_for_members, clear_eta_on_enter)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                project,
+                name,
+                i as i64,
+                role,
+                c.require_comment_on_enter,
+                c.require_dependencies_met,
+                c.terminal_for_members,
+                c.clear_eta_on_enter
+            ],
         )?;
     }
     Ok(())
@@ -352,7 +373,9 @@ pub fn create_board(t: &mut Tx<'_>, project: &str) -> ApiResult<()> {
 
 fn column_rows(conn: &Connection, project: &str) -> ApiResult<Vec<ColumnRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, title, wip_limit, role FROM board_columns WHERE project = ?1
+        "SELECT id, name, title, wip_limit, role, require_comment_on_enter,
+                require_dependencies_met, terminal_for_members, clear_eta_on_enter
+         FROM board_columns WHERE project = ?1
          ORDER BY position",
     )?;
     let rows = stmt
@@ -363,6 +386,12 @@ fn column_rows(conn: &Connection, project: &str) -> ApiResult<Vec<ColumnRow>> {
                 title: r.get(2)?,
                 wip_limit: r.get(3)?,
                 role: r.get(4)?,
+                checks: ColumnChecks {
+                    require_comment_on_enter: r.get(5)?,
+                    require_dependencies_met: r.get(6)?,
+                    terminal_for_members: r.get(7)?,
+                    clear_eta_on_enter: r.get(8)?,
+                },
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1148,7 +1177,7 @@ pub fn list_cards_for_request(
         .unwrap_or_else(|| " AND ?11 IS NULL".to_owned());
     let sql = format!(
         "SELECT c.*, k.name AS column_name, k.role AS column_role,
-                k.position AS column_position
+                k.terminal_for_members AS column_terminal, k.position AS column_position
            FROM cards c JOIN board_columns k ON k.id = c.column_id
           WHERE c.project = ?1 AND c.kind = 'card'
            AND (k.position, c.position, c.number) > (?2, ?9, ?10)
@@ -1643,10 +1672,11 @@ fn may_edit(actor: &Actor, card: &CardRow) -> ApiResult<()> {
     if policy::is_admin_of(actor, &card.project) {
         return Ok(());
     }
-    if card.column == DONE {
+    if card.column_terminal {
         return Err(ApiError::forbidden(format!(
-            "{} is done; only a project admin or the operator changes a done card",
-            card.id
+            "{}; only a project admin or the operator changes {}",
+            final_state(card),
+            final_noun(card)
         )));
     }
     if owns(actor, card) || card.created_by == actor.address() {
@@ -1744,6 +1774,25 @@ fn card_is_held(card: &CardRow) -> bool {
     github_gate::is_held(&card.title, &json_col::<Vec<String>>(&card.labels))
 }
 
+/// "X is done", or "X is in `col`, a final column" for another column with
+/// the `terminal_for_members` check (TER-1112).
+fn final_state(card: &CardRow) -> String {
+    if card.column == DONE {
+        format!("{} is done", card.id)
+    } else {
+        format!("{} is in `{}`, a final column", card.id, card.column)
+    }
+}
+
+/// "a done card", or "a card in a final column" for another final column.
+fn final_noun(card: &CardRow) -> &'static str {
+    if card.column == DONE {
+        "a done card"
+    } else {
+        "a card in a final column"
+    }
+}
+
 fn not_archived(card: &CardRow) -> ApiResult<()> {
     if card.kind == "group" {
         return Err(ApiError::invalid(
@@ -1790,16 +1839,18 @@ fn check_move(
             card.id
         )));
     }
-    if card.column == DONE && to.name != DONE && !admin {
+    // The checks of TER-1112 are options of the columns: `terminal_for_members`
+    // of the source, the others of the target.
+    if card.column_terminal && to.id != card.column_id && !admin {
         return Err(ApiError::forbidden(format!(
-            "{} is done; only a project admin or the operator reopens a card",
-            card.id
+            "{}; only a project admin or the operator reopens a card",
+            final_state(card)
         )));
     }
     if to.id == card.column_id {
         return Ok(());
     }
-    if to.is(WORKING) {
+    if to.checks.require_dependencies_met {
         let open = unmet(t, &card.id)?;
         if !open.is_empty() {
             return Err(ApiError::new(
@@ -1827,11 +1878,16 @@ fn check_move(
         )
         .with_details(json!({"column": to.name, "wip_limit": limit})));
     }
-    if to.is(BLOCKED) && comment.is_none_or(|c| c.trim().is_empty()) {
+    if to.checks.require_comment_on_enter && comment.is_none_or(|c| c.trim().is_empty()) {
+        let what = if to.is(BLOCKED) {
+            " (the blocked column)"
+        } else {
+            ""
+        };
         return Err(ApiError::new(
             Code::CommentRequired,
             format!(
-                "moving {} to `{}` (the blocked column) needs a comment that says what is needed",
+                "moving {} to `{}`{what} needs a comment that says what is needed",
                 card.id, to.name
             ),
         ));
@@ -1868,17 +1924,19 @@ fn apply_move(
     )?;
     // `done_at` is when the card moved to `done`; another column clears it.
     // A move to another column ends the idle mark (TER-67) and clears the
-    // ETA (TER-155 D1): an ETA is for the work of one column. The `moved`
-    // event keeps the old ETA.
+    // ETA (TER-155 D1): an ETA is for the work of one column. The
+    // `clear_eta_on_enter` option of the target (TER-1112, on by default)
+    // can keep it. The `moved` event keeps the old ETA.
+    let keep_eta = same || !to.checks.clear_eta_on_enter;
     t.execute(
         "UPDATE cards SET column_id = ?2, position = ?3, updated_at = ?4,
             done_at = CASE WHEN ?5 THEN done_at WHEN ?6 THEN ?4 ELSE NULL END,
             idle_since = CASE WHEN ?5 THEN idle_since ELSE NULL END,
-            eta_at = CASE WHEN ?5 THEN eta_at ELSE NULL END,
-            eta_set_at = CASE WHEN ?5 THEN eta_set_at ELSE NULL END,
-            eta_set_by = CASE WHEN ?5 THEN eta_set_by ELSE NULL END
+            eta_at = CASE WHEN ?7 THEN eta_at ELSE NULL END,
+            eta_set_at = CASE WHEN ?7 THEN eta_set_at ELSE NULL END,
+            eta_set_by = CASE WHEN ?7 THEN eta_set_by ELSE NULL END
          WHERE id = ?1",
-        params![card.id, to.id, at, now(), same, to.name == DONE],
+        params![card.id, to.id, at, now(), same, to.name == DONE, keep_eta],
     )?;
     let author = author_of(t, actor);
     if let Some(c) = comment {
@@ -2056,10 +2114,10 @@ pub fn assign_card(t: &mut Tx<'_>, actor: &Actor, id: &str, who: Option<&str>) -
     let me = actor.address();
     let admin = policy::is_admin_of(actor, &card.project);
     if !admin {
-        if card.column == DONE {
+        if card.column_terminal {
             return Err(ApiError::forbidden(format!(
-                "{} is done; only a project admin or the operator changes it",
-                card.id
+                "{}; only a project admin or the operator changes it",
+                final_state(&card)
             )));
         }
         if let Some(current) = card.assignee.as_ref().filter(|a| **a != me) {
@@ -2121,8 +2179,8 @@ pub fn claim_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<Card> {
             name_of(t, current)?
         )));
     }
-    if card.column == DONE {
-        return Err(ApiError::conflict(format!("{} is done", card.id)));
+    if card.column_terminal {
+        return Err(ApiError::conflict(final_state(&card)));
     }
     if card.assignee.is_none() {
         t.execute(
@@ -2377,10 +2435,11 @@ pub(crate) fn create_card_with_author(
         .transpose()?
         .filter(|k| k.name != BACKLOG);
     if let Some(to) = to {
-        if to.name == DONE && !policy::is_admin_of(actor, project) {
-            return Err(ApiError::forbidden(
-                "only a project admin or the operator makes a card in done",
-            ));
+        if to.checks.terminal_for_members && !policy::is_admin_of(actor, project) {
+            return Err(ApiError::forbidden(format!(
+                "only a project admin or the operator makes a card in {}",
+                to.name
+            )));
         }
         check_move(t, actor, &row, &to, new.comment.as_deref())?;
         apply_move(t, actor, &row, &to, None, new.comment.as_deref())?;
@@ -2718,10 +2777,11 @@ pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> Ap
     may_edit(actor, &card)?;
     let at = match eta {
         Some(v) => {
-            if card.column == DONE {
+            if card.column_terminal {
                 return Err(ApiError::conflict(format!(
-                    "{} is done; a done card takes no new ETA",
-                    card.id
+                    "{}; {} takes no new ETA",
+                    final_state(&card),
+                    final_noun(&card)
                 )));
             }
             let at =
@@ -3145,6 +3205,33 @@ fn check_columns(current: &[ColumnRow], specs: &[ColumnSpec]) -> ApiResult<Vec<W
     Ok(out)
 }
 
+/// The legacy board PATCH keeps today's behaviour (TER-1112): the check of
+/// a role goes with the role. A column that gets the role `working` needs
+/// met dependencies and one that loses it no longer does; the same for
+/// `blocked` and the comment. The other checks stay. A change needs the
+/// options right ([`column_options::carry_checks`]).
+fn carry_role_checks(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    project: &str,
+    old: &ColumnRow,
+    name: &str,
+    role: Option<&str>,
+) -> ApiResult<()> {
+    let was = old.role.as_deref();
+    if was == role {
+        return Ok(());
+    }
+    let mut c = old.checks;
+    if was == Some(WORKING) || role == Some(WORKING) {
+        c.require_dependencies_met = role == Some(WORKING);
+    }
+    if was == Some(BLOCKED) || role == Some(BLOCKED) {
+        c.require_comment_on_enter = role == Some(BLOCKED);
+    }
+    column_options::carry_checks(t, actor, project, old, name, c)
+}
+
 /// Set the columns: the list is the whole board, in order (PLAN §13).
 ///
 /// - `backlog` is first and `done` is last. They stay, keep their names,
@@ -3167,6 +3254,7 @@ pub fn set_columns(
     let wanted = check_columns(&current, specs)?;
     let kept: HashSet<i64> = wanted.iter().filter_map(|w| w.keeps).collect();
     let backlog = column(t, project, BACKLOG)?;
+    let mut dropped_rules: Vec<Value> = Vec::new();
     for c in current.iter().filter(|c| !kept.contains(&c.id)) {
         let mut stmt = t.prepare(
             "SELECT id FROM cards WHERE column_id = ?1 AND archived = 0 ORDER BY number",
@@ -3183,6 +3271,11 @@ pub fn set_columns(
                 cards.join(", ")
             ))
             .with_details(json!({"column": c.name, "cards": cards})));
+        }
+        // The column's rules go with it (TER-1120): that needs the options
+        // right, and the audit row keeps them.
+        if let Some(d) = column_options::drop_rules(t, actor, project, c)? {
+            dropped_rules.push(d);
         }
         // Archived cards of a removed column go to the backlog.
         t.execute(
@@ -3228,12 +3321,29 @@ pub fn set_columns(
                      WHERE id = ?1",
                     params![id, w.name, w.title, i as i64, w.wip_limit, w.role],
                 )?;
+                if let Some(old) = current.iter().find(|c| c.id == id) {
+                    carry_role_checks(t, actor, project, old, &w.name, w.role.as_deref())?;
+                }
             }
             None => {
+                let c = ColumnChecks::default_for(&w.name, w.role.as_deref());
                 t.execute(
-                    "INSERT INTO board_columns (project, name, title, position, wip_limit, role)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![project, w.name, w.title, i as i64, w.wip_limit, w.role],
+                    "INSERT INTO board_columns (project, name, title, position, wip_limit, role,
+                         require_comment_on_enter, require_dependencies_met, terminal_for_members,
+                         clear_eta_on_enter)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        project,
+                        w.name,
+                        w.title,
+                        i as i64,
+                        w.wip_limit,
+                        w.role,
+                        c.require_comment_on_enter,
+                        c.require_dependencies_met,
+                        c.terminal_for_members,
+                        c.clear_eta_on_enter
+                    ],
                 )?;
             }
         }
@@ -3245,12 +3355,11 @@ pub fn set_columns(
                    "rename_from": w.rename_from})
         })
         .collect();
-    t.audit(
-        "board.columns",
-        project,
-        Some(project),
-        json!({"columns": after}),
-    )?;
+    let mut detail = json!({"columns": after});
+    if !dropped_rules.is_empty() {
+        detail["dropped_rules"] = dropped_rules.into();
+    }
+    t.audit("board.columns", project, Some(project), detail)?;
     t.emit(
         EventDraft::new(
             "board",

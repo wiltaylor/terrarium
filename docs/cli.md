@@ -186,7 +186,7 @@ cloned terrarium in work/terrarium of worker
 HEAD 3f2c1e0b9a0d... (main)
 ```
 
-`--target <name>` runs the clone or fetch on that target through its host agent. A vmlab target is refused (422). The work tree gets the modes of a plain `git clone` under the umask of the target user (`0002` gives `rwxrwxr-x` on an executable file), as in 0.64. Only the staging of the managed hooks and the SSH key file are owner-only (TER-1127). On a 0.65 checkout made before this fix the tree is `700`/`600`: run `chmod -R go+rX` on your own checkout.
+`--target <name>` runs the clone or fetch on that target through its host agent. A vmlab target is refused (422). The work tree gets the modes of a plain `git clone` under the umask of the target user (`0002` gives `rwxrwxr-x` on an executable file), as in 0.64. Only the staging of the managed hooks and the SSH key file are owner-only (TER-1127). On a 0.65 checkout made before this fix the tree is `700`/`600`: run `chmod -R go+rX` on your own checkout. `--path` is an absolute path on the target. Without it an agent's checkout goes to the repo's path under the agent's work root on the target, `<work_root>/<project>/<agent>/<repo path>` (`/src/terrarium/...` when the target sets no `work_root`, or the home fallback the agent's root already uses), not to the workspace. The operator must give `--path` (422 without it).
 
 `terrarium repo credential get` is hidden. git runs it as the credential
 helper that the daemon writes into each workspace clone. It reads git's
@@ -895,6 +895,17 @@ terrarium board column add <name> [--title t] [--wip N] [--role r] [--after c | 
 terrarium board column set <name> [--title t] [--wip N | --no-wip] [--role r | --no-role] [--rename new]
 terrarium board column rm <name>
 terrarium board column move <name> (--after c | --before c)
+terrarium board column options <name> [--require-comment B] [--require-dependencies B] [--terminal B]
+                              [--clear-eta B] [--queue-release wip|batch|job] [--batch-size N]
+                              [--max-wait-seconds S] [--max-batch-cards N | --no-max-batch-cards]
+                              [--from-file f.json | -]
+terrarium board column rule ls <column>
+terrarium board column rule show <column> <rule>
+terrarium board column rule set <column> <rule> --from-file (f.json | -) [--before r | --after r]
+terrarium board column rule rm <column> <rule>
+terrarium board column rule move <column> <rule> (--before r | --after r)
+terrarium board column rule enable|disable <column> <rule>
+terrarium board column rule catalog
 terrarium card ls [-c column] [--mine | --assignee a] [--unassigned] [--label l] [--archived]
 terrarium card show <id>
 terrarium card new <title> [-b body | -] [-c column] [--label l]... [--depends-on id]...
@@ -1020,6 +1031,34 @@ fails while the column has cards; the error lists them. `backlog` and
 under the card count is allowed: the column takes no more cards until it
 is under the limit. `board columns --from-file` sends a whole list: a JSON
 list of columns, or `{"columns": [...]}`; `-` reads stdin.
+
+`board column options <name>` shows the options of a column (TER-1112,
+docs/api.md §8.2.1): its four move checks and its queue settings, with the
+options version. With a flag it changes them: the CLI reads the options,
+changes the flagged values, and sends the whole options with the version it
+read (`PUT .../board/columns/<name>/options`). `B` is `true` or `false`. A
+`--queue-release` other than `batch` drops the batch settings. Another
+write in between fails with `409 stale_base`: run the command again.
+`--from-file` sends `{"checks", "queue"}` from a file (`-` reads stdin);
+without a `base_version` in the file, the version just read is used, so the
+`--json` output of a read is a valid file. A change needs project_admin of
+the project or the operator; a sysadmin only reads. The queue settings are
+stored only: no column queues cards yet.
+
+`board column rule` reads and changes the structured rules of a column
+(TER-1120, docs/api.md §8.2.1). `ls` lists them in order (place, name,
+on or off, trigger, verbs, ID); `show` prints one as JSON. A change reads
+the options, changes the rule list, and sends the whole list with the
+version it read; another write in between fails with `409 stale_base`.
+`set` takes one rule as JSON (`-` reads stdin), named by the argument: a
+`name` in the file must be the same. It replaces the rule of that name and
+keeps its ID and place, or adds a new rule at the end; `--before` and
+`--after` place it. The `--json` output of `show` is a valid file. `rm`,
+`move`, `enable`, and `disable` change one rule. `catalog` lists the
+triggers, the verbs with their arguments (`*`: required), and, with
+`--json`, the condition fields, placeholders, and limits. A change needs
+project_admin of the project or the operator. The engine does not run
+these rules yet.
 
 `card eta` sets when the work is expected to be done: a duration from now
 with one or more parts (`45m`, `2h30m`, `1d`), or an RFC 3339 time. The
