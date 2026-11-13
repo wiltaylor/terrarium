@@ -3440,7 +3440,9 @@ mod tests {
             // task cannot read the Ping until its ticker is overdue too.
             std::thread::sleep(hb * (MISSED_HEARTBEATS + 2));
             tokio::time::sleep(Duration::from_millis(1)).await;
-            assert!(ended.try_recv().is_err(), "link ended after ping {nonce}");
+            if let Ok(why) = ended.try_recv() {
+                panic!("link ended after ping {nonce}: {why}");
+            }
         }
         ws.close(None).await.unwrap();
         let why = tokio::time::timeout(Duration::from_secs(5), ended.recv())
