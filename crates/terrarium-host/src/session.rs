@@ -817,7 +817,8 @@ pub fn signal_number(_text: &str) -> Option<i32> {
     None
 }
 
-#[cfg(test)]
+// Pipes, process groups, signals and PTYs: Unix only.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::outbox::Outgoing;

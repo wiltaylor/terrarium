@@ -966,6 +966,7 @@ lab "alpine-box" {
         assert!(render(BOX, &lab, dir.path(), Some(&bad)).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn render_keeps_the_labs_own_mount() {
         let dir = tempfile::tempdir().unwrap();

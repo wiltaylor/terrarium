@@ -666,8 +666,11 @@ mod tests {
             ),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&vmlab, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&vmlab, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let ctx = Ctx {
             paths: HostPaths {
                 work_dir: root.join("work"),
