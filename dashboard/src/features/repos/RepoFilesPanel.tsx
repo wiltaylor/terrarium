@@ -25,7 +25,7 @@ function RepoSelector(props: { project: string }) {
       </PageHead>
       <ErrorBanner error={repos.error} />
       <Show when={repo()?.id} keyed fallback={<Empty>{repos.loading ? "Loading…" : name() ? "Not Found" : "Choose a repo."}</Empty>}>
-        {() => <RepoFiles repo={repo()!} />}
+        {(id) => <RepoFiles repo={{ ...repo()!, id }} />}
       </Show>
     </>
   );
