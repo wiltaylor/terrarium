@@ -57,6 +57,7 @@ pub mod prompt;
 pub mod question_guard;
 pub mod quota_notices;
 pub mod quota_policy;
+pub mod release_env;
 pub mod remotes;
 pub mod repo_browse;
 pub mod required_templates;

@@ -1619,6 +1619,31 @@ fn error_end(message: impl Into<String>) -> JobEnd {
 /// The marker of the failed step in the tail of a job.
 const FAILED_STEP: &str = "[failed step: ";
 
+/// The marker of the kill report of a step ([`step_redacted`]).
+const KILLED_ON_TARGET: &str = "[killed on the target: ";
+
+/// The kill report line that [`step_redacted`] put in `stderr`, if any.
+fn kill_line(stderr: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stderr);
+    let at = text.rfind(KILLED_ON_TARGET)?;
+    Some(text[at..].trim_end().to_owned())
+}
+
+/// `end` with `notes` (lines of steps whose output is not kept, such as
+/// the kill report of the ionice probe, TER-1225) at the end of its tail.
+fn with_notes(mut end: JobEnd, notes: &str) -> JobEnd {
+    if notes.is_empty() {
+        return end;
+    }
+    let mut tail = end.tail.take().unwrap_or_default();
+    if !tail.is_empty() && !tail.ends_with('\n') {
+        tail.push('\n');
+    }
+    tail.push_str(notes);
+    end.tail = Some(tail);
+    end
+}
+
 /// A failed end with the step that failed as the last line of its tail
 /// (TER-614 R3), so the job keeps it. The tail is clipped from its start,
 /// so the last line stays.
@@ -1786,7 +1811,7 @@ async fn step_redacted(
     };
     if let Some(r) = kill {
         c.stderr
-            .extend_from_slice(format!("\n[killed on the target: {r}]\n").as_bytes());
+            .extend_from_slice(format!("\n{KILLED_ON_TARGET}{r}]\n").as_bytes());
     }
     Ok(c)
 }
@@ -1954,10 +1979,15 @@ async fn run(state: &Shared, job: &Job, def: &DeliveryDef) -> Ran {
     let recipe = AtomicBool::new(false);
     let lost = OnceLock::new();
     let step = Mutex::new(STEP_SETUP);
-    let end = match run_inner(state, job, def, &recipe, &lost, &step).await {
+    let notes = Mutex::new(String::new());
+    let end = match run_inner(state, job, def, &recipe, &lost, &step, &notes).await {
         Ok(end) => end,
         Err(e) => error_end(format!("the job could not run: {}", e.message)),
     };
+    let notes = notes
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let end = with_notes(end, &notes);
     let at = *step
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2148,6 +2178,7 @@ async fn run_inner(
     recipe_started: &AtomicBool,
     recipe_lost: &OnceLock<String>,
     step: &Mutex<&'static str>,
+    notes: &Mutex<String>,
 ) -> ApiResult<JobEnd> {
     let target = def
         .target
@@ -2260,7 +2291,7 @@ async fn run_inner(
         }
     };
     let holder = Some(terrarium_host::native::service_holder(&job.project, "jobs"));
-    let ionice = has_ionice(state, job, &target, &row.def, holder.clone()).await;
+    let ionice = has_ionice(state, job, &target, &row.def, holder.clone(), notes).await;
     let project = job.project.clone();
     let wipe = state
         .db
@@ -2512,13 +2543,16 @@ fn ionice_of() -> &'static Mutex<HashMap<String, bool>> {
 }
 
 /// True when `ionice -c3` works on the target. Checked once per target;
-/// a check that cannot run is not kept, and counts as false.
+/// a check that cannot run is not kept, and counts as false. A kill of
+/// the check (a cancel) puts its report line in `notes`, for the tail of
+/// the job (TER-1225).
 async fn has_ionice(
     state: &Shared,
     job: &Job,
     name: &str,
     def: &terrarium_core::config::TargetDef,
     holder: Option<String>,
+    notes: &Mutex<String>,
 ) -> bool {
     let known = match ionice_of().lock() {
         Ok(m) => m.get(name).copied(),
@@ -2539,6 +2573,12 @@ async fn has_ionice(
     };
     match step(state, &job.id, def, &probe, STEP_MAX, None).await {
         Ok(c) => {
+            if let Some(line) = kill_line(&c.stderr) {
+                notes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push_str(&line);
+            }
             let ok = c.end.as_ref().is_some_and(End::success);
             // Keep only an answer: an exit code. An error, a signal, a
             // timeout, or 255 (an ssh client that could not connect,
@@ -6664,6 +6704,26 @@ mod tests {
         };
         assert_eq!(e.outcome.as_deref(), Some(OUTCOME_INFRA));
         assert!(e.tail.unwrap().contains("an infra failure"));
+    }
+
+    /// TER-1225: the kill report of a step whose output is not kept (the
+    /// ionice probe) goes into the tail, before the failed step line.
+    #[test]
+    fn a_kill_report_of_the_probe_reaches_the_tail() {
+        let stderr = b"probe out\n[killed on the target: {\"left\":[],\"pid\":7}]\n";
+        let line = kill_line(stderr).unwrap();
+        assert_eq!(line, "[killed on the target: {\"left\":[],\"pid\":7}]");
+        assert_eq!(kill_line(b"no kill here\n"), None);
+        let end = error_end("the job could not run: the job was cancelled");
+        let end = with_failed_step(with_notes(end, &line), STEP_PREPARE);
+        assert_eq!(
+            end.tail.unwrap(),
+            "the job could not run: the job was cancelled\n\
+             [killed on the target: {\"left\":[],\"pid\":7}]\n\
+             [failed step: prepare]"
+        );
+        let plain = with_notes(error_end("out"), "");
+        assert_eq!(plain.tail.as_deref(), Some("out"));
     }
 
     /// TER-614 R3: a failed end keeps its step as the last line of its

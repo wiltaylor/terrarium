@@ -16,4 +16,6 @@ dashboard/dist
 !defaults/**
 # The host installer: terrariumd embeds it (GET /install/host.sh).
 !scripts/install-host.sh
+# The release compose file: terrariumd embeds it (`terrariumd release-env-keys`).
+!compose.yaml
 **/target

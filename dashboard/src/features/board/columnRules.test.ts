@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../../api/http";
 import type { ColumnOptions, ColumnRule } from "../../api/types";
-import { cleanRule, isStale, rateLimits, rateText, problemsByPath, problemsUnder, putBody, queueText, ruleSentence, seconds, triggerText } from "./columnRules";
+import { actionText, cardConditionText, cleanRule, isStale, rateLimits, rateText, problemsByPath, problemsUnder, putBody, queueText, ruleSentence, seconds, triggerText } from "./columnRules";
 
 const read: ColumnOptions = {
   project: "p", column: "merge_queue", version: 3, can_edit: true,
@@ -26,6 +26,20 @@ describe("column rules in plain words (TER-1116)", () => {
       actions: [{ verb: "card.move", args: { to: "@accepted" } }, { verb: "card.label", args: { add: ["merged"] } }],
     };
     expect(ruleSentence(r)).toBe("When the merge job of a card here has a verdict, if the card: it has none of the labels hold and the job outcome is passed: move the card to the accepted column and then add the label merged. At most 60 runs an hour, 60 for one card.");
+  });
+
+  it("says card.assign with who, template and templates (TER-1230)", () => {
+    expect(actionText({ verb: "card.assign", args: { who: "cog-7" } })).toBe("assign the card to cog-7");
+    expect(actionText({ verb: "card.assign", args: { who: "none" } })).toBe("clear the assignee");
+    expect(actionText({ verb: "card.assign", args: { template: "card-worker", owner: "lead" } })).toBe("start an agent from the template card-worker for the card, owned by lead");
+    expect(actionText({ verb: "card.assign", args: { templates: ["type:small=card-small", "type:impl=card-impl"], owner: "lead", from: "@ready", limit: 3 } }))
+      .toBe("start an agent from the template that its label picks (type:small gets card-small and type:impl gets card-impl) for the top 3 cards of the ready column, owned by lead");
+    expect(actionText({ verb: "card.assign", args: { template: "card-worker", owner: "lead", from: "ready" } })).toBe("start an agent from the template card-worker for the top card of ready, owned by lead");
+  });
+
+  it("says if_card any_labels (TER-1230)", () => {
+    expect(cardConditionText({ any_labels: ["bug", "deps"] })).toBe("it has one of the labels bug or deps");
+    expect(cardConditionText({ any_labels: ["bug"] })).toBe("it has the label bug");
   });
 
   it("says the queue", () => {
