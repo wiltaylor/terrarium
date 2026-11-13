@@ -46,7 +46,9 @@ describe("heldLabel and heldText (TER-1105)", () => {
     const a = { queued: 1, held_mail: 2 };
     expect(queuedLabel(a)).toBe("1 queued");
     expect(heldLabel(a)).toBe("2 held");
-    expect(queuedLabel({ held_mail: 2 })).toBeNull();
+    const onlyHeld = { queued: 0, held_mail: 2 };
+    expect(queuedLabel(onlyHeld)).toBeNull();
+    expect(heldLabel(onlyHeld)).toBe("2 held");
   });
   it("tells zero from unavailable", () => {
     expect(heldLabel({ held_mail: 0 })).toBeNull();
