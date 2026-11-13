@@ -13,7 +13,7 @@ export interface ColumnOptionsMockContext {
   reply: <T>(fn: () => T) => Promise<T>;
   fail: Fail;
   audit: (action: string, target: string, project: string | undefined, detail?: Record<string, unknown>) => void;
-  emit: (e: { kind: string; actor: string; project: string; summary: string; data: Record<string, unknown> }) => void;
+  emit: (e: { kind: "board"; actor: string; project: string; summary: string; data: Record<string, unknown> }) => unknown;
   /** A column by name or role alias (throws `422` for an unknown one). */
   column: (project: string, name: string) => Column;
   ulid: () => string;

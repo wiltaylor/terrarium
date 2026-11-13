@@ -163,6 +163,7 @@ export function triggerOf(catalog: RuleCatalog, kind: string): RuleTrigger {
 export function fieldValue(f: CatalogField, raw: string | boolean | string[]): unknown {
   if (f.type === "bool") return raw === true || raw === "true";
   if (Array.isArray(raw)) return raw;
+  if (typeof raw === "boolean") return raw;
   if (f.type === "count") return raw.trim() === "" ? undefined : Number(raw);
   if (f.type === "list" || f.type === "columns") return raw.split(",").map((s) => s.trim()).filter(Boolean);
   return raw;
