@@ -535,9 +535,8 @@ mod tests {
     fn rerun_settled_scans_no_table() {
         let mut c = Connection::open_in_memory().unwrap();
         crate::db::migrate(&mut c).unwrap();
-        let sql = format!(
-            "EXPLAIN QUERY PLAN SELECT 1 FROM jobs j WHERE j.id = 'J' AND {RERUN_SETTLED}"
-        );
+        let sql =
+            format!("EXPLAIN QUERY PLAN SELECT 1 FROM jobs j WHERE j.id = 'J' AND {RERUN_SETTLED}");
         let plans: Vec<String> = c
             .prepare(&sql)
             .unwrap()
