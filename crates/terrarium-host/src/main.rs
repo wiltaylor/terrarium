@@ -225,12 +225,9 @@ fn windows_workspaces(cfg: &Config) -> bool {
 fn windows_git_checkout(cfg: &Config) -> bool {
     windows_workspaces(cfg)
         && cfg.windows_git.root.as_deref().is_some_and(|root| {
-            terrarium_winapi::TrustedFiles::open(
-                root,
-                &terrarium_host::git_checkout::RUNTIME_FILES,
-            )
-            .inspect_err(|e| tracing::warn!(error = %e, "[windows_git] root refused"))
-            .is_ok()
+            terrarium_winapi::TrustedFiles::open(root, &terrarium_host::git_checkout::RUNTIME_FILES)
+                .inspect_err(|e| tracing::warn!(error = %e, "[windows_git] root refused"))
+                .is_ok()
         })
 }
 

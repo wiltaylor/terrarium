@@ -236,7 +236,10 @@ async fn windows_round_trip(no_workspaces: bool) {
     let message = checkout.body["error"]["message"].as_str().unwrap();
     assert!(message.contains("not supported yet"), "{message}");
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(received.try_recv().is_err(), "no frame for a refused checkout");
+    assert!(
+        received.try_recv().is_err(),
+        "no frame for a refused checkout"
+    );
     fake.abort();
     listener.abort();
 }
@@ -344,9 +347,12 @@ async fn windows_git_checkout_goes_only_to_a_capable_host_in_managed_mode() {
     let repo_id = repo.ok()["id"].as_str().unwrap().to_owned();
     let url = format!("/api/repos/{repo_id}/checkout");
     // An operator checkout has no workspace: refused, no frame.
-    td.post(&url, json!({"target": "p-win", "path": r"C:\Terrarium\work\p\worker\app"}))
-        .await
-        .err(422, "invalid");
+    td.post(
+        &url,
+        json!({"target": "p-win", "path": r"C:\Terrarium\work\p\worker\app"}),
+    )
+    .await
+    .err(422, "invalid");
     // A path outside the agent's own workspace: refused, no frame.
     td.post_as(
         aid,
@@ -374,7 +380,10 @@ async fn windows_git_checkout_goes_only_to_a_capable_host_in_managed_mode() {
     let terrarium_host::protocol::CheckoutMode::Managed(m) = &r.mode else {
         panic!("an agent checkout must be managed: {:?}", r.mode)
     };
-    assert!(m.commit_hook.contains("# terrarium managed provenance hook"));
+    assert!(
+        m.commit_hook
+            .contains("# terrarium managed provenance hook")
+    );
     terrarium_host::git_checkout::check_push_hook(&m.push_hook).unwrap();
     assert_eq!(m.repo_id, repo_id);
     fake.abort();

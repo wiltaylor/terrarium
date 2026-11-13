@@ -124,8 +124,12 @@ impl Confined {
         session: SessionId,
     ) -> Result<Self, TransferError> {
         let (dirs, name) = split_file(location).map_err(|_| not_a_file(path))?;
-        let dir = workspace.into_dir(&dirs, mkdirs).map_err(io("open", path))?;
-        let temp = dir.create_temp(session).map_err(io("create", path))?;
+        let dir = workspace
+            .into_dir(&dirs, mkdirs)
+            .map_err(io("open", path))?;
+        let temp = dir
+            .create_temp(u64::from(session))
+            .map_err(io("create", path))?;
         Ok(Self {
             dir,
             temp: Some(temp),

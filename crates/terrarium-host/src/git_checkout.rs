@@ -110,7 +110,10 @@ pub fn check_push_hook(hook: &str) -> Result<(), &'static str> {
     if hook.is_empty() || hook.len() > 24_576 {
         return Err("decode");
     }
-    if !hook.bytes().all(|b| b == b'\n' || (0x20..=0x7e).contains(&b)) {
+    if !hook
+        .bytes()
+        .all(|b| b == b'\n' || (0x20..=0x7e).contains(&b))
+    {
         return Err("bytes");
     }
     if hook.lines().next() != Some("#!/bin/sh") {
@@ -156,7 +159,12 @@ pub fn check_request(req: &GitCheckout) -> Result<(), String> {
     if req.depth == Some(0) {
         return Err("depth must be at least 1".into());
     }
-    if is_ssh_url(url) && req.known_hosts.as_deref().is_none_or(|k| k.trim().is_empty()) {
+    if is_ssh_url(url)
+        && req
+            .known_hosts
+            .as_deref()
+            .is_none_or(|k| k.trim().is_empty())
+    {
         return Err("an SSH checkout needs the daemon's pinned known_hosts".into());
     }
     if let CheckoutMode::Managed(m) = &req.mode {
@@ -279,7 +287,10 @@ pub fn ssh_command(ssh: &str, known_hosts: &str, key: Option<&str>) -> Result<St
         sh_quote_path(known_hosts)?
     );
     if let Some(key) = key {
-        cmd.push_str(&format!(" -i {} -o IdentitiesOnly=yes", sh_quote_path(key)?));
+        cmd.push_str(&format!(
+            " -i {} -o IdentitiesOnly=yes",
+            sh_quote_path(key)?
+        ));
     }
     Ok(cmd)
 }
@@ -310,7 +321,12 @@ mod tests {
     #[test]
     fn config_allowlist_matches_the_script_rules() {
         assert_eq!(
-            refused_key(["core.bare", "remote.origin.url", "User.Name", "branch.main.merge"]),
+            refused_key([
+                "core.bare",
+                "remote.origin.url",
+                "User.Name",
+                "branch.main.merge"
+            ]),
             None
         );
         for bad in [
@@ -339,13 +355,19 @@ mod tests {
             check_push_hook("#!/bin/sh\n# Written by terrariumd from the repo\r\n"),
             Err("bytes")
         );
-        assert_eq!(check_push_hook("#!/bin/bash\n# Written by terrariumd from the repo\n"), Err("header"));
+        assert_eq!(
+            check_push_hook("#!/bin/bash\n# Written by terrariumd from the repo\n"),
+            Err("header")
+        );
         assert_eq!(check_push_hook("#!/bin/sh\nexit 0\n"), Err("header"));
     }
 
     #[test]
     fn managed_markers_decide_replacement() {
-        assert!(is_managed("prepare-commit-msg", "#!/bin/sh\n# terrarium managed provenance hook\n"));
+        assert!(is_managed(
+            "prepare-commit-msg",
+            "#!/bin/sh\n# terrarium managed provenance hook\n"
+        ));
         assert!(!is_managed("prepare-commit-msg", "#!/bin/sh\necho mine\n"));
         assert!(is_managed("pre-push", &push_hook()));
         assert!(!is_managed("pre-push", "#!/bin/sh\nexit 1\n"));
@@ -392,7 +414,13 @@ mod tests {
             let CheckoutMode::Managed(m) = &mut r.mode else {
                 unreachable!()
             };
-            [&mut m.commit_hook, &mut m.name, &mut m.email, &mut m.repo_id][clear].clear();
+            [
+                &mut m.commit_hook,
+                &mut m.name,
+                &mut m.email,
+                &mut m.repo_id,
+            ][clear]
+                .clear();
             assert!(check_request(&r).is_err(), "managed control {clear}");
         }
         let mut r = request();
@@ -408,7 +436,12 @@ mod tests {
 
     #[test]
     fn ssh_urls_need_the_pinned_known_hosts() {
-        for url in ["git@github.com:o/r.git", "ssh://git@h/r", "GIT+SSH://h/r", "h:r"] {
+        for url in [
+            "git@github.com:o/r.git",
+            "ssh://git@h/r",
+            "GIT+SSH://h/r",
+            "h:r",
+        ] {
             assert!(is_ssh_url(url), "{url}");
             let mut r = request();
             r.url = url.into();

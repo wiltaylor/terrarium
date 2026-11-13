@@ -17,14 +17,16 @@
 use super::*;
 use crate::policy_file::{Local, audit_acl, sid_from_string, trusted_sids};
 use crate::workspace::{
-    ANCESTOR_FORBIDDEN, ANCESTORS, DIR_ACCESS, INNER_ACCESS, STRICT_FORBIDDEN, check_name,
-    dispose, open_dir, protected_descriptor, refused, verify,
+    ANCESTOR_FORBIDDEN, ANCESTORS, DIR_ACCESS, INNER_ACCESS, STRICT_FORBIDDEN, check_name, dispose,
+    open_dir, protected_descriptor, refused, verify,
 };
 use std::io::Write as _;
 use std::path::PathBuf;
-use windows_sys::Win32::Storage::FileSystem::{FindClose, FindFirstFileW, FindNextFileW, WIN32_FIND_DATAW};
 use std::sync::atomic::{AtomicU64, Ordering};
 use windows_sys::Win32::Storage::FileSystem::*;
+use windows_sys::Win32::Storage::FileSystem::{
+    FindClose, FindFirstFileW, FindNextFileW, WIN32_FIND_DATAW,
+};
 
 /// The parent of the session directories. The host creates it, protected.
 pub const GIT_SESSIONS: &str = r"C:\Terrarium\git";
@@ -172,7 +174,11 @@ impl TrustedFiles {
                 let attributes = crate::workspace::info(&handle)?.dwFileAttributes;
                 let is_dir = attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
                 verify(&handle, &entry, is_dir)?;
-                let forbidden = if is_dir { STRICT_FORBIDDEN } else { FILE_FORBIDDEN };
+                let forbidden = if is_dir {
+                    STRICT_FORBIDDEN
+                } else {
+                    FILE_FORBIDDEN
+                };
                 audit_acl(&handle, &trusted, &trusted, &[], forbidden, false)
                     .map_err(|_| refused("a runtime file or directory is not protected"))?;
                 if is_dir {

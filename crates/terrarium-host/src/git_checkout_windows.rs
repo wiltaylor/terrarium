@@ -91,7 +91,10 @@ impl Git<'_> {
     ) -> Result<Vec<u8>, Failure> {
         let (code, out) = self.run(extra, args, env)?;
         if code != 0 {
-            return Err(fail(code, format!("git {} failed", args.first().unwrap_or(&""))));
+            return Err(fail(
+                code,
+                format!("git {} failed", args.first().unwrap_or(&"")),
+            ));
         }
         Ok(out)
     }
@@ -223,7 +226,9 @@ pub fn run(
     .map_err(|e| fail(2, format!("workspace: {e}")))?;
     let mut private = PrivateDir::create(u64::from(req.session), identity.map(Arc::as_ref))
         .map_err(|e| fail(2, format!("git session directory: {e}")))?;
-    let hooks_off = private.subdir("hooks").map_err(|e| fail(2, e.to_string()))?;
+    let hooks_off = private
+        .subdir("hooks")
+        .map_err(|e| fail(2, e.to_string()))?;
     let mut known = req.known_hosts.clone().unwrap_or_default();
     known.push('\n');
     let known_hosts = private
@@ -241,7 +246,11 @@ pub fn run(
         }
         _ => None,
     };
-    let path_of = |p: &Path| p.to_str().map(str::to_owned).ok_or_else(|| fail(2, "non-ASCII path"));
+    let path_of = |p: &Path| {
+        p.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| fail(2, "non-ASCII path"))
+    };
     let ssh = path_of(&root.join(r"usr\bin\ssh.exe"))?;
     let known_path = path_of(known_hosts.path())?;
     let ssh_base = ssh_command(&ssh, &known_path, None).map_err(|m| fail(2, m))?;
@@ -274,7 +283,10 @@ pub fn run(
         Some(GitCredential::SshKey { .. }) => {
             let key = path_of(key_file.as_ref().expect("key file").path())?;
             let cmd = ssh_command(&ssh, &known_path, Some(&key)).map_err(|m| fail(2, m))?;
-            Some((BTreeMap::from([("GIT_SSH_COMMAND".to_owned(), cmd)]), Vec::new()))
+            Some((
+                BTreeMap::from([("GIT_SSH_COMMAND".to_owned(), cmd)]),
+                Vec::new(),
+            ))
         }
         None => None,
     };
@@ -327,10 +339,15 @@ pub fn run(
             drop(key_file.take());
             (
                 "not_updated",
-                format!("the repo config has `{bad}`, which the checkout does not allow; remove it"),
+                format!(
+                    "the repo config has `{bad}`, which the checkout does not allow; remove it"
+                ),
             )
         } else {
-            let before = text(git.status(&["-C", dest, "rev-parse", "-q", "--verify", "HEAD"])?.1);
+            let before = text(
+                git.status(&["-C", dest, "rev-parse", "-q", "--verify", "HEAD"])?
+                    .1,
+            );
             let reference = match &req.branch {
                 Some(b) => b.clone(),
                 None => match git.status(&["-C", dest, "symbolic-ref", "--short", "-q", "HEAD"])? {
@@ -347,17 +364,26 @@ pub fn run(
             git.g(&fetch)?;
             git.forget();
             drop(key_file.take());
-            if !git.plain(&["-C", dest, "status", "--porcelain"])?.is_empty() {
+            if !git
+                .plain(&["-C", dest, "status", "--porcelain"])?
+                .is_empty()
+            {
                 ("not_updated", "the work tree has local changes".to_owned())
             } else if git
                 .status(&["-C", dest, "merge", "--ff-only", "-q", "FETCH_HEAD"])?
                 .0
                 == 0
             {
-                let after =
-                    text(git.status(&["-C", dest, "rev-parse", "-q", "--verify", "HEAD"])?.1);
+                let after = text(
+                    git.status(&["-C", dest, "rev-parse", "-q", "--verify", "HEAD"])?
+                        .1,
+                );
                 (
-                    if before == after { "up_to_date" } else { "updated" },
+                    if before == after {
+                        "up_to_date"
+                    } else {
+                        "updated"
+                    },
                     String::new(),
                 )
             } else {
@@ -388,13 +414,19 @@ pub fn run(
             ("user.name", managed.name.clone()),
             ("user.email", managed.email.clone()),
             ("terrarium.provenance", managed.provenance.to_string()),
-            ("terrarium.provenanceWarnOnly", managed.warn_only.to_string()),
+            (
+                "terrarium.provenanceWarnOnly",
+                managed.warn_only.to_string(),
+            ),
             ("terrarium.repoId", managed.repo_id.clone()),
         ] {
             git.plain(&["-C", dest, "config", key, &value])?;
         }
     }
-    let head = text(git.status(&["-C", dest, "rev-parse", "-q", "--verify", "HEAD"])?.1);
+    let head = text(
+        git.status(&["-C", dest, "rev-parse", "-q", "--verify", "HEAD"])?
+            .1,
+    );
     let branch = match git.status(&["-C", dest, "symbolic-ref", "--short", "-q", "HEAD"])? {
         (0, out) => text(out),
         _ => String::new(),
@@ -430,7 +462,10 @@ fn install_hooks(
             }
             if current == Some(Entry::File) {
                 let mut content = String::new();
-                hooks.open_read(hook)?.take(1 << 20).read_to_string(&mut content)?;
+                hooks
+                    .open_read(hook)?
+                    .take(1 << 20)
+                    .read_to_string(&mut content)?;
                 if !is_managed(hook, &content) {
                     if saved.is_some() {
                         return Ok(Err("install"));

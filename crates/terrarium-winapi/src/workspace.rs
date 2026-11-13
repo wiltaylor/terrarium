@@ -197,7 +197,10 @@ fn agent_descriptor(account_sid: Option<&str>) -> io::Result<Local> {
 
 /// A protected DACL with full control for `trustees` (SDDL aliases) and the
 /// optional account SID, inherited by files and directories below.
-pub(crate) fn protected_descriptor(trustees: &[&str], account_sid: Option<&str>) -> io::Result<Local> {
+pub(crate) fn protected_descriptor(
+    trustees: &[&str],
+    account_sid: Option<&str>,
+) -> io::Result<Local> {
     let mut sddl = String::from("D:P");
     for trustee in trustees {
         sddl.push_str(&format!("(A;OICI;FA;;;{trustee})"));
@@ -288,8 +291,15 @@ impl Workspace {
             }
             other => other?,
         };
-        audit_acl(&project_dir, &trusted, &trusted, &[], STRICT_FORBIDDEN, false)
-            .map_err(|_| refused("the project directory is not protected"))?;
+        audit_acl(
+            &project_dir,
+            &trusted,
+            &trusted,
+            &[],
+            STRICT_FORBIDDEN,
+            false,
+        )
+        .map_err(|_| refused("the project directory is not protected"))?;
         held.push(project_dir);
         let root = project_path.join(agent);
         let agent_dir = match open_dir(&root, DIR_ACCESS) {
@@ -499,14 +509,22 @@ impl Dir {
             file: Some(File::from(handle)),
         };
         // On a failed check, Drop deletes the new file by its handle.
-        verify(temp.file.as_ref().expect("live temporary file"), &path, false)?;
+        verify(
+            temp.file.as_ref().expect("live temporary file"),
+            &path,
+            false,
+        )?;
         Ok(temp)
     }
 }
 
 /// Rename an open file to `name` in its own directory. A bare name with a
 /// null root renames within the same directory: no path is resolved again.
-pub(crate) fn rename_by_handle(handle: &impl AsRawHandle, name: &str, replace: bool) -> io::Result<()> {
+pub(crate) fn rename_by_handle(
+    handle: &impl AsRawHandle,
+    name: &str,
+    replace: bool,
+) -> io::Result<()> {
     let name: Vec<u16> = OsStr::new(name).encode_wide().collect();
     let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
     let bytes = offset + (name.len() + 1) * size_of::<u16>();
