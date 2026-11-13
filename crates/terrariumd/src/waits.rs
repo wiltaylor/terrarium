@@ -317,11 +317,12 @@ pub async fn collect_cleanup(state: &Shared, w: &Wait, id: String) -> ApiResult<
         .session()
         .and_then(|s| state.executor.find(s))
         .filter(|s| {
-            s.owner.as_deref() == Some(w.agent.as_str())
+            !s.is_done()
+                && s.owner.as_deref() == Some(w.agent.as_str())
                 && Some(s.target.as_str()) == w.exec_target()
         });
     let report = route.as_ref().and_then(|s| s.claim_cleanup());
-    let Some((route, report)) = route.zip(report) else {
+    let Some(route) = route else {
         return state
             .db
             .write_full("system", move |t| {
@@ -339,6 +340,7 @@ pub async fn collect_cleanup(state: &Shared, w: &Wait, id: String) -> ApiResult<
     }
     let (reason, diagnostic) = match route.attempt_cleanup(report).await {
         crate::executor::CleanupAttempt::DeliveryUnknown => ("control_delivery_unknown", None),
+        crate::executor::CleanupAttempt::NoReportRecipe => ("control_sent_no_report", None),
         crate::executor::CleanupAttempt::MissingReport => ("missing_report", None),
         crate::executor::CleanupAttempt::Deadline => ("report_deadline", None),
         crate::executor::CleanupAttempt::LegacyReport(report) => (

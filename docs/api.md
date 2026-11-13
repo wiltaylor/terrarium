@@ -3209,9 +3209,11 @@ Cleanup reporting (TER-1059):
   GET. A kill retry without recorded intent is `unavailable/no_recorded_intent`
   with a null operation ID.
 - The open-to-cancelled CAS and unique intent insert commit together before
-  control. The daemon claims a live owned wrapped route, durably records
+  control. The daemon claims a live owned control route, durably records
   dispatch with status `unknown`, and attempts control at most once. Report collection has a 12-second
-  deadline and survives an HTTP disconnect. A failed dispatch/receipt write
+  deadline and survives an HTTP disconnect. A live owned route without a report
+  recipe still receives one control request and reports `unknown/control_sent_no_report`,
+  never verified termination. A failed dispatch/receipt write
   leaves conservative durable state. Startup marks orphaned queued operations
   unavailable and dispatched ones unknown. It never replays a kill.
 - Concurrent or terminal kill retries read the same operation. Legacy terminal

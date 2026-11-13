@@ -1002,21 +1002,69 @@ mod cleanup_tests {
 
     #[tokio::test]
     async fn unavailable_routes_send_nothing_and_failed_send_stays_unknown() {
-        for (wrapped, done) in [(false, false), (true, true)] {
-            let (state, w, _report, mut controls) = fixture(wrapped, done).await;
+        for wrapped in [false, true] {
+            let (state, w, _report, mut controls) = fixture(wrapped, true).await;
             let response = request(state, w.id).await.unwrap().0;
             assert_eq!(response["cleanup"]["status"], "unavailable");
             assert!(controls.try_recv().is_err());
         }
-        let (state, w, _report, controls) = fixture(true, false).await;
-        drop(controls);
-        let response = request(state.clone(), w.id.clone()).await.unwrap().0;
-        assert_eq!(response["cleanup"]["status"], "unknown");
-        assert_eq!(response["cleanup"]["reason"], "control_delivery_unknown");
-        assert_eq!(
-            request(state, w.id).await.unwrap().0["cleanup"],
-            response["cleanup"]
+        for wrapped in [false, true] {
+            let (state, w, _report, controls) = fixture(wrapped, false).await;
+            drop(controls);
+            let response = request(state.clone(), w.id.clone()).await.unwrap().0;
+            assert_eq!(response["cleanup"]["status"], "unknown");
+            assert_eq!(response["cleanup"]["reason"], "control_delivery_unknown");
+            assert_eq!(
+                request(state, w.id).await.unwrap().0["cleanup"],
+                response["cleanup"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn live_restored_session_without_recipe_dispatches_once_and_remains_unknown() {
+        // Restored/Vmlab/native Windows routes may lack a report recipe, but
+        // retain an owned logical control channel. Absence of proof must not
+        // remove their existing kill effect.
+        let (state, w, _report, mut controls) = fixture(false, false).await;
+        let (a, b) = tokio::join!(
+            request(state.clone(), w.id.clone()),
+            request(state.clone(), w.id.clone())
         );
+        let response = a.unwrap().0;
+        assert_eq!(response["state"], "cancelled");
+        assert_eq!(response["cleanup"]["status"], "unknown");
+        assert_eq!(response["cleanup"]["reason"], "control_sent_no_report");
+        assert_eq!(b.unwrap().0["cleanup"]["operation_id"], response["cleanup"]["operation_id"]);
+        assert!(matches!(controls.try_recv(), Ok(Control::Kill)));
+        assert!(controls.try_recv().is_err());
+        assert_eq!(request(state.clone(), w.id.clone()).await.unwrap().0["cleanup"], response["cleanup"]);
+        state.db.write_full("system", crate::store::run_cleanup::recover).await.unwrap();
+        assert_eq!(request(state, w.id).await.unwrap().0["cleanup"], response["cleanup"]);
+        assert!(controls.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn no_recipe_does_not_relax_owned_route_attribution() {
+        for mismatch in ["owner", "target"] {
+            let (state, w, _report, mut controls) = fixture(false, false).await;
+            let (foreign, mut foreign_controls) = state.executor.fake_cleanup_session("foreign-owner".into(), None, false);
+            let id = w.id.clone();
+            let session = w.session().map(str::to_owned);
+            state.db.write("operator", move |t| {
+                let spec = if mismatch == "owner" {
+                    json!({"session":foreign.id,"target":"fake-target"})
+                } else {
+                    json!({"session":session,"target":"foreign-target"})
+                };
+                t.execute("UPDATE waits SET spec=?2 WHERE id=?1", rusqlite::params![id,spec.to_string()])?;
+                Ok(())
+            }).await.unwrap();
+            let response = request(state, w.id).await.unwrap().0;
+            assert_eq!(response["cleanup"]["status"], "unavailable");
+            assert!(controls.try_recv().is_err());
+            assert!(foreign_controls.try_recv().is_err());
+        }
     }
 
     #[tokio::test]

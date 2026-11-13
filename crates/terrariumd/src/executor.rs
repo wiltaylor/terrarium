@@ -869,6 +869,7 @@ struct Buf {
 /// Reporting outcomes are not termination receipts.
 pub enum CleanupAttempt {
     DeliveryUnknown,
+    NoReportRecipe,
     MissingReport,
     Deadline,
     LegacyReport(Value),
@@ -1157,8 +1158,8 @@ impl ExecSession {
         }
     }
 
-    /// Claim only a live wrapped route. Restored bare sessions are unavailable.
-    /// Taking the channel prevents a second reporting attempt from claiming it.
+    /// Claim the report channel of a live wrapped route, when available.
+    /// No report recipe is not evidence that control cannot be sent.
     pub fn claim_cleanup(&self) -> Option<crate::run_kill::Report> {
         if self.is_done() {
             return None;
@@ -1171,10 +1172,13 @@ impl ExecSession {
 
     /// Called only after a durable dispatch marker. Exactly one control send,
     /// followed by bounded observation of the original channel, never replay.
-    pub async fn attempt_cleanup(&self, report: crate::run_kill::Report) -> CleanupAttempt {
+    pub async fn attempt_cleanup(&self, report: Option<crate::run_kill::Report>) -> CleanupAttempt {
         if !self.control(Control::Kill) {
             return CleanupAttempt::DeliveryUnknown;
         }
+        let Some(report) = report else {
+            return CleanupAttempt::NoReportRecipe;
+        };
         match tokio::time::timeout(Duration::from_secs(12), crate::run_kill::report(report)).await {
             Ok(Some(report)) => CleanupAttempt::LegacyReport(report),
             Ok(None) => CleanupAttempt::MissingReport,
@@ -5811,7 +5815,7 @@ mod tests {
         ] {
             let (s, mut controls) = ExecSession::new("fake", Some("owner".into()), "exec", 1);
             let (_tx, rx) = tokio::sync::watch::channel(Some(value.clone()));
-            match s.attempt_cleanup(rx).await {
+            match s.attempt_cleanup(Some(rx)).await {
                 CleanupAttempt::LegacyReport(report) => assert_eq!(report, value),
                 _ => panic!("legacy reports must remain diagnostics"),
             }
@@ -5822,14 +5826,14 @@ mod tests {
         let (tx, rx) = tokio::sync::watch::channel(None);
         drop(tx);
         assert!(matches!(
-            s.attempt_cleanup(rx).await,
+            s.attempt_cleanup(Some(rx)).await,
             CleanupAttempt::MissingReport
         ));
         assert!(matches!(controls.try_recv(), Ok(Control::Kill)));
         let (tx, rx) = tokio::sync::watch::channel(None);
         let pending = {
             let s = s.clone();
-            tokio::spawn(async move { s.attempt_cleanup(rx).await })
+            tokio::spawn(async move { s.attempt_cleanup(Some(rx)).await })
         };
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(13)).await;
@@ -5839,14 +5843,14 @@ mod tests {
         assert!(controls.try_recv().is_err());
         let (tx, rx) = tokio::sync::watch::channel(Some(Value::Null));
         assert!(matches!(
-            s.attempt_cleanup(rx).await,
+            s.attempt_cleanup(Some(rx)).await,
             CleanupAttempt::MissingReport
         ));
         drop(tx);
         drop(controls);
         let (_tx, rx) = tokio::sync::watch::channel(None);
         assert!(matches!(
-            s.attempt_cleanup(rx).await,
+            s.attempt_cleanup(Some(rx)).await,
             CleanupAttempt::DeliveryUnknown
         ));
     }
