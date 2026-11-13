@@ -375,7 +375,7 @@ pub fn set_review_dispatcher(t: &mut Tx<'_>, project: &str, owner: &str) -> ApiR
     )?;
     Ok(())
 }
-///
+
 /// A project on `board_flow = columns` assigns with the `card.assign` rule
 /// action (TER-1115, D6): an owner other than `off` is refused there.
 pub fn set_card_dispatcher(t: &mut Tx<'_>, project: &str, owner: &str) -> ApiResult<()> {

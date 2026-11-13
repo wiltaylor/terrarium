@@ -268,7 +268,6 @@ pub const VERBS: &[Verb] = &[
             ("templates", Arg::List),
             ("owner", Arg::Text),
             ("from", Arg::Column),
-            ("room", Arg::Column),
             ("limit", Arg::Count),
         ],
         required: &[],
@@ -906,7 +905,7 @@ pub fn assign_template_entry(entry: &str) -> Option<(&str, &str)> {
 
 /// The checks of `card.assign` across its arguments (TER-1115): exactly one
 /// of `who` (a name or `none`), `template` or `templates` (a new agent);
-/// a new agent needs `owner`; `from`, `room` and `limit` are for a new
+/// a new agent needs `owner`; `from` and `limit` are for a new
 /// agent only; `limit` needs `from` and is 1 to [`MAX_ASSIGN_LIMIT`]; each
 /// `templates` entry is `<label>=<template>`, with no label twice.
 fn check_assign_args(args: &Map<String, Value>) -> Vec<String> {
@@ -920,7 +919,7 @@ fn check_assign_args(args: &Map<String, Value>) -> Vec<String> {
         out.push("card_assign needs exactly one of `who`, `template` or `templates`".to_owned());
     }
     if set("who") {
-        for key in ["owner", "from", "room", "limit"] {
+        for key in ["owner", "from", "limit"] {
             if set(key) {
                 out.push(format!(
                     "card_assign.{key} is for a new agent (`template` or `templates`) only"
@@ -2179,6 +2178,8 @@ rule "validate-pass" {
         assert!(e.contains("limit is 1 to 16"), "{e}");
         let e = bad(r#"card_assign { templates = ["a=x", "a=y"] owner = "lead" }"#);
         assert!(e.contains("names the label `a` twice"), "{e}");
+        let e = bad(r#"card_assign { template = "t" owner = "lead" room = "review" }"#);
+        assert!(!e.is_empty(), "room is not an argument: {e}");
         let e = bad(r#"card_assign { templates = ["a"] owner = "lead" }"#);
         assert!(e.contains("is not `<label>=<template>`"), "{e}");
         let ok = "rule \"r\" {\n  on = [\"card\"]\n  card_assign { who = \"w\" }\n}\n";

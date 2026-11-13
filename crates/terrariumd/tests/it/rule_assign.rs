@@ -229,7 +229,7 @@ async fn a_lands_rule_starts_the_template_agent_that_claims_the_card() {
 }
 
 /// `from` picks the top eligible cards of a column up to `limit`, and only
-/// while `room` is under its WIP limit; a card with two map labels has no
+/// while the working column is under its WIP limit; a card with two map labels has no
 /// template and stays.
 #[tokio::test]
 async fn from_takes_the_top_cards_while_the_working_column_has_room() {
@@ -311,6 +311,11 @@ async fn a_template_assign_needs_an_owner_and_well_formed_entries() {
             json!({"template": "card-small", "owner": "lead", "limit": 2}),
             "limit needs `from`",
         ),
+        // The claim always lands in the working column: no other room.
+        (
+            json!({"template": "card-small", "owner": "lead", "room": "review"}),
+            "has no argument `room`",
+        ),
     ] {
         let r = td
             .put(
@@ -324,4 +329,69 @@ async fn a_template_assign_needs_an_owner_and_well_formed_entries() {
         assert_eq!(r.status.as_u16(), 422, "{args}: {}", r.body);
         assert!(r.body.to_string().contains(needle), "{args}: {}", r.body);
     }
+}
+
+/// A rule on another column (`review`) still needs a free slot in the
+/// working column, where the claim lands (rev-1115): with the working
+/// column full, no agent starts and the card is not claimed.
+#[tokio::test]
+async fn a_full_working_column_starts_no_agent_for_a_rule_on_another_column() {
+    let td = setup(1).await;
+    let busy = new_card(&td, "coding", json!(["type:small"])).await;
+    set_rules(
+        &td,
+        "review",
+        json!([{
+            "name": "dispatch", "trigger": {"kind": "lands"},
+            "actions": [{"verb": "card.assign",
+                         "args": {"template": "card-small", "owner": "lead"}}]
+        }]),
+    )
+    .await;
+    let id = new_card(&td, "review", json!(["type:small"])).await;
+    settle(&td).await;
+    let r = runs(&td).await;
+    let run = r
+        .iter()
+        .find(|r| r["rule"] == "review/dispatch")
+        .expect("the rule ran");
+    assert_eq!(run["state"], "noop", "{run}");
+    assert!(run.to_string().contains("no room"), "{run}");
+    let c = card(&td, &id).await;
+    assert_eq!(c["column"], "review", "{c}");
+    assert!(c["assignee"].is_null(), "{c}");
+    let spawns: i64 = state(&td)
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM spawns WHERE bound_kind = 'card'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(spawns, 0);
+    assert_eq!(card(&td, &busy).await["column"], "coding");
+}
+
+/// File sync and the fleet store a `card_dispatcher` of a columns project
+/// as `off` and go on (no error); another project keeps its owner.
+#[tokio::test]
+async fn a_file_card_dispatcher_on_a_columns_board_is_stored_as_off() {
+    let td = setup(2).await;
+    td.project("q").await;
+    let got = state(&td)
+        .db
+        .write("operator", |t| {
+            terrariumd::store::projects::set_card_dispatcher_from_file(t, "p", Some("lead"))?;
+            terrariumd::store::projects::set_card_dispatcher_from_file(t, "q", Some("lead"))?;
+            Ok((
+                terrariumd::store::projects::get(t, "p")?.card_dispatcher,
+                terrariumd::store::projects::get(t, "q")?.card_dispatcher,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(got, (None, Some("lead".to_owned())));
 }

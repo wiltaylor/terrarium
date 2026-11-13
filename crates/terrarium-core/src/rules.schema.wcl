@@ -193,8 +193,8 @@ type CardComment {
 // `<label>=<template>`: the card's one matching label picks the template).
 // A new agent needs `owner`, the project admin whose spawn rights and caps
 // are used. `from`: take the top eligible cards of this column, up to
-// `limit` (1); else the run's card. `room`: the column that must be under
-// its WIP limit (absent: `@working`).
+// `limit` (1); else the run's card. The column with the role `working`
+// must have a free WIP slot (the claim lands there).
 @block("card_assign")
 type CardAssign {
   who: utf8?
@@ -202,7 +202,6 @@ type CardAssign {
   templates: list<utf8>?
   owner: utf8?
   from: utf8?
-  room: utf8?
   limit: i64?
 }
 

@@ -654,7 +654,6 @@ fn assign_new(
             Templates::ByLabel(map)
         }
     };
-    let room = a.raw("room").map(|r| column_name(ctx, r)).transpose()?;
     let (from, card, limit) = match a.raw("from") {
         Some(r) => (
             column_name(ctx, r)?,
@@ -679,7 +678,6 @@ fn assign_new(
     }
     let pick = Pick {
         from,
-        room,
         templates,
         card,
     };

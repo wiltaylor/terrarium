@@ -90,12 +90,11 @@ impl Templates {
 }
 
 /// What one dispatch chooses from: the cards of column `from` (only
-/// `card` when it is set), the column `room` that must be under its WIP
-/// limit (`None`: the working role), and the templates.
+/// `card` when it is set), and the templates. The room is always the
+/// working-role column, because the claim always lands there (rev-1115).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pick {
     pub from: String,
-    pub room: Option<String>,
     pub templates: Templates,
     pub card: Option<String>,
 }
@@ -145,13 +144,6 @@ WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = 
   AND (c.position, c.id) > (?4, ?5)
 ORDER BY c.position, c.id LIMIT ?6";
 
-/// The WIP check of a named column, as [`WORKING_WIP`] for a rule's `room`.
-pub const ROOM_WIP: &str = "
-SELECT k.wip_limit,
-       (SELECT count(*) FROM cards c WHERE c.column_id = k.id
-         AND c.archived = 0 AND c.kind = 'card')
-FROM board_columns k WHERE k.project = ?1 AND k.name = ?2";
-
 /// One card of [`CANDIDATES`]: the same tests, for the card `?4` only (a
 /// rule action on its run's card).
 pub const ONE_CANDIDATE: &str = "
@@ -176,11 +168,10 @@ pub fn select(
     project: &str,
     pick: &Pick,
 ) -> ApiResult<Result<(String, String), &'static str>> {
-    let room = match &pick.room {
-        None => c.query_row(WORKING_WIP, [project], working_wip),
-        Some(column) => c.query_row(ROOM_WIP, params![project, column], working_wip),
-    }
-    .optional()?;
+    let room = c
+        .query_row(WORKING_WIP, [project], working_wip)
+        .optional()?;
+    // The room is the working-role column, where the claim lands.
     // Fail closed without an explicit limit: opt-in must not create an
     // unbounded number of agents on a board with no concurrency policy.
     // The count is every card in the column, also a card that waits in the
@@ -254,12 +245,10 @@ pub fn select(
     }
 }
 
-/// The `card_dispatcher` setting's pick: the ready column, the working
-/// role's room, the fixed map.
+/// The `card_dispatcher` setting's pick: the ready column and the fixed map.
 fn setting_pick(c: &Connection, project: &str) -> ApiResult<Pick> {
     Ok(Pick {
         from: board::role_name(c, project, "ready", "ready")?,
-        room: None,
         templates: Templates::TypeMap,
         card: None,
     })
