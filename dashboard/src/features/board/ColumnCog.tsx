@@ -112,7 +112,6 @@ function OptionsEditor(props: { options: ColumnOptions; catalog: RuleCatalog; co
   const { api } = useInstance();
   const listId = createUniqueId();
   // The props are a snapshot: the panel makes a new editor for each read (keyed).
-  // eslint-disable-next-line solid/reactivity
   const start = props.options;
   const [checks, setChecks] = createSignal<ColumnChecks>({ ...start.checks });
   const [queue, setQueue] = createSignal<ColumnQueue>({ ...start.queue });
