@@ -874,3 +874,65 @@ async fn page_list_reports_the_existing_domain_rights() {
     .await
     .err(403, "forbidden");
 }
+
+#[tokio::test]
+async fn v2_start_refuses_an_over_limit_project_and_initializes_the_others() {
+    // TER-1134 (rev-1077 finding 1, `lib.rs` `initialize_project_pages`): a
+    // project with 20 stored pages plus Dashboard cannot take the ten
+    // built-ins (30 at most). The ON start logs the refusal, leaves that
+    // project uninitialized, initializes the others, and still serves.
+    let mut td = TestDaemon::start().await;
+    td.project("big").await;
+    td.project("small").await;
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("fixture", |t| {
+            for i in 1..=20 {
+                t.execute(
+                    "INSERT INTO project_pages(project,slug,title,position,widgets,updated_at,updated_by)
+                     VALUES('big',?1,'Stored',?2,'[]','before','original')",
+                    rusqlite::params![format!("stored-{i}"), i],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let big_items = td.get("/api/projects/big/pages").await.body["items"].clone();
+    assert_eq!(big_items.as_array().unwrap().len(), 21);
+    let counts = layout_counts(&td).await;
+
+    td.web.project_pages_v2 = true;
+    td.boot(None, None).await;
+
+    // The over-limit project: no built-ins, no revision, its pages unchanged.
+    let big = td.get("/api/projects/big/page-layout").await.body;
+    assert_eq!(big["revision"], 0);
+    assert_eq!(big["pages"].as_array().unwrap(), big_items.as_array().unwrap());
+    assert!(
+        big["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p.get("builtin").is_none_or(Value::is_null)),
+        "no built-in page on the refused project: {big}"
+    );
+    // The other project is initialized, once.
+    let small = td.get("/api/projects/small/page-layout").await.body;
+    assert_eq!(small["revision"], 1);
+    assert_eq!(small["pages"].as_array().unwrap().len(), 11);
+    assert_eq!(layout_counts(&td).await, (counts.0 + 1, counts.1 + 1));
+
+    // The next start refuses it again and changes nothing.
+    td.boot(None, None).await;
+    assert_eq!(td.get("/api/projects/big/page-layout").await.body, big);
+    assert_eq!(td.get("/api/projects/small/page-layout").await.body, small);
+    assert_eq!(layout_counts(&td).await, (counts.0 + 1, counts.1 + 1));
+    // The daemon serves both projects.
+    td.get("/api/projects").await.ok();
+    assert_eq!(td.get("/api/projects/big/pages").await.ok()["items"], big_items);
+    td.get("/api/projects/small/pages/board").await.ok();
+}
