@@ -315,6 +315,12 @@
     },
     {
       "source": "api/board.rs",
+      "registration": "\"/projects/{name}/board/columns/{column}/options\",get(show_column_options).put(put_column_options)",
+      "access": "other",
+      "cases": []
+    },
+    {
+      "source": "api/board.rs",
       "registration": "\"/projects/{name}/cards\",get(list_cards).post(create_card)",
       "access": "conditional",
       "cases": [

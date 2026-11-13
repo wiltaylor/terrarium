@@ -60,8 +60,9 @@ it("puts ordered custom tabs before Board and Add page at the end, and creates a
   try {
     await waitFor(() => expect(host.textContent).toContain("First"));
     expect([...host.querySelectorAll("a")].slice(0, 3).map(a => a.textContent)).toEqual(["First", "Later", "Board"]);
-    expect(host.querySelector("nav")?.lastElementChild?.textContent).toBe("Add page");
-    host.querySelector("button")!.click();
+    const add = host.querySelector("nav")?.lastElementChild as HTMLButtonElement;
+    expect([add.textContent, add.getAttribute("aria-label"), add.title, add.disabled]).toEqual(["+", "Add page", "Add page", false]);
+    add.click();
     const inputs = host.querySelectorAll("input");
     inputs[0]!.value = "new-page"; inputs[0]!.dispatchEvent(new Event("input", { bubbles: true }));
     inputs[1]!.value = "New page"; inputs[1]!.dispatchEvent(new Event("input", { bubbles: true }));
@@ -73,8 +74,18 @@ it("puts ordered custom tabs before Board and Add page at the end, and creates a
 it("does not expose Add page to a reader", async () => {
   vi.spyOn(api.pages, "list").mockResolvedValue({ items: [], can_edit: false });
   const { host, dispose } = mount();
-  try { await waitFor(() => expect(host.textContent).toContain("Board")); expect(host.textContent).not.toContain("Add page"); }
+  try { await waitFor(() => expect(host.textContent).toContain("Board")); expect(host.querySelector('[aria-label="Add page"]')).toBeNull(); }
   finally { dispose(); }
+});
+it("disables the Add page + at 10 pages and says why in its tooltip", async () => {
+  const items = Array.from({ length: 10 }, (_, i) => ({ project: "terrarium", slug: `p${i}`, title: `P${i}`, position: i, updated_at: "", updated_by: "operator", widgets: [] }));
+  vi.spyOn(api.pages, "list").mockResolvedValue({ items, can_edit: true });
+  const { host, dispose } = mount();
+  try {
+    await waitFor(() => expect(host.querySelector('[aria-label="Add page"]')).not.toBeNull());
+    const add = host.querySelector<HTMLButtonElement>('[aria-label="Add page"]')!;
+    expect([add.textContent, add.disabled, add.title]).toEqual(["+", true, "Add page: this project has the maximum of 10 pages"]);
+  } finally { dispose(); }
 });
 it("does not infer a question-bearing Dashboard from its slug when no dashboard is designated", async () => {
   const page = { project: "terrarium", slug: "dashboard", title: "Old dashboard slug", position: 0, updated_at: "", updated_by: "operator", widgets: [] };
@@ -83,5 +94,16 @@ it("does not infer a question-bearing Dashboard from its slug when no dashboard 
   try {
     await waitFor(() => expect(host.textContent).toContain("Old dashboard slug"));
     expect(host.querySelector('a[href$="/pages/dashboard"] .nav-count')).toBeNull();
+  } finally { dispose(); }
+});
+it("shows no per-page Add or shared Edit outside the project shell when v2 is on", async () => {
+  const page = { project: "terrarium", slug: "work", title: "Work", position: 0, updated_at: "", updated_by: "operator", widgets: [] };
+  vi.spyOn(api.pages, "list").mockResolvedValue({ items: [page], can_edit: true, capabilities: { project_pages_v2: true } });
+  const { host, dispose } = mount();
+  try {
+    // The page list has arrived when its tab shows.
+    await waitFor(() => expect(host.querySelector('a[href$="/pages/work"]')).not.toBeNull());
+    expect(host.querySelector('[aria-label="Add page"]')).toBeNull();
+    expect(host.textContent).not.toContain("Edit pages");
   } finally { dispose(); }
 });

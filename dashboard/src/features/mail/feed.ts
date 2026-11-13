@@ -51,7 +51,7 @@ export function createMailFeed(api: Pick<Api, "mail">, query: () => MailQuery, o
     const gen = generation;
     const q = query();
     try {
-      const [fresh, ...again] = await Promise.all([all(q, cursor), ...threads.map((thread) => all({ thread }))]);
+      const [fresh, ...again] = await Promise.all([all(q, cursor), ...threads.map((thread) => all({ thread, ...(q.project ? { project: q.project } : {}) }))]);
       if (gen !== generation) return;
       const next = newestId(fresh!);
       if (next && (!cursor || next > cursor)) cursor = next;

@@ -1115,9 +1115,17 @@ async fn kill_ends_the_child(td: &TestDaemon, agent: &str, target: &str, dir: &s
     assert_eq!(k["cleanup"]["status"], "unknown", "{k}");
     assert!(k["cleanup"]["operation_id"].is_string(), "{k}");
     // The physical check below is separate from the untrusted legacy report.
+    // The answer is not proof that the kill took effect: the collector waits
+    // at most 12 s for the report of the kill on the target (TERM, up to
+    // GRACE_SECS, then KILL), and under load the answer can come first
+    // (TER-1137). So wait for the child to end, up to a deadline.
+    let end = std::time::Instant::now() + PATIENCE;
+    while alive(child) && std::time::Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(
         !alive(child),
-        "the child {child} still runs on {target}: {k}"
+        "the child {child} still runs on {target} {PATIENCE:?} after the kill: {k}"
     );
 }
 

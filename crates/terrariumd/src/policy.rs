@@ -52,6 +52,20 @@ pub fn admin_project(actor: &Actor, project: &str, what: &str) -> ApiResult<()> 
     }
 }
 
+/// Edit the options of a board column (TER-1112, kanban rework D4): only the
+/// operator and a `project_admin` of that project. Stricter than
+/// [`admin_project`]: a `sysadmin` and every other reader only read them.
+pub fn edit_column_options(actor: &Actor, project: &str) -> ApiResult<()> {
+    match actor {
+        Actor::Operator => Ok(()),
+        Actor::Agent(a) if a.project == project && a.roles.contains(&Role::ProjectAdmin) => Ok(()),
+        Actor::Agent(_) => Err(deny(
+            "editing the options of a board column",
+            &format!("project_admin of `{project}` or the operator"),
+        )),
+    }
+}
+
 /// The project gate of a write (TER-47): the own project, a sysadmin, or
 /// the operator. It is what [`read_project`] was before the architect: an
 /// architect reads every project but writes only in its own, as a member.

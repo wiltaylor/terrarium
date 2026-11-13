@@ -235,6 +235,12 @@ pub fn create(t: &mut Tx<'_>, p: &NewProject, source: &str) -> ApiResult<Project
         params![p.name, p.description, prefix, source, at],
     )?;
     board::create_board(t, &p.name)?;
+    // Project pages v2 (TER-1077): a new project gets the built-in pages in
+    // the same transaction. OFF keeps today's Dashboard trigger only.
+    if t.project_pages_v2 {
+        let actor = t.actor.clone();
+        super::pages::initialize_defaults(t, &p.name, &actor)?;
+    }
     t.audit(
         "project.create",
         &p.name,

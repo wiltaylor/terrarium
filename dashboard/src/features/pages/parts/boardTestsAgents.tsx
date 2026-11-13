@@ -94,7 +94,7 @@ function BoardColumnsContent(props: { project: string; canEdit: boolean }) {
     <Show when={props.canEdit} fallback={<ColumnsTable columns={board.latest?.columns} loading={board.loading} />}>
       <Show when={stale()}><p class="muted small" role="status">The columns changed on the server. Cancel to load them.</p></Show>
       <Show when={base()} keyed fallback={<p class="muted">{board.loading ? "Loading…" : ""}</p>}>
-        {columns => <ColumnsEditorFields columns={columns} onClose={reset} onSave={async (edits): Promise<Board> => {
+        {columns => <ColumnsEditorFields columns={columns} autoFocus={false} onClose={reset} onSave={async (edits): Promise<Board> => {
           if (!props.canEdit) throw new Error("No right to edit the columns.");
           const saved = await api.board.update(props.project, edits);
           mutate(saved);

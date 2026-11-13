@@ -2,13 +2,16 @@ import { useInstance } from "../../instance";
 // Mail pieces that the mail log and the Inbox share. A subject and a body
 // are the sender's words: they go into the page as text nodes only.
 
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, createUniqueId, For, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { Message } from "../../api/types";
 import { ForumPost, quotePost } from "../../components/ForumPost";
 import { SafeHtml } from "../../components/SafeHtml";
 import { renderMarkdown } from "../../lib/markdown";
 
+
+/** True for a message that the loop guard held and the operator did not release yet. */
+export const heldOpen = (m: Pick<Message, "held" | "released_at">): boolean => m.held === true && !m.released_at;
 
 /** The delivery state of a message, as chips. The state is the recipient's; the log keeps no unread state for the operator. */
 export function StateChips(props: { message: Message }) {
@@ -24,6 +27,11 @@ export function StateChips(props: { message: Message }) {
             read by {who()}
           </span>
         )}
+      </Show>
+      <Show when={heldOpen(m())}>
+        <span class="chip warn" title={`The loop guard held it${m().held_reason ? ` (${m().held_reason})` : ""}. No pointer went to the recipient. The operator resumes the thread in the Inbox.`}>
+          held
+        </span>
       </Show>
       <Show when={m().released_at}>
         {(at) => (
@@ -41,9 +49,19 @@ export function StateChips(props: { message: Message }) {
   );
 }
 
-export function MessageView(props: { message: Message; number?: number; project?: string; onQuote?: (text: string) => void }) {
+/**
+ * The DOM id and hash anchor of a message post. Without a scope it is the
+ * legacy `mail-<id>` that `/logs/mail?open=<id>#mail-<id>` links scroll to.
+ * A mail panel passes its own scope, so two panels that show the same message
+ * give two ids, and a hash scrolls only the panel that it names.
+ */
+export function mailPostId(id: string, scope?: string) {
+  return scope ? `mail-${scope}-${id}` : `mail-${id}`;
+}
+
+export function MessageView(props: { message: Message; number?: number; project?: string; idScope?: string; onQuote?: (text: string) => void }) {
   return (
-    <ForumPost id={`mail-${props.message.id}`} number={props.number ?? 1} href={`/logs/mail?open=${encodeURIComponent(props.message.id)}#mail-${props.message.id}`} author={props.message.from_name} authorId={props.message.from} session={props.message} at={props.message.created_at} label="Mail" onQuote={props.onQuote ? (post) => props.onQuote?.(quotePost(props.message.body, post)) : undefined}>
+    <ForumPost id={mailPostId(props.message.id, props.idScope)} number={props.number ?? 1} href={`/logs/mail?open=${encodeURIComponent(props.message.id)}#mail-${props.message.id}`} author={props.message.from_name} authorId={props.message.from} session={props.message} at={props.message.created_at} label="Mail" onQuote={props.onQuote ? (post) => props.onQuote?.(quotePost(props.message.body, post)) : undefined}>
       <div class="row small" style={{ gap: "6px", "flex-wrap": "wrap" }}>
         <span title={props.message.to}>To {props.message.to_name}</span>
         <Show when={props.message.subject}>
@@ -62,6 +80,8 @@ export function Compose(props: { to?: string; onClose: () => void; onSent: (m: M
   const [subject, setSubject] = createSignal("");
   const [body, setBody] = createSignal("");
   const [error, setError] = createSignal<unknown>(null);
+  /** One recipient list per Compose, so each input binds to its own list. */
+  const recipientsId = `mail-recipients-${createUniqueId()}`;
   return (
     <Modal title="Compose as operator" onClose={() => props.onClose()}>
       <ErrorBanner error={error()} />
@@ -80,8 +100,8 @@ export function Compose(props: { to?: string; onClose: () => void; onSent: (m: M
       >
         <label>
           To (project/agent, project:&lt;name&gt;, or operator)
-          <input list="mail-recipients" value={to()} onInput={(e) => setTo(e.currentTarget.value)} required />
-          <datalist id="mail-recipients">
+          <input list={recipientsId} value={to()} onInput={(e) => setTo(e.currentTarget.value)} required />
+          <datalist id={recipientsId}>
             <For each={agents.state.agents}>{(a) => <option value={`${a.project}/${a.name}`}>{a.harness}</option>}</For>
             <For each={projects.projects()}>{(p) => <option value={`project:${p.name}`}>project inbox</option>}</For>
           </datalist>

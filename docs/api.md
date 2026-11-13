@@ -351,7 +351,7 @@ gives them to the routers and the mail code.
 | `TERRARIUM_ARTIFACT_LISTEN` | `--artifact-listen` | `0.0.0.0:8081` | The artifact origin listener. Empty: none, and the dashboard port serves `/a/...`. |
 | `TERRARIUM_ARTIFACT_PUBLIC_URL` | `--artifact-public-url` | unset | The artifact origin in signed URLs and the CSP. |
 | `TERRARIUM_WS_QUERY_TOKEN` | `--ws-query-token` | `0` | `1`: take `?token=` on an upgrade. |
-| `TERRARIUM_PROJECT_PAGES_V2` | `--project-pages-v2` | `0` | Staged project-page layout capability. Strict switch parser. Deployment activation and explicit default initialization belong to C7 (TER-1077). |
+| `TERRARIUM_PROJECT_PAGES_V2` | `--project-pages-v2` | `0` | Project pages (TER-1077). Strict switch parser. `1` turns them on: see "Project page layout v2" for the switch-on step and what the first start initializes. `0` is the rollback. |
 | `TERRARIUM_SESSION_TTL` | `--session-ttl` | `30d` | The life of a session cookie. The daemon renews it past half its life. |
 | `TERRARIUM_CLI_SESSION_TTL` | `--cli-session-ttl` | `90d` | The life of a CLI session token (`terrarium login`). |
 | `TERRARIUM_SESSION_MAX_AGE` | `--session-max-age` | `90d` | The longest life of a dashboard session through its renewals, from the login. |
@@ -2084,6 +2084,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `status_reason` | The reason of the last status change: `idle` after an idle stop, `paused` after the stop of a pause, `subscription_disabled` (the subscription is disabled, §16.2), `stream_limit: waiting for a free stream on `<sub>`` (the work waits for a stream of a self-hosted subscription, §16.2), `stopped`, an exit, or an error text. Absent when not known. |
 | `paused` | `true` while the agent is paused (§6.2): nothing wakes it, and its work waits. Always present. |
 | `queued` | The work that waits for the agent: queued turns, `queued` mail, card and nudge lines, and a pending reset with a `then` prompt (§6.2). Absent when 0. |
+| `held_mail` | The mail to the agent that the loop guard held and the operator did not release yet (`held` and no `released_at`, whatever its `state`; §7.4). It is not in `queued`: held mail is not deliverable work, and nothing releases it but `release` or `resume` (§7.4). A count only, in `GET /api/agents` and `GET /api/agents/{id}`. Present (`0` when none) for the operator, the agent itself, a `project_admin` of its project, a `sysadmin`, and an `architect`. Absent for any other caller: absent means unavailable, not 0. It can differ from the Inbox `system` count, which counts threads (§6.9). |
 | `idle_stop` | The idle stop of the agent (§6.2): `off`, or a duration such as `30m`. Absent: the daemon's `TERRARIUM_IDLE_STOP`. |
 | `compact_on_idle` | `true` or `false`: the agent compacts its session at its idle stop (§6.2, "Auto compact"). Absent: the daemon's `TERRARIUM_COMPACT_ON_IDLE`. |
 | `compact_max_age` | The maximum age of the session context (§6.2, "Auto compact"): `off`, or a duration such as `24h`. Absent: the daemon's `TERRARIUM_COMPACT_MAX_AGE`. |
@@ -4498,6 +4499,10 @@ of agent-to-agent mail on thread T since the last operator or project-inbox
 message (limit 6)`. The daemon sets both at the send and does not change
 them. Messages from before migration 16 have `held: false`.
 `thread_paused` is about the thread now; `held` is about the message.
+So a held message is never `queued` until a release: its `state` is
+`delivered` (later `read` or `replied` when the recipient reads it), and
+only `released_at` ends the hold. The CLI shows its state as
+`delivered (held)`, and the agent's `held_mail` counts it (§6).
 
 A message from an agent in `GET /api/mail` and `GET /api/mail/{id}` can
 have `session_id` and `session_label`: the sender's session at
@@ -4809,6 +4814,10 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 
 ### 8.2 Rules (PLAN §13)
 
+The checks of dependencies, blocked, done, and ETA below are **column
+options** (TER-1112, §8.2.1). Their defaults are the rules as written here.
+Own cards, the GitHub hold, and the WIP limit stay fixed.
+
 - **Own cards.** A member may move, edit, and link its own cards. A card is
   its own when it is assigned to the member, or when it is unassigned and the
   member made it. A member claims unassigned cards and comments on any card
@@ -4857,12 +4866,68 @@ archived cards. The columns are configurable (§8.3, "Columns"):
   previous_planned_secs}`).
 - **Events.** Every change is a `card` event with the actor (§9).
 
+#### 8.2.1 Column options (TER-1112)
+
+Each column has options: four move checks and the settings of its queue.
+
+| Check | Default | What it does |
+|---|---|---|
+| `require_dependencies_met` | the `working` column | a move into the column needs met dependencies (`409 dependencies_unmet`), also for a claim and a wait action |
+| `require_comment_on_enter` | the `blocked` column | a move into the column needs a non-blank comment (`422 comment_required`) |
+| `terminal_for_members` | `done` | the **Done** rule above for a card in the column: only a project admin or the operator moves it out, edits it, or reassigns it (`403`); nobody claims it or gives it a new ETA (`409`); only an admin makes a card in it (`403`) |
+| `clear_eta_on_enter` | every column | a card that enters the column loses its ETA (**ETA per column** above) |
+
+The mails on a move to `blocked` and `done`, `done_at`, and the reopen
+audit stay with the column role and the name `done`, not with the options.
+
+The queue settings are stored but not used yet (C3 runs the queue):
+`release` is `wip` (the default), `batch`, or `job`. Only `batch` takes
+`batch_size` (1 to 1000) and `max_wait_seconds` (1 to 2592000), both
+required, and `max_batch_cards` (optional, `batch_size` to 1000).
+
+The options belong to the column: a rename or a reorder keeps them. The
+board `PATCH` (§8.3) does not carry them, with one exception that keeps
+today's behaviour: when a column gets or loses the role `working`, its
+`require_dependencies_met` follows the role, and the same for `blocked`
+and `require_comment_on_enter`. Such a change needs the right to write the
+options (below): for another actor with the board `PATCH` right (a
+`sysadmin`), the whole `PATCH` is `403 forbidden` with `details.column` and
+`details.options`, and nothing changes. An allowed change raises the
+version and is recorded as a `PUT` is. A new column from the board `PATCH`
+gets the defaults of its role. Migration `ter-1112-column-options.sql` sets the
+defaults on each existing board from its roles and the name `done`.
+
+`GET /api/projects/{name}/board/columns/{column}/options` (a project
+reader; a role alias names the column with that role):
+
+```json
+{"project": "p", "column": "merge_queue", "version": 3,
+ "checks": {"require_comment_on_enter": false, "require_dependencies_met": false,
+            "terminal_for_members": false, "clear_eta_on_enter": true},
+ "queue": {"release": "batch", "batch_size": 4, "max_wait_seconds": 1800,
+           "max_batch_cards": 8}}
+```
+
+`PUT` on the same path takes the whole `checks` and `queue` and the
+`base_version` that was read, and returns the new options. Only the
+operator and a `project_admin` of that project write (`403` for every other
+actor, a `sysadmin` too: it reads only). A `base_version` that is not the
+current `version` is `409 stale_base` with `details.version`, and nothing is
+written. A bad queue is `422 invalid` with `details.path` (for example
+`queue.batch_size`). A write that changes something raises `version` by
+one, writes one audit row `board.column_options` (`{column, version,
+before, after}`), and emits one `board` event (`{column, options_version,
+checks, queue}`). A write that changes nothing keeps the version and writes
+nothing.
+
 ### 8.3 Endpoints
 
 | Endpoint | Body | Answer |
 |---|---|---|
 | `GET /api/projects/{name}/board?done=&limit=&cursor=` | | `200` board with card summaries; Done pages are opt-in |
 | `PATCH /api/projects/{name}/board` | `{"columns": [column, ...]}` | `200` board; project_admin |
+| `GET /api/projects/{name}/board/columns/{column}/options` | | `200` column options (§8.2.1) |
+| `PUT /api/projects/{name}/board/columns/{column}/options` | `{"base_version", "checks", "queue"}` | `200` column options; the operator or project_admin of the project |
 | `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards in board order: by column, then by place in the column (the top first), then by number. Each card has its `position` in its column, from 0. Cursor: opaque |
 | `POST /api/projects/{name}/cards` | new card | `201` card |
 | `GET /api/cards?columns=working,research` | | `200` the active cards of every board the caller may read (below) |
@@ -6920,7 +6985,7 @@ all projects. Targets are project targets by default: a global target
 
 | Field | Meaning |
 |---|---|
-| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Without `work_root`, when the agent user cannot create `/src/terrarium` (permission denied or a read-only file system), the root falls back to `~/.terrarium-work/<project>/<agent-name>` of that user, with one daemon warning per target; the root keeps that base until cleanup. A `work_root` that is set never falls back: its failure names it. Set it with `terrarium admin target edit <t> --work-root <path>`. Keep project shared caches outside each agent root. |
+| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Without `work_root`, when the agent user cannot create `/src/terrarium` (permission denied or a read-only file system), the root falls back to `~/.terrarium-work/<project>/<agent-name>` of that user, with one daemon warning per target; the root keeps that base until cleanup. The run spool of other callers (`<work_root>/.terrarium-runs`, below) falls back the same way, to `~/.terrarium-work/.terrarium-runs`, and a run keeps the spool it started in. A `work_root` that is set never falls back: its failure names it and `--work-root`. Set it with `terrarium admin target edit <t> --work-root <path>`. Keep project shared caches outside each agent root. |
 | `scope` | `global` (no `project`) or `project`. Every target view has it, also in `GET /api/projects/{name}/targets`. |
 | `state` | `running`, `stopped`, `absent`, or `unknown`: what the last lifecycle verb saw. |
 | `snapshots` | The snapshot names that `POST .../snapshot` or `snapshot_before_task` took. A destroy (the state `absent`) clears them. A snapshot delete removes a name. A snapshot list removes the names that the host no longer has (§17.3, "Snapshots"). |
@@ -7608,7 +7673,11 @@ is `422 invalid`. Input-fed queue setup and bundle transfer do not opt in.
 Ordinary execs, PTYs, and shells retain the previous interruption behavior.
 The private remote output spool is under the bound card agent's recorded
 owned root, or `<work_root>/.terrarium-runs` for other callers. The latter
-has a daemon-owned marker. No-follow directory-FD checks reject symlinks,
+has a daemon-owned marker. Without `work_root` it is
+`/src/terrarium/.terrarium-runs`, else `~/.terrarium-work/.terrarium-runs`
+when the remote user may not create `/src/terrarium` (permission denied, a
+read-only file system, or a missing parent); a spool that is not usable either
+way fails at once with a `spool error` that names `--work-root` (TER-1129). No-follow directory-FD checks reject symlinks,
 foreign ownership and group/other writable components. Python 3 is required
 for these checks; missing tools are terminal errors, never installed. The spool
 retains the first 64 MiB per stream, and is removed after 24 hours of result
@@ -11436,7 +11505,7 @@ and the dashboard CLI remain compatibility aliases for at least one release.
 The alias reads an empty layout if the mapped page was deleted. Saving it
 replaces monitor/Markdown widgets and preserves system and wiki widgets.
 
-#### Project page layout v2 (staged, default OFF)
+#### Project page layout v2 (default OFF)
 
 `GET /api/projects/{name}/pages` additionally returns
 `capabilities: {project_pages_v2: boolean}`. Only exact `true` from the
@@ -11512,8 +11581,11 @@ month. Knowledge contains wiki browser, memory list/graph and DB types/records.
 Logs contains mail and events. Reset uses the same definitions and affects
 only the selected built-in. A stored initialized marker prevents restart
 from restoring deleted built-ins. Schema migrations add only empty metadata.
-C7 owns calling the initializer before enabled responses and during enabled
-new-project creation. This implementation does not call it automatically.
+With the capability ON, the daemon runs the initializer for every project
+without the marker at each start, before it serves a request (one
+transaction per project, a refusal is logged and the other projects go on),
+and in the transaction of each project creation. OFF never runs it, and a
+new project then gets only the Dashboard page as before. GET never runs it.
 
 Copy requires source read plus target administration rights and confirmation.
 It copies neither grants nor source audit actor metadata. References remain
@@ -11523,6 +11595,53 @@ Renderers must resolve IDs against the target project's monitor inventory,
 not fetch a global ID because the caller also has source-project rights.
 Existing resource endpoints retain their authorization checks. Compatible
 existing local monitor references are validated normally.
+
+The page list also returns `rights`, the caller's existing rights in the
+project, for the controls of the page widgets:
+
+| Field | The check it reports | Widget controls |
+|---|---|---|
+| `write_project` | `write_project` (own project, sysadmin, operator) | Board New card, moves and the card drawer |
+| `admin_project` | `admin_project` (same as `can_edit`) | Board columns, New agent, project event sources, rules, pipelines |
+| `manage_schedules` | `schedule_scope` of the project | New schedule or trigger, edit of a project schedule |
+| `manage_global` | `sysadmin` | global schedules and event sources |
+| `operator` | the operator | agent pins |
+
+They describe the endpoints and give no right: each endpoint still checks
+every write and answers 403. A missing or failed rights read shows the
+widgets read-only. `can_edit` stays the layout right only. The Repos,
+Knowledge and Logs widgets keep the controls of their routes, and a refused
+write shows the endpoint's 403. The mail widget sends `project` to
+`GET /api/mail`, so the daemon returns that project's mail only.
+
+Dashboard (TER-1077), with the capability ON: the stored pages replace the
+ten fixed project tabs, in their order. A cog next to Edit pages opens the
+project settings (General, Secrets, Templates, Monitors) at the unchanged
+`/p/{name}/settings/...` URLs, and the cog of the project row in the
+sidebar stays. Settings is no page and has no widgets. The old routes
+(`/p/{name}/board?card=…`, `/tests/{id}`, `/repos/{repo}`,
+`/knowledge/wiki/…`, `/logs/mail?open=…`, the redirects of nav.ts) still
+open their old views with their queries, and the built-in page of that
+route is the active tab. A project click opens the Board built-in page,
+else the first page, else `/board`. In Edit pages, "Restore default" adds a
+deleted built-in again or resets one (`/page-layout/reset`), and "Copy
+layout" replaces the whole layout after a confirmation (`/page-layout/copy`).
+Both need a draft without unsaved changes. With the capability OFF the
+tab row is the old one, and built-in pages that an ON period left are
+stored but hidden. An OFF save of a page with v2 widgets returns 422 and
+changes nothing.
+
+Switch-on step for a deployment: set `TERRARIUM_PROJECT_PAGES_V2=1` in the
+daemon's environment (the `terrarium` service in `compose.yaml` passes
+`TERRARIUM_PROJECT_PAGES_V2: ${TERRARIUM_PROJECT_PAGES_V2:-0}`, so set it in
+the `.env` next to `compose.yaml` or in the service environment), then
+restart the daemon. At the first start with it ON, each existing project
+gets the ten built-in pages appended after its stored pages, once (the
+marker survives restarts and rollbacks). Each project's layout revision
+increases by one, with one `page.layout` audit row (`initialize`) and one
+`page.updated` event. Rollback: set it to `0` and restart. The built-in
+pages stay stored and hidden, and switching on again shows them without a
+second initialization.
 
 CLI: `page layout`, `page save-layout --from-file FILE`,
 `page reset BUILTIN --base-revision N`, and

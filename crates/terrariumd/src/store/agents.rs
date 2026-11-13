@@ -73,6 +73,13 @@ pub struct AgentView {
     /// the agent ([`queued_count`]). Absent when 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub queued: usize,
+    /// The held mail of the agent that the operator did not release yet
+    /// ([`super::mail::held_count`], TER-1105). It is not in `queued`.
+    /// The API fills it only for the operator, the agent itself, an
+    /// admin of its project, and a reader of every project: absent means
+    /// unavailable to the caller, and `0` means none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_mail: Option<usize>,
     /// The harness of the agent has a compaction that the daemon can run
     /// and see the end of (PLAN §18, "Auto compact"). False: the daemon
     /// ignores the auto compact settings of the agent, and refuses a
@@ -192,6 +199,7 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
         status_reason: r.get("status_reason")?,
         parked: None,
         queued: 0,
+        held_mail: None,
         compact_supported: parse::<HarnessId>(&harness, "harness")?
             .compact_command()
             .is_some(),

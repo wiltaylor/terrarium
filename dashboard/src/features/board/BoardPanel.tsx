@@ -74,6 +74,13 @@ function BoardPanelContent(props: BoardPanelProps) {
   // The column of the open New card dialog, or null.
   const [newCardIn, setNewCardIn] = createSignal<string | null>(null);
   let addButton: HTMLButtonElement | undefined;
+  // A revoked grant closes the dialogs that it allows, so a re-grant does not open them again without a click.
+  createEffect(() => {
+    if (canWrite()) return;
+    setNewCardIn(null);
+    setPendingBlock(null);
+  });
+  createEffect(() => { if (!canColumns()) setEditColumns(false); });
   const [filtersOpen, setFiltersOpen] = createSignal(false);
 
   // A phone (phone.ts PHONE_QUERY) shows one column at a time, and it has no drag and drop: the Column select of the card drawer moves a card.

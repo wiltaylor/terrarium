@@ -49,17 +49,33 @@ export default function MailPage() {
 }
 
 /** `search` seeds the local free-text filter. Only a changed configured value replaces it. */
-export function MailPanel(props: { project: string; search?: string }) {
-  return <Show when={props.project} keyed>{(project) => <LocalMail project={project} search={props.search} />}</Show>;
+/**
+ * `canMakeCard` (write_project) gates Make card, `canReplyAsProject`
+ * (project_admin, the inbox reply) gates a reply that goes out as the project
+ * inbox (TER-1134). Compose and other replies follow the mail scope of the
+ * server, not a project right, and stay.
+ */
+export function MailPanel(props: { project: string; search?: string } & MailWrites) {
+  return <Show when={props.project} keyed>{(project) => <LocalMail project={project} search={props.search} canMakeCard={props.canMakeCard} canReplyAsProject={props.canReplyAsProject} />}</Show>;
 }
 
-function LocalMail(props: { project: string; search?: string }) {
+/** The route leaves them out and shows every control. */
+type MailWrites = { canMakeCard?: boolean; canReplyAsProject?: boolean };
+
+function LocalMail(props: { project: string; search?: string } & MailWrites) {
   const [params, setParams] = createSignal<LogParams>(props.search ? { q: props.search } : {});
   createEffect(on(() => props.search, (search, old) => { if (search !== old) setParams((p) => ({ ...p, q: search || undefined })); }, { defer: true }));
-  return <MailContent project={props.project} params={params()} onParams={(patch) => setParams((old) => ({ ...old, ...patch }))} />;
+  /** Message posts of this panel get ids of their own (see `mailPostId`). */
+  const idScope = `panel-${createUniqueId()}`;
+  return <MailContent project={props.project} idScope={idScope} serverProject params={params()} onParams={(patch) => setParams((old) => ({ ...old, ...patch }))} canMakeCard={props.canMakeCard} canReplyAsProject={props.canReplyAsProject} />;
 }
 
-function MailContent(props: { project?: string; params: LogParams; onParams: (patch: LogParams, options?: { replace: boolean }) => void }) {
+/**
+ * `serverProject`: the daemon filters the messages to the project too (the
+ * page widget, TER-1077), so no other project's mail reaches the browser. The
+ * route keeps its browser filter only.
+ */
+function MailContent(props: { project?: string; idScope?: string; serverProject?: boolean; params: LogParams; onParams: (patch: LogParams, options?: { replace: boolean }) => void } & MailWrites) {
   const { api, projects, events } = useInstance();
   const namesId = `mail-log-names-${createUniqueId()}`;
   /** The project of the route wins over the filter. */
@@ -75,7 +91,7 @@ function MailContent(props: { project?: string; params: LogParams; onParams: (pa
   };
   const now = useNow(60_000);
   const live = createLive();
-  const feed = createMailFeed(api, () => serverQuery(filter()), { onNew: live.arrive });
+  const feed = createMailFeed(api, () => ({ ...serverQuery(filter()), ...(props.serverProject && props.project ? { project: props.project } : {}) }), { onNew: live.arrive });
   /** Every message that the filters let through, held ones too. */
   const matching = createMemo(() => applyFilter(feed.messages(), filter(), now(), projects.prefixes()));
   const shown = createMemo(() => live.shown(matching(), (m) => m.id));
@@ -200,11 +216,14 @@ function MailContent(props: { project?: string; params: LogParams; onParams: (pa
                   now={now()}
                   open={openRow() === id}
                   project={props.project}
+                  idScope={props.idScope}
                   onToggle={() => toggle(m())}
                   onThread={() => setFilter({ thread: m().thread_id })}
                   feed={feed}
                   onCompose={(to) => setComposing({ to })}
                   onError={setError}
+                  canMakeCard={props.canMakeCard}
+                  canReplyAsProject={props.canReplyAsProject}
                 />
                 );
               }}
@@ -224,12 +243,13 @@ function LogRow(props: {
   now: number;
   open: boolean;
   project?: string;
+  idScope?: string;
   onToggle: () => void;
   onThread: () => void;
   feed: MailFeed;
   onCompose: (to?: string) => void;
   onError: (e: unknown) => void;
-}) {
+} & MailWrites) {
   const m = () => props.message;
   return (
     <>
@@ -264,7 +284,7 @@ function LogRow(props: {
       <Show when={props.open}>
         <tr class="log-thread-row">
           <td colspan={5}>
-            <ThreadPanel thread={m().thread_id} row={m()} project={props.project} feed={props.feed} onCompose={props.onCompose} onError={props.onError} />
+            <ThreadPanel thread={m().thread_id} row={m()} project={props.project} idScope={props.idScope} feed={props.feed} onCompose={props.onCompose} onError={props.onError} canMakeCard={props.canMakeCard} canReplyAsProject={props.canReplyAsProject} />
           </td>
         </tr>
       </Show>
@@ -272,7 +292,7 @@ function LogRow(props: {
   );
 }
 
-function ThreadPanel(props: { thread: string; row: Message; project?: string; feed: MailFeed; onCompose: (to?: string) => void; onError: (e: unknown) => void }) {
+function ThreadPanel(props: { thread: string; row: Message; project?: string; idScope?: string; feed: MailFeed; onCompose: (to?: string) => void; onError: (e: unknown) => void } & MailWrites) {
   const { api } = useInstance();
   const messages = createMemo(() => threadOf(props.feed.messages(), props.thread));
   const read = useReadBoundary("mail", () => props.thread, () => messages().map((m) => m.created_at));
@@ -283,6 +303,8 @@ function ThreadPanel(props: { thread: string; row: Message; project?: string; fe
   const to = () => counterpart(props.row);
   /** The newest message to the inbox of the page's project: the reply goes from that inbox, and a card can come from it. */
   const toInbox = () => (props.project ? messages().filter((m) => m.to === `project:${props.project}`).at(-1) : undefined);
+  /** A reply from the project inbox needs its admin right; another reply follows the mail scope. */
+  const canReply = () => !toInbox() || props.canReplyAsProject !== false;
   const makeCard = async (m: Message) => {
     try {
       // The daemon takes the title and the body from the message, and links its thread.
@@ -299,7 +321,7 @@ function ThreadPanel(props: { thread: string; row: Message; project?: string; fe
           <>
           <Show when={index() === read.first()}><ReadBoundary /></Show>
           <div class={m.id === props.row.id ? "current" : undefined}>
-            <MessageView message={m} number={index() + 1} project={props.project} onQuote={(quote) => {
+            <MessageView message={m} number={index() + 1} project={props.project} idScope={props.idScope} onQuote={(quote) => {
               setText((old) => old + (old ? "\n\n" : "") + quote);
               replyInput?.focus();
             }} />
@@ -307,7 +329,7 @@ function ThreadPanel(props: { thread: string; row: Message; project?: string; fe
           </>
         )}
       </For>
-      <Show when={toInbox()}>
+      <Show when={props.canMakeCard !== false ? toInbox() : undefined}>
         {(m) => (
           <div class="row">
             <Show
@@ -333,7 +355,7 @@ function ThreadPanel(props: { thread: string; row: Message; project?: string; fe
         onSubmit={async (e) => {
           e.preventDefault();
           const last = messages().at(-1);
-          if (!last || !text().trim()) return;
+          if (!last || !text().trim() || !canReply()) return;
           setSending(true);
           try {
             // One message for each participant (docs/api.md §7.2). From the project inbox when the thread goes to it.
@@ -350,6 +372,7 @@ function ThreadPanel(props: { thread: string; row: Message; project?: string; fe
           }
         }}
       >
+        <Show when={canReply()}>
         <PostEditor label="Reply" text={text()} project={props.project ?? ""} textBody>
         <textarea ref={replyInput}
           placeholder={toInbox() ? `Reply on the thread as project:${props.project}` : "Reply on the thread, to every participant"}
@@ -358,10 +381,13 @@ function ThreadPanel(props: { thread: string; row: Message; project?: string; fe
           aria-label="Reply"
         />
         </PostEditor>
+        </Show>
         <div class="row">
-          <button class="primary" type="submit" disabled={!text().trim() || sending()}>
-            Reply
-          </button>
+          <Show when={canReply()}>
+            <button class="primary" type="submit" disabled={!text().trim() || sending()}>
+              Reply
+            </button>
+          </Show>
           <Show when={to()}>
             {(name) => (
               <button type="button" onClick={() => props.onCompose(name())}>

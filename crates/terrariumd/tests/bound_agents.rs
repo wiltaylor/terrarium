@@ -591,6 +591,199 @@ async fn round_trip_claude_rules() {
     round_trip("claude", "rules").await;
 }
 
+/// TER-1090: ten no-op runs of a legacy generated unpark override do not
+/// consume the built-in budget after retirement. The original owner gets
+/// one return; another assignee still refuses the unpark.
+#[tokio::test]
+async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
+    let (td, lead) = setup_flow("rules").await;
+    // A board without `validating`, like the terrarium board: the old
+    // migration wrote the wait overrides only for a board that lacked a
+    // column of the old rules.
+    let r = td
+        .patch(
+            "/api/projects/p/board",
+            json!({"columns": [
+                {"name": "backlog"}, {"name": "ready"},
+                {"name": "in_progress", "role": "working"},
+                {"name": "review"}, {"name": "merge_queue"}, {"name": "accepted"},
+                {"name": "blocked", "role": "blocked"}, {"name": "done"}]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let columns = state(&td)
+        .db
+        .read(|c| Ok(terrariumd::store::rules::context(c, "p")?.columns.unwrap()))
+        .await
+        .unwrap();
+    let old_pack = terrarium_core::rules_file::parse(
+        terrarium_core::rules_tools::PRE_TER_222_WAIT_RULES,
+        "old",
+        &terrarium_core::rules_file::Context::default(),
+    )
+    .unwrap();
+    let old = terrarium_core::rules_tools::migrate(
+        &old_pack,
+        "",
+        &terrarium_core::rules_file::RuleSet::default(),
+        &columns,
+    )
+    .text;
+    assert!(old.contains("rule \"agent-unpark\""), "{old}");
+    let r = td.put("/api/projects/p/rules", json!({"text": old})).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let origin = |effective: &Value| {
+        effective["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "agent-unpark")
+            .unwrap()["origin"]
+            .clone()
+    };
+    let effective = td.get("/api/projects/p/rules/effective").await.ok().clone();
+    assert_eq!(origin(&effective), "override", "{effective}");
+
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    let before = sessions(&td, &eph).await;
+    assert_eq!(before.len(), 1, "{before:?}");
+    let session = before[0]["id"].clone();
+
+    // Ordinary non-wait moves: the legacy unpark runs, but the bound agent
+    // is not parked, so every run ends `noop`. Each counts against the
+    // ten-run card budget of an override. The setup above already moved
+    // the card: count those moves first, so the history is exact.
+    let (tdr, cr) = (&td, c.as_str());
+    let non_wait_moves = move || async move {
+        tdr.get("/api/events?kind=card&limit=1000")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                e["card"] == cr
+                    && e["data"]["change"] == "moved"
+                    && !["review", "accepted", "done"].contains(&e["data"]["to"].as_str().unwrap())
+            })
+            .count()
+    };
+    let unpark_runs = move || async move {
+        tdr.get("/api/projects/p/rules/runs?rule=agent-unpark&limit=500")
+            .await
+            .ok()["runs"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    // `until` with the runs in the timeout message.
+    let noop_runs = move |want: usize| async move {
+        let start = std::time::Instant::now();
+        loop {
+            let runs = unpark_runs().await;
+            if runs.len() == want && runs.iter().all(|r| r["state"] == "noop") {
+                return;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "timed out waiting for {want} legacy no-op runs: {runs:#?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let setup_moves = non_wait_moves().await;
+    assert!(setup_moves < 10, "{setup_moves}");
+    noop_runs(setup_moves).await;
+    let column = td.get(&format!("/api/cards/{c}")).await.ok()["column"].clone();
+    assert_eq!(column, "in_progress");
+    for (n, to) in ["ready", "in_progress"]
+        .into_iter()
+        .cycle()
+        .take(10 - setup_moves)
+        .enumerate()
+    {
+        mv(&td, &c, to, None).await;
+        noop_runs(setup_moves + n + 1).await;
+    }
+    assert_eq!(non_wait_moves().await, 10);
+    td.post_empty("/api/reload").await.ok();
+    let effective = td.get("/api/projects/p/rules/effective").await.ok().clone();
+    assert_eq!(origin(&effective), "pack", "{effective}");
+
+    mv(&td, &c, "review", None).await;
+    parked(&td, &eph).await;
+    mv(&td, &c, "ready", Some("Review: changes.")).await;
+    td.wait_status(&eph, "idle").await;
+    until("the return after the old no-op budget", || async {
+        return_turns(&td, &eph, &c).len() == 1
+    })
+    .await;
+    assert!(spawn_row(&td, &eph).await["parked_at"].is_null());
+    let runs = td
+        .get("/api/projects/p/rules/runs?rule=agent-unpark&limit=500")
+        .await
+        .ok()["runs"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(runs.len(), 11, "{runs:?}");
+    // Ten legacy no-ops, then one built-in run that wakes the owner. None
+    // is skipped by the card budget.
+    let state_count = |s: &str| runs.iter().filter(|r| r["state"] == s).count();
+    assert_eq!(state_count("noop"), 10, "{runs:?}");
+    assert_eq!(state_count("done"), 1, "{runs:?}");
+    let after = sessions(&td, &eph).await;
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0]["id"], session);
+    assert_eq!(after[0]["resumes"], 1, "{after:?}");
+    let unparked = td
+        .get(&format!("/api/agents/{eph}/events?kind=agent.unparked"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(unparked.as_array().unwrap().len(), 1, "{unparked}");
+    mv(&td, &c, "in_progress", None).await;
+    let r = td
+        .post(
+            &format!("/api/cards/{c}/assign"),
+            json!({"assignee": eph.clone()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+
+    // The same restored built-in must not create a second writer.
+    mv(&td, &c, "review", None).await;
+    parked(&td, &eph).await;
+    let other = worker(&td, "other").await;
+    let r = td
+        .post(
+            &format!("/api/cards/{c}/assign"),
+            json!({"assignee": other}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    mv(&td, &c, "in_progress", None).await;
+    until("the different-assignee refusal", || async {
+        let events = td
+            .get(&format!(
+                "/api/agents/{eph}/events?kind=agent.unpark_refused"
+            ))
+            .await;
+        events.ok().as_array().unwrap().len() == 1
+    })
+    .await;
+    assert!(spawn_row(&td, &eph).await["parked_at"].is_string());
+    assert_eq!(return_turns(&td, &eph, &c).len(), 1);
+    let unparked = td
+        .get(&format!("/api/agents/{eph}/events?kind=agent.unparked"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(unparked.as_array().unwrap().len(), 1, "{unparked}");
+}
+
 both_flows!(forward_moves_stay_parked_and_returns_wake);
 /// Forward delivery moves never send a return turn. Review and merge
 /// failures still wake the same agent in both board flows.

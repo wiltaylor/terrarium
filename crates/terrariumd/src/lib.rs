@@ -350,6 +350,11 @@ async fn start_with_usage_and_executor(
         links: Arc::default(),
         remotes: Arc::default(),
     });
+    // Project pages v2 (TER-1077): with the capability ON, every project
+    // gets its built-in pages before any request is served. OFF writes nothing.
+    if cfg.web.project_pages_v2 {
+        initialize_project_pages(&state.db).await?;
+    }
     // The instance ID of the links (TER-61): made at the first start.
     match state.links.instance_id(&state.state_dir) {
         Ok(id) => info!(instance = %id, "instance ID"),
@@ -576,6 +581,30 @@ async fn activate(
     tasks.push(exedev::spawn(&state));
     tasks.extend(start_usage(&state).await);
     Ok(std::mem::take(&mut owned.0))
+}
+
+/// Give every project that has no initialized page layout its built-in
+/// pages (TER-1077). Each project is one transaction, so one refusal (more
+/// than 20 stored pages) leaves the others initialized and is logged. A
+/// failure to read the projects stops the start.
+pub async fn initialize_project_pages(db: &Db) -> anyhow::Result<()> {
+    let names = db
+        .read(store::pages::uninitialized_projects)
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot read the project page layouts: {e}"))?;
+    for name in names {
+        let project = name.clone();
+        let done = db
+            .write("system", move |t| {
+                store::pages::initialize_defaults(t, &project, "system")
+            })
+            .await;
+        match done {
+            Ok(()) => info!(project = %name, "project pages initialized"),
+            Err(e) => warn!(project = %name, "cannot initialize the project pages: {e}"),
+        }
+    }
+    Ok(())
 }
 
 /// Log a warning for each repo with `push_deny` whose checkouts go
@@ -1009,8 +1038,8 @@ pub async fn apply_definitions(
         })
         .await?;
     rule_errors.extend(stored);
-    // TER-243: merge_queue into the wait overrides of older migrations.
-    rule_errors.extend(store::rules::add_merge_queue(&state.db).await);
+    // TER-1090: restore the built-ins over exact generated legacy wait overrides.
+    rule_errors.extend(store::rules::retire_legacy_wait_overrides(&state.db).await);
     report.errors.extend(rule_errors);
     // The template files, before the fleets: a fleet agent may name one.
     match template_files::refresh(state).await {

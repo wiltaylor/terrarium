@@ -787,11 +787,34 @@ a.project-name {
 .project-tabs .nav-count {
   margin-left: 6px;
 }
+/* A tab in the shared layout draft (TER-1073): drag it, or use its buttons. */
+.project-tab-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  cursor: grab;
+}
+.project-tab-edit input {
+  width: 9em;
+}
+.project-tab-edit.dragging {
+  opacity: 0.5;
+}
+/* The Add page "+" (TER-1107): it never shrinks out of the scrolling row. */
+.tabs .project-tab-add {
+  flex: none;
+  min-width: 36px;
+  font-size: 1.2em;
+  line-height: 1;
+}
 /* A phone: tabs of 40px or more, for a finger. */
 @media (max-width: 760px) {
   .tabs a,
   .tabs button {
     padding-block: 10px;
+  }
+  .tabs .project-tab-add {
+    min-width: 44px;
   }
 }
 

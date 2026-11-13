@@ -16,6 +16,7 @@ use crate::policy;
 use crate::store::Page;
 use crate::store::accepted_heads;
 use crate::store::board::card_waits;
+use crate::store::board::column_options::{self, ColumnOptions, OptionsPut};
 use crate::store::board::{self, Board, Card, CardFilter, CardPatch, ColumnSpec, NewCard, NewLink};
 
 pub fn routes() -> super::link_registry::RegisteredRouter {
@@ -37,6 +38,14 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
                     axum::http::Method::PATCH,
                     super::link_registry::Access::Link,
                 ),
+            ],
+        )
+        .route(
+            "/projects/{name}/board/columns/{column}/options",
+            get(show_column_options).put(put_column_options),
+            &[
+                (axum::http::Method::GET, super::link_registry::Access::Link),
+                (axum::http::Method::PUT, super::link_registry::Access::Link),
             ],
         )
         .route(
@@ -236,6 +245,35 @@ async fn patch_board(
         })
         .await?;
     Ok(Json(b))
+}
+
+async fn show_column_options(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path((name, column)): Path<(String, String)>,
+) -> ApiResult<Json<ColumnOptions>> {
+    policy::read_project(&actor, &name)?;
+    Ok(Json(
+        state
+            .db
+            .read(move |c| column_options::get_options(c, &name, &column))
+            .await?,
+    ))
+}
+
+async fn put_column_options(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path((name, column)): Path<(String, String)>,
+    ApiJson(body): ApiJson<OptionsPut>,
+) -> ApiResult<Json<ColumnOptions>> {
+    let o = state
+        .db
+        .write(actor.label(), move |t| {
+            column_options::put_options(t, &actor, &name, &column, &body)
+        })
+        .await?;
+    Ok(Json(o))
 }
 
 async fn list_cards(
