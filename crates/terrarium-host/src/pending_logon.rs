@@ -8,8 +8,8 @@
 
 use crate::protocol::SessionId;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
 const MAX_EVENTS: usize = 64;
 // The CLI sends 256 KiB inputs and the daemon accepts MAX_DATA_PAYLOAD.
@@ -102,7 +102,12 @@ impl Reservations {
     }
 
     pub(crate) fn route(&self, id: SessionId, event: Event, bytes: usize) -> Routed {
-        let pending = self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned();
+        let pending = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .cloned();
         let Some(pending) = pending else {
             return Routed::Absent(event);
         };
@@ -125,17 +130,33 @@ impl Reservations {
     }
 
     pub(crate) fn cancel(&self, id: SessionId) -> Option<bool> {
-        let pending = self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned()?;
+        let pending = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .cloned()?;
         Some(pending.cancel())
     }
 
     pub(crate) fn cancel_preparing(&self, id: SessionId) -> Option<bool> {
-        let pending = self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned()?;
+        let pending = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .cloned()?;
         Some(pending.cancel_preparing())
     }
 
     pub(crate) fn cancel_all(&self) {
-        let pending: Vec<_> = self.0.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
+        let pending: Vec<_> = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
         for pending in pending {
             pending.cancel();
         }
@@ -144,9 +165,15 @@ impl Reservations {
 
 impl Pending {
     fn revoke(&self) -> bool {
-        let old = self.phase.fetch_update(Ordering::AcqRel, Ordering::Acquire, |phase| {
-            Some(match phase { PREPARING | CANCELLED => CANCELLED, _ => REVOKED })
-        }).expect("phase update always has a replacement");
+        let old = self
+            .phase
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |phase| {
+                Some(match phase {
+                    PREPARING | CANCELLED => CANCELLED,
+                    _ => REVOKED,
+                })
+            })
+            .expect("phase update always has a replacement");
         matches!(old, COMMITTED | REVOKED)
     }
 
@@ -159,7 +186,11 @@ impl Pending {
     }
 
     fn cancel_preparing(&self) -> bool {
-        if self.phase.compare_exchange(PREPARING, CANCELLED, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        if self
+            .phase
+            .compare_exchange(PREPARING, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return false;
         }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -177,7 +208,9 @@ impl Pending {
     /// block: revoke is nonblocking and the child is stopped once available.
     /// No queue or registry lock is held across filesystem/process APIs.
     pub(crate) fn commit(&self) -> bool {
-        self.phase.compare_exchange(PREPARING, COMMITTED, Ordering::AcqRel, Ordering::Acquire).is_ok()
+        self.phase
+            .compare_exchange(PREPARING, COMMITTED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 }
 
@@ -188,7 +221,9 @@ impl Lease {
         let mut state = self.pending.state.lock().unwrap_or_else(|e| e.into_inner());
         // A revoked reservation must remain owned until the worker has cleaned
         // up any published entry. Otherwise its cleanup could hit a reused ID.
-        if self.pending.cancelled() { return None; }
+        if self.pending.cancelled() {
+            return None;
+        }
         if let Some((event, bytes)) = state.queue.pop_front() {
             state.bytes -= bytes;
             return Some(event);

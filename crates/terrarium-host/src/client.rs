@@ -1021,12 +1021,12 @@ impl Client {
             match self.shared.pending_logons.cancel_preparing(id) {
                 None => return Some(frame),
                 Some(true) => {
-                send_error(
-                    tx,
-                    id,
-                    ErrorCode::Interrupted,
-                    "pending logon was cancelled".into(),
-                );
+                    send_error(
+                        tx,
+                        id,
+                        ErrorCode::Interrupted,
+                        "pending logon was cancelled".into(),
+                    );
                     return None;
                 }
                 // Once start has committed, preserve signal/input ordering.
@@ -1130,7 +1130,8 @@ impl Client {
                 }
             }
             if lease.pending.cancelled()
-                && client.shared.pending_logons.owns(id, Some(&lease.pending)) {
+                && client.shared.pending_logons.owns(id, Some(&lease.pending))
+            {
                 client.cancel_pending(id);
                 client.sessions().remove(&id);
             }
@@ -1681,10 +1682,10 @@ impl Client {
         let program = plan.exec.program.clone();
         if owner.is_some_and(|owner| !owner.commit()) {
             return send_error(
-                        tx,
-                        session,
-                        ErrorCode::Interrupted,
-                        "pending logon was cancelled".into(),
+                tx,
+                session,
+                ErrorCode::Interrupted,
+                "pending logon was cancelled".into(),
             );
         }
         let running = match session::spawn(plan.exec, outbox.clone()) {
@@ -2595,18 +2596,30 @@ pub(crate) mod tests {
             client.on_binary(&cli, &tx).await;
             assert!(lease.pop_or_handoff().is_some());
             for value in 0..4u8 {
-                let wire = DataFrame::new(1, stream, vec![value; crate::protocol::MAX_DATA_PAYLOAD]).encode();
-                assert_eq!(wire.len(), crate::protocol::MAX_DATA_PAYLOAD + crate::protocol::DATA_HEADER_LEN);
+                let wire =
+                    DataFrame::new(1, stream, vec![value; crate::protocol::MAX_DATA_PAYLOAD])
+                        .encode();
+                assert_eq!(
+                    wire.len(),
+                    crate::protocol::MAX_DATA_PAYLOAD + crate::protocol::DATA_HEADER_LEN
+                );
                 client.on_binary(&wire, &tx).await;
             }
-            client.on_text(r#"{"type":"eof","session":1}"#, &tx).await.unwrap();
+            client
+                .on_text(r#"{"type":"eof","session":1}"#, &tx)
+                .await
+                .unwrap();
             for value in 0..4u8 {
-                let Some(PendingEvent::Binary(wire)) = lease.pop_or_handoff() else { panic!("maximum frame was lost"); };
+                let Some(PendingEvent::Binary(wire)) = lease.pop_or_handoff() else {
+                    panic!("maximum frame was lost");
+                };
                 let decoded = DataFrame::decode(&wire).unwrap();
                 assert_eq!(decoded.payload.len(), crate::protocol::MAX_DATA_PAYLOAD);
                 assert!(decoded.payload.iter().all(|byte| *byte == value));
             }
-            assert!(matches!(lease.pop_or_handoff(), Some(PendingEvent::Control(frame)) if matches!(*frame, DaemonFrame::Eof {..})));
+            assert!(
+                matches!(lease.pop_or_handoff(), Some(PendingEvent::Control(frame)) if matches!(*frame, DaemonFrame::Eof {..}))
+            );
             assert!(!lease.pending.cancelled());
             assert!(rx.try_recv().is_err());
         }
@@ -2617,11 +2630,24 @@ pub(crate) mod tests {
         let client = Client::new(ClientOptions::new("ws://localhost", "fixture", "fixture"));
         let (tx, mut rx) = mpsc::unbounded_channel();
         let lease = client.shared.pending_logons.reserve(1);
-        let wire = DataFrame::new(1, StreamTag::File, vec![1; crate::protocol::MAX_DATA_PAYLOAD]).encode();
-        for _ in 0..5 { client.on_binary(&wire, &tx).await; }
+        let wire = DataFrame::new(
+            1,
+            StreamTag::File,
+            vec![1; crate::protocol::MAX_DATA_PAYLOAD],
+        )
+        .encode();
+        for _ in 0..5 {
+            client.on_binary(&wire, &tx).await;
+        }
         assert!(lease.pending.cancelled());
         assert_eq!(client.session_count(), 1);
-        assert!(matches!(rx.recv().await, Some(Outgoing::Control(HostFrame::Error {code:ErrorCode::Busy, ..}))));
+        assert!(matches!(
+            rx.recv().await,
+            Some(Outgoing::Control(HostFrame::Error {
+                code: ErrorCode::Busy,
+                ..
+            }))
+        ));
         assert!(rx.try_recv().is_err());
     }
 
@@ -2645,27 +2671,59 @@ pub(crate) mod tests {
         let reader = client.clone();
         let wire_tx = tx.clone();
         let operations = tokio::spawn(async move {
-            reader.on_binary(&DataFrame::new(1, StreamTag::Stdin, vec![1; 256 * 1024]).encode(), &wire_tx).await;
-            reader.on_text(r#"{"type":"signal","session":1,"signal":"INT"}"#, &wire_tx).await.unwrap();
-            reader.on_text(r#"{"type":"ping","nonce":81}"#, &wire_tx).await.unwrap();
+            reader
+                .on_binary(
+                    &DataFrame::new(1, StreamTag::Stdin, vec![1; 256 * 1024]).encode(),
+                    &wire_tx,
+                )
+                .await;
+            reader
+                .on_text(r#"{"type":"signal","session":1,"signal":"INT"}"#, &wire_tx)
+                .await
+                .unwrap();
+            reader
+                .on_text(r#"{"type":"ping","nonce":81}"#, &wire_tx)
+                .await
+                .unwrap();
         });
         let result = tokio::time::timeout(Duration::from_secs(2), operations).await;
-        if result.is_err() { let _ = finish.send(()); let _ = spawn.join(); panic!("reader waited for OS spawn"); }
+        if result.is_err() {
+            let _ = finish.send(());
+            let _ = spawn.join();
+            panic!("reader waited for OS spawn");
+        }
         result.unwrap().unwrap();
-        assert!(matches!(rx.recv().await, Some(Outgoing::Control(HostFrame::Pong {nonce:81}))));
-        assert!(matches!(lease.pop_or_handoff(), Some(PendingEvent::Binary(_))));
-        assert!(matches!(lease.pop_or_handoff(), Some(PendingEvent::Control(frame)) if matches!(*frame, DaemonFrame::Signal {ref signal, ..} if signal == "INT")));
+        assert!(matches!(
+            rx.recv().await,
+            Some(Outgoing::Control(HostFrame::Pong { nonce: 81 }))
+        ));
+        assert!(matches!(
+            lease.pop_or_handoff(),
+            Some(PendingEvent::Binary(_))
+        ));
+        assert!(
+            matches!(lease.pop_or_handoff(), Some(PendingEvent::Control(frame)) if matches!(*frame, DaemonFrame::Signal {ref signal, ..} if signal == "INT"))
+        );
         assert!(!lease.pending.cancelled()); // Committed INT preserves queued input.
         let reader = client.clone();
         let operations = tokio::spawn(async move {
-            reader.on_text(r#"{"type":"release","session":1}"#, &tx).await.unwrap();
-            reader.on_text(r#"{"type":"ping","nonce":82}"#, &tx).await.unwrap();
+            reader
+                .on_text(r#"{"type":"release","session":1}"#, &tx)
+                .await
+                .unwrap();
+            reader
+                .on_text(r#"{"type":"ping","nonce":82}"#, &tx)
+                .await
+                .unwrap();
         });
         let result = tokio::time::timeout(Duration::from_secs(2), operations).await;
         let _ = finish.send(());
         assert!(spawn.join().unwrap());
         result.expect("revoke waited for OS spawn").unwrap();
-        assert!(matches!(rx.recv().await, Some(Outgoing::Control(HostFrame::Pong {nonce:82}))));
+        assert!(matches!(
+            rx.recv().await,
+            Some(Outgoing::Control(HostFrame::Pong { nonce: 82 }))
+        ));
         assert_eq!(client.session_count(), 1);
         drop(lease);
         assert_eq!(client.session_count(), 0);
