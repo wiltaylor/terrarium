@@ -1113,10 +1113,10 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
   return {
     pages: {
       list: (project) => get(`${p(project)}/pages`),
-      layout: (project) => get(`${p(project)}/pages/layout`),
-      saveLayout: (project, body) => put(`${p(project)}/pages/layout`, body),
-      resetLayout: (project, body) => post(`${p(project)}/pages/layout/reset`, body),
-      copyLayout: (project, body) => post(`${p(project)}/pages/layout/copy`, body),
+      layout: (project) => get(`${p(project)}/page-layout`),
+      saveLayout: (project, body) => put(`${p(project)}/page-layout`, body),
+      resetLayout: (project, body) => post(`${p(project)}/page-layout/reset`, body),
+      copyLayout: (project, body) => post(`${p(project)}/page-layout/copy`, body),
       get: (project, slug) => get(`${p(project)}/pages/${seg(slug)}`),
       save: (project, slug, body) => put(`${p(project)}/pages/${seg(slug)}`, body),
       remove: (project, slug) => del(`${p(project)}/pages/${seg(slug)}`),

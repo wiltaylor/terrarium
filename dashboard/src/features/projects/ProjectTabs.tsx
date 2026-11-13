@@ -61,8 +61,15 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
     // Route links, not an ARIA tablist: every tab is a page.
     <nav ref={tabs} class="tabs project-tabs" aria-label="Project">
       <For each={pages.latest?.items}>{page => {
-        const badge = () => enabled() ? combineWidgetBadges(widgetBadgeSources(page.widgets), source => props.badge?.(source) ?? null)
-          : page.slug === (pages.latest?.dashboard_slug ?? "dashboard") ? props.badge?.("dashboard") : null;
+        // No question-bearing v2 part is defined yet. C7 must preserve this
+        // alias fallback until explicit question metadata replaces it.
+        const badge = () => {
+          const alias = page.slug === (pages.latest?.dashboard_slug ?? "dashboard");
+          if (!enabled()) return alias ? props.badge?.("dashboard") : null;
+          return combineWidgetBadges([
+            ...widgetBadgeSources(page.widgets), ...(alias ? ["dashboard" as const] : []),
+          ], source => props.badge?.(source) ?? null);
+        };
         return <A href={`${props.base}/pages/${page.slug}`} class={props.active(`pages/${page.slug}`) ? "active" : undefined} activeClass="" inactiveClass="" title={badge()?.text}>
           {page.title}<Show when={badge()}>{b => <><span class={b().cls} aria-hidden="true">{b().n}</span><span class="sr-only">, {b().text}</span></>}</Show>
         </A>;

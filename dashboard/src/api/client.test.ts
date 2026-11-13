@@ -59,10 +59,22 @@ describe("createHttpApi", () => {
     await api.pages.resetLayout("demo", { base_revision: 7, builtin: "knowledge" });
     await api.pages.copyLayout("demo", { base_revision: 8, source_project: "source", confirm: true });
     expect(calls.map(call => [call.method, call.path, call.opts?.body])).toEqual([
+      ["GET", "/api/projects/demo/page-layout", undefined],
+      ["PUT", "/api/projects/demo/page-layout", { base_revision: 6, pages: [] }],
+      ["POST", "/api/projects/demo/page-layout/reset", { base_revision: 7, builtin: "knowledge" }],
+      ["POST", "/api/projects/demo/page-layout/copy", { base_revision: 8, source_project: "source", confirm: true }],
+    ]);
+  });
+  it("keeps a custom page named layout on the ordinary slug CRUD routes", async () => {
+    const { api, calls } = recorder();
+    const body = { title: "Layout", position: 0, widgets: [] };
+    await api.pages.get("demo", "layout");
+    await api.pages.save("demo", "layout", body);
+    await api.pages.remove("demo", "layout");
+    expect(calls.map(call => [call.method, call.path, call.opts?.body])).toEqual([
       ["GET", "/api/projects/demo/pages/layout", undefined],
-      ["PUT", "/api/projects/demo/pages/layout", { base_revision: 6, pages: [] }],
-      ["POST", "/api/projects/demo/pages/layout/reset", { base_revision: 7, builtin: "knowledge" }],
-      ["POST", "/api/projects/demo/pages/layout/copy", { base_revision: 8, source_project: "source", confirm: true }],
+      ["PUT", "/api/projects/demo/pages/layout", body],
+      ["DELETE", "/api/projects/demo/pages/layout", undefined],
     ]);
   });
   it("reads Home JSON pages with the column, project and cursor", async () => {
