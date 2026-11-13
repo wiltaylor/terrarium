@@ -4490,99 +4490,228 @@ impl RunnerSupervisor {
     }
 
     /// Watch the event hub for new mail and card changes (PLAN §12, §13).
+    /// A lag reloads the pointers (TER-1103) and replays the lost events
+    /// from the store (TER-1124).
     fn spawn_hub_listener(&self, state: &Shared) {
         let mut rx = state.db.hub().subscribe();
+        // Read after the subscribe: an event at or below the start that
+        // comes on the hub is still handled ([`HubSeen::first`]).
+        let start = match state.db.read_now(crate::events::last_seq) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("cannot read the newest event: {e}");
+                0
+            }
+        };
         let me = self.clone();
         tokio::spawn(async move {
+            let mut seen = HubSeen::new(start);
             loop {
                 let ev = match rx.recv().await {
                     Ok(ev) => ev,
                     Err(RecvError::Lagged(n)) => {
                         // TER-1103: mail and stored pointers of the lost
-                        // events are in the store. Card, lead, and lease
-                        // events of agents that run have no row yet.
+                        // events are in the store. TER-1124: card, lead,
+                        // lease, and reservation events of agents that run
+                        // have no row: they come back from the event log.
                         warn!("the push listener missed {n} events: reloading the pointers");
                         me.reload_up_pointers();
+                        me.replay_lost_events(&mut seen).await;
                         continue;
                     }
                     Err(RecvError::Closed) => return,
                 };
-                if let Some(item) = lead_item(&ev) {
-                    me.nudge_leads(&ev, item).await;
-                }
-                let Some(agent) = ev
-                    .agent_id
-                    .as_deref()
-                    .and_then(|a| a.parse::<AgentId>().ok())
-                else {
-                    continue;
-                };
-                let s = |k: &str| ev.data.get(k).and_then(Value::as_str).map(str::to_owned);
-                match ev.kind.as_str() {
-                    "mail" => {
-                        // The loop guard held the message (PLAN §12): it is
-                        // in the inbox, but it types no pointer.
-                        if ev.data.get("held").and_then(Value::as_bool) == Some(true) {
-                            continue;
-                        }
-                        let (Some(message_id), Some(thread)) = (s("message_id"), s("thread_id"))
-                        else {
-                            continue;
-                        };
-                        let from = s("from_name").or_else(|| s("from")).unwrap_or_default();
-                        me.add_pointer(agent, |p| {
-                            p.add_mail(MailItem::new(message_id, from, thread));
-                        });
-                    }
-                    "card" => {
-                        let Some(card) = ev.card.clone() else {
-                            continue;
-                        };
-                        let self_made = ev.actor.as_deref() == Some(&format!("agent:{agent}"));
-                        let change = match s("change").as_deref() {
-                            Some("assigned")
-                                if s("assignee").as_deref() == Some(&agent.to_string())
-                                    && !self_made =>
-                            {
-                                CardChange::Assigned
-                            }
-                            Some("unblocked") => CardChange::Unblocked,
-                            _ => continue,
-                        };
-                        me.add_card_pointer(agent, CardItem { card, change });
-                    }
-                    "reservation_pointer" => {
-                        if let (Some(id), Some(line)) = (s("reservation_id"), s("line")) {
-                            me.add_parked_pointer(agent, |p| {
-                                p.add_reservation(ReservationItem { id, line })
-                            });
-                        }
-                    }
-                    // The grant pointer comes from `lease_granted`, after
-                    // the lifecycle step; an extend types none.
-                    "lease" if s("change").as_deref() == Some("ended") => {
-                        let (Some(target), Some(lease)) = (s("target"), s("lease_id")) else {
-                            continue;
-                        };
-                        me.add_parked_pointer(agent, |p| {
-                            p.add_lease(LeaseItem {
-                                target,
-                                lease,
-                                change: LeaseChange::Ended,
-                                line: None,
-                            });
-                        });
-                    }
-                    _ => {}
+                if seen.first(ev.seq) {
+                    me.handle_hub_event(&ev).await;
                 }
             }
         });
+    }
+
+    /// Hand the events that a lag lost to [`Self::handle_hub_event`]
+    /// (TER-1124): the stored events after the floor of `seen` that it has
+    /// not handled, oldest first. Mail events are left out: the reload
+    /// reads the `queued` mail, and a mail that went out since is no
+    /// longer `queued`. The read follows the `seq` key in pages, at most
+    /// [`REPLAY_MAX`] events; on a read error the rest is not replayed.
+    async fn replay_lost_events(&self, seen: &mut HubSeen) {
+        let Some(state) = self.state() else { return };
+        seen.prune();
+        let mut since = seen.floor;
+        let (mut read, mut replayed) = (0usize, 0usize);
+        while read < REPLAY_MAX {
+            let page = state
+                .db
+                .read(move |c| {
+                    crate::events::list(
+                        c,
+                        &crate::events::EventFilter::default(),
+                        since,
+                        REPLAY_PAGE,
+                    )
+                })
+                .await;
+            let page = match page {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("cannot read the events that the push listener missed: {e}");
+                    break;
+                }
+            };
+            let Some(last) = page.last().map(|e| e.seq) else {
+                break;
+            };
+            read += page.len();
+            since = last;
+            for ev in page {
+                if seen.first(ev.seq) && ev.kind != "mail" {
+                    self.handle_hub_event(&ev).await;
+                    replayed += 1;
+                }
+            }
+        }
+        if read >= REPLAY_MAX {
+            warn!(read, "the event replay stopped at its limit");
+        }
+        seen.prune();
+        info!(read, replayed, "the push listener replayed the missed events");
+    }
+
+    /// Queue the pointer items of one hub event: a lead nudge, a mail, a
+    /// card, a reservation, or the end of a lease.
+    async fn handle_hub_event(&self, ev: &crate::events::StoredEvent) {
+        if let Some(item) = lead_item(ev) {
+            self.nudge_leads(ev, item).await;
+        }
+        let Some(agent) = ev
+            .agent_id
+            .as_deref()
+            .and_then(|a| a.parse::<AgentId>().ok())
+        else {
+            return;
+        };
+        let s = |k: &str| ev.data.get(k).and_then(Value::as_str).map(str::to_owned);
+        match ev.kind.as_str() {
+            "mail" => {
+                // The loop guard held the message (PLAN §12): it is
+                // in the inbox, but it types no pointer.
+                if ev.data.get("held").and_then(Value::as_bool) == Some(true) {
+                    return;
+                }
+                let (Some(message_id), Some(thread)) = (s("message_id"), s("thread_id"))
+                else {
+                    return;
+                };
+                let from = s("from_name").or_else(|| s("from")).unwrap_or_default();
+                self.add_pointer(agent, |p| {
+                    p.add_mail(MailItem::new(message_id, from, thread));
+                });
+            }
+            "card" => {
+                let Some(card) = ev.card.clone() else {
+                    return;
+                };
+                let self_made = ev.actor.as_deref() == Some(&format!("agent:{agent}"));
+                let change = match s("change").as_deref() {
+                    Some("assigned")
+                        if s("assignee").as_deref() == Some(&agent.to_string())
+                            && !self_made =>
+                    {
+                        CardChange::Assigned
+                    }
+                    Some("unblocked") => CardChange::Unblocked,
+                    _ => return,
+                };
+                self.add_card_pointer(agent, CardItem { card, change });
+            }
+            "reservation_pointer" => {
+                if let (Some(id), Some(line)) = (s("reservation_id"), s("line")) {
+                    self.add_parked_pointer(agent, |p| {
+                        p.add_reservation(ReservationItem { id, line })
+                    });
+                }
+            }
+            // The grant pointer comes from `lease_granted`, after
+            // the lifecycle step; an extend types none.
+            "lease" if s("change").as_deref() == Some("ended") => {
+                let (Some(target), Some(lease)) = (s("target"), s("lease_id")) else {
+                    return;
+                };
+                self.add_parked_pointer(agent, |p| {
+                    p.add_lease(LeaseItem {
+                        target,
+                        lease,
+                        change: LeaseChange::Ended,
+                        line: None,
+                    });
+                });
+            }
+            _ => {}
+        }
     }
 }
 
 /// How often a pointer reload reads the store when a delivery ran during
 /// each read ([`RunnerSupervisor::reload_pointer`]).
 const RELOAD_TRIES: usize = 8;
+
+/// The handled events the push listener keeps, behind the newest one
+/// ([`HubSeen`]). More than the hub holds (4096), so that an event that
+/// comes late on the hub is still known.
+const SEEN_WINDOW: i64 = 16_384;
+
+/// The events one page of the replay reads ([`RunnerSupervisor::replay_lost_events`]).
+const REPLAY_PAGE: usize = 1_000;
+
+/// The most events one replay reads: the seen window and the lost events.
+const REPLAY_MAX: usize = 50_000;
+
+/// The events the push listener handled (TER-1124), so that each event is
+/// handled once: live from the hub, or from the store in the replay after
+/// a lag. Writes publish their events after the commit, so two writes can
+/// publish out of `seq` order: the listener keeps every handled `seq` of a
+/// window instead of only the newest one.
+#[derive(Debug)]
+struct HubSeen {
+    /// The replay reads the events after it. An event at or below it that
+    /// comes on the hub is handled (it is not in `handled`): an event of
+    /// the start, or one later than the window.
+    floor: i64,
+    /// The handled events after `floor`.
+    handled: std::collections::BTreeSet<i64>,
+}
+
+impl HubSeen {
+    fn new(floor: i64) -> Self {
+        Self {
+            floor,
+            handled: Default::default(),
+        }
+    }
+
+    /// True the first time for `seq`: handle the event.
+    fn first(&mut self, seq: i64) -> bool {
+        if seq <= self.floor {
+            return true;
+        }
+        let first = self.handled.insert(seq);
+        if self.handled.len() as i64 > 2 * SEEN_WINDOW {
+            self.prune();
+        }
+        first
+    }
+
+    /// Keep the handled events of the window behind the newest one; the
+    /// floor moves up to the window.
+    fn prune(&mut self) {
+        let Some(&top) = self.handled.last() else {
+            return;
+        };
+        let floor = self.floor.max(top - SEEN_WINDOW);
+        self.handled = self.handled.split_off(&(floor + 1));
+        self.floor = floor;
+    }
+}
 
 /// How long a launch waits for the runner process of the last launch to
 /// end. It lingers up to 2 s after the harness exits.
@@ -9101,5 +9230,146 @@ mod tests {
         );
         let rows = state.db.read(crate::store::pointers::load).await.unwrap();
         assert!(rows.is_empty(), "{rows:?}");
+    }
+
+    /// A lease end of agent `id` as an event draft (TER-1124).
+    fn lease_end_draft(id: AgentId, target: &str) -> crate::events::EventDraft {
+        crate::events::EventDraft::new(
+            "lease",
+            format!("lease on {target} ended"),
+            serde_json::json!({"change": "ended", "target": target, "lease_id": "L1124"}),
+        )
+        .agent(id.to_string(), "a")
+        .project("p")
+    }
+
+    /// More events than the hub holds, with no await between them: the
+    /// push listener gets `Lagged` at its next receive. The events are
+    /// old (`seq` 1), so the listener handles them as no-ops.
+    fn flood_hub(state: &Shared) {
+        let ev = card_event(serde_json::json!({}));
+        for _ in 0..5000 {
+            state.db.hub().publish(ev.clone());
+        }
+    }
+
+    /// The typed turns that hold `line`, summed.
+    fn typed_count(runner: &ClaimRunner, line: &str) -> usize {
+        lock(&runner.typed).iter().map(|t| t.matches(line).count()).sum()
+    }
+
+    /// Let the push listener run its replay, then the delivery end.
+    async fn settle_listener(sup: &RunnerSupervisor, id: AgentId) {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        settle(sup, id).await;
+    }
+
+    /// TER-1124 T1: a lease end that the lagged push listener lost (in
+    /// the store, never on the hub) is replayed from the event log and
+    /// typed once to the agent that runs. When the same event comes late
+    /// on the hub and a second lag replays again, it is not typed again.
+    #[tokio::test]
+    async fn a_lagged_push_listener_replays_a_lost_lease_end_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        let lost = state
+            .db
+            .write("system", move |t| {
+                crate::events::insert(t, "system", lease_end_draft(id, "t1124"))
+            })
+            .await
+            .unwrap();
+        flood_hub(&state);
+        tokio::time::timeout(Duration::from_secs(5), runner.typed_ready.notified())
+            .await
+            .expect("the replay types the pointer");
+        settle_listener(&sup, id).await;
+        let line = crate::leases::ended_line("t1124");
+        assert_eq!(typed_count(&runner, &line), 1, "{:?}", lock(&runner.typed));
+        state.db.hub().publish(lost);
+        flood_hub(&state);
+        settle_listener(&sup, id).await;
+        assert_eq!(typed_count(&runner, &line), 1, "{:?}", lock(&runner.typed));
+        assert!(lock(&sup.inner.slots)[&id].pointer.is_empty());
+    }
+
+    /// TER-1124 T2: an event that the push listener handled live is not
+    /// replayed after a later lag: its pointer is typed once.
+    #[tokio::test]
+    async fn an_event_handled_live_is_not_replayed_after_a_lag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        state
+            .db
+            .write("system", move |t| t.emit(lease_end_draft(id, "t1124b")))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), runner.typed_ready.notified())
+            .await
+            .expect("the live event types the pointer");
+        settle_listener(&sup, id).await;
+        let line = crate::leases::ended_line("t1124b");
+        assert_eq!(typed_count(&runner, &line), 1, "{:?}", lock(&runner.typed));
+        flood_hub(&state);
+        settle_listener(&sup, id).await;
+        assert_eq!(typed_count(&runner, &line), 1, "{:?}", lock(&runner.typed));
+    }
+
+    /// TER-1124 T3: the replay leaves mail out (the TER-1103 reload reads
+    /// the `queued` mail): a lost mail event of a mail that went out is not
+    /// typed again.
+    #[tokio::test]
+    async fn the_replay_leaves_mail_events_to_the_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        // A mail that was read: no longer `queued`.
+        let mid = store_mail(&state, id, true).await;
+        let m = mid.clone();
+        state
+            .db
+            .write("system", move |t| {
+                crate::events::insert(
+                    t,
+                    "system",
+                    crate::events::EventDraft::new(
+                        "mail",
+                        "mail",
+                        serde_json::json!({"message_id": m, "thread_id": "T1", "from": "operator"}),
+                    )
+                    .agent(id.to_string(), "a")
+                    .project("p"),
+                )
+            })
+            .await
+            .unwrap();
+        flood_hub(&state);
+        settle_listener(&sup, id).await;
+        assert_eq!(mail_blocks(&runner), 0, "{:?}", lock(&runner.typed));
+        assert!(lock(&sup.inner.slots)[&id].pointer.is_empty());
+    }
+
+    /// TER-1124: each `seq` is handled once, also out of order; an event
+    /// at or below the floor is always handled; the prune keeps the window.
+    #[test]
+    fn hub_seen_handles_each_event_once() {
+        let mut seen = HubSeen::new(10);
+        assert!(seen.first(5), "at the floor: handled");
+        assert!(seen.first(5), "at the floor: not kept");
+        assert!(seen.first(12));
+        assert!(seen.first(11), "out of order");
+        assert!(!seen.first(12));
+        assert!(!seen.first(11));
+        seen.handled.insert(10 + 3 * SEEN_WINDOW);
+        seen.prune();
+        assert_eq!(seen.floor, 10 + 2 * SEEN_WINDOW);
+        assert_eq!(seen.handled.len(), 1);
+        assert!(!seen.first(10 + 3 * SEEN_WINDOW));
+        // The set never grows past twice the window.
+        let mut seen = HubSeen::new(0);
+        for s in 1..=(5 * SEEN_WINDOW) {
+            assert!(seen.first(s));
+        }
+        assert!(seen.handled.len() as i64 <= 2 * SEEN_WINDOW);
+        assert!(!seen.first(5 * SEEN_WINDOW));
     }
 }
