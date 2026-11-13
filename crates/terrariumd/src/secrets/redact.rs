@@ -504,11 +504,6 @@ mod tests {
             "the old matcher does not know it"
         );
         let r = build(&c, dir.path()).unwrap();
-        // Grok refreshed the old token away: it stays (TER-1259).
-        assert_eq!(
-            r.redact_str("xai-at-Q7w9Zk2LmP4rT8vB"),
-            "[secret:subscription/x-super]"
-        );
         assert_eq!(
             r.redact_str("xai-at-N4eW8tOk3nV6yU2c"),
             "[secret:subscription/x-super]"
@@ -567,6 +562,36 @@ mod tests {
         assert_eq!(
             r.redact_str("xai-at-N4eW8tOk3nV6yU2c xai-rt-H3nJ6sD1fG5kL0pX"),
             "[secret:subscription/x-super] [secret:subscription/x-super]"
+        );
+    }
+
+    /// TER-1259: Grok rewrites its file itself, with no daemon call. A
+    /// token that a build read stays in the matcher after that rewrite.
+    #[test]
+    fn a_grok_token_refreshed_by_grok_stays_in_the_matcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = crate::secrets::tests::db();
+        crate::accounts::write_credential(
+            dir.path(),
+            "x-self",
+            terrarium_core::HarnessId::Grok,
+            br#"{"session": {"access_token": "xai-at-Vb6Nm1Qw8Er3Ty5U"}}"#,
+        )
+        .unwrap();
+        build(&c, dir.path()).unwrap();
+        let file = crate::accounts::credential_path(
+            &crate::accounts::store_dir(dir.path(), "x-self"),
+            terrarium_core::HarnessId::Grok,
+        );
+        std::fs::write(
+            &file,
+            r#"{"session": {"access_token": "xai-at-Zx4Cv7Bn2Ml9Kj0H"}}"#,
+        )
+        .unwrap();
+        let r = build(&c, dir.path()).unwrap();
+        assert_eq!(
+            r.redact_str("xai-at-Vb6Nm1Qw8Er3Ty5U xai-at-Zx4Cv7Bn2Ml9Kj0H"),
+            "[secret:subscription/x-self] [secret:subscription/x-self]"
         );
     }
 
