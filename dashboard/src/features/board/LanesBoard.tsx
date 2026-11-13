@@ -3,7 +3,7 @@
 // (one column at a time) each column holds the lanes as sections that collapse; a phone has no drag and drop, so
 // the Labels field of the card drawer moves a card between lanes. The plain lane has no lane head.
 
-import { createSignal, For, type JSX, Show, onCleanup } from "solid-js";
+import { createSignal, createUniqueId, For, type JSX, Show, onCleanup } from "solid-js";
 import type { BoardGroup } from "../../api/types";
 import { stepTiming } from "./stepTiming";
 import type { Board, CardSummary as Card, Column } from "../../api/types";
@@ -41,7 +41,10 @@ export function LanesBoard(props: {
   onDrop: (cardId: string, fromLane: string, toLane: string, column: string, index: number) => void;
   boardRef?: (el: HTMLDivElement) => void;
   onScroll?: () => void;
+  columnId?: (name: string) => string;
 }) {
+  const id = createUniqueId();
+  const columnId = (name: string) => props.columnId?.(name) ?? `${id}-col-${name}`;
   const [dragging, setDragging] = createSignal<{ id: string; lane: string } | null>(null);
   const [drop, setDrop] = createSignal<Drop | null>(null);
   const [now, setNow] = createSignal(Date.now());
@@ -206,7 +209,7 @@ export function LanesBoard(props: {
         <div class="board" ref={props.boardRef} onScroll={() => props.onScroll?.()}>
           <For each={props.board.columns}>
             {(col) => (
-              <section id={`board-col-${col.name}`} data-column={col.name} class="column lanes-column" classList={{ "over-limit": overLimit(col, cardsIn(props.board, col.name).filter((c) => c.kind !== "group").length) }} aria-label={columnTitle(col)}>
+              <section id={columnId(col.name)} data-column={col.name} class="column lanes-column" classList={{ "over-limit": overLimit(col, cardsIn(props.board, col.name).filter((c) => c.kind !== "group").length) }} aria-label={columnTitle(col)}>
                 <ColumnHead col={col} />
                 <For each={props.lanes}>
                   {(lane) => (
