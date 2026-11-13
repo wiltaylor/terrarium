@@ -10578,7 +10578,10 @@ mod tests {
         {
             let slots = lock(&sup.inner.slots);
             assert_eq!(slots[&id].kick, None, "the ended episode stays ended");
-            assert!(!slots[&id].restart_requested, "the running runner's claim is released");
+            assert!(
+                !slots[&id].restart_requested,
+                "the running runner's claim is released"
+            );
         }
         assert_eq!(runner.kills.load(Ordering::SeqCst), 0);
 
