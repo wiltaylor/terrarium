@@ -19,6 +19,10 @@ export function pageGrants(rights: ProjectPageRights | undefined, project: strin
   const write = yes(r?.write_project);
   const global = yes(r?.manage_global);
   const schedules = yes(r?.manage_schedules);
+  // The wiki review check: write_project, then an admin or the page's `reviewer` (TER-1157).
+  const reviewAny = write && yes(r?.review_wiki);
+  const names: unknown = r?.review_as;
+  const reviewAs = write && Array.isArray(names) ? names.filter((n): n is string => typeof n === "string" && n !== "") : [];
   // A schedule or event source of this project needs the project right, a global one the global right.
   const own = (item: { project?: string | null }) => (item.project ? item.project === project : false);
   return {
@@ -40,7 +44,8 @@ export function pageGrants(rights: ProjectPageRights | undefined, project: strin
     knowledgeLogsRepos: {
       attachRepo: admin, // admin_project, "attaching a repo"
       checkoutRepo: write, // write_project, then the target check
-      writeWiki: write, // write_project (create, save, review, restore)
+      writeWiki: write, // write_project (create, save, restore)
+      reviewWiki: (reviewer?: string | null) => reviewAny || (!!reviewer && reviewAs.includes(reviewer)), // write_project, then review_page
       writeDb: write, // write_db, which is write_project
       purgeDbType: admin, // purge_db_type, a type with records
       cardFromMail: write, // write_project of the card create

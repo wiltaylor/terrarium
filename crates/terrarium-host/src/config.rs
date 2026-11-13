@@ -665,6 +665,7 @@ allowed_cwd_roots = ["/home/alice/labs", "/srv/build"]
         assert!(c.transport().is_err(), "a short pin is an error");
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_secret_is_0600() {
         use std::os::unix::fs::PermissionsExt;
@@ -693,6 +694,7 @@ allowed_cwd_roots = ["/home/alice/labs", "/srv/build"]
         assert!(connect_url("d:8082").is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn policy_limits_paths_to_roots() {
         let dir = tempfile::tempdir().unwrap();

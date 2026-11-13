@@ -7,7 +7,13 @@
 //!   `<project>/<name>` for a project secret (`[secret:web/deploy]`);
 //! - each stored subscription API key in
 //!   `<state>/credentials/subscriptions/<name>.json`, with the label
-//!   `subscription/<name>` (`[secret:subscription/zai]`).
+//!   `subscription/<name>` (`[secret:subscription/zai]`);
+//! - each string value of each Grok Build login of an xAI plan account,
+//!   `<state>/credentials/accounts/<name>/store/grok/auth.json`
+//!   ([`crate::accounts::grok_secret_values`]), with the label
+//!   `subscription/<name>`. Grok refreshes that file itself: the daemon
+//!   builds the matcher again after a Grok login and after a verify of the
+//!   row, so a refreshed token joins it then (TER-1191).
 //!
 //! The decrypted values live only for the build, in zeroizing buffers. The
 //! matcher keeps its own copy of the patterns, for the life of the daemon:
@@ -241,6 +247,22 @@ pub fn check_value(
     Ok(warnings)
 }
 
+/// The entries of the Grok Build logins in the plan accounts (TER-1191).
+/// Their scope is `global`, as for the subscription keys.
+fn grok_entries(state_dir: &Path) -> Vec<Entry<Zeroizing<String>>> {
+    let mut out = Vec::new();
+    for (name, values) in crate::accounts::grok_secret_values(state_dir) {
+        for value in values {
+            out.push(Entry {
+                label: format!("{SUBSCRIPTION_PREFIX}{name}"),
+                scope: Some(GLOBAL.to_owned()),
+                value: Zeroizing::new(value),
+            });
+        }
+    }
+    out
+}
+
 /// Build the matcher from the store and the subscription keys. A value
 /// shorter than [`terrarium_core::redact::MIN_LEN`] bytes is skipped, and
 /// so is each pattern that [`keep`] refuses.
@@ -248,6 +270,7 @@ pub fn build(conn: &Connection, state_dir: &Path) -> ApiResult<Redactor> {
     let names = record_names(conn)?;
     let mut entries = secret_entries(conn, state_dir)?;
     entries.extend(subscription_entries(state_dir));
+    entries.extend(grok_entries(state_dir));
     let redactor = Redactor::build(
         entries.iter().map(|e| Entry {
             label: e.label.clone(),
@@ -377,6 +400,104 @@ mod tests {
         assert_eq!(
             r.redact_str("a ghp_globalvalue123 b projectvalue4567 c zai-key-abcdefgh abc"),
             "a [secret:gh] b [secret:p/deploy] c [secret:subscription/zai] abc"
+        );
+    }
+
+    /// TER-1191: the matcher holds each token of a Grok Build login of an
+    /// xAI plan account, and a refreshed token after a rebuild. The keys
+    /// and short fields of the file (`expires_at`, a type word) stay
+    /// visible.
+    #[test]
+    fn grok_logins_and_refreshed_tokens_are_in_the_matcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = crate::secrets::tests::db();
+        let old = r#"{"session": {"access_token": "xai-at-Q7w9Zk2LmP4rT8vB", "refresh_token": "xai-rt-H3nJ6sD1fG5kL0pX", "token_type": "Bearer"}, "expires_at": "2026-11-13T12:00:00Z"}"#;
+        crate::accounts::write_credential(
+            dir.path(),
+            "x-super",
+            terrarium_core::HarnessId::Grok,
+            old.as_bytes(),
+        )
+        .unwrap();
+        let r = build(&c, dir.path()).unwrap();
+        assert_eq!(
+            r.redact_str(
+                "at=xai-at-Q7w9Zk2LmP4rT8vB rt=xai-rt-H3nJ6sD1fG5kL0pX Bearer access_token"
+            ),
+            "at=[secret:subscription/x-super] rt=[secret:subscription/x-super] Bearer access_token"
+        );
+        // A project agent sees no name.
+        assert_eq!(
+            r.redact_str_as("xai-rt-H3nJ6sD1fG5kL0pX", &View::Scope("p".into()))
+                .0,
+            "[secret]"
+        );
+        // Grok refreshes its file: the next build has the new token.
+        let new = r#"{"session": {"access_token": "xai-at-N4eW8tOk3nV6yU2c", "refresh_token": "xai-rt-H3nJ6sD1fG5kL0pX"}}"#;
+        crate::accounts::write_credential(
+            dir.path(),
+            "x-super",
+            terrarium_core::HarnessId::Grok,
+            new.as_bytes(),
+        )
+        .unwrap();
+        let stale = r.redact_str("xai-at-N4eW8tOk3nV6yU2c").into_owned();
+        assert_eq!(
+            stale, "xai-at-N4eW8tOk3nV6yU2c",
+            "the old matcher does not know it"
+        );
+        let r = build(&c, dir.path()).unwrap();
+        assert_eq!(
+            r.redact_str("xai-at-N4eW8tOk3nV6yU2c"),
+            "[secret:subscription/x-super]"
+        );
+        // A transcript block: the text, the tool input, and the result.
+        use terrarium_core::transcript::{BlockKind, BlockRole, ToolCall, ToolResult};
+        let mut b = Block::new(
+            "m:1",
+            BlockRole::Assistant,
+            BlockKind::ToolCall,
+            terrarium_core::HarnessId::Grok,
+            1,
+            None,
+        );
+        b.text = Some("token xai-at-N4eW8tOk3nV6yU2c".into());
+        b.tool = Some(ToolCall {
+            id: "t1".into(),
+            name: "Bash".into(),
+            input: serde_json::json!({"command": "echo xai-rt-H3nJ6sD1fG5kL0pX"}),
+            summary: "echo xai-rt-H3nJ6sD1fG5kL0pX".into(),
+        });
+        b.result = Some(ToolResult {
+            tool_id: "t1".into(),
+            output: r#"{"access_token": "xai-at-N4eW8tOk3nV6yU2c"}"#.into(),
+            truncated: false,
+            is_error: false,
+        });
+        redact_block(&r, &View::All, &mut b);
+        let text = serde_json::to_string(&b).unwrap();
+        assert!(
+            !text.contains("xai-at-") && !text.contains("xai-rt-"),
+            "{text}"
+        );
+        // An event payload or an audit detail (`Tx::emit`, `Tx::audit`).
+        let v = crate::db::redact_json_values(
+            &r,
+            &View::All,
+            serde_json::json!({"error": "grok: refresh failed for xai-rt-H3nJ6sD1fG5kL0pX",
+                               "lines": ["xai-at-N4eW8tOk3nV6yU2c"]}),
+        );
+        let text = v.to_string();
+        assert!(
+            !text.contains("xai-at-") && !text.contains("xai-rt-"),
+            "{text}"
+        );
+        // The logout removes the account: the next build has no Grok entry.
+        assert!(crate::accounts::remove(dir.path(), "x-super").unwrap());
+        let r = build(&c, dir.path()).unwrap();
+        assert_eq!(
+            r.redact_str("xai-at-N4eW8tOk3nV6yU2c"),
+            "xai-at-N4eW8tOk3nV6yU2c"
         );
     }
 

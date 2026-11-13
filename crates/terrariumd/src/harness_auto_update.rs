@@ -219,7 +219,7 @@ pub fn changelog_url(harness: HarnessId) -> Option<&'static str> {
         }
         HarnessId::Codex => Some("https://github.com/openai/codex/releases"),
         HarnessId::Copilot => Some("https://github.com/github/copilot-cli/releases"),
-        HarnessId::Pi => None,
+        HarnessId::Pi | HarnessId::Grok => None,
     }
 }
 

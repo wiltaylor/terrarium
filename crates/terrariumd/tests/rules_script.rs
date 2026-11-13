@@ -438,7 +438,11 @@ async fn a_busy_dry_run_slot_refuses_and_does_not_hold_the_engine() {
     let card = new_card(&td, "se", "Engine").await;
     settle(&td).await;
 
-    // A script that runs to the wall clock holds the one dry-run slot.
+    // A script that runs to the wall clock holds the one dry-run slot, and
+    // the hold keeps it there after the wall clock until the test has seen
+    // the refusal and the engine's comment: the slot is surely busy when the
+    // second dry run asks, whatever the load (TER-1221).
+    let hold = terrariumd::rule_script::hold_slots(terrariumd::rule_script::Pool::DryRun, "sb");
     let slow = failing(
         "slow",
         10_000_000,
@@ -498,7 +502,10 @@ async fn a_busy_dry_run_slot_refuses_and_does_not_hold_the_engine() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(held, "the slow dry run did not take its slot");
-        tokio::join!(refused, engine)
+        let both = tokio::join!(refused, engine);
+        // Only now may the slow dry run give its slot back.
+        drop(hold);
+        both
     };
     let (slow_body, (busy, (c, slow_had_returned))) = tokio::join!(slow_run, others);
     settle(&td).await;

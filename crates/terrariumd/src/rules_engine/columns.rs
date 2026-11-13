@@ -20,7 +20,9 @@
 //!   or verdict event of a card that is in the column when the engine
 //!   plans), `timer` (every `every_seconds`, [`fire_timers`]), and
 //!   `count_reached` (a card lands and the column then holds exactly
-//!   `count` cards: `data.to_count` of the event).
+//!   `count` cards: `data.to_count` of the event). A `rule.timer` event
+//!   runs only the `timer` rule with its `rule_id`: the legacy batch and
+//!   version timers do not scan the column rules (TER-1199).
 //! - **The order** (TER-1112 Q3): the `leaves` rules of the source column,
 //!   then the `lands` rules of the target, then `count_reached`. With
 //!   several cards (a batch job), the cards in board order (column, then
@@ -238,10 +240,14 @@ pub fn plan(
     };
     match e.kind.as_str() {
         TIMER_KIND => {
-            // A timer names its rule; only the engine writes one.
+            // A timer names its rule by ID, and only a rule with the
+            // `timer` trigger runs on it (TER-1199): a rename between the
+            // write and the plan keeps the run. Only the engine writes one.
             if e.actor.as_deref() == Some(TIMER_ACTOR)
-                && let Some(name) = e.data["rule"].as_str()
-                && let Some(i) = pr.set.rules.iter().position(|r| r.name == name)
+                && let Some(id) = e.data["rule_id"].as_str()
+                && let Some(i) = meta
+                    .iter()
+                    .position(|m| m.id == id && matches!(m.trigger, Trigger::Timer { .. }))
             {
                 hits.push((i, None, 1, 0));
             }
