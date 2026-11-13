@@ -482,14 +482,22 @@ async fn wait_met_runs_the_rules_of_the_cards_column() {
         &td,
         "flow",
         "ready",
-        json!([note("met", json!({"kind": "wait_met"}), "deps met in ready")]),
+        json!([note(
+            "met",
+            json!({"kind": "wait_met"}),
+            "deps met in ready"
+        )]),
     )
     .await;
     set_rules(
         &td,
         "flow",
         "backlog",
-        json!([note("met", json!({"kind": "wait_met"}), "deps met in backlog")]),
+        json!([note(
+            "met",
+            json!({"kind": "wait_met"}),
+            "deps met in backlog"
+        )]),
     )
     .await;
     switch(&td, "flow").await;
@@ -552,7 +560,11 @@ async fn a_timer_event_runs_only_the_timer_rule_with_its_id() {
     let ticks = count(&runs(&td, "flow").await, "review/tick");
     // By ID: the timer rule runs, also under a stale name (a rename
     // between the write and the plan).
-    timer_event(&td, json!({"rule": "old/tick", "rule_id": tick_id, "slot": "x"})).await;
+    timer_event(
+        &td,
+        json!({"rule": "old/tick", "rule_id": tick_id, "slot": "x"}),
+    )
+    .await;
     // By name only (the shape of a legacy timer): nothing runs.
     timer_event(&td, json!({"rule": "review/tick"})).await;
     timer_event(&td, json!({"rule": "review/land"})).await;
@@ -690,7 +702,13 @@ async fn to_count_is_written_only_on_a_columns_project() {
     };
     assert_eq!(
         of("flow"),
-        vec![("created".to_owned(), Some(1)), ("moved".to_owned(), Some(1))]
+        vec![
+            ("created".to_owned(), Some(1)),
+            ("moved".to_owned(), Some(1))
+        ]
     );
-    assert_eq!(of("plain"), vec![("created".to_owned(), None), ("moved".to_owned(), None)]);
+    assert_eq!(
+        of("plain"),
+        vec![("created".to_owned(), None), ("moved".to_owned(), None)]
+    );
 }
