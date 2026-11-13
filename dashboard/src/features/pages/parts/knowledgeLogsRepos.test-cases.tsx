@@ -27,6 +27,7 @@ const handlers: Record<string, (...args: never[]) => unknown> = {
   "projects.targets": () => [],
   "repos.trees": (id: string) => ({ repo_id: id, trees: [{ id: "main", kind: "main", label: "main" }] }),
   "repos.files": (_id: string, _tree: string, path: string) => ({ path, entries: [{ path: "README.md", name: "README.md", kind: "file" }], truncated: false }),
+  "repos.file": () => ({ blob: new Blob(["# Readme"], { type: "text/plain" }), text: true, size: 8, truncated: false }),
   "wiki.tree": (p: string) => [{ path: "index", title: `${p} index` }],
   "wiki.get": (key: string) => ({ id: key, path: "index", title: key, body: UNSAFE, rev: 1, updated_at: at, author_name: "operator", links: [] }),
   "wiki.backlinks": () => [],
@@ -146,7 +147,7 @@ describe("rendered parts", () => {
       const [first] = c.args as [unknown];
       if (["projects.repos", "projects.targets", "wiki.tree", "artifacts.list", "memories.list", "db.types", "db.type", "db.query"].includes(c.path)) expect(first, c.path).toBe("alpha");
       if (["wiki.get", "memories.graph"].includes(c.path)) expect(String(first).startsWith("alpha/"), c.path).toBe(true);
-      if (["repos.trees", "repos.files"].includes(c.path)) expect(first, c.path).toBe("alpha-infra");
+      if (["repos.trees", "repos.files", "repos.file"].includes(c.path)) expect(first, c.path).toBe("alpha-infra");
       if (c.path === "events.history") expect((first as EventQuery).project).toBe("alpha");
     }
   });
