@@ -178,9 +178,9 @@ it("ON: the widget controls follow the domain rights, never the layout right", a
   expect(button(nav(host), "Edit pages")).toBeTruthy();
 });
 
-it("ON: a reader's domain write from a Knowledge widget is refused visibly by the server, and the page stays", async () => {
-  // The Repos, Knowledge and Logs parts keep their route controls; the endpoint's 403 is the guard.
-  server.rights = none;
+it("ON: a member's domain write that the server refuses shows the 403 visibly, and the page stays", async () => {
+  // The client gate only hides controls (TER-1134); the endpoint's 403 stays the guard.
+  server.rights = member;
   server.pages = [page("knowledge", 0, [viewport("knowledge-3", "db", "types")], "knowledge")];
   const create = vi.spyOn(api.db, "createType").mockRejectedValue(new ApiError(403, "project `terrarium` is not your project; writing its DB needs sysadmin"));
   const { host } = mount(`/p/${P}/pages/knowledge`);
@@ -193,6 +193,123 @@ it("ON: a reader's domain write from a Knowledge widget is refused visibly by th
   await waitFor(() => expect(document.body.textContent).toContain("writing its DB needs sysadmin"));
   expect(widgetEl(host, "knowledge-3")).toBeTruthy();
   expect(button(nav(host), "Edit pages")).toBeUndefined();
+});
+
+// TER-1134: the Repos, Knowledge and Logs widgets show a write control only
+// for the right that its endpoint checks (pageGrants.ts), never `can_edit`.
+const AT = "2026-11-13T00:00:00Z";
+const remount = (path: string) => { dispose?.(); dispose = undefined; document.body.replaceChildren(); return mount(path).host; };
+const widgetButton = async (host: HTMLElement, id: string, text: string) => waitFor(() => { const b = button(widgetEl(host, id)!, text); expect(b, `${id} ${text}`).toBeTruthy(); return b!; });
+
+it("ON: a reader sees no write control in the Repos widget", async () => {
+  server.pages = [page("repos", 0, [viewport("repos-0", "repos", "list")], "repos")];
+  vi.spyOn(api.projects, "repos").mockResolvedValue([{ id: "R1", project: P, name: "infra", url: "https://example.com/infra.git", default_branch: "main" } as never]);
+  vi.spyOn(api.projects, "targets").mockResolvedValue([]);
+  server.rights = none;
+  let host = mount(`/p/${P}/pages/repos`).host;
+  await waitFor(() => expect(widgetEl(host, "repos-0")?.textContent).toContain("infra"));
+  expect(button(widgetEl(host, "repos-0")!, "Add repo")).toBeUndefined();
+  expect(button(widgetEl(host, "repos-0")!, "Check out…")).toBeUndefined();
+  // A member checks out (write_project) but does not attach repos (project_admin).
+  server.rights = member;
+  host = remount(`/p/${P}/pages/repos`);
+  await widgetButton(host, "repos-0", "Check out…");
+  expect(button(widgetEl(host, "repos-0")!, "Add repo")).toBeUndefined();
+  server.rights = admin;
+  host = remount(`/p/${P}/pages/repos`);
+  await widgetButton(host, "repos-0", "Add repo");
+  await widgetButton(host, "repos-0", "Check out…");
+});
+
+it("ON: a reader sees no write control in the Knowledge widgets (wiki, DB types, DB records)", async () => {
+  const records = { ...viewport("k-records", "db", "records", 24), options: { view: "records", search: "type:items" } } as PageWidget;
+  server.pages = [page("knowledge", 0, [viewport("k-wiki", "wiki_index", "browser"), viewport("k-types", "db", "types", 12), records], "knowledge")];
+  const wiki = { id: "W1", project: P, path: "index", title: "Index", body: "# Index", rev: 2, status: "ready_for_review", author: "operator", author_name: "operator", updated_at: AT, links: [] };
+  vi.spyOn(api.wiki, "tree").mockResolvedValue([{ path: "index", title: "Index" }] as never);
+  vi.spyOn(api.wiki, "get").mockResolvedValue(wiki as never);
+  vi.spyOn(api.wiki, "backlinks").mockResolvedValue([]);
+  vi.spyOn(api.wiki, "revisions").mockResolvedValue([1, 2].map((rev) => ({ rev, author: "operator", author_name: "operator", summary: `rev ${rev}`, created_at: AT })) as never);
+  const type = { id: "T1", project: P, name: "items", description: "", fields: [{ name: "title", kind: "string" }], records: 1, created_at: AT, updated_at: AT };
+  const record = { id: "REC-1", project: P, type: "items", data: { title: "First" }, revision: 1, created_at: AT, updated_at: AT, updated_by_name: "operator" };
+  vi.spyOn(api.db, "types").mockResolvedValue([type] as never);
+  vi.spyOn(api.db, "type").mockResolvedValue(type as never);
+  vi.spyOn(api.db, "query").mockResolvedValue({ type: "items", query: "type:items", view: "table", fields: type.fields, records: [record], count: 1, labels: {} } as never);
+  vi.spyOn(api.db, "record").mockResolvedValue(record as never);
+  const writes = [vi.spyOn(api.wiki, "save"), vi.spyOn(api.wiki, "review"), vi.spyOn(api.wiki, "restore"), vi.spyOn(api.db, "createType"), vi.spyOn(api.db, "createRecord"), vi.spyOn(api.db, "updateRecord"), vi.spyOn(api.db, "removeRecord"), vi.spyOn(api.db, "removeType")];
+
+  server.rights = none;
+  let host = mount(`/p/${P}/pages/knowledge`).host;
+  await widgetButton(host, "k-wiki", "History");
+  expect(button(widgetEl(host, "k-wiki")!, "Edit")).toBeUndefined();
+  expect(button(widgetEl(host, "k-wiki")!, "Approve")).toBeUndefined();
+  button(widgetEl(host, "k-wiki")!, "History")!.click();
+  await waitFor(() => expect(widgetEl(host, "k-wiki")!.textContent).toContain("rev 1"));
+  expect(button(widgetEl(host, "k-wiki")!, "Restore")).toBeUndefined();
+  await waitFor(() => expect(widgetEl(host, "k-types")!.textContent).toContain("items"));
+  expect(button(widgetEl(host, "k-types")!, "New type")).toBeUndefined();
+  const row = await waitFor(() => { const r = widgetEl(host, "k-records")!.querySelector<HTMLElement>("tr.clickable"); expect(r).toBeTruthy(); return r!; });
+  for (const text of ["New record", "Schema", "Delete type"]) expect(button(widgetEl(host, "k-records")!, text), text).toBeUndefined();
+  // A reader opens a record read-only: no Save and no Delete record.
+  row.click();
+  await waitFor(() => expect(button(document.body, "Close")).toBeTruthy());
+  expect(button(document.body, "Save")).toBeUndefined();
+  expect(button(document.body, "Delete record")).toBeUndefined();
+  for (const write of writes) expect(write).not.toHaveBeenCalled();
+
+  // A member writes the wiki and the DB, but deletes no type with records (project_admin).
+  server.rights = member;
+  host = remount(`/p/${P}/pages/knowledge`);
+  await widgetButton(host, "k-wiki", "Edit");
+  await widgetButton(host, "k-wiki", "Approve");
+  await widgetButton(host, "k-types", "New type");
+  await widgetButton(host, "k-records", "New record");
+  await widgetButton(host, "k-records", "Schema");
+  expect(button(widgetEl(host, "k-records")!, "Delete type")).toBeUndefined();
+  server.rights = admin;
+  host = remount(`/p/${P}/pages/knowledge`);
+  await widgetButton(host, "k-records", "Delete type");
+});
+
+it("ON: a reader sees no write control in the Logs mail widget, and mail scope controls stay", async () => {
+  server.pages = [page("logs", 0, [viewport("logs-mail", "mail", "messages")], "logs")];
+  const message = { id: "01M7B000000000000000000001", thread_id: "01M7B0000000000000000000T1", from: "A1", from_kind: "agent", from_name: "other/lead",
+    to: `project:${P}`, to_kind: "project", to_name: `project:${P}`, subject: "Inbox request", body: "Please look", state: "delivered", created_at: AT };
+  vi.spyOn(api.mail, "list").mockResolvedValue({ items: [message], next: null } as never);
+  const writes = [vi.spyOn(api.cards, "create"), vi.spyOn(api.projectInbox, "reply")];
+  const open = async (host: HTMLElement) => {
+    const subject = await waitFor(() => { const b = widgetEl(host, "logs-mail")!.querySelector<HTMLButtonElement>("button.log-main"); expect(b).toBeTruthy(); return b!; });
+    subject.click();
+    await waitFor(() => expect(widgetEl(host, "logs-mail")!.querySelector(".log-thread")).toBeTruthy());
+    return widgetEl(host, "logs-mail")!;
+  };
+  server.rights = none;
+  let section = await open(mount(`/p/${P}/pages/logs`).host);
+  expect(button(section, "Make card")).toBeUndefined();
+  expect(button(section, "Reply")).toBeUndefined();
+  expect(section.querySelector('textarea[aria-label="Reply"]')).toBeNull();
+  // Compose is checked by the mail scope of the server, not a project right.
+  expect(button(section, "Compose")).toBeTruthy();
+  for (const write of writes) expect(write).not.toHaveBeenCalled();
+  // A member makes a card (write_project) but does not reply as the project inbox (project_admin).
+  server.rights = member;
+  section = await open(remount(`/p/${P}/pages/logs`));
+  expect(button(section, "Make card")).toBeTruthy();
+  expect(button(section, "Reply")).toBeUndefined();
+  server.rights = admin;
+  section = await open(remount(`/p/${P}/pages/logs`));
+  expect(button(section, "Make card")).toBeTruthy();
+  expect(button(section, "Reply")).toBeTruthy();
+  expect(section.querySelector('textarea[aria-label="Reply"]')).toBeTruthy();
+});
+
+it("ON: the Repos, Knowledge and Logs grants follow the domain rights, never can_edit", () => {
+  const reader = pageGrants({ ...none }, P).knowledgeLogsRepos;
+  expect(Object.values(reader).some(Boolean)).toBe(false);
+  expect(Object.values(pageGrants(undefined, P).knowledgeLogsRepos).some(Boolean)).toBe(false);
+  expect(pageGrants(member, P).knowledgeLogsRepos).toEqual({
+    attachRepo: false, checkoutRepo: true, writeWiki: true, writeDb: true, purgeDbType: false, cardFromMail: true, replyAsProject: false,
+  });
+  expect(Object.values(pageGrants(admin, P).knowledgeLogsRepos).every(Boolean)).toBe(true);
 });
 
 it("ON: a failed rights read leaves the widgets read-only", () => {

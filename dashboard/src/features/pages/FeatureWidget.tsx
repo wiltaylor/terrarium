@@ -41,6 +41,6 @@ export function FeatureWidget(props: { project: string; widget: PageWidget; gran
       : current === "operations" ? <Show when={validFeatureOptions(props.widget.kind as ProjectWidgetKind, props.widget.options)} fallback={<p>Not Found</p>}>
         <OperationsWidget project={props.project} widget={props.widget} grants={props.grants.operations} />
       </Show>
-      : <KnowledgeLogsReposWidget project={props.project} widget={props.widget} />}
+      : <KnowledgeLogsReposWidget project={props.project} widget={props.widget} grants={props.grants.knowledgeLogsRepos} />}
   </Show>;
 }

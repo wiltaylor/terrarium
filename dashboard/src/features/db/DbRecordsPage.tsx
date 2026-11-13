@@ -28,12 +28,19 @@ export default function DbRecordsPage() {
 /** The `type:` term of a configured query, the type it selects. */
 export const queryType = (q: string | undefined) => splitTerms(q ?? "").find((t) => t.startsWith("type:"))?.slice(5) ?? "";
 
-/** `search` is a DB query: its `type:` term selects a local type, the rest seeds the query box. */
-export function DbRecordsPanel(props: { project: string; search?: string }) {
-  return <Show when={props.project} keyed>{(project) => <RecordsSelector project={project} search={props.search} />}</Show>;
+/** The write controls of the records view (TER-1134). The route leaves them out and shows every control. */
+type RecordWrites = { canWrite?: boolean; canPurge?: boolean };
+
+/**
+ * `search` is a DB query: its `type:` term selects a local type, the rest seeds the query box.
+ * `canWrite` (write_db) gates New record, Schema, the record edit and Delete type;
+ * `canPurge` (project_admin) gates Delete type of a type with records.
+ */
+export function DbRecordsPanel(props: { project: string; search?: string } & RecordWrites) {
+  return <Show when={props.project} keyed>{(project) => <RecordsSelector project={project} search={props.search} canWrite={props.canWrite} canPurge={props.canPurge} />}</Show>;
 }
 
-function RecordsSelector(props: { project: string; search?: string }) {
+function RecordsSelector(props: { project: string; search?: string } & RecordWrites) {
   const { api } = useInstance();
   const [types] = createResource(() => props.project, (p) => api.db.types(p));
   const [name, setName] = createSignal(queryType(props.search));
@@ -49,20 +56,22 @@ function RecordsSelector(props: { project: string; search?: string }) {
       </label>
       <ErrorBanner error={types.error} />
       <Show when={selected()} keyed fallback={<Empty>{types.loading ? "Loading…" : name() ? "Not Found" : "Choose a type."}</Empty>}>
-        {(typeName) => <LocalRecords project={props.project} typeName={typeName} search={queryType(props.search) === typeName ? props.search : undefined} onBack={() => setName("")} />}
+        {(typeName) => <LocalRecords project={props.project} typeName={typeName} search={queryType(props.search) === typeName ? props.search : undefined} onBack={() => setName("")} canWrite={props.canWrite} canPurge={props.canPurge} />}
       </Show>
     </>
   );
 }
 
-function LocalRecords(props: { project: string; typeName: string; search?: string; onBack: () => void }) {
+function LocalRecords(props: { project: string; typeName: string; search?: string; onBack: () => void } & RecordWrites) {
   const [search, setSearch] = createSignal<RecordSearch>(props.search ? { q: props.search } : {});
   createEffect(on(() => props.search, (q, old) => { if (q !== old) setSearch((s) => ({ ...s, q })); }, { defer: true }));
-  return <DbRecordsContent project={props.project} typeName={props.typeName} search={search()} onSearch={(patch) => setSearch((old) => ({ ...old, ...patch }))} onBack={props.onBack} />;
+  return <DbRecordsContent project={props.project} typeName={props.typeName} search={search()} onSearch={(patch) => setSearch((old) => ({ ...old, ...patch }))} onBack={props.onBack} canWrite={props.canWrite} canPurge={props.canPurge} />;
 }
 
-function DbRecordsContent(props: { project: string; typeName: string; search: RecordSearch; onSearch: (patch: RecordSearch) => void; onBack: () => void }) {
+function DbRecordsContent(props: { project: string; typeName: string; search: RecordSearch; onSearch: (patch: RecordSearch) => void; onBack: () => void } & RecordWrites) {
   const { api, events } = useInstance();
+  const canWrite = () => props.canWrite !== false;
+  const canDelete = (t: { records: number }) => canWrite() && (t.records === 0 || props.canPurge !== false);
   const typeName = () => props.typeName;
   const [typeRes, { refetch: refetchType, mutate: setType }] = createResource(() => ({ p: props.project, t: typeName() }), (k) => api.db.type(k.p, k.t));
   // A resource in error throws when read: read it only without an error.
@@ -191,13 +200,15 @@ function DbRecordsContent(props: { project: string; typeName: string; search: Re
         }
         level={2}
       >
-        <button class="primary" disabled={!type()} onClick={() => setCreating(true)}>
-          New record
-        </button>
-        <button disabled={!type()} onClick={() => setSchema(true)}>
-          Schema
-        </button>
-        <Show when={type()}>{(t) => <ConfirmButton label="Delete type" confirmLabel={t().records ? `Yes, delete it and ${t().records} records` : undefined} onConfirm={removeType} />}</Show>
+        <Show when={canWrite()}>
+          <button class="primary" disabled={!type()} onClick={() => setCreating(true)}>
+            New record
+          </button>
+          <button disabled={!type()} onClick={() => setSchema(true)}>
+            Schema
+          </button>
+        </Show>
+        <Show when={type() && canDelete(type()!) ? type() : undefined}>{(t) => <ConfirmButton label="Delete type" confirmLabel={t().records ? `Yes, delete it and ${t().records} records` : undefined} onConfirm={removeType} />}</Show>
       </PageHead>
       <ErrorBanner error={typeRes.error ?? error()} onDismiss={() => setError(null)} />
       <Show when={type()?.description}>
@@ -366,10 +377,10 @@ function DbRecordsContent(props: { project: string; typeName: string; search: Re
       </Show>
 
       {/* Keyed: another record makes a new dialog with its own form. */}
-      <Show when={type() ? (creating() ? "new" : openRecord()?.id) : undefined} keyed>
-        {(k) => <RecordModal project={props.project} type={type()!} record={k === "new" ? undefined : openRecord()} onClose={() => (setCreating(false), closeRecord())} onSaved={afterSave} onDeleted={afterSave} />}
+      <Show when={type() ? (creating() && canWrite() ? "new" : openRecord()?.id) : undefined} keyed>
+        {(k) => <RecordModal project={props.project} type={type()!} record={k === "new" ? undefined : openRecord()} readOnly={!canWrite()} onClose={() => (setCreating(false), closeRecord())} onSaved={afterSave} onDeleted={afterSave} />}
       </Show>
-      <Show when={schema() && type()}>
+      <Show when={schema() && canWrite() && type()}>
         <SchemaEditor
           project={props.project}
           type={type()!}
