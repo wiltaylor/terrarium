@@ -4828,28 +4828,22 @@ async fn column_rules_run_a_merge_group_and_a_version_cut_without_the_pack() {
     assert!(runs(&td, "p").await.iter().all(|r| r["column"].is_string()));
 }
 
+
 // ---------------------------------- merge and version groups, columns only
 //
 // TER-1215 (kanban rework C4c): on a `columns` board the merge batch, the
-// merge group, the split of a red batch, the version cut and the built
-// version run from column rules only, across C2a (the engine), C3a (the
-// batch release of the column queue) and C4a (the verbs). No pack rule and
-// no `rules.wcl` runs, and the coded flow writes no label or comment.
-
-/// The pack rule `name` as a column rule with other actions.
-fn column_rule_with(name: &str, new_name: &str, actions: Value) -> Value {
-    let mut r = pack_as_column_rule(name);
-    r["name"] = json!(new_name);
-    r["actions"] = actions;
-    r
-}
+// merge group, the fix cards and the split of a red batch, the version cut
+// and the built version run from column rules only, across C2a (the
+// engine), C3a (the batch release of the column queue) and C4a (the
+// verbs). The jobs end through the runner's end path (`jobs::on_end`), so
+// the coded flow gets its chance to act; it must write nothing. No pack
+// rule and no `rules.wcl` runs.
 
 /// Project `p` of [`queue_lab`] on the column flow. `merge_queue` admits
-/// cards in batches of 2 (C3a) and its `lands` rule queues one merge job
+/// cards in batches of 2 (C3a), and its `lands` rule queues one merge job
 /// of the admitted batch. Its job rules are the pack's merge group and end
-/// rules as C5 places them; a red batch splits at once (no fix card first)
-/// and a red job of one card goes back to the top of ready. `accepted`
-/// cuts a version at 2 cards.
+/// rules, unchanged, as C5 places them. `accepted` cuts a version at 2
+/// cards.
 async fn columns_merge_lab() -> TestDaemon {
     let td = queue_lab().await;
     let path = "/api/projects/p/board/columns/merge_queue/options";
@@ -4863,21 +4857,13 @@ async fn columns_merge_lab() -> TestDaemon {
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
+    // The pack's card rule as a `leaves` rule of the merge queue.
     let returned = terrarium_core::rules_file::default_pack()
         .rules
         .iter()
         .find(|r| r.name == "merge-group-returned")
         .unwrap()
         .clone();
-    // The fail rule without its mail: the cards of the test have no worker.
-    let fail_red = pack_as_column_rule("job-fail-red");
-    let fail_actions: Vec<Value> = fail_red["actions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|a| a["verb"] != "mail")
-        .cloned()
-        .collect();
     put_column_rules(
         &td,
         "merge_queue",
@@ -4889,10 +4875,10 @@ async fn columns_merge_lab() -> TestDaemon {
             pack_as_column_rule("merge-group-started"),
             pack_as_column_rule("merge-group-failed"),
             pack_as_column_rule("merge-pass"),
-            column_rule_with("merge-red-group", "merge-red-split",
-                             json!([{"verb": "job.split", "args": {}}])),
+            pack_as_column_rule("merge-red-group"),
             pack_as_column_rule("merge-red-split-note"),
-            column_rule_with("job-fail-red", "job-fail-red", json!(fail_actions)),
+            pack_as_column_rule("merge-red-fix-note"),
+            pack_as_column_rule("job-fail-red"),
             {"name": "merge-group-returned", "trigger": {"kind": "leaves"}, "max_per_hour": 600,
              "if_card": returned.if_card, "actions": returned.actions},
         ]),
@@ -4917,26 +4903,35 @@ async fn columns_merge_lab() -> TestDaemon {
     td
 }
 
-/// Start and end `job` as passed.
-async fn pass_job(td: &TestDaemon, job: &Job) -> Job {
+/// Start `job` and end it as a run does: passed, or red with a failed
+/// test in the output. The end goes through `jobs::on_end`, which writes
+/// the verdicts.
+async fn end_job(td: &TestDaemon, job: &Job, passed: bool) {
+    let st = state(td);
     let id = job.id.clone();
-    state(td)
+    let started = st
         .db
-        .write("system", move |t| {
-            jobs::start(t, &id, "machine", None)?;
-            Ok(jobs::finish(
-                t,
-                &id,
-                &JobEnd {
-                    passed: true,
-                    exit_code: Some(0),
-                    ..JobEnd::default()
-                },
-            )?
-            .unwrap())
-        })
+        .write("system", move |t| jobs::start(t, &id, "machine", None))
         .await
-        .unwrap()
+        .unwrap();
+    assert!(started, "{job:?}");
+    let end = if passed {
+        JobEnd {
+            passed: true,
+            exit_code: Some(0),
+            ..JobEnd::default()
+        }
+    } else {
+        JobEnd {
+            passed: false,
+            outcome: Some("red".into()),
+            exit_code: Some(1),
+            tail: Some("test a ... FAILED\nfailures: a".into()),
+            ..JobEnd::default()
+        }
+    };
+    terrariumd::jobs::finish_for_test(&st, &job.id, end).await;
+    settle(td).await;
 }
 
 /// Two `version:vnext` cards of repo `app` in review.
@@ -4957,11 +4952,97 @@ async fn two_cards(td: &TestDaemon) -> (String, String) {
     (v[0].clone(), v[1].clone())
 }
 
-/// Every run of `p` came from a column rule: the pack ran nothing.
+/// The one open job of `p`.
+async fn the_open_job(td: &TestDaemon) -> Job {
+    let open = open_jobs(td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    open[0].clone()
+}
+
+fn card_ids(j: &Job) -> Vec<String> {
+    j.cards().into_iter().map(|c| c.card).collect()
+}
+
+/// The two halves of the split of `red`, left first.
+async fn halves_of(td: &TestDaemon, red: &Job) -> (Job, Job) {
+    let mut h: Vec<Job> = all_jobs(td)
+        .await
+        .into_iter()
+        .filter(|j| j.parent.as_deref() == Some(red.id.as_str()))
+        .collect();
+    assert_eq!(h.len(), 2, "{h:?}");
+    h.sort_by(|x, y| x.split_path.cmp(&y.split_path));
+    let right = h.pop().unwrap();
+    (h.pop().unwrap(), right)
+}
+
+/// The writes of card `id`: each `card` event that creates, moves,
+/// comments or edits it, as `(actor, change)`, in order.
+async fn card_writes(td: &TestDaemon, id: &str) -> Vec<(String, String)> {
+    let id = id.to_owned();
+    state(td)
+        .db
+        .read(move |c| {
+            let mut st = c.prepare(
+                "SELECT COALESCE(actor, ''), COALESCE(json_extract(payload, '$.change'), '')
+                   FROM events WHERE kind = 'card' AND card = ?1 ORDER BY seq",
+            )?;
+            let v = st
+                .query_map([&id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(v)
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|(_, ch)| matches!(ch.as_str(), "created" | "moved" | "commented" | "edited"))
+        .collect()
+}
+
+/// Every write of card `id` came from the test (the operator) or from a
+/// column rule run of `p`; none from the coded flow or the pack.
+async fn only_rule_writes(td: &TestDaemon, id: &str) {
+    let w = card_writes(td, id).await;
+    assert!(!w.is_empty(), "{id}");
+    for (actor, change) in &w {
+        let column_rule = ["rule:p/merge_queue/", "rule:p/accepted/"]
+            .iter()
+            .any(|p| actor.starts_with(p));
+        assert!(
+            actor == "operator" || column_rule,
+            "{id}: {change} by {actor}: {w:?}"
+        );
+    }
+}
+
+/// The kind of each comment of card `id`, in order.
+async fn comment_kinds(td: &TestDaemon, id: &str) -> Vec<&'static str> {
+    bodies(&card(td, id).await)
+        .iter()
+        .map(|b| {
+            if b.contains("The batch splits") {
+                "split"
+            } else if b.contains("The group gets a fix card") {
+                "fix"
+            } else if b.contains(" queued") {
+                "queued"
+            } else if b.contains(" passed") {
+                "passed"
+            } else if b.contains(" failed") {
+                "failed"
+            } else {
+                "other"
+            }
+        })
+        .collect()
+}
+
+/// Every rule run of `p` came from a column rule: the pack ran nothing.
 async fn only_column_runs(td: &TestDaemon) {
     let r = runs(td, "p").await;
     assert!(!r.is_empty());
     assert!(r.iter().all(|x| x["column"].is_string()), "{r:?}");
+    assert!(r.iter().all(|x| x["state"] != "failed"), "{r:?}");
 }
 
 #[tokio::test]
@@ -4978,16 +5059,14 @@ async fn column_rules_merge_a_batch_cut_a_version_and_build_it() {
     // queues one merge job of the two, in queue order.
     move_to(&td, &b, "merge_queue").await;
     settle(&td).await;
-    let open = open_jobs(&td).await;
-    assert_eq!(open.len(), 1, "{open:?}");
-    let batch: Vec<&str> = open[0].batch.iter().map(|x| x.card.as_str()).collect();
-    assert_eq!(batch, vec![a.as_str(), b.as_str()]);
-    assert_eq!(open[0].created_by, "rule:p/merge_queue/merge-batch");
+    let job = the_open_job(&td).await;
+    assert_eq!(card_ids(&job), vec![a.clone(), b.clone()]);
+    assert_eq!(job.created_by, "rule:p/merge_queue/merge-batch");
     let q = runs_of(&td, "p", "merge_queue/merge-batch").await;
     let mut s = states(&q);
     s.sort_unstable();
     assert_eq!(s, vec!["done", "noop"], "{q:?}");
-    // The merge group of the job, with the label of the rule.
+    // The merge group of the job, and the label of the rule.
     let g = card(&td, &a).await["group"].clone();
     assert!(
         g["key"].as_str().is_some_and(|k| k.starts_with("merge:")),
@@ -5003,15 +5082,15 @@ async fn column_rules_merge_a_batch_cut_a_version_and_build_it() {
         );
     }
 
-    // The job passes: both cards go to accepted and the merge group closes.
-    let passed = pass_job(&td, &open[0]).await;
-    settle(&td).await;
+    // The job passes through the runner's end: the verdicts move both
+    // cards to accepted, and the merge group closes.
+    end_job(&td, &job, true).await;
     for id in [&a, &b] {
-        verdict(&td, &passed, id, "passed").await;
-        settle(&td).await;
         let x = card(&td, id).await;
         assert_eq!(x["column"], "accepted", "{x}");
         assert_eq!(x["labels"], json!(["version:vnext"]), "{x}");
+        // One queue comment and one end comment, from the rules only.
+        assert_eq!(comment_kinds(&td, id).await, vec!["queued", "passed"], "{x}");
     }
     assert_eq!(card(&td, &merge_group).await["archived"], true);
     let pass = runs_of(&td, "p", "merge_queue/merge-pass").await;
@@ -5040,85 +5119,122 @@ async fn column_rules_merge_a_batch_cut_a_version_and_build_it() {
     settle(&td).await;
     for id in [&a, &b] {
         assert_eq!(card(&td, id).await["column"], "done");
+        only_rule_writes(&td, id).await;
     }
     assert_eq!(card(&td, &header).await["archived"], true);
     only_column_runs(&td).await;
 }
 
+/// The pack's red path on the batch merge queue: a red group gets a fix
+/// card (at most 3); the lead queues the group again with the newest fix
+/// card first; the 4th red run splits the batch. A red half of one card
+/// goes to the top of ready.
 #[tokio::test]
-async fn column_rules_split_a_red_merge_batch() {
+async fn column_rules_fix_then_split_a_red_merge_batch() {
     let td = columns_merge_lab().await;
     let (a, b) = two_cards(&td).await;
     move_to(&td, &a, "merge_queue").await;
     move_to(&td, &b, "merge_queue").await;
     settle(&td).await;
-    let open = open_jobs(&td).await;
-    assert_eq!(open.len(), 1, "{open:?}");
-    let g = card(&td, &a).await["group"].clone();
-    let merge_group = g["id"].as_str().unwrap().to_owned();
+    let mut job = the_open_job(&td).await;
+    let merge_group = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
-    // The batch is red: one split into two halves, a note on each card,
-    // and the cards stay in the merge queue.
-    let red = fail_job(&td, &open[0], "red").await;
-    settle(&td).await;
-    for id in [&a, &b] {
-        verdict(&td, &red, id, "red").await;
-    }
-    settle(&td).await;
-    let split = runs_of(&td, "p", "merge_queue/merge-red-split").await;
-    let mut s = states(&split);
-    s.sort_unstable();
-    assert_eq!(s, vec!["done", "noop"], "{split:?}");
-    let mut halves: Vec<Job> = all_jobs(&td)
-        .await
-        .into_iter()
-        .filter(|j| j.parent.as_deref() == Some(red.id.as_str()))
-        .collect();
-    halves.sort_by(|x, y| x.split_path.cmp(&y.split_path));
-    assert_eq!(halves.len(), 2, "{halves:?}");
-    assert_eq!(halves[0].card, a);
-    assert_eq!(halves[1].card, b);
-    for id in [&a, &b] {
-        let x = card(&td, id).await;
-        assert_eq!(x["column"], "merge_queue", "{x}");
-        assert_eq!(
-            x["labels"],
-            json!(["version:vnext", "validation:queued"]),
-            "{x}"
-        );
-    }
-    let note = runs_of(&td, "p", "merge_queue/merge-red-split-note").await;
-    assert_eq!(states(&note), vec!["done", "done"], "{note:?}");
-    let failed = card(&td, &merge_group).await;
-    assert!(
-        failed["group"]["steps"]
-            .as_array()
+    let mut fixes: Vec<String> = Vec::new();
+    for round in 1..=3 {
+        end_job(&td, &job, false).await;
+        // One fix card in ready, first in the merge group; no split yet.
+        let label = format!("merge-fix:{}", job.id);
+        let fix = state(&td)
+            .db
+            .read(move |c| terrariumd::store::board::find_open_by_label(c, "p", &label))
+            .await
             .unwrap()
-            .iter()
-            .any(|s| s["state"] == "failed"),
-        "{failed}"
-    );
+            .unwrap_or_else(|| panic!("round {round}: no fix card"));
+        assert_eq!(column_of(&td, &fix).await, "ready", "round {round}");
+        assert!(
+            all_jobs(&td)
+                .await
+                .iter()
+                .all(|j| j.parent.as_deref() != Some(job.id.as_str())),
+            "round {round}: no split before 3 fix cards"
+        );
+        let g = card(&td, &a).await["group"].clone();
+        assert_eq!(g["id"], json!(merge_group), "round {round}: {g}");
+        assert_eq!(g["members"][0], json!(fix), "round {round}: {g}");
+        for id in [&a, &b] {
+            let x = card(&td, id).await;
+            assert_eq!(x["column"], "merge_queue", "round {round}: {x}");
+            assert_eq!(x["labels"], json!(["version:vnext"]), "round {round}: {x}");
+        }
+        // The fix card is reviewed and goes to the merge queue: it waits
+        // there, because the red batch still holds the column (C3a).
+        move_to(&td, &fix, "review").await;
+        move_to(&td, &fix, "merge_queue").await;
+        settle(&td).await;
+        assert!(card(&td, &fix).await["queued"].is_object(), "round {round}");
+        assert!(open_jobs(&td).await.is_empty(), "round {round}");
+        // The lead queues the group again, the newest fix card first.
+        let mut order = vec![fix.clone()];
+        order.extend(fixes.iter().rev().cloned());
+        order.extend([a.clone(), b.clone()]);
+        fixes.push(fix);
+        let r = td.post("/api/merges", json!({"cards": order})).await;
+        assert_eq!(r.status, 201, "{}", r.body);
+        settle(&td).await;
+        job = the_open_job(&td).await;
+        assert_eq!(card_ids(&job), order, "round {round}");
+        for id in &order {
+            let x = card(&td, id).await;
+            assert_eq!(x["column"], "merge_queue", "round {round}: {x}");
+            assert!(
+                x["labels"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("validation:queued")),
+                "round {round}: {x}"
+            );
+        }
+    }
 
-    // The half of a passes: a goes to accepted and stays in the merge
-    // group, which waits for b. One accepted card cuts no version.
-    let left = pass_job(&td, &halves[0]).await;
-    settle(&td).await;
-    verdict(&td, &left, &a, "passed").await;
-    settle(&td).await;
-    let x = card(&td, &a).await;
-    assert_eq!(x["column"], "accepted", "{x}");
-    assert_eq!(x["group"]["id"], json!(merge_group), "{x}");
+    // The 4th red run: no 4th fix card, the batch splits in two.
+    end_job(&td, &job, false).await;
+    let label = format!("merge-fix:{}", job.id);
+    let none = state(&td)
+        .db
+        .read(move |c| terrariumd::store::board::find_open_by_label(c, "p", &label))
+        .await
+        .unwrap();
+    assert!(none.is_none(), "{none:?}");
+    let (left, right) = halves_of(&td, &job).await;
+    let (f1, f2, f3) = (fixes[0].clone(), fixes[1].clone(), fixes[2].clone());
+    assert_eq!(card_ids(&left), vec![f3.clone(), f2.clone()]);
+    assert_eq!(card_ids(&right), vec![f1.clone(), a.clone(), b.clone()]);
 
-    // The half of b is red: b goes to the top of ready with the failure
-    // block, and leaves the merge group.
-    let right = fail_job(&td, &halves[1], "red").await;
-    settle(&td).await;
-    verdict(&td, &right, &b, "red").await;
-    settle(&td).await;
-    let x = card(&td, &b).await;
+    // The left half passes: the two fix cards go to accepted. They carry
+    // no version label, so no version is cut.
+    end_job(&td, &left, true).await;
+    for id in [&f3, &f2] {
+        assert_eq!(column_of(&td, id).await, "accepted");
+    }
+    assert!(card(&td, &f3).await["group"]["key"]
+        .as_str()
+        .is_some_and(|k| k.starts_with("merge:")));
+
+    // The right half is red: it had 3 fix cards, so it splits again.
+    end_job(&td, &right, false).await;
+    let (one, rest) = halves_of(&td, &right).await;
+    assert_eq!(card_ids(&one), vec![f1.clone()]);
+    assert_eq!(card_ids(&rest), vec![a.clone(), b.clone()]);
+
+    // The red half of one card: the fix card goes to the top of ready
+    // with the failure block, and leaves the merge group.
+    end_job(&td, &one, false).await;
+    let x = card(&td, &f1).await;
     assert_eq!(x["column"], "ready", "{x}");
     assert_eq!(x["position"], 0, "{x}");
-    assert_eq!(x["labels"], json!(["version:vnext"]), "{x}");
     assert!(
         x["body"].as_str().unwrap_or_default().contains("FAILED"),
         "{x}"
@@ -5126,5 +5242,47 @@ async fn column_rules_split_a_red_merge_batch() {
     assert!(x.get("group").is_none_or(Value::is_null), "{x}");
     let fail = runs_of(&td, "p", "merge_queue/job-fail-red").await;
     assert_eq!(fail.last().unwrap()["state"], "done", "{fail:?}");
+
+    // The group's own cards pass: they go to accepted, the merge group
+    // closes, and the version is cut and built.
+    end_job(&td, &rest, true).await;
+    for id in [&a, &b] {
+        let x = card(&td, id).await;
+        assert_eq!(x["column"], "accepted", "{x}");
+        assert_eq!(x["labels"], json!(["version:vnext"]), "{x}");
+    }
+    assert_eq!(card(&td, &merge_group).await["archived"], true);
+    let key = card(&td, &a).await["group"]["key"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(key.starts_with("version:"), "{key}");
+    let built = td
+        .post(
+            &format!("/api/projects/p/version-groups/{key}/built"),
+            json!({"version": "v1.2.3"}),
+        )
+        .await;
+    assert_eq!(built.status, 200, "{}", built.body);
+    settle(&td).await;
+    for id in [&a, &b] {
+        assert_eq!(column_of(&td, id).await, "done");
+    }
+
+    // Each comment of a and b, from the column rules only: 4 queue
+    // comments, 3 fix notes, 2 split notes and the end of the pass.
+    for id in [&a, &b] {
+        assert_eq!(
+            comment_kinds(&td, id).await,
+            vec![
+                "queued", "fix", "queued", "fix", "queued", "fix", "queued", "split", "split",
+                "passed"
+            ],
+            "{id}"
+        );
+    }
+    for id in [&a, &b, &f1, &f2, &f3] {
+        only_rule_writes(&td, id).await;
+    }
     only_column_runs(&td).await;
 }
