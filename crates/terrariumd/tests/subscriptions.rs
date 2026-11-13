@@ -4242,3 +4242,262 @@ async fn a_config_dir_fleet_that_makes_an_xai_key_row_a_plan_row_drops_the_key()
         .await;
     assert!(audit.ok().to_string().contains("x-fleet"), "{}", audit.body);
 }
+
+/// Set a column of a subscription row straight in the store, for a state
+/// that the API cannot make.
+async fn set_row(td: &TestDaemon, name: &str, sql: &'static str) {
+    let n = name.to_owned();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("system", move |t| {
+            t.execute(sql, [&n])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// The row as the API shows it, with a check that its key file is gone and
+/// that `key` is still redacted.
+async fn assert_key_dropped(td: &TestDaemon, name: &str, key: &str) -> Value {
+    let s = td.get(&format!("/api/subscriptions/{name}")).await;
+    assert!(s.ok()["env_var"].is_null(), "{}", s.body);
+    assert_eq!(s.body["has_api_key"], false, "{}", s.body);
+    assert!(
+        !terrariumd::login_session::key_path(&td.state, name).exists(),
+        "the key file of {name} stays"
+    );
+    assert_eq!(
+        card_body(td, key).await,
+        format!("t=[secret:subscription/{name}]")
+    );
+    s.body
+}
+
+/// TER-1239 (rev-1239, F1): a key of another provider on an xai key row.
+/// The Z.ai key POST replaces the xai key file, and `set_plan` makes the
+/// row an xai plan row (`coding` is no xai plan word). R7 holds: the row
+/// keeps no variable, the sweep removes the key file, and both the old
+/// xai key and the Z.ai key stay redacted.
+#[tokio::test]
+async fn another_providers_key_on_an_xai_key_row_keeps_r7_and_both_keys_redacted() {
+    const XAI_KEY: &str = "xai-swap-row-key-0123456789";
+    const ZAI_KEY: &str = "zai-swap-row-key-9876543210";
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    td.project("p").await;
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "x-swap", "provider": "xai", "plan": "API key", "harnesses": ["pi"]}),
+    )
+    .await
+    .ok();
+    let r = td
+        .post(
+            "/api/subscriptions/x-swap/api-key",
+            json!({"provider": "xai", "key": XAI_KEY}),
+        )
+        .await;
+    assert_eq!(r.ok()["env_var"], "XAI_API_KEY", "{}", r.body);
+
+    let r = td
+        .post(
+            "/api/subscriptions/x-swap/api-key",
+            json!({"provider": "zai", "key": ZAI_KEY}),
+        )
+        .await;
+    assert_eq!(r.ok()["plan"], "coding", "{}", r.body);
+    assert!(r.body["env_var"].is_null(), "{}", r.body);
+    let s = assert_key_dropped(td, "x-swap", XAI_KEY).await;
+    assert_ne!(s["login_status"], "logged_in", "{s}");
+    assert_eq!(
+        card_body(td, ZAI_KEY).await,
+        "t=[secret:subscription/x-swap]"
+    );
+    let audit = td
+        .get("/api/audit?action=subscription.api_key_dropped")
+        .await;
+    assert!(audit.ok().to_string().contains("x-swap"), "{}", audit.body);
+}
+
+/// TER-1239 (rev-1239, F2): a login `register` that gives a plan to a file
+/// xai key row with no plan makes it a plan row: the key file goes, and
+/// the key stays redacted.
+#[tokio::test]
+async fn a_register_that_makes_an_xai_key_row_a_plan_row_drops_the_key_file() {
+    const KEY: &str = "xai-register-row-key-0123456789";
+    let env = boot(
+        |c| {
+            write(
+                c,
+                "subscriptions/x-reg.toml",
+                "provider = \"xai\"\nharnesses = [\"pi\"]\n",
+            );
+        },
+        |_, _| {},
+    )
+    .await;
+    let td = &env.td;
+    td.project("p").await;
+    let r = td
+        .post(
+            "/api/subscriptions/x-reg/api-key",
+            json!({"provider": "xai", "key": KEY}),
+        )
+        .await;
+    assert_eq!(r.ok()["env_var"], "XAI_API_KEY", "{}", r.body);
+    // An xai row with no plan is an API-key row (`xai::plan(None)`).
+    set_row(td, "x-reg", "UPDATE subscriptions SET plan = NULL WHERE name = ?1").await;
+    let st = terrariumd::login_session::LoginStatus {
+        kind: terrariumd::login_session::LoginKind::Pi,
+        harness: HarnessId::Pi,
+        provider: "xai".into(),
+        pi_provider: Some("xai".into()),
+        logged_in: true,
+        plan: Some("Super".into()),
+        detail: None,
+    };
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let sub = terrariumd::login_session::register(&state, &st, Some("x-reg"))
+        .await
+        .unwrap();
+    assert_eq!(sub.plan.as_deref(), Some("Super"));
+    assert_key_dropped(td, "x-reg", KEY).await;
+}
+
+/// TER-1239 (rev-1239, F2): a verify whose check reads a plan for an xai
+/// row with no plan makes it a plan row, and the sweep after the verify
+/// removes a key file that the row still has. The API cannot make this
+/// state (a row with a variable and a key file never reaches the check):
+/// the test clears the variable in the store and adds a Claude account
+/// record, so that the check reads a plan.
+#[tokio::test]
+async fn a_verify_that_makes_an_xai_row_a_plan_row_drops_its_key_file() {
+    const KEY: &str = "xai-verify-row-key-0123456789";
+    let env = boot(
+        |_| {},
+        |u, bin| {
+            u.programs.insert(
+                HarnessId::Claude,
+                script(
+                    bin,
+                    "claude-plan",
+                    r#"echo '{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "max"}'"#,
+                ),
+            );
+        },
+    )
+    .await;
+    let td = &env.td;
+    td.project("p").await;
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "x-ver", "provider": "xai", "plan": "API key", "harnesses": ["pi"]}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/subscriptions/x-ver/api-key",
+        json!({"provider": "xai", "key": KEY}),
+    )
+    .await
+    .ok();
+    set_row(
+        td,
+        "x-ver",
+        "UPDATE subscriptions SET plan = NULL, env_var = NULL WHERE name = ?1",
+    )
+    .await;
+    let account = terrariumd::accounts::account_dir(&td.state, "x-ver");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(
+        account.join(terrariumd::accounts::META_FILE),
+        r#"{"harness": "claude", "source": "login", "created_at": "2026-11-13T00:00:00Z", "updated_at": "2026-11-13T00:00:00Z"}"#,
+    )
+    .unwrap();
+    assert!(terrariumd::login_session::key_path(&td.state, "x-ver").exists());
+
+    let v = td.post_empty("/api/subscriptions/x-ver/verify").await;
+    assert!(v.ok()["subscription"]["plan"].is_string(), "{}", v.body);
+    assert!(
+        terrarium_core::xai::is_plan_row("xai", v.body["subscription"]["plan"].as_str()),
+        "{}",
+        v.body
+    );
+    assert_key_dropped(td, "x-ver", KEY).await;
+}
+
+/// TER-1239 (rev-1205b, point 3): when `register` fails after a Grok
+/// import, `drop_grok_import` removes what the import wrote. A new account
+/// goes as a whole; an account that was there keeps everything but its
+/// Grok credential. `register` fails through the test fault hook.
+#[tokio::test]
+async fn a_failed_register_drops_the_grok_import() {
+    let env = boot(
+        |_| {},
+        |u, bin| {
+            u.programs
+                .insert(HarnessId::Grok, fake_grok_login(bin, GROK_TOKEN_A, false));
+        },
+    )
+    .await;
+    let td = &env.td;
+    let fault = |name: &str, on: bool| {
+        let mut f = terrariumd::login_session::FAIL_REGISTER.lock().unwrap();
+        f.retain(|n| n != name);
+        if on {
+            f.push(name.to_owned());
+        }
+    };
+    let login = |name: &'static str| async move {
+        let r = td
+            .post(
+                "/api/subscriptions/login",
+                json!({"kind": "grok", "name": name}),
+            )
+            .await;
+        r.ok()["id"].as_str().unwrap().to_owned()
+    };
+    let grok_file = |name: &str| {
+        terrariumd::accounts::credential_path(
+            &terrariumd::accounts::store_dir(&td.state, name),
+            HarnessId::Grok,
+        )
+    };
+
+    // A new account: the whole account goes.
+    xai_plan_row(td, "x-fault-new").await;
+    fault("x-fault-new", true);
+    let id = login("x-fault-new").await;
+    let f = wait_login(td, &id, "failed").await;
+    fault("x-fault-new", false);
+    assert!(
+        f["error"].as_str().unwrap().contains("test fault hook"),
+        "{f}"
+    );
+    assert!(
+        !terrariumd::accounts::exists(&td.state, "x-fault-new"),
+        "the account of a failed register stays"
+    );
+
+    // An account that was there: only its Grok credential goes.
+    xai_plan_row(td, "x-fault-old").await;
+    let id = login("x-fault-old").await;
+    wait_login(td, &id, "done").await;
+    assert!(grok_file("x-fault-old").exists());
+    fault("x-fault-old", true);
+    let id = login("x-fault-old").await;
+    wait_login(td, &id, "failed").await;
+    fault("x-fault-old", false);
+    assert!(
+        terrariumd::accounts::exists(&td.state, "x-fault-old"),
+        "the account that was there goes"
+    );
+    assert!(
+        !grok_file("x-fault-old").exists(),
+        "the Grok credential of a failed register stays"
+    );
+}
