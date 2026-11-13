@@ -1452,7 +1452,7 @@ mod tests {
     async fn xai_plan_and_key_rows() {
         let (g, p) = (HarnessId::Grok, HarnessId::Pi);
         let db = db();
-        db.write("system", |t| {
+        db.write("system", move |t| {
             upsert_def(t, &xai("x-super", Some("Super"), &[g]), SOURCE_API)?;
             upsert_def(t, &xai("x-key", Some("API key"), &[p]), SOURCE_API)?;
             upsert_def(t, &xai("x-old", None, &[p]), SOURCE_API)?;
