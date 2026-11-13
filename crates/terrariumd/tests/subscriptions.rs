@@ -3977,7 +3977,7 @@ async fn a_grok_login_into_a_row_edited_meanwhile_stores_nothing() {
 
 /// TER-1191 R6, TER-1205: a verify and a logout of a Grok Build account
 /// build the redaction matcher again. A refreshed token is redacted from
-/// the verify on, and a logged-out login leaves the matcher.
+/// the verify on. A logged-out login stays in the matcher (TER-1257).
 #[tokio::test]
 async fn grok_verify_and_logout_rebuild_the_redaction_matcher() {
     let env = boot(
@@ -4026,21 +4026,17 @@ async fn grok_verify_and_logout_rebuild_the_redaction_matcher() {
         v.body
     );
     assert_eq!(card_body(td, GROK_TOKEN_B).await, format!("t={label}"));
-    // The old token is no longer in the file, nor in the matcher.
-    assert_eq!(
-        card_body(td, GROK_TOKEN_A).await,
-        format!("t={GROK_TOKEN_A}")
-    );
+    // The old token is no longer in the file. It stays in the matcher: an
+    // agent that used it may still print it (TER-1259).
+    assert_eq!(card_body(td, GROK_TOKEN_A).await, format!("t={label}"));
 
-    // A logout removes the account, and its token leaves the matcher.
+    // A logout removes the account. Its token stays in the matcher for the
+    // life of the daemon (TER-1257).
     td.post_empty("/api/subscriptions/x-super/logout")
         .await
         .ok();
     assert!(!terrariumd::accounts::exists(&td.state, "x-super"));
-    assert_eq!(
-        card_body(td, GROK_TOKEN_B).await,
-        format!("t={GROK_TOKEN_B}")
-    );
+    assert_eq!(card_body(td, GROK_TOKEN_B).await, format!("t={label}"));
 }
 
 const XAI_ENV_CHILD: &str = "TERRARIUM_TEST_XAI_ENV_CHILD";
