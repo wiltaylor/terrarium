@@ -695,7 +695,14 @@ fn ter_243_upgrade(rule: &Rule, mq: &str) -> Option<Rule> {
 ///
 /// Only a byte-exact block after the [`MIGRATION_HEADER`] is removed. Any
 /// edit, unrecognized form, or copy outside that generated section stays.
-/// `None`: no generated legacy block was found.
+///
+/// The pair retires as one (TER-1130): when either `agent-park` or
+/// `agent-unpark` of `own` is not such a block (an edit, also an edit of a
+/// TER-243 marked block, or the short form that turns it off), neither
+/// retires. An edited legacy park thus never runs next to the pack's
+/// role-aware unpark, or the other way round. A pair with only one block
+/// left retires that block.
+/// `None`: nothing to retire.
 pub fn retire_legacy_wait_overrides(
     text: &str,
     own: &RuleSet,
@@ -722,12 +729,10 @@ pub fn retire_legacy_wait_overrides(
             .iter()
             .any(|(name, generated)| *name == r.name && *generated == block)
         {
-            continue;
+            // An edit keeps both blocks of the pair.
+            return None;
         }
-        let Some(at) = out[header..].find(&block) else {
-            continue;
-        };
-        let at = header + at;
+        let at = header + out[header..].find(&block)?;
         out.replace_range(at..at + block.len(), "");
         changed = true;
     }
@@ -1562,6 +1567,28 @@ rule "to-blocked" {
         assert_eq!(retire(&marked, &board), Some(new));
     }
 
+    /// TER-1130: a TER-243 marked block that the operator edited after
+    /// the mark is not a generated form, so it stays, with its pair.
+    #[test]
+    fn a_marked_block_edited_after_the_mark_stays() {
+        let board = queue_board();
+        let marked = ter_243_migration(&old_migration(&board), &board);
+        assert!(marked.contains(MERGE_QUEUE_MARK), "{marked}");
+        // The operator takes the merge queue out again, in to_wcl form.
+        let removed = marked
+            .replace(", \"queue\"] }", "] }")
+            .replace("  when \"data.to\" { ne = \"queue\" }\n", "");
+        assert!(!removed.contains("queue\""), "{removed}");
+        assert!(removed.contains(MERGE_QUEUE_MARK), "{removed}");
+        assert_eq!(retire(&removed, &board), None);
+        // Only the marked park is edited: the marked unpark stays too.
+        let park = to_wcl(&rule_of(&marked, "agent-park"));
+        let one = marked.replacen(&park, &park.replace(", \"queue\"] }", "] }"), 1);
+        assert_ne!(one, marked);
+        assert_eq!(rule_of(&one, "agent-unpark"), rule_of(&marked, "agent-unpark"));
+        assert_eq!(retire(&one, &board), None);
+    }
+
     #[test]
     fn edited_or_other_wait_overrides_stay() {
         let board = queue_board();
@@ -1569,14 +1596,26 @@ rule "to-blocked" {
         // Retirement does not depend on the board gaining a merge queue.
         let plain = cols(&[("review", Some("review")), ("accepted", Some("accepted"))]);
         assert!(retire(&old_migration(&plain), &plain).is_some());
-        // A custom cap is an edit: only the other exact block retires.
+        // A custom cap is an edit: the pair retires as one, so the exact
+        // unpark stays next to the edited park (TER-1130).
         let edited = text.replacen("max_per_hour = 600", "max_per_hour = 60", 1);
-        let new = retire(&edited, &board).expect("unpark retires");
-        assert_eq!(rule_of(&new, "agent-park"), rule_of(&edited, "agent-park"));
-        assert!(!new.contains("rule \"agent-unpark\""), "{new}");
+        assert_eq!(rule_of(&edited, "agent-park").max_per_hour, Some(60));
+        assert_eq!(retire(&edited, &board), None);
         let marked = ter_243_migration(&edited, &board);
-        let new = retire(&marked, &board).expect("marked unpark retires");
-        assert_eq!(rule_of(&new, "agent-park"), rule_of(&marked, "agent-park"));
+        assert!(marked.contains(MERGE_QUEUE_MARK), "{marked}");
+        assert_eq!(retire(&marked, &board), None);
+        // The operator turns the park off: also an edit of the pair.
+        let off = text.replacen(
+            &to_wcl(&rule_of(&text, "agent-park")),
+            "rule \"agent-park\" { enabled = false }\n",
+            1,
+        );
+        assert!(off.contains("rule \"agent-unpark\""), "{off}");
+        assert_eq!(retire(&off, &board), None);
+        // A pair with only one exact block left retires that block.
+        let alone = text.replacen(&to_wcl(&rule_of(&text, "agent-park")), "", 1);
+        let new = retire(&alone, &board).expect("the lone unpark retires");
+        assert!(!new.contains("rule \"agent-unpark\""), "{new}");
         // The same rules without the migration header are the project's own.
         let own_only = text.replace(MIGRATION_HEADER, "");
         assert_eq!(retire(&own_only, &board), None);

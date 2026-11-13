@@ -10091,17 +10091,20 @@ name, §19.11) at the end of the project's `rules.wcl`, with the reasons
 in its `description`. A pack rule that `rules.wcl` replaces already stays
 as it is (`kept`). A second migration of the same board changes nothing.
 
-A migration before TER-222 left `merge_queue` out of the `agent-park` and
-`agent-unpark` overrides, so a move from review to the merge queue woke
-the bound agent. Each load of the config (the start and `POST
-/api/reload`) adds it one time to the API rules of a project (TER-243). It
-changes only a block that is still exactly the text of that old migration
-for the board, and the board needs a merge queue column (the role
-`merge_queue`, else the name on a column with no role). The changed block
-gets `merge_queue added (TER-243).` at the end of its `description`, and
-a block with that note is never changed again. An edited block and a
-file's rules stay as they are. The write is a `rules.put` audit row. A
-problem is one line in the load report and does not fail the load.
+A migration before TER-222 wrote `agent-park` and `agent-unpark`
+overrides with the wait columns as names. TER-243 later added
+`merge_queue` to them and appended `merge_queue added (TER-243).` to
+their `description`. Each load of the config (the start and `POST
+/api/reload`) removes these overrides from the API rules of a project, so
+the pack's role-aware rules run again (TER-1090). It removes only a block
+after the migration header that is still exactly the text of that old
+migration for the board, or exactly its TER-243 form. The two blocks
+retire as a pair (TER-1130): when either one is edited (also after the
+TER-243 note, or turned off with `enabled = false`), both stay, so an
+edited legacy park never runs next to the pack's unpark. A pair with
+only one block left retires that block. A file's rules stay as they are.
+The write is a `rules.put` audit row. A problem is one line in the load
+report and does not fail the load.
 
 **The lint.** It reads the rules that the engine runs: the pack with the
 project's own rules for `board_flow = rules`, else only its own rules.
