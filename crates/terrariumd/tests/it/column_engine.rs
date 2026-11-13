@@ -6,6 +6,8 @@
 //! names it (TER-1159). The follow-ups of the review (TER-1199): the
 //! removal check on the board after the change, the timers by rule ID, the
 //! R3 lockout at each entry, `wait_met`, and `to_count` only on `columns`.
+//! A role change that leaves a rule's `@role` naming no column is refused
+//! (TER-1210).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use crate::common;
@@ -473,6 +475,60 @@ async fn a_removal_checks_the_roles_of_the_board_after_the_change() {
     .ok();
     let o = options(&td, "flow", "review").await;
     assert_eq!(o["rules"][0]["actions"][0]["args"]["to"], "@accepted");
+}
+
+/// The board of [`board`] with the role of `review` set to `role`.
+fn board_review_role(role: Option<&str>) -> Value {
+    let mut b = board(Some("ready"));
+    for c in b["columns"].as_array_mut().unwrap() {
+        if c["name"] == "review" {
+            c["role"] = role.into();
+        }
+    }
+    b
+}
+
+#[tokio::test]
+async fn a_role_change_that_leaves_a_dangling_role_ref_is_refused() {
+    let td = setup().await;
+    set_rules(
+        &td,
+        "flow",
+        "accepted",
+        json!([{"name": "back", "trigger": {"kind": "lands"},
+                "actions": [{"verb": "card.move", "args": {"to": "@review"}}]}]),
+    )
+    .await;
+    let b = "/api/projects/flow/board";
+    let before = td.get(b).await.ok().clone();
+    // The role `review` is cleared and no column is removed: `@review`
+    // would name no column (TER-1210).
+    let r = td.patch(b, board_review_role(None)).await;
+    r.err(409, "conflict");
+    let d = &r.body["error"]["details"];
+    assert_eq!(d["reason"], "role_in_use", "{}", r.body);
+    assert_eq!(d["roles"], json!(["review"]));
+    assert_eq!(d["rules"][0]["column"], "accepted");
+    assert_eq!(d["rules"][0]["rule"], "back");
+    assert_eq!(d["rules"][0]["names"], "@review");
+    // Nothing changed.
+    assert_eq!(td.get(b).await.ok().clone(), before);
+    // The role moves to another column in the same change: `@review`
+    // follows it, so the change goes and the rule keeps its reference.
+    let mut moved = board_review_role(None);
+    let cols = moved["columns"].as_array_mut().unwrap();
+    let at = cols.iter().position(|c| c["name"] == "review").unwrap();
+    cols.insert(at, json!({"name": "check", "role": "review"}));
+    td.patch(b, moved).await.ok();
+    let o = options(&td, "flow", "accepted").await;
+    assert_eq!(o["rules"][0]["actions"][0]["args"]["to"], "@review");
+    // A rule without the reference: the role may go.
+    set_rules(&td, "flow", "accepted", json!([])).await;
+    let mut cleared = board_review_role(None);
+    let cols = cleared["columns"].as_array_mut().unwrap();
+    let at = cols.iter().position(|c| c["name"] == "review").unwrap();
+    cols.insert(at, json!({"name": "check"}));
+    td.patch(b, cleared).await.ok();
 }
 
 #[tokio::test]

@@ -3290,9 +3290,19 @@ pub fn set_columns(
     let wanted = check_columns(&current, specs)?;
     let kept: HashSet<i64> = wanted.iter().filter_map(|w| w.keeps).collect();
     let backlog = column(t, project, BACKLOG)?;
+    // Group completion anchors and column rules are stored by name. Resolve
+    // all renames from the old board at once, including swaps.
+    let renames: HashMap<String, String> = wanted
+        .iter()
+        .filter_map(|w| {
+            let old = current.iter().find(|c| Some(c.id) == w.keeps)?;
+            Some((old.name.clone(), w.name.clone()))
+        })
+        .collect();
     // A rule of a column that stays may not name a removed column
-    // (TER-1159): refused before anything is written.
-    // The references resolve on the board after the change (TER-1199).
+    // (TER-1159), nor a role that no column has after the change
+    // (TER-1210): refused before anything is written. The references
+    // resolve on the board after the change (TER-1199).
     let removed: Vec<&ColumnRow> = current.iter().filter(|c| !kept.contains(&c.id)).collect();
     let after: Vec<terrarium_core::rules_file::BoardColumn> = wanted
         .iter()
@@ -3301,7 +3311,7 @@ pub fn set_columns(
             role: w.role.clone(),
         })
         .collect();
-    column_options::check_removal(t, project, &current, &after, &removed)?;
+    column_options::check_refs(t, project, &current, &after, &removed, &renames)?;
     let mut dropped_rules: Vec<Value> = Vec::new();
     for c in current.iter().filter(|c| !kept.contains(&c.id)) {
         let mut stmt = t.prepare(
@@ -3334,15 +3344,6 @@ pub fn set_columns(
     }
     // Free the names and the roles first, so that the UNIQUE indexes do
     // not see a half-done change (two columns that swap a role).
-    // Group completion anchors are stored by name. Resolve all renames
-    // from the old board at once, including swaps.
-    let renames: HashMap<String, String> = wanted
-        .iter()
-        .filter_map(|w| {
-            let old = current.iter().find(|c| Some(c.id) == w.keeps)?;
-            Some((old.name.clone(), w.name.clone()))
-        })
-        .collect();
     let anchors: Vec<(String, String)> = {
         let mut q = t.prepare("SELECT card, done_when FROM card_groups WHERE project = ?1")?;
         q.query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?
