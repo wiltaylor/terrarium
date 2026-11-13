@@ -63,11 +63,13 @@ function DbRecordsContent(props: { project: string; typeName: string; search: Re
   const type = () => (typeRes.error ? undefined : typeRes());
   const [types, { refetch: refetchTypes }] = createResource(() => props.project, (p) => api.db.types(p).catch(() => []));
 
-  const initial = () => (props.search.q ? withType(props.search.q, typeName()) : `type:${typeName()}`);
+  // Local selection replaces search objects. Only a changed q resets query/draft.
+  const searchQuery = createMemo(() => props.search.q);
+  const initial = () => (searchQuery() ? withType(searchQuery()!, typeName()) : `type:${typeName()}`);
   const [query, setQuery] = createSignal(initial());
   const [draft, setDraft] = createSignal(initial());
   createEffect(
-    on([() => props.typeName, () => props.search.q], () => {
+    on([() => props.typeName, searchQuery], () => {
       setQuery(initial());
       setDraft(initial());
     }, { defer: true }),
@@ -100,6 +102,7 @@ function DbRecordsContent(props: { project: string; typeName: string; search: Re
 
   const first = () => pages()[0];
   const records = createMemo(() => pages().flatMap((p) => p.records));
+  const recordsById = createMemo(() => new Map(records().map((record) => [record.id, record])));
   const labels = createMemo(() => Object.assign({}, ...pages().map((p) => p.labels)) as Record<string, string>);
   const hasFields = () => splitTerms(query()).some((t) => t.startsWith("fields:"));
 
@@ -305,12 +308,15 @@ function DbRecordsContent(props: { project: string; typeName: string; search: Re
                           </tr>
                         </thead>
                         <tbody>
-                          <For each={records()}>
-                            {(rec: DbRecord) => (
-                              <tr class="clickable" tabIndex={0} onClick={() => props.onSearch({ id: rec.id })} onKeyDown={(e) => e.key === "Enter" && props.onSearch({ id: rec.id })}>
-                                <For each={columns()}>{(c) => <td class={`db-cell db-cell-${c.kind}`}>{cellText(c, columnValue(c, rec), labels())}</td>}</For>
+                          <For each={records().map((record) => record.id)}>
+                            {(id) => {
+                              const rec = (): DbRecord => recordsById().get(id)!;
+                              return (
+                              <tr class="clickable" tabIndex={0} onClick={() => props.onSearch({ id })} onKeyDown={(e) => e.key === "Enter" && props.onSearch({ id })}>
+                                <For each={columns()}>{(c) => <td class={`db-cell db-cell-${c.kind}`}>{cellText(c, columnValue(c, rec()), labels())}</td>}</For>
                               </tr>
-                            )}
+                              );
+                            }}
                           </For>
                         </tbody>
                       </table>

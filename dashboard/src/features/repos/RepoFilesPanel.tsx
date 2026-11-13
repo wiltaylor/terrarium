@@ -4,6 +4,7 @@ import { Empty, ErrorBanner, PageHead } from "../../components/ui";
 import { useInstance } from "../../instance";
 import { FilesTab } from "./FilesTab";
 import { treeText } from "./RepoPage";
+import { createTreeCache } from "./fileTree";
 
 /** Selection is local, never inferred from the host route or another project. */
 export function RepoFilesPanel(props: { project: string }) {
@@ -33,6 +34,8 @@ function RepoSelector(props: { project: string }) {
 
 function RepoFiles(props: { repo: Repo }) {
   const { api } = useInstance();
+  // Each embedded browser owns its expanded folders. Legacy routes keep their cache.
+  const cache = createTreeCache();
   const [tree, setTree] = createSignal("main");
   const [path, setPath] = createSignal("");
   const [refresh, setRefresh] = createSignal(0);
@@ -48,7 +51,7 @@ function RepoFiles(props: { repo: Repo }) {
       </div>
       <ErrorBanner error={trees.error ?? current()?.error} />
       <Show when={current() && !current()!.error} fallback={<Empty>{trees.loading ? "Loading…" : "Not Found"}</Empty>}>
-        <FilesTab repo={props.repo} tree={tree()} head={current()!.head} reload={`${tree()}#${refresh()}`} path={path()} onPath={setPath} />
+        <FilesTab repo={props.repo} tree={tree()} head={current()!.head} reload={`${tree()}#${refresh()}`} path={path()} onPath={setPath} cache={cache} />
       </Show>
     </>
   );

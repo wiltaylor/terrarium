@@ -24,7 +24,7 @@ vi.mock("../../stores", async () => {
 });
 const { EventsPanel } = await import("./EventsPage");
 let dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); history.mockClear(); });
+afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); document.documentElement.scrollTop = 0; vi.restoreAllMocks(); history.mockClear(); });
 
 it("keeps duplicate filters local and never consults the global project", async () => {
   const root = document.createElement("div"); document.body.append(root);
@@ -40,21 +40,39 @@ it("keeps duplicate filters local and never consults the global project", async 
 });
 
 it("retains rows, focus and filter state on live arrival and cleans subscriptions", async () => {
+  history.mockResolvedValueOnce({ items: [event("alpha", 2), event("alpha", 1)], next: null });
+  // jsdom has no layout. Model row geometry on the real document scroll owner;
+  // the production keeper must compensate when a live row is inserted above it.
+  const nativeRect = Element.prototype.getBoundingClientRect;
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+    if (this.matches(".event-row, .event-list")) {
+      const index = this.matches(".event-row") ? [...this.parentElement!.children].indexOf(this) : 0;
+      return new DOMRect(0, index * 40 - document.documentElement.scrollTop, 500, 40);
+    }
+    return nativeRect.call(this);
+  });
+  const scrollBy = vi.spyOn(window, "scrollBy").mockImplementation((options, y) => {
+    document.documentElement.scrollTop += typeof options === "number" ? y ?? 0 : options?.top ?? 0;
+  });
   const [project, setProject] = createSignal("alpha");
   const root = document.createElement("div"); document.body.append(root);
   dispose = render(() => <EventsPanel project={project()} />, root);
   await waitFor(() => expect(root.querySelector(".event-row")).toBeTruthy());
-  const row = root.querySelector(".event-row");
+  const row = root.querySelectorAll(".event-row")[1]!;
   const since = root.querySelector<HTMLInputElement>('[aria-label="Since"]')!;
   since.focus();
-  root.scrollTop = 31;
-  for (const fn of listeners) fn(event("beta", 2));
-  expect(root.querySelectorAll(".event-row")).toHaveLength(1);
-  for (const fn of listeners) fn(event("alpha", 2));
-  await waitFor(() => expect(root.querySelectorAll(".event-row")).toHaveLength(2));
-  expect(root.querySelectorAll(".event-row")[1]).toBe(row);
+  document.documentElement.scrollTop = 50;
+  window.dispatchEvent(new Event("scroll"));
+  const top = row.getBoundingClientRect().top;
+  for (const fn of listeners) fn(event("beta", 3));
+  expect(root.querySelectorAll(".event-row")).toHaveLength(2);
+  for (const fn of listeners) fn(event("alpha", 3));
+  await waitFor(() => expect(root.querySelectorAll(".event-row")).toHaveLength(3));
+  await waitFor(() => expect(scrollBy).toHaveBeenCalledWith(0, 40));
+  expect(root.querySelectorAll(".event-row")[2]).toBe(row);
   expect(document.activeElement).toBe(since);
-  expect(root.scrollTop).toBe(31);
+  expect(document.documentElement.scrollTop).toBe(90);
+  expect(row.getBoundingClientRect().top).toBe(top);
   expect(listeners.size).toBe(1);
   setProject("beta");
   await waitFor(() => expect(root.textContent).toContain("beta event 1"));

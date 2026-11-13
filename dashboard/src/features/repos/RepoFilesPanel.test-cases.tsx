@@ -5,10 +5,32 @@ import { waitFor } from "../../test/wait";
 
 const repos = vi.fn(async (project: string) => [{ id: project, project, name: "infra", url: "https://example.com/repo" }]);
 const trees = vi.fn(async (id: string) => ({ repo_id: id, trees: [{ id: "main", kind: "main", label: "main" }] }));
-const files = vi.fn(async () => ({ path: "", entries: [], truncated: false }));
+const files = vi.fn(async (_id: string, _tree: string, path: string) => ({ path, entries: path ? [] : [{ path: "folder", name: "folder", kind: "dir" }], truncated: false }));
 vi.mock("../../stores", async () => {
   const { instanceTestStores } = await import("../../test/instance");
   return instanceTestStores({ api: { projects: { repos }, repos: { trees, files } } });
+});
+
+it("keeps expansion independent for duplicate panels on the same repo and tree", async () => {
+  const history = createMemoryHistory(); history.set({ value: "/host" });
+  const root = document.createElement("div"); document.body.append(root);
+  dispose = render(() => <MemoryRouter history={history}><Route path="/host" component={() => <>
+    <section><RepoFilesPanel project="alpha" /></section><section><RepoFilesPanel project="alpha" /></section>
+  </>} /></MemoryRouter>, root);
+  await waitFor(() => expect(root.querySelectorAll('option[value="infra"]')).toHaveLength(2));
+  for (const select of root.querySelectorAll<HTMLSelectElement>('[aria-label="Repository"]')) {
+    select.value = "infra"; select.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  await waitFor(() => expect(root.querySelectorAll('[role="treeitem"][data-key="folder"]')).toHaveLength(2));
+  const folders = root.querySelectorAll<HTMLElement>('[role="treeitem"][data-key="folder"]');
+  folders[0]!.click();
+  await waitFor(() => expect(folders[0]!.getAttribute("aria-expanded")).toBe("true"));
+  expect(folders[1]!.getAttribute("aria-expanded")).toBe("false");
+  folders[1]!.click();
+  await waitFor(() => expect(folders[1]!.getAttribute("aria-expanded")).toBe("true"));
+  folders[0]!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+  await waitFor(() => expect(folders[0]!.getAttribute("aria-expanded")).toBe("false"));
+  expect(folders[1]!.getAttribute("aria-expanded")).toBe("true");
 });
 const { RepoFilesPanel } = await import("./RepoFilesPanel");
 let dispose: (() => void) | undefined;

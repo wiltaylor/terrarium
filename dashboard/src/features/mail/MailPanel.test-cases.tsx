@@ -15,10 +15,11 @@ vi.mock("../../stores", async () => {
 });
 const { MailPanel } = await import("./MailPage");
 let dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.restoreAllMocks(); });
+afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); document.documentElement.scrollTop = 0; vi.restoreAllMocks(); });
 
 it("keeps duplicate filters and open rows local and retains a reply draft through refresh", async () => {
   const message = await api.mail.send({ to: "terrarium/lead", subject: "Panel retention", body: "hello" });
+  await api.mail.send({ to: "terrarium/lead", subject: "Above retention", body: "newer row" });
   const history = createMemoryHistory(); history.set({ value: "/host?open=foreign&q=foreign" });
   const root = document.createElement("div"); document.body.append(root);
   dispose = render(() => <MemoryRouter history={history}><Route path="/host" component={() => <>
@@ -36,7 +37,24 @@ it("keeps duplicate filters and open rows local and retains a reply draft throug
   expect(sections[1]!.querySelector('[aria-label="Reply"]')).toBeNull();
   const reply = sections[0]!.querySelector<HTMLTextAreaElement>('[aria-label="Reply"]')!;
   reply.value = "unsaved reply"; reply.dispatchEvent(new Event("input", { bubbles: true })); reply.focus();
-  const originalRow = row(); root.scrollTop = 51;
+  const originalRow = row();
+  // Exercise the production keeper on the document, with deterministic layout
+  // for jsdom. Only the first panel is in the viewport in this fixture.
+  const nativeRect = Element.prototype.getBoundingClientRect;
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+    if (this.closest("section") === sections[0] && this.matches(".mail-log tbody, .log-row, .log-thread-row")) {
+      const index = this.matches("tbody") ? 0 : [...this.parentElement!.children].indexOf(this);
+      return new DOMRect(0, index * 40 - document.documentElement.scrollTop, 500, 40);
+    }
+    return nativeRect.call(this);
+  });
+  const scrollBy = vi.spyOn(window, "scrollBy").mockImplementation((options, y) => {
+    document.documentElement.scrollTop += typeof options === "number" ? y ?? 0 : options?.top ?? 0;
+  });
+  document.documentElement.scrollTop = 50;
+  window.dispatchEvent(new Event("scroll"));
+  const top = originalRow.getBoundingClientRect().top;
+  const indexBefore = [...originalRow.parentElement!.children].indexOf(originalRow);
   await api.mail.reply(message.id, "new response");
   const list = vi.spyOn(api.mail, "list");
   for (const fn of listeners) fn({ id: "e", seq: 1, at: "2026-11-13T00:00:00Z", kind: "mail", project: "terrarium", data: { thread_id: message.thread_id }, summary: "reply" });
@@ -46,7 +64,11 @@ it("keeps duplicate filters and open rows local and retains a reply draft throug
   expect(sections[0]!.querySelector('[aria-label="Reply"]')).toBe(reply);
   expect(reply.value).toBe("unsaved reply");
   expect(document.activeElement).toBe(reply);
-  expect(root.scrollTop).toBe(51);
+  await waitFor(() => expect(scrollBy).toHaveBeenCalled());
+  const insertedHeight = ([...originalRow.parentElement!.children].indexOf(originalRow) - indexBefore) * 40;
+  expect(insertedHeight).toBeGreaterThan(0);
+  expect(document.documentElement.scrollTop).toBe(50 + insertedHeight);
+  expect(originalRow.getBoundingClientRect().top).toBe(top);
   const search = sections[1]!.querySelector<HTMLInputElement>('[aria-label="Search"]')!;
   search.value = "nothing matches"; search.dispatchEvent(new Event("input", { bubbles: true }));
   expect(sections[0]!.querySelector<HTMLInputElement>('[aria-label="Search"]')!.value).toBe("");

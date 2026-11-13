@@ -54,13 +54,13 @@ function rawUrl(instance: ReturnType<typeof useInstance>, repo: string, tree: st
   return instance.apiHref(`/api/repos/${seg(repo)}/trees/${seg(tree)}/file${buildQuery({ path })}`);
 }
 
-export function FilesTab(props: { repo: Repo; tree: string; head?: string | null; reload: string; path: string; onPath: (p: string) => void }) {
+export function FilesTab(props: { repo: Repo; tree: string; head?: string | null; reload: string; path: string; onPath: (p: string) => void; cache?: ReturnType<typeof createTreeCache> }) {
   const treeId = `repo-file-tree-${createUniqueId()}`;
   const { api, key, storage } = useInstance();
   const ft = createMemo(() => {
     const id = props.repo.id;
     const tree = props.tree;
-    return treeCache(`${key}|${id}|${tree}|${props.head ?? ""}|${props.reload}`, (dir) => api.repos.files(id, tree, dir));
+    return (props.cache ?? treeCache)(`${key}|${id}|${tree}|${props.head ?? ""}|${props.reload}`, (dir) => api.repos.files(id, tree, dir));
   });
   // Open the folders above the selection (a deep link loads each level), and a selected folder.
   createEffect(
