@@ -1714,18 +1714,16 @@ async fn an_adopted_runner_gets_the_mail_queued_while_the_daemon_was_down() {
     td.boot().await;
     let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
     assert_eq!(td.runner_pid(&id), Some(pid), "the same runner process");
-    assert!(
-        prompts(&starts)[0].contains(mid),
-        "{:?}",
-        prompts(&starts)
-    );
+    assert!(prompts(&starts)[0].contains(mid), "{:?}", prompts(&starts));
     td.wait_status(&id, "idle").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let all = prompts(&td.events(&id, "turn_start").await);
     assert_eq!(all.iter().filter(|p| p.contains(mid)).count(), 1, "{all:?}");
     let state: String = rusqlite::Connection::open(td.dir.path().join("state/terrarium.db"))
         .unwrap()
-        .query_row("SELECT state FROM messages WHERE id = ?1", [mid], |r| r.get(0))
+        .query_row("SELECT state FROM messages WHERE id = ?1", [mid], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_ne!(state, "queued");
 

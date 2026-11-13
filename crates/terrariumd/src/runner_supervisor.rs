@@ -4028,10 +4028,7 @@ impl RunnerSupervisor {
             }
             let added = {
                 let mut slots = lock(&self.inner.slots);
-                let Some(slot) = slots
-                    .get_mut(&id)
-                    .filter(|s| s.up() && s.epoch == epoch)
-                else {
+                let Some(slot) = slots.get_mut(&id).filter(|s| s.up() && s.epoch == epoch) else {
                     return;
                 };
                 if slot.deliveries_open > 0 {
@@ -8844,7 +8841,10 @@ mod tests {
             if slot.deliveries_open == 0 && !slot.pointer_busy && !slot.reload_wanted {
                 break;
             }
-            assert!(start.elapsed() < Duration::from_secs(5), "a delivery stays open");
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "a delivery stays open"
+            );
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -8933,7 +8933,10 @@ mod tests {
         sup.reload_pointer(id).await;
         {
             let slots = lock(&sup.inner.slots);
-            assert!(slots[&id].pointer.is_empty(), "nothing merged during the delivery");
+            assert!(
+                slots[&id].pointer.is_empty(),
+                "nothing merged during the delivery"
+            );
             assert!(slots[&id].reload_wanted);
         }
         resume_tx.send(()).unwrap();
@@ -9021,7 +9024,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
         store_mail(&state, id, false).await;
-        for status in [AgentStatus::Paused, AgentStatus::Stopped, AgentStatus::Error] {
+        for status in [
+            AgentStatus::Paused,
+            AgentStatus::Stopped,
+            AgentStatus::Error,
+        ] {
             {
                 let mut slots = lock(&sup.inner.slots);
                 let slot = slots.get_mut(&id).unwrap();
