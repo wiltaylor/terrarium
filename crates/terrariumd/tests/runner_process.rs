@@ -1685,6 +1685,55 @@ async fn the_agent_lives_through_a_daemon_restart() {
     td.wait_runner_gone(&id).await;
 }
 
+/// TER-1103 T3: a mail that queued while the daemon was down has no event
+/// in the new daemon, and the pointer of the old daemon is gone. The new
+/// daemon adopts the live runner, reloads the queued mail from the store,
+/// and types it once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopted_runner_gets_the_mail_queued_while_the_daemon_was_down() {
+    let mut td = Td::start().await;
+    let id = td.agent("bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let pid = td.runner_pid(&id).unwrap();
+
+    td.shutdown();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mid = "01M7TER1103QUEUEDMAIL00000";
+    let db = rusqlite::Connection::open(td.dir.path().join("state/terrarium.db")).unwrap();
+    db.execute(
+        "INSERT INTO messages (id, thread_id, from_agent, from_kind, to_agent, to_kind,
+                               subject, body, state, created_at)
+         VALUES (?1, 'T1103', 'operator', 'operator', ?2, 'agent', 's', 'b', 'queued',
+                 '2026-11-13T00:00:00Z')",
+        rusqlite::params![mid, id],
+    )
+    .unwrap();
+    drop(db);
+
+    td.boot().await;
+    let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
+    assert_eq!(td.runner_pid(&id), Some(pid), "the same runner process");
+    assert!(
+        prompts(&starts)[0].contains(mid),
+        "{:?}",
+        prompts(&starts)
+    );
+    td.wait_status(&id, "idle").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let all = prompts(&td.events(&id, "turn_start").await);
+    assert_eq!(all.iter().filter(|p| p.contains(mid)).count(), 1, "{all:?}");
+    let state: String = rusqlite::Connection::open(td.dir.path().join("state/terrarium.db"))
+        .unwrap()
+        .query_row("SELECT state FROM messages WHERE id = ?1", [mid], |r| r.get(0))
+        .unwrap();
+    assert_ne!(state, "queued");
+
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+    td.wait_runner_gone(&id).await;
+}
+
 /// A harness that ends while the daemon is down leaves `runner-exit.json`.
 /// The next daemon applies the restart policy: `never` and a kill give
 /// `error`; `on-failure` launches the agent again with resume.

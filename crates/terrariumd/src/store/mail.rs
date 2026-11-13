@@ -496,6 +496,22 @@ pub fn list(conn: &Connection, f: &MailFilter, page: &Page) -> ApiResult<Paged<M
     Ok(Paged::from_rows(rows, limit, |m: &Message| m.id.clone()))
 }
 
+/// The `queued` mail of agent `id` and of the inbox routed to it, oldest
+/// first, at most [`Page::MAX`]: the mail that waits for a pointer. Held
+/// mail is `delivered` until its release, so it is not here (TER-1103).
+pub fn queued_for(conn: &Connection, id: &str) -> ApiResult<Vec<Message>> {
+    let f = MailFilter {
+        to: Some(id.to_owned()),
+        state: Some("queued".into()),
+        ..Default::default()
+    };
+    let page = Page {
+        limit: Some(Page::MAX),
+        cursor: None,
+    };
+    Ok(list(conn, &f, &page)?.items)
+}
+
 /// The addresses that posted on or received a message on a thread.
 pub fn participants(conn: &Connection, thread: &str) -> ApiResult<Vec<Address>> {
     let mut stmt = conn.prepare(

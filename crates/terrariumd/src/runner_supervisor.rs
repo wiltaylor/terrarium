@@ -552,6 +552,15 @@ struct MailItem {
     content: Option<(String, String)>,
 }
 
+/// The `queued` mail of agent `id` as pointer items: what a launch and a
+/// reload ([`RunnerSupervisor::reload_pointer`]) read.
+fn queued_mail(c: &rusqlite::Connection, id: &str) -> crate::error::ApiResult<Vec<MailItem>> {
+    Ok(crate::store::mail::queued_for(c, id)?
+        .into_iter()
+        .map(|m| MailItem::new(m.id, m.from_name, m.thread_id))
+        .collect())
+}
+
 impl MailItem {
     fn new(message_id: String, from: String, thread: String) -> Self {
         Self {
@@ -800,6 +809,15 @@ struct Pointer {
 }
 
 impl Pointer {
+    /// The number of items.
+    fn len(&self) -> usize {
+        self.mail.len()
+            + self.cards.len()
+            + self.leads.len()
+            + self.leases.len()
+            + self.reservations.len()
+    }
+
     fn is_empty(&self) -> bool {
         self.mail.is_empty()
             && self.cards.is_empty()
@@ -1031,6 +1049,14 @@ struct Slot {
     recap: Option<String>,
     pointer: Pointer,
     pointer_busy: bool,
+    /// Pointer deliveries that took items out of `pointer` and did not
+    /// end yet, and the number of deliveries ever taken. A reload
+    /// ([`RunnerSupervisor::reload_pointer`]) merges only when no delivery
+    /// ran during its store read: a mail on its way is still `queued`.
+    deliveries_open: usize,
+    deliveries_taken: u64,
+    /// A reload waits for the end of the open deliveries.
+    reload_wanted: bool,
     /// Deliveries reserved under `slots`, including turns not yet typed.
     turns_in_flight: usize,
     /// Turns that came before the first idle of a launch (for example the
@@ -1157,6 +1183,9 @@ impl Slot {
             recap: None,
             pointer: Pointer::default(),
             pointer_busy: false,
+            deliveries_open: 0,
+            deliveries_taken: 0,
+            reload_wanted: false,
             turns_in_flight: 0,
             turns: Vec::new(),
             harness_version: None,
@@ -1569,16 +1598,7 @@ impl RunnerSupervisor {
                         roles: v.agent.roles,
                     })
                     .collect();
-                let f = crate::store::mail::MailFilter {
-                    to: Some(id.clone()),
-                    state: Some("queued".into()),
-                    ..Default::default()
-                };
-                let queued = crate::store::mail::list(c, &f, &page)?
-                    .items
-                    .into_iter()
-                    .map(|m| MailItem::new(m.id, m.from_name, m.thread_id))
-                    .collect();
+                let queued = queued_mail(c, &id)?;
                 let repo_urls = crate::store::repos::all_for_project(c, &project)?
                     .into_iter()
                     .map(|r| r.url)
@@ -2882,6 +2902,10 @@ impl RunnerSupervisor {
         }
         let me = self.clone();
         tokio::spawn(async move { me.forward(id, epoch, runner, rx).await });
+        // TER-1103: the pointer of the last daemon (or of the dropped
+        // connection) is gone. Mail queued meanwhile is in the store.
+        let me = self.clone();
+        tokio::spawn(async move { me.reload_pointer(id).await });
         true
     }
 
@@ -3921,6 +3945,117 @@ impl RunnerSupervisor {
         }
     }
 
+    /// One pointer delivery of `id` ended: its items are marked in the
+    /// store (delivered, read, rows deleted) or back in `pointer`. A reload
+    /// that waited for the open deliveries runs now.
+    fn end_delivery(&self, id: AgentId) {
+        let reload = lock(&self.inner.slots).get_mut(&id).is_some_and(|slot| {
+            slot.deliveries_open = slot.deliveries_open.saturating_sub(1);
+            slot.deliveries_open == 0 && std::mem::take(&mut slot.reload_wanted)
+        });
+        if reload {
+            let me = self.clone();
+            tokio::spawn(async move { me.reload_pointer(id).await });
+        }
+    }
+
+    /// Reload the pointer of every agent that is up (TER-1103): after the
+    /// push listener lost hub events, the items of those events exist only
+    /// in the store.
+    fn reload_up_pointers(&self) {
+        let ids: Vec<AgentId> = lock(&self.inner.slots)
+            .iter()
+            .filter(|(_, s)| s.up())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            let me = self.clone();
+            tokio::spawn(async move { me.reload_pointer(id).await });
+        }
+    }
+
+    /// Read the pointer items of agent `id` from the store again
+    /// (TER-1103), the same items a launch reads: its `queued` mail (held
+    /// mail is not `queued`) and its `pending_pointers` rows. They join the
+    /// items in memory, which win for the same key, and the push follows
+    /// the usual checks ([`Self::maybe_push`]: holds, gates, idle).
+    ///
+    /// A slot that is down is left alone: its next launch reads the store.
+    /// The merge needs the same epoch, and no delivery that ran during the
+    /// read: a mail on its way stays `queued` until the delivery ends, so it
+    /// would go out twice. With a delivery open, the reload runs again at
+    /// its end. On a read error nothing is merged. No wake, no start.
+    async fn reload_pointer(&self, id: AgentId) {
+        let Some(state) = self.state() else { return };
+        for _ in 0..RELOAD_TRIES {
+            let (epoch, taken) = {
+                let mut slots = lock(&self.inner.slots);
+                let Some(slot) = slots.get_mut(&id).filter(|s| s.up()) else {
+                    return;
+                };
+                if slot.deliveries_open > 0 {
+                    slot.reload_wanted = true;
+                    return;
+                }
+                (slot.epoch, slot.deliveries_taken)
+            };
+            let agent = id.to_string();
+            let read = state
+                .db
+                .read(move |c| {
+                    Ok((
+                        queued_mail(c, &agent)?,
+                        crate::store::pointers::for_agent(c, &agent)?,
+                    ))
+                })
+                .await;
+            let (mail, rows) = match read {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(agent = %id, "cannot reload the pointer: {e}");
+                    return;
+                }
+            };
+            let mut fresh = Pointer::default();
+            let (mail_n, rows_n) = (mail.len(), rows.len());
+            for m in mail {
+                fresh.add_mail(m);
+            }
+            for r in &rows {
+                if !fresh.add_stored(&r.kind, &r.data) {
+                    warn!(agent = %id, kind = %r.kind, key = %r.key, "a stored pointer does not parse");
+                }
+            }
+            let added = {
+                let mut slots = lock(&self.inner.slots);
+                let Some(slot) = slots
+                    .get_mut(&id)
+                    .filter(|s| s.up() && s.epoch == epoch)
+                else {
+                    return;
+                };
+                if slot.deliveries_open > 0 {
+                    slot.reload_wanted = true;
+                    return;
+                }
+                if slot.deliveries_taken != taken {
+                    // A delivery ran and ended during the read: read again.
+                    continue;
+                }
+                let before = slot.pointer.len();
+                fresh.merge(std::mem::take(&mut slot.pointer));
+                slot.pointer = fresh;
+                slot.pointer.len() - before
+            };
+            if added > 0 {
+                info!(agent = %id, queued_mail = mail_n, stored = rows_n, added, "the pointer reload found missed items");
+            }
+            self.maybe_push(id);
+            return;
+        }
+        warn!(agent = %id, "the pointer reload gave up: deliveries ran during each read");
+    }
+
     /// Type the pending pointer when the agent is idle and no pointer is on
     /// the way. A `working` agent gets it after its next stop hook.
     fn maybe_push(&self, id: AgentId) {
@@ -3953,6 +4088,8 @@ impl RunnerSupervisor {
                 return;
             }
             slot.pointer_busy = true;
+            slot.deliveries_open += 1;
+            slot.deliveries_taken += 1;
             (runner, std::mem::take(&mut slot.pointer))
         };
         // The stored rows of these items: deleted when the pointer goes
@@ -3974,6 +4111,7 @@ impl RunnerSupervisor {
                     slot.pointer_busy = false;
                     (slot.epoch, slot.seen.is_resting())
                 });
+                me.end_delivery(id);
                 // Items that came in meanwhile go out now.
                 me.maybe_push(id);
                 // No turn came of it, so no status change: a restart that
@@ -4003,7 +4141,9 @@ impl RunnerSupervisor {
                     me.mark_delivered(delivered).await;
                     me.forget_stored(id, stored, upto).await;
                 }
-                Err(e) => debug!(agent = %id, "the push pointer was not delivered: {e}"),
+                // TER-1103: the items stay, but nothing pushes them before
+                // the next idle or event, so say so.
+                Err(e) => warn!(agent = %id, error = %e, "the push pointer was not delivered"),
             }
             let swap = {
                 let mut slots = lock(&me.inner.slots);
@@ -4024,6 +4164,7 @@ impl RunnerSupervisor {
                     (slot.swap_pending && ended).then_some(slot.epoch)
                 })
             };
+            me.end_delivery(id);
             if let Some(epoch) = swap {
                 me.take_pending_restart(id, epoch);
             }
@@ -4360,7 +4501,11 @@ impl RunnerSupervisor {
                 let ev = match rx.recv().await {
                     Ok(ev) => ev,
                     Err(RecvError::Lagged(n)) => {
-                        warn!("the push listener missed {n} events");
+                        // TER-1103: mail and stored pointers of the lost
+                        // events are in the store. Card, lead, and lease
+                        // events of agents that run have no row yet.
+                        warn!("the push listener missed {n} events: reloading the pointers");
+                        me.reload_up_pointers();
                         continue;
                     }
                     Err(RecvError::Closed) => return,
@@ -4437,6 +4582,10 @@ impl RunnerSupervisor {
         });
     }
 }
+
+/// How often a pointer reload reads the store when a delivery ran during
+/// each read ([`RunnerSupervisor::reload_pointer`]).
+const RELOAD_TRIES: usize = 8;
 
 /// How long a launch waits for the runner process of the last launch to
 /// end. It lingers up to 2 s after the harness exits.
@@ -8593,5 +8742,362 @@ mod tests {
         assert!(text.contains("- turn: fix the parser…"), "{text}");
         assert!(text.contains("- tool Bash: cargo test"), "{text}");
         assert!(text.contains("terrarium mail check"), "{text}");
+    }
+
+    /// TER-1103: a bound supervisor with one running, idle agent on a
+    /// [`ClaimRunner`], and the agent's row in the store.
+    async fn reload_fixture(tmp: &Path) -> (Shared, RunnerSupervisor, Arc<ClaimRunner>, AgentId) {
+        let state = workspace_state(tmp);
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            state.state_dir.clone(),
+            tmp.join("run"),
+            tmp.join("prompts"),
+            SandboxConfig {
+                mode: SandboxMode::None,
+                ..Default::default()
+            },
+            HashMap::new(),
+        ));
+        sup.bind(&state);
+        let id = AgentId::new();
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": id, "name": "a", "project": "p", "harness": "claude", "workspace": "/w"
+        }))
+        .unwrap();
+        state
+            .db
+            .write("system", move |t| {
+                t.execute(
+                    "INSERT INTO agents (id, name, project, harness, workspace, created_at, updated_at)
+                     VALUES (?1, 'a', 'p', 'claude', '/w', 't', 't')",
+                    [id.to_string()],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let runner = Arc::new(ClaimRunner {
+            id,
+            pending_error: None,
+            entered: tokio::sync::Notify::new(),
+            reply: tokio::sync::Notify::new(),
+            lost: false,
+            claimed: AtomicBool::new(false),
+            typed: Mutex::default(),
+            typed_ready: tokio::sync::Notify::new(),
+            deliver_fails: false,
+            deliver_seq: None,
+            kills: AtomicU64::new(0),
+        });
+        let mut slot = Slot::new(agent);
+        slot.runner = Some(runner.clone());
+        slot.phase = Phase::Running;
+        slot.seen = AgentStatus::Idle;
+        slot.reached_idle = true;
+        lock(&sup.inner.slots).insert(id, slot);
+        (state, sup, runner, id)
+    }
+
+    /// Write a mail to `to` with no event, as a lost hub event leaves it:
+    /// `queued`, or held by the loop guard (`delivered`, `held = 1`).
+    async fn store_mail(state: &Shared, to: AgentId, held: bool) -> String {
+        let mid = ulid::Ulid::new().to_string();
+        let m = mid.clone();
+        state
+            .db
+            .write("system", move |t| {
+                t.execute(
+                    "INSERT INTO messages (id, thread_id, from_agent, from_kind, to_agent, to_kind,
+                                           subject, body, state, created_at, held)
+                     VALUES (?1, 'T1', 'operator', 'operator', ?2, 'agent', 's', 'b', ?3, ?4, ?5)",
+                    rusqlite::params![
+                        m,
+                        to.to_string(),
+                        if held { "delivered" } else { "queued" },
+                        crate::db::now(),
+                        held
+                    ],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        mid
+    }
+
+    async fn mail_state(state: &Shared, mid: &str) -> String {
+        let mid = mid.to_owned();
+        state
+            .db
+            .read(move |c| Ok(crate::store::mail::get(c, &mid)?.state))
+            .await
+            .unwrap()
+    }
+
+    /// Wait until no delivery is open and the tasks it started ran.
+    async fn settle(sup: &RunnerSupervisor, id: AgentId) {
+        let start = Instant::now();
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let s = lock(&sup.inner.slots);
+            let slot = &s[&id];
+            if slot.deliveries_open == 0 && !slot.pointer_busy && !slot.reload_wanted {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(5), "a delivery stays open");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    /// The `[Mailbox:` blocks typed so far.
+    fn mail_blocks(runner: &ClaimRunner) -> usize {
+        lock(&runner.typed)
+            .iter()
+            .map(|t| t.matches("[Mailbox:").count())
+            .sum()
+    }
+
+    /// TER-1103 T1: the push listener lags. The queued mail of the lost
+    /// event is reloaded from the store and typed once to the idle agent,
+    /// and the mail is `delivered`.
+    #[tokio::test]
+    async fn a_lagged_push_listener_reloads_the_queued_mail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        let mid = store_mail(&state, id, false).await;
+        // More events than the hub holds, with no await between them: the
+        // listener gets `Lagged` at its next receive.
+        let ev = card_event(serde_json::json!({}));
+        for _ in 0..5000 {
+            state.db.hub().publish(ev.clone());
+        }
+        tokio::time::timeout(Duration::from_secs(5), runner.typed_ready.notified())
+            .await
+            .expect("the reload types the pointer");
+        settle(&sup, id).await;
+        let typed = lock(&runner.typed).clone();
+        assert_eq!(typed.len(), 1, "{typed:?}");
+        assert!(typed[0].contains(&mid), "{typed:?}");
+        assert_eq!(mail_blocks(&runner), 1);
+        assert_eq!(mail_state(&state, &mid).await, "delivered");
+    }
+
+    /// TER-1103 T2: two reloads and the live event of the same mail type
+    /// one mail block.
+    #[tokio::test]
+    async fn a_reload_twice_and_the_live_event_type_one_mail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        let mid = store_mail(&state, id, false).await;
+        // Working: nothing goes out until the idle.
+        lock(&sup.inner.slots).get_mut(&id).unwrap().seen = AgentStatus::Working;
+        let live = mid.clone();
+        sup.add_pointer(id, |p| {
+            p.add_mail(MailItem::new(live, "operator".into(), "T1".into()))
+        });
+        sup.reload_pointer(id).await;
+        sup.reload_pointer(id).await;
+        assert_eq!(lock(&sup.inner.slots)[&id].pointer.mail.len(), 1);
+        lock(&sup.inner.slots).get_mut(&id).unwrap().seen = AgentStatus::Idle;
+        sup.maybe_push(id);
+        settle(&sup, id).await;
+        sup.reload_pointer(id).await;
+        settle(&sup, id).await;
+        assert_eq!(mail_blocks(&runner), 1, "{:?}", lock(&runner.typed));
+        assert_eq!(lock(&runner.typed).len(), 1);
+    }
+
+    /// TER-1103: a reload while the delivery of the same mail is on its way
+    /// (the mail is still `queued`) does not type it again: the reload
+    /// waits for the end of the delivery and reads the store again.
+    #[tokio::test]
+    async fn a_reload_during_a_delivery_does_not_type_the_mail_twice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        let mid = store_mail(&state, id, false).await;
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        *lock(&sup.inner.pointer_delivery_pause) = Some(PointerDeliveryPause {
+            reached: reached_tx,
+            resume: resume_rx,
+        });
+        let live = mid.clone();
+        sup.add_pointer(id, |p| {
+            p.add_mail(MailItem::new(live, "operator".into(), "T1".into()))
+        });
+        tokio::time::timeout(Duration::from_secs(5), reached_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mail_state(&state, &mid).await, "queued");
+        sup.reload_pointer(id).await;
+        {
+            let slots = lock(&sup.inner.slots);
+            assert!(slots[&id].pointer.is_empty(), "nothing merged during the delivery");
+            assert!(slots[&id].reload_wanted);
+        }
+        resume_tx.send(()).unwrap();
+        settle(&sup, id).await;
+        assert_eq!(mail_blocks(&runner), 1, "{:?}", lock(&runner.typed));
+        assert!(lock(&sup.inner.slots)[&id].pointer.is_empty());
+        assert_eq!(mail_state(&state, &mid).await, "delivered");
+    }
+
+    /// TER-1103 T4: held mail is not typed by a reload. After its release
+    /// it is, once.
+    #[tokio::test]
+    async fn a_reload_skips_held_mail_until_its_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        let mid = store_mail(&state, id, true).await;
+        sup.reload_pointer(id).await;
+        settle(&sup, id).await;
+        assert!(lock(&runner.typed).is_empty());
+        let m = mid.clone();
+        state
+            .db
+            .write("operator", move |t| crate::store::mail::release(t, &m))
+            .await
+            .unwrap();
+        sup.reload_pointer(id).await;
+        settle(&sup, id).await;
+        let typed = lock(&runner.typed).clone();
+        assert_eq!(mail_blocks(&runner), 1, "{typed:?}");
+        assert!(typed.iter().any(|t| t.contains(&mid)), "{typed:?}");
+    }
+
+    /// TER-1103 T5: during a quota hold a reload types nothing and keeps
+    /// the item. The end of the hold types it once.
+    #[tokio::test]
+    async fn a_reload_during_a_quota_hold_waits_for_its_end() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        sup.hold_turns(
+            id,
+            Some(TurnHold {
+                until: None,
+                reason: "the daily budget is used up".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let mid = store_mail(&state, id, false).await;
+        sup.reload_pointer(id).await;
+        settle(&sup, id).await;
+        assert!(lock(&runner.typed).is_empty());
+        assert_eq!(lock(&sup.inner.slots)[&id].pointer.mail.len(), 1);
+        sup.hold_turns(id, None).await.unwrap();
+        settle(&sup, id).await;
+        let typed = lock(&runner.typed).clone();
+        assert_eq!(typed.len(), 1, "{typed:?}");
+        assert!(typed[0].contains(&mid), "{typed:?}");
+    }
+
+    /// TER-1103 T6: with the drain gate of a self-update closed a reload
+    /// types nothing. When the gate opens, the item is typed.
+    #[tokio::test]
+    async fn a_reload_during_the_drain_waits_for_the_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        state.usage.streams.set_closed(true);
+        let mid = store_mail(&state, id, false).await;
+        sup.reload_pointer(id).await;
+        settle(&sup, id).await;
+        assert!(lock(&runner.typed).is_empty());
+        for a in state.usage.streams.set_closed(false) {
+            sup.stream_granted(a);
+        }
+        settle(&sup, id).await;
+        let typed = lock(&runner.typed).clone();
+        assert_eq!(typed.len(), 1, "{typed:?}");
+        assert!(typed[0].contains(&mid), "{typed:?}");
+    }
+
+    /// TER-1103 T7: a reload of an agent that is down (paused, stopped,
+    /// error) changes nothing: no item, no stored row, no typing. Its next
+    /// launch reads the store.
+    #[tokio::test]
+    async fn a_reload_of_a_down_agent_is_a_no_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        store_mail(&state, id, false).await;
+        for status in [AgentStatus::Paused, AgentStatus::Stopped, AgentStatus::Error] {
+            {
+                let mut slots = lock(&sup.inner.slots);
+                let slot = slots.get_mut(&id).unwrap();
+                slot.runner = None;
+                slot.down(status);
+            }
+            sup.reload_pointer(id).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let slots = lock(&sup.inner.slots);
+            assert!(slots[&id].pointer.is_empty(), "{status}");
+            assert!(!slots[&id].reload_wanted);
+        }
+        assert!(lock(&sup.inner.parked).is_empty());
+        let rows = state
+            .db
+            .read(|c| crate::store::pointers::load(c))
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "{rows:?}");
+        assert!(lock(&runner.typed).is_empty());
+    }
+
+    /// TER-1103 T8: a reload whose store read fails merges nothing and
+    /// types nothing.
+    #[tokio::test]
+    async fn a_reload_with_a_read_error_merges_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        store_mail(&state, id, false).await;
+        state
+            .db
+            .write("system", |t| {
+                t.execute("DROP TABLE pending_pointers", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        sup.reload_pointer(id).await;
+        settle(&sup, id).await;
+        assert!(lock(&sup.inner.slots)[&id].pointer.is_empty());
+        assert!(lock(&runner.typed).is_empty());
+    }
+
+    /// TER-1103 T9: a `pending_pointers` row of an agent that runs is
+    /// reloaded, typed once, and deleted after the delivery.
+    #[tokio::test]
+    async fn a_reload_types_a_stored_row_once_and_deletes_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        // A row this daemon wrote: its id is not above the sequence.
+        let row_id = sup.inner.pointer_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let row = crate::store::pointers::PendingPointer {
+            id: row_id,
+            agent: id.to_string(),
+            kind: "reservation".into(),
+            key: "R1".into(),
+            line: "reservation R1 is ready".into(),
+            data: serde_json::json!({"id": "R1", "line": "reservation R1 is ready"}).to_string(),
+        };
+        state
+            .db
+            .write("system", move |t| crate::store::pointers::put(t, &row))
+            .await
+            .unwrap();
+        sup.reload_pointer(id).await;
+        settle(&sup, id).await;
+        sup.reload_pointer(id).await;
+        settle(&sup, id).await;
+        let typed = lock(&runner.typed).clone();
+        assert_eq!(typed.len(), 1, "{typed:?}");
+        assert!(typed[0].contains("reservation R1 is ready"), "{typed:?}");
+        let rows = state
+            .db
+            .read(|c| crate::store::pointers::load(c))
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "{rows:?}");
     }
 }

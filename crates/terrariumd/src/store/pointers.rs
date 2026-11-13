@@ -68,15 +68,28 @@ pub fn load(c: &Connection) -> ApiResult<Vec<PendingPointer>> {
     )?;
     let mut stmt =
         c.prepare("SELECT id, agent, kind, key, line, data FROM pending_pointers ORDER BY id")?;
-    let rows = stmt.query_map([], |r| {
-        Ok(PendingPointer {
-            id: r.get(0)?,
-            agent: r.get(1)?,
-            kind: r.get(2)?,
-            key: r.get(3)?,
-            line: r.get(4)?,
-            data: r.get(5)?,
-        })
-    })?;
+    let rows = stmt.query_map([], row)?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The rows of `agent`, oldest first (TER-1103: the reload of a running
+/// agent's pointer).
+pub fn for_agent(c: &Connection, agent: &str) -> ApiResult<Vec<PendingPointer>> {
+    let mut stmt = c.prepare(
+        "SELECT id, agent, kind, key, line, data FROM pending_pointers
+         WHERE agent = ?1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map([agent], row)?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PendingPointer> {
+    Ok(PendingPointer {
+        id: r.get(0)?,
+        agent: r.get(1)?,
+        kind: r.get(2)?,
+        key: r.get(3)?,
+        line: r.get(4)?,
+        data: r.get(5)?,
+    })
 }
