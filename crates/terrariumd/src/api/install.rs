@@ -861,14 +861,14 @@ mod tests {
             for _ in 0..4 {
                 let (mut socket, _) = timeout(WAIT, listener.accept())
                     .await
-                    .expect("the client did not connect")
+                    .unwrap_or_else(|_| panic!("the client did not connect"))
                     .unwrap();
                 let mut request = Vec::new();
                 while !request.windows(4).any(|w| w == b"\r\n\r\n") {
                     let mut buf = [0; 4096];
                     let n = timeout(WAIT, socket.read(&mut buf))
                         .await
-                        .expect("the client did not send its request")
+                        .unwrap_or_else(|_| panic!("the client did not send its request"))
                         .unwrap();
                     assert!(n > 0, "the client closed before the end of its request");
                     request.extend_from_slice(&buf[..n]);
@@ -913,7 +913,7 @@ mod tests {
         assert_eq!(read_bundle(&path).await.unwrap(), b"bundle");
         timeout(WAIT, server)
             .await
-            .expect("the test server did not serve 4 connections")
+            .unwrap_or_else(|_| panic!("the test server did not serve 4 connections"))
             .unwrap();
     }
 
