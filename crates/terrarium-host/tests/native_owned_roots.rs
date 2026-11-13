@@ -1,4 +1,5 @@
 //! Privileged filesystem boundary, with two real pool UIDs and no GPU.
+#![cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::Path;

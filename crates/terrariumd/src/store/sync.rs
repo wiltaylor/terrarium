@@ -135,11 +135,7 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
             &def.name,
             def.review_dispatcher.as_deref().unwrap_or("off"),
         )?;
-        projects::set_card_dispatcher(
-            t,
-            &def.name,
-            def.card_dispatcher.as_deref().unwrap_or("off"),
-        )?;
+        projects::set_card_dispatcher_from_file(t, &def.name, def.card_dispatcher.as_deref())?;
         // Repos: the file list replaces the file repos, and takes over API
         // repos with the same name.
         t.execute(

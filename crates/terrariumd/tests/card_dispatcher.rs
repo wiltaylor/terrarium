@@ -1639,7 +1639,8 @@ async fn cap_reached_after_selection_defers_without_card_failure() {
                 "p",
                 id.clone(),
                 who.clone(),
-                error
+                error,
+                None
             )
             .await
             .unwrap()
@@ -1662,7 +1663,8 @@ async fn selection_changed_is_not_a_card_failure() {
             "p",
             id.clone(),
             lead_actor(&td).await,
-            error
+            error,
+            None
         )
         .await
         .unwrap()

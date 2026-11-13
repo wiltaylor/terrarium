@@ -82,6 +82,7 @@ fn card_fields(c: &CardCondition) -> Vec<(String, String)> {
         ("column", &c.column),
         ("not_column", &c.not_column),
         ("has_labels", &c.has_labels),
+        ("any_labels", &c.any_labels),
         ("lacks_labels", &c.lacks_labels),
     ] {
         if !v.is_empty() {
@@ -640,6 +641,34 @@ rule "agent-unpark" {
 }
 "#;
 
+/// The `agent-park` and `agent-unpark` rules of the pack from TER-222 to
+/// the role-aware pack (07982934 to 76debcde^): the wait columns as names,
+/// with `merge_queue`. A migration in that window wrote this text mapped
+/// to the board (TER-1219: project terrarium on 0.69.0).
+/// [`retire_legacy_wait_overrides`] removes such an override too.
+pub const TER_222_WAIT_RULES: &str = r#"rule "agent-park" {
+  description = "The card waits on others: its bound agent parks."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to" { one_of = ["validating", "review", "merge_queue", "accepted"] }
+  agent_park { reason = "card in {{card.column}}" }
+}
+
+rule "agent-unpark" {
+  description = "The card came back out of a wait column: its parked agent wakes with the move and the failure block."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to" { ne = "validating" }
+  when "data.to" { ne = "review" }
+  when "data.to" { ne = "merge_queue" }
+  when "data.to" { ne = "accepted" }
+  when "data.to" { ne = "done" }
+  agent_unpark {}
+}
+"#;
+
 /// The note that TER-243 appended to the description of each legacy wait
 /// override when it added the merge queue.
 pub const MERGE_QUEUE_MARK: &str = "merge_queue added (TER-243).";
@@ -658,14 +687,10 @@ fn merge_queue_column(columns: &[BoardColumn]) -> Option<&BoardColumn> {
         })
 }
 
-/// The overrides that [`migrate`] wrote for `columns` before TER-222, as
-/// the blocks of its text, by rule name.
-fn pre_ter_222_overrides(columns: &[BoardColumn]) -> Vec<Rule> {
-    let Ok(old) = rules_file::parse(
-        PRE_TER_222_WAIT_RULES,
-        "pre-ter-222",
-        &rules_file::Context::default(),
-    ) else {
+/// The overrides that [`migrate`] wrote for `columns` from the legacy wait
+/// rules `pack` ([`PRE_TER_222_WAIT_RULES`] or [`TER_222_WAIT_RULES`]).
+fn legacy_overrides(pack: &str, columns: &[BoardColumn]) -> Vec<Rule> {
+    let Ok(old) = rules_file::parse(pack, "legacy-wait", &rules_file::Context::default()) else {
         return Vec::new();
     };
     old.rules
@@ -688,21 +713,29 @@ fn ter_243_upgrade(rule: &Rule, mq: &str) -> Option<Rule> {
 }
 
 /// TER-1090: retire the exact `agent-park` and `agent-unpark` overrides
-/// that [`migrate`] generated before the pack used column roles. Both the
-/// pre-TER-222 form and its TER-243 marked form are recognized. Removing
+/// that [`migrate`] generated before the pack used column roles. The
+/// pre-TER-222 form, its TER-243 marked form, and the TER-222 form
+/// (TER-1219) are recognized. Removing
 /// these blocks restores the current role-aware built-ins and their card
 /// budget; a generic user rule keeps its ten-run budget.
 ///
 /// Only a byte-exact block after the [`MIGRATION_HEADER`] is removed. Any
 /// edit, unrecognized form, or copy outside that generated section stays.
-/// `None`: no generated legacy block was found.
+///
+/// The pair retires as one (TER-1130): when either `agent-park` or
+/// `agent-unpark` of `own` is not such a block (an edit, also an edit of a
+/// TER-243 marked block, or the short form that turns it off), neither
+/// retires. An edited legacy park thus never runs next to the pack's
+/// role-aware unpark, or the other way round. A pair with only one block
+/// left retires that block.
+/// `None`: nothing to retire.
 pub fn retire_legacy_wait_overrides(
     text: &str,
     own: &RuleSet,
     columns: &[BoardColumn],
 ) -> Option<String> {
     let header = text.find(MIGRATION_HEADER)?;
-    let old = pre_ter_222_overrides(columns);
+    let old = legacy_overrides(PRE_TER_222_WAIT_RULES, columns);
     let mut generated: Vec<(String, String)> =
         old.iter().map(|r| (r.name.clone(), to_wcl(r))).collect();
     if let Some(mq) = merge_queue_column(columns) {
@@ -711,6 +744,11 @@ pub fn retire_legacy_wait_overrides(
                 ter_243_upgrade(r, &mq.name).map(|r| (r.name.clone(), to_wcl(&r)))
             }));
     }
+    generated.extend(
+        legacy_overrides(TER_222_WAIT_RULES, columns)
+            .iter()
+            .map(|r| (r.name.clone(), to_wcl(r))),
+    );
     let mut out = text.to_owned();
     let mut changed = false;
     for r in &own.rules {
@@ -722,12 +760,10 @@ pub fn retire_legacy_wait_overrides(
             .iter()
             .any(|(name, generated)| *name == r.name && *generated == block)
         {
-            continue;
+            // An edit keeps both blocks of the pair.
+            return None;
         }
-        let Some(at) = out[header..].find(&block) else {
-            continue;
-        };
-        let at = header + at;
+        let at = header + out[header..].find(&block)?;
         out.replace_range(at..at + block.len(), "");
         changed = true;
     }
@@ -1562,6 +1598,31 @@ rule "to-blocked" {
         assert_eq!(retire(&marked, &board), Some(new));
     }
 
+    /// TER-1130: a TER-243 marked block that the operator edited after
+    /// the mark is not a generated form, so it stays, with its pair.
+    #[test]
+    fn a_marked_block_edited_after_the_mark_stays() {
+        let board = queue_board();
+        let marked = ter_243_migration(&old_migration(&board), &board);
+        assert!(marked.contains(MERGE_QUEUE_MARK), "{marked}");
+        // The operator takes the merge queue out again, in to_wcl form.
+        let removed = marked
+            .replace(", \"queue\"] }", "] }")
+            .replace("  when \"data.to\" { ne = \"queue\" }\n", "");
+        assert!(!removed.contains("queue\""), "{removed}");
+        assert!(removed.contains(MERGE_QUEUE_MARK), "{removed}");
+        assert_eq!(retire(&removed, &board), None);
+        // Only the marked park is edited: the marked unpark stays too.
+        let park = to_wcl(&rule_of(&marked, "agent-park"));
+        let one = marked.replacen(&park, &park.replace(", \"queue\"] }", "] }"), 1);
+        assert_ne!(one, marked);
+        assert_eq!(
+            rule_of(&one, "agent-unpark"),
+            rule_of(&marked, "agent-unpark")
+        );
+        assert_eq!(retire(&one, &board), None);
+    }
+
     #[test]
     fn edited_or_other_wait_overrides_stay() {
         let board = queue_board();
@@ -1569,14 +1630,26 @@ rule "to-blocked" {
         // Retirement does not depend on the board gaining a merge queue.
         let plain = cols(&[("review", Some("review")), ("accepted", Some("accepted"))]);
         assert!(retire(&old_migration(&plain), &plain).is_some());
-        // A custom cap is an edit: only the other exact block retires.
+        // A custom cap is an edit: the pair retires as one, so the exact
+        // unpark stays next to the edited park (TER-1130).
         let edited = text.replacen("max_per_hour = 600", "max_per_hour = 60", 1);
-        let new = retire(&edited, &board).expect("unpark retires");
-        assert_eq!(rule_of(&new, "agent-park"), rule_of(&edited, "agent-park"));
-        assert!(!new.contains("rule \"agent-unpark\""), "{new}");
+        assert_eq!(rule_of(&edited, "agent-park").max_per_hour, Some(60));
+        assert_eq!(retire(&edited, &board), None);
         let marked = ter_243_migration(&edited, &board);
-        let new = retire(&marked, &board).expect("marked unpark retires");
-        assert_eq!(rule_of(&new, "agent-park"), rule_of(&marked, "agent-park"));
+        assert!(marked.contains(MERGE_QUEUE_MARK), "{marked}");
+        assert_eq!(retire(&marked, &board), None);
+        // The operator turns the park off: also an edit of the pair.
+        let off = text.replacen(
+            &to_wcl(&rule_of(&text, "agent-park")),
+            "rule \"agent-park\" { enabled = false }\n",
+            1,
+        );
+        assert!(off.contains("rule \"agent-unpark\""), "{off}");
+        assert_eq!(retire(&off, &board), None);
+        // A pair with only one exact block left retires that block.
+        let alone = text.replacen(&to_wcl(&rule_of(&text, "agent-park")), "", 1);
+        let new = retire(&alone, &board).expect("the lone unpark retires");
+        assert!(!new.contains("rule \"agent-unpark\""), "{new}");
         // The same rules without the migration header are the project's own.
         let own_only = text.replace(MIGRATION_HEADER, "");
         assert_eq!(retire(&own_only, &board), None);
@@ -1584,6 +1657,76 @@ rule "to-blocked" {
         let mine = parse(MINE, "rules.wcl", &Context::default()).unwrap();
         let current = migrate(default_pack(), MINE, &mine, &board).text;
         assert_eq!(retire(&current, &board), None);
+    }
+
+    /// The board of project terrarium on 0.69.0: no `validating`.
+    fn terrarium_board() -> Vec<BoardColumn> {
+        cols(&[
+            ("backlog", None),
+            ("research", None),
+            ("ready", None),
+            ("in_progress", Some("working")),
+            ("review", Some("review")),
+            ("merge_queue", Some("merge_queue")),
+            ("accepted", Some("accepted")),
+            ("blocked", Some("blocked")),
+            ("done", None),
+        ])
+    }
+
+    /// The stored rules.wcl of project terrarium on 0.69.0 (TER-1219), as
+    /// `terrarium rule migrate --text` printed it.
+    const TERRARIUM_0_69_RULES: &str = r#"// The built-in pack mapped to this board (terrarium rule migrate, TER-171).
+// A rule here with the name of a pack rule replaces it.
+
+rule "agent-park" {
+  description = "The card waits on others: its bound agent parks. Mapped to this board: the board has no column `validating`: dropped from `data.to`."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to" { one_of = ["review", "merge_queue", "accepted"] }
+  agent_park { reason = "card in {{card.column}}" }
+}
+
+rule "agent-unpark" {
+  description = "The card came back out of a wait column: its parked agent wakes with the move and the failure block. Mapped to this board: the board has no column `validating`: `data.to ne validating` always holds, dropped."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to" { ne = "review" }
+  when "data.to" { ne = "merge_queue" }
+  when "data.to" { ne = "accepted" }
+  when "data.to" { ne = "done" }
+  agent_unpark {}
+}
+"#;
+
+    /// TER-1219: the overrides that a migration wrote from the TER-222
+    /// pack retire, and the pack's role-aware pair runs again.
+    #[test]
+    fn ter_222_wait_overrides_are_retired() {
+        let board = terrarium_board();
+        let new = retire(TERRARIUM_0_69_RULES, &board).expect("the TER-222 blocks retire");
+        assert!(!new.contains("rule \""), "{new}");
+        assert!(new.starts_with(MIGRATION_HEADER), "{new}");
+        let own = parse(&new, "rules.wcl", &ctx(&board)).unwrap();
+        let effective = effective(Some(default_pack()), &own);
+        for name in ["agent-park", "agent-unpark"] {
+            let r = effective.iter().find(|r| r.rule.name == name).unwrap();
+            assert_eq!(r.origin, ORIGIN_PACK, "{name}");
+        }
+        assert_eq!(retire(&new, &board), None);
+        // The same form on another board retires too.
+        let mine = parse(MINE, "rules.wcl", &Context::default()).unwrap();
+        let old = parse(TER_222_WAIT_RULES, "old", &Context::default()).unwrap();
+        let queue = queue_board();
+        let text = migrate(&old, MINE, &mine, &queue).text;
+        let new = retire(&text, &queue).expect("the TER-222 blocks retire");
+        assert!(new.starts_with(MINE.trim_end()), "{new}");
+        assert!(!new.contains("rule \"agent-"), "{new}");
+        // An edit keeps the pair.
+        let edited = TERRARIUM_0_69_RULES.replacen("max_per_hour = 600", "max_per_hour = 60", 1);
+        assert_eq!(retire(&edited, &board), None);
     }
 
     #[test]

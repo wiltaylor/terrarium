@@ -706,6 +706,7 @@ mod tests {
         assert!(matches!(verify(&data, &o), Err(UpdateError::Offer(_))));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn stage_runs_the_new_binary_and_swap_keeps_the_old_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -828,6 +829,7 @@ mod tests {
         assert!(took < SMOKE_TIMEOUT, "{took:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_read_only_directory_is_reported() {
         if nix::unistd::geteuid().is_root() {

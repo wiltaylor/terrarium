@@ -81,7 +81,7 @@ pub enum QueueRelease {
 }
 
 impl QueueRelease {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Wip => "wip",
             Self::Batch => "batch",
@@ -89,7 +89,7 @@ impl QueueRelease {
         }
     }
 
-    fn parse(s: &str) -> rusqlite::Result<Self> {
+    pub(crate) fn parse(s: &str) -> rusqlite::Result<Self> {
         match s {
             "wip" => Ok(Self::Wip),
             "batch" => Ok(Self::Batch),
@@ -480,9 +480,10 @@ pub fn put_options(
         write_rules(t, col.id, &before.rules, &rules)?;
     }
     let col = column(t, project, &col.name)?;
-    let after = read(t, project, &col)?;
-    record(t, project, &before, &after)?;
-    Ok(after)
+    record(t, project, &before, &read(t, project, &col)?)?;
+    // New queue options may release waiting cards (TER-1114).
+    super::queues::release(t, col.id)?;
+    read(t, project, &col)
 }
 
 /// The audit row `board.column_options` and the `board` event of one
@@ -638,40 +639,52 @@ fn project_rules(
 
 /// The legacy board PATCH (`super::set_columns`) removes the columns
 /// `removed` (TER-1159): refused with `409` while a rule of a column that
-/// stays names one of them. A reference `@x` where a column of the board has
-/// the role `x` is a role, not a name: it does not hold the column. Nothing
-/// is written.
+/// stays names one of them. A reference names the column that it resolves
+/// to on the board before the change (`current`,
+/// [`rules_file::resolve_column`]: `@x` is the column with the role `x`,
+/// else the column named `x`). It holds that column when it does not
+/// resolve on the board after the change (`after`, TER-1199): so `@x` holds
+/// the only column with the role `x` unless another column has that role
+/// after the change. Nothing is written.
 pub(super) fn check_removal(
     t: &Tx<'_>,
     project: &str,
     current: &[ColumnRow],
+    after: &[BoardColumn],
     removed: &[&ColumnRow],
 ) -> ApiResult<()> {
     if removed.is_empty() {
         return Ok(());
     }
-    let gone: Vec<&str> = removed.iter().map(|c| c.name.as_str()).collect();
+    let before: Vec<BoardColumn> = current
+        .iter()
+        .map(|c| BoardColumn {
+            name: c.name.clone(),
+            role: c.role.clone(),
+        })
+        .collect();
     let gone_ids: Vec<i64> = removed.iter().map(|c| c.id).collect();
-    let is_role = |x: &str| current.iter().any(|c| c.role.as_deref() == Some(x));
     let mut users: Vec<Value> = Vec::new();
-    let mut named: Vec<&str> = Vec::new();
+    let mut named: Vec<String> = Vec::new();
     for (_, col_id, col, rule) in project_rules(t, project)? {
         if gone_ids.contains(&col_id) {
             continue;
         }
         let legacy = crate::rules_engine::columns::engine_rule(&col, &rule);
         for r in rules_file::column_refs(&legacy) {
-            let name = match r.strip_prefix('@') {
-                Some(x) if is_role(x) => continue,
-                Some(x) => x,
-                None => r.as_str(),
+            let Some(target) = rules_file::resolve_column(&before, &r) else {
+                continue;
             };
-            if let Some(g) = gone.iter().find(|g| **g == name) {
-                if !named.contains(g) {
-                    named.push(*g);
-                }
-                users.push(json!({"column": col, "rule": rule.name, "names": g}));
+            if !removed.iter().any(|c| c.name == target.name)
+                || rules_file::resolve_column(after, &r).is_some()
+            {
+                continue;
             }
+            let g = target.name.clone();
+            if !named.contains(&g) {
+                named.push(g.clone());
+            }
+            users.push(json!({"column": col, "rule": rule.name, "names": g}));
         }
     }
     if users.is_empty() {

@@ -76,13 +76,16 @@ mod tests {
         let work = dir.path().join("work");
         std::fs::create_dir_all(work.join("p/a")).unwrap();
         std::fs::create_dir_all(dir.path().join("outside")).unwrap();
-        std::os::unix::fs::symlink(dir.path().join("outside"), work.join("p/link")).unwrap();
         let real = resolve(&work, &ws("p/a")).unwrap();
         assert!(real.ends_with("work/p/a"));
-        assert!(
-            resolve(&work, &ws("p/link")).is_err(),
-            "a link out of work_dir"
-        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.path().join("outside"), work.join("p/link")).unwrap();
+            assert!(
+                resolve(&work, &ws("p/link")).is_err(),
+                "a link out of work_dir"
+            );
+        }
         assert!(resolve(&work, &ws("p/missing")).is_err());
         assert!(resolve(&work, &ws("../x")).is_err());
         assert!(resolve(&work, &ws("/etc/x")).is_err());

@@ -41,6 +41,8 @@ export interface KnowledgeLogsReposGrants {
   attachRepo: boolean;
   checkoutRepo: boolean;
   writeWiki: boolean;
+  /** Review (Approve, Comment) a wiki page with this `reviewer` (TER-1157). */
+  reviewWiki: (reviewer?: string | null) => boolean;
   writeDb: boolean;
   purgeDbType: boolean;
   cardFromMail: boolean;
@@ -49,7 +51,7 @@ export interface KnowledgeLogsReposGrants {
 
 /** No grant: the parts are read-only. */
 export const NO_KNOWLEDGE_LOGS_REPOS_GRANTS: KnowledgeLogsReposGrants = {
-  attachRepo: false, checkoutRepo: false, writeWiki: false, writeDb: false, purgeDbType: false, cardFromMail: false, replyAsProject: false,
+  attachRepo: false, checkoutRepo: false, writeWiki: false, reviewWiki: () => false, writeDb: false, purgeDbType: false, cardFromMail: false, replyAsProject: false,
 };
 
 /** What a part receives: the host project only, never a project from options. */
@@ -58,7 +60,7 @@ export interface FeaturePartProps { project: string; search?: string; grants: Kn
 export const KNOWLEDGE_LOGS_REPOS_PARTS: { readonly [P in KnowledgeLogsReposPart]: Component<FeaturePartProps> } = {
   "repos:list": (props) => <ReposPanel project={props.project} canAttach={props.grants.attachRepo} canCheckout={props.grants.checkoutRepo} />,
   "repos:files": (props) => <RepoFilesPanel project={props.project} search={props.search} />,
-  "wiki_index:browser": (props) => <WikiBrowserPanel project={props.project} search={props.search} canWrite={props.grants.writeWiki} />,
+  "wiki_index:browser": (props) => <WikiBrowserPanel project={props.project} search={props.search} canWrite={props.grants.writeWiki} canReview={props.grants.reviewWiki} />,
   "memory:list": (props) => <MemoryPanel project={props.project} view="list" search={props.search} />,
   "memory:graph": (props) => <MemoryPanel project={props.project} view="graph" search={props.search} />,
   "db:types": (props) => <DbTypesPanel project={props.project} canWrite={props.grants.writeDb} />,

@@ -2959,6 +2959,7 @@ pub(crate) mod tests {
     }
 
     /// A helper that answers `hello` with the `session` right.
+    #[cfg(unix)]
     async fn fake_helper(socket: &std::path::Path) -> tokio::task::JoinHandle<()> {
         let listener = tokio::net::UnixListener::bind(socket).unwrap();
         tokio::spawn(async move {
@@ -2978,6 +2979,7 @@ pub(crate) mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn native_client(socket: &std::path::Path) -> Client {
         let mut opts = ClientOptions::new("ws://localhost", "test", "test");
         opts.native = Some(crate::native::NativeOptions {
@@ -3007,6 +3009,7 @@ pub(crate) mod tests {
         (plan, l)
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn native_routing_follows_the_helper_answer_at_hello() {
         let dir = tempfile::tempdir().unwrap();
@@ -3100,6 +3103,7 @@ pub(crate) mod tests {
     /// shim with `--user-slice`, which fails when the helper cannot be
     /// reached (`a_shim_stop_also_stops_the_user_slice` in
     /// `tests/native_helper.rs`), so the stop never reports success.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_restarted_client_with_the_helper_down_stops_through_the_helper() {
         let dir = tempfile::tempdir().unwrap();

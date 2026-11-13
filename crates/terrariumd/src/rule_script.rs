@@ -598,8 +598,65 @@ pub fn slots_in_use(pool: Pool) -> usize {
     total.saturating_sub(slots(pool).all.available_permits())
 }
 
+/// The holds of [`hold_slots`]: a closed gate opens the hold.
+type Holds = Mutex<HashMap<(Pool, String), Arc<Semaphore>>>;
+
+fn holds() -> &'static Holds {
+    static HOLDS: OnceLock<Holds> = OnceLock::new();
+    HOLDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A hold of [`hold_slots`]: dropping it lets the held runs end.
+#[doc(hidden)]
+pub struct SlotHold {
+    key: (Pool, String),
+    gate: Arc<Semaphore>,
+}
+
+impl Drop for SlotHold {
+    fn drop(&mut self) {
+        let mut map = holds()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if map
+            .get(&self.key)
+            .is_some_and(|g| Arc::ptr_eq(g, &self.gate))
+        {
+            map.remove(&self.key);
+        }
+        self.gate.close();
+    }
+}
+
+/// For the tests: each run of `project` in `pool` that ends while the
+/// hold lives keeps its slot until the hold is dropped, so a test knows
+/// that the slot is busy without a time budget (TER-1221).
+#[doc(hidden)]
+pub fn hold_slots(pool: Pool, project: &str) -> SlotHold {
+    let key = (pool, project.to_owned());
+    let gate = Arc::new(Semaphore::new(0));
+    holds()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key.clone(), gate.clone());
+    SlotHold { key, gate }
+}
+
+/// Wait while a [`hold_slots`] holds the runs of `project` in `pool`.
+async fn held(pool: Pool, project: &str) {
+    let gate = holds()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&(pool, project.to_owned()))
+        .cloned();
+    if let Some(gate) = gate {
+        // The gate has no permits: this returns when the hold closes it.
+        let _ = gate.acquire().await;
+    }
+}
+
 /// The pool of a script's child.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pool {
     /// The runs of the engine: [`MAX_RUNNING`] slots.
     Engine,
@@ -674,6 +731,14 @@ pub async fn run(input: &Input, budget: Budget) -> Result<Reply, String> {
     if wall.is_zero() {
         return Err(busy(budget.acquire));
     }
+    let result = run_child(body, wall).await;
+    held(budget.pool, &budget.project).await;
+    result
+}
+
+/// Run a child on `body` for at most `wall`: the part of [`run`] that
+/// holds the slot.
+async fn run_child(body: Vec<u8>, wall: Duration) -> Result<Reply, String> {
     let mut child = tokio::process::Command::new(runner()?)
         .arg(CHILD_ARG)
         .env_clear()

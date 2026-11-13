@@ -12,12 +12,17 @@
 //!   verbs, the actor (`rule:<project>/<column>/<rule>`), the self-event
 //!   guard, and the outbox stay those of the engine.
 //! - **The triggers** ([`plan`]): `lands` (a card is created in the column
-//!   or moves into it), `leaves` (a card moves out of it), `archived` and
+//!   or moves into it; with a column queue, when the card is admitted:
+//!   the `admitted` event, TER-1114), `leaves` (a card moves out of it; a
+//!   card that only waited in its queue never landed, so it does not
+//!   leave, and its archive runs no `archived` rule), `archived` and
 //!   `wait_met` (the column of the card in the event), `job_result` (a job
 //!   or verdict event of a card that is in the column when the engine
 //!   plans), `timer` (every `every_seconds`, [`fire_timers`]), and
 //!   `count_reached` (a card lands and the column then holds exactly
-//!   `count` cards: `data.to_count` of the event).
+//!   `count` cards: `data.to_count` of the event). A `rule.timer` event
+//!   runs only the `timer` rule with its `rule_id`: the legacy batch and
+//!   version timers do not scan the column rules (TER-1199).
 //! - **The order** (TER-1112 Q3): the `leaves` rules of the source column,
 //!   then the `lands` rules of the target, then `count_reached`. With
 //!   several cards (a batch job), the cards in board order (column, then
@@ -235,10 +240,14 @@ pub fn plan(
     };
     match e.kind.as_str() {
         TIMER_KIND => {
-            // A timer names its rule; only the engine writes one.
+            // A timer names its rule by ID, and only a rule with the
+            // `timer` trigger runs on it (TER-1199): a rename between the
+            // write and the plan keeps the run. Only the engine writes one.
             if e.actor.as_deref() == Some(TIMER_ACTOR)
-                && let Some(name) = e.data["rule"].as_str()
-                && let Some(i) = pr.set.rules.iter().position(|r| r.name == name)
+                && let Some(id) = e.data["rule_id"].as_str()
+                && let Some(i) = meta
+                    .iter()
+                    .position(|m| m.id == id && matches!(m.trigger, Trigger::Timer { .. }))
             {
                 hits.push((i, None, 1, 0));
             }
@@ -257,19 +266,29 @@ pub fn plan(
                     }
                 }
             };
+            // The column queues (TER-1114): a card that moves into a queue
+            // lands when it is admitted, and a card that leaves a queue
+            // never landed, so it does not leave either.
+            let flag = |k: &str| e.data[k].as_bool().unwrap_or(false);
             match e.data["change"].as_str().unwrap_or_default() {
                 "moved" => {
-                    if let Some(from) = e.data["from"].as_str() {
+                    if let Some(from) = e.data["from"].as_str().filter(|_| !flag("from_queued")) {
                         for i in in_column(from, &|t| *t == Trigger::Leaves) {
                             hits.push((i, card.clone(), 0, 0));
                         }
                     }
-                    if let Some(to) = e.data["to"].as_str() {
+                    if let Some(to) = e.data["to"].as_str().filter(|_| !flag("queued")) {
                         for i in in_column(to, &|t| *t == Trigger::Lands) {
                             hits.push((i, card.clone(), 1, 0));
                         }
                         counted(to, &mut hits);
                     }
+                }
+                "admitted" => {
+                    for i in in_column(column, &|t| *t == Trigger::Lands) {
+                        hits.push((i, card.clone(), 1, 0));
+                    }
+                    counted(column, &mut hits);
                 }
                 "created" => {
                     for i in in_column(column, &|t| *t == Trigger::Lands) {
@@ -277,7 +296,7 @@ pub fn plan(
                     }
                     counted(column, &mut hits);
                 }
-                "archived" => {
+                "archived" if !flag("queued") => {
                     for i in in_column(column, &|t| *t == Trigger::Archived) {
                         hits.push((i, card.clone(), 1, 0));
                     }

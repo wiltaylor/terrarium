@@ -397,14 +397,20 @@ fn act_inner(t: &mut Tx<'_>, actor: &Actor, id: &str, generation: &str) -> ApiRe
                 Ok(destination)
             });
             match checked {
-                Ok(destination) => apply_move(
-                    t,
-                    actor,
-                    &row,
-                    &destination,
-                    None,
-                    action.comment.as_deref(),
-                )?,
+                Ok(destination) => {
+                    // A full column queues the card on a `columns` board
+                    // (TER-1114): the wait is met, the card waits there.
+                    if apply_move(
+                        t,
+                        actor,
+                        &row,
+                        &destination,
+                        None,
+                        action.comment.as_deref(),
+                    )? {
+                        reason = format!("wait met, queued in `{}`", destination.name);
+                    }
+                }
                 Err(e) => {
                     reason = format!("wait met, move refused: {e}");
                     refused = true;

@@ -4983,6 +4983,49 @@ paths and ops, `if_card` and `if_job` fields), `actions` (each verb with its
 arguments: `name`, `type`, `required`, and `values` of a `one_of`),
 `placeholders`, and `limits`.
 
+#### 8.2.2 Column queues (TER-1114)
+
+Only a project with `board_flow = columns` has column queues. On every other
+board a full column refuses a move with `409 wip_limit`, as before.
+
+A move into a column that cannot take the card now is accepted. The card is
+in the column and waits in its queue; the move checks of §8.2.1 (rights, a
+final column, dependencies, the comment) still run at the move, and the ETA
+is cleared. The `moved` event has `queued: true`, and the column's `lands`
+and `count_reached` rules do not run yet. A claim, the move of a met card
+wait (the wait mail says `wait met, queued in <column>`), a card made in a
+column, and the `card.move` verb all go through the same move.
+
+Cards leave the queue first in, first out; a new card never overtakes one
+that waits. When a card gets its slot the daemon writes the `card` event
+`admitted` (with `queued_at` and `to_count`, the admitted cards of the
+column), and the `lands` and `count_reached` rules of the column run on it.
+A card that leaves the queue (a move or an archive) never landed: its
+column runs no `leaves` or `archived` rule for it (`from_queued: true` on
+the `moved` event, `queued: true` on `archived`).
+
+The capacity is the column's `wip_limit` (none: no limit) in each release
+(`queue.release` of §8.2.1):
+
+| Release | A waiting card is admitted when |
+|---|---|
+| `wip` | the admitted cards are fewer than the WIP limit |
+| `job` | one job at a time: no card of the column holds the job slot. A card that lands or is admitted holds it until a job of the card has ended after that (passed, failed, or cancelled) and it has no open job, or until it leaves the column. A job that is requeued (lost at a restart) stays open and keeps the slot |
+| `batch` | no card of the last batch is still in the column, and `batch_size` cards wait or the first has waited `max_wait_seconds`. Up to `max_batch_cards` (default `batch_size`) are admitted, in queue order |
+
+The release runs in the transaction of its cause: a move into or out of
+the column, an archive, a job end or cancel, a board `PATCH`, and an
+options `PUT`. The rule engine's tick also releases every queue (the wait
+of a batch, and any release that no cause triggered).
+
+A card that waits shows `queued: {column, since, place, held_eta}` (place 1
+goes next); a board column shows `queued`, the number that wait (absent
+when 0); `count` counts them too. An ETA set on a waiting card (`PATCH
+eta_at`, `card claim --eta`) is held, not set: it is set when the card is
+admitted, and a duration counts from then. A waiting card has no ETA, so it
+raises no ETA signal, and the card reminder skips it. The `job.queue` batch
+verb leaves out a card that waits in the queue of its column.
+
 ### 8.3 Endpoints
 
 | Endpoint | Body | Answer |
@@ -7049,7 +7092,7 @@ all projects. Targets are project targets by default: a global target
 
 | Field | Meaning |
 |---|---|
-| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Without `work_root`, when the agent user cannot create `/src/terrarium` (permission denied or a read-only file system), the root falls back to `~/.terrarium-work/<project>/<agent-name>` of that user, with one daemon warning per target; the root keeps that base until cleanup. The run spool of other callers (`<work_root>/.terrarium-runs`, below) falls back the same way, to `~/.terrarium-work/.terrarium-runs`, and a run keeps the spool it started in. A `work_root` that is set never falls back: its failure names it and `--work-root`. Set it with `terrarium admin target edit <t> --work-root <path>`. Keep project shared caches outside each agent root. |
+| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Without `work_root`, when the agent user cannot create `/src/terrarium` (permission denied or a read-only file system), the root falls back to `~/.terrarium-work/<project>/<agent-name>` of that user, with one daemon warning per target; the root keeps that base until cleanup. The run spool of other callers (`<work_root>/.terrarium-runs`, below) falls back the same way, to `~/.terrarium-work/.terrarium-runs`, and a run keeps the spool it started in. A `work_root` that is set never falls back: when it is not writable, a symlink, foreign-owned or group/other writable, the error names it and `--work-root`. A default root in one of those last three states fails closed the same way, without the fallback. A symlinked component of `$HOME` (for example `/home -> var/home`) blocks the fallback, and the error names that component: set `work_root` on such a target. Set it with `terrarium admin target edit <t> --work-root <path>`. Keep project shared caches outside each agent root. |
 | `scope` | `global` (no `project`) or `project`. Every target view has it, also in `GET /api/projects/{name}/targets`. |
 | `state` | `running`, `stopped`, `absent`, or `unknown`: what the last lifecycle verb saw. |
 | `snapshots` | The snapshot names that `POST .../snapshot` or `snapshot_before_task` took. A destroy (the state `absent`) clears them. A snapshot delete removes a name. A snapshot list removes the names that the host no longer has (§17.3, "Snapshots"). |
@@ -7741,7 +7784,7 @@ has a daemon-owned marker. Without `work_root` it is
 `/src/terrarium/.terrarium-runs`, else `~/.terrarium-work/.terrarium-runs`
 when the remote user may not create `/src/terrarium` (permission denied, a
 read-only file system, or a missing parent); a spool that is not usable either
-way fails at once with a `spool error` that names `--work-root` (TER-1129). No-follow directory-FD checks reject symlinks,
+way fails at once with a `spool error` that names `--work-root` (TER-1129, TER-1141): also a root that is a symlink, foreign-owned or group/other writable, which never falls back, and a fallback below a symlinked `$HOME` component, which the error names. No-follow directory-FD checks reject symlinks,
 foreign ownership and group/other writable components. Python 3 is required
 for these checks; missing tools are terminal errors, never installed. The spool
 retains the first 64 MiB per stream, and is removed after 24 hours of result
@@ -9573,7 +9616,8 @@ rule "note-review" {
 
 `if_card` (on the run's card; a rule with one runs only for events with a
 card): `column` (in one of these), `not_column`, `has_labels` (every
-one), `lacks_labels` (none), `assigned`, `archived`. `if_job` (on the job
+one), `any_labels` (at least one, TER-1115), `lacks_labels` (none),
+`assigned`, `archived`. `if_job` (on the job
 of a `job` event, `data.id`, or of a `job.verdict` event, `data.job`; a
 rule with one runs only for those events): `state` (`queued`, `running`,
 `passed`, `failed`, `cancelled`), `outcome` (`red`, `conflict`, `error`,
@@ -9700,9 +9744,30 @@ expression. No manual close endpoint exists.
   is left out. `remove` takes globs (`by:*`); a label that `add` names
   stays. No change: a no-op.
 - `card_comment`: a comment on the run's card.
-- `card_assign`: assign the run's card to `who` (an agent name or a
-  template), or unassign it with `none`. A template that fills to nothing
-  fails the action (only `none` unassigns). The same assignee: a no-op.
+- `card_assign`: exactly one of `who`, `template` or `templates`.
+  - `who`: assign the run's card to an agent name, or unassign it with
+    `none`. A placeholder that fills to nothing fails the action (only
+    `none` unassigns). The same assignee: a no-op.
+  - `template` or `templates` (TER-1115, kanban rework C4 D6): a new bound
+    agent from a template claims the card, as the ready-card dispatcher
+    does (docs/card-dispatcher.md). `templates` is a list of
+    `<label>=<template>`: the card must have exactly one of the labels,
+    and that label picks the template. `owner` (required) is a
+    non-ephemeral project admin of the project: its spawn rights and caps
+    are used, and pausing it pauses the action. `from` (a column): take the
+    top eligible cards of that column in board order, up to `limit` (1 to
+    16, default 1), for a rule with no card (a `timer`). Without `from`,
+    the run's card, in the column it is in. The column with the role
+    `working`, where the claim lands, must be under its WIP limit, counting
+    the cards that wait in its queue: a free slot, never a queue place, so
+    no agent starts for a card that would only wait. A working column with
+    no limit starts nothing. Eligible: no assignee, no open bound agent, its
+    dependencies met, not held, not cooling down after a failed spawn, and
+    a matching template. The run's write picks the card and reports it
+    (`changed`); the spawn runs after the commit and checks the owner and
+    the card again. No room, no eligible card, a paused owner, or an owner
+    at a spawn cap: a no-op with the reason. A failed spawn gives the card
+    the dispatcher's cooldown, comment and owner mail.
 - `card_prepend`: put `text` at the top of the card body. A body that
   starts with the text already: a no-op.
 - `mail`: mail from `project:<project>` to each of `to` (`operator`,
@@ -10091,17 +10156,24 @@ name, §19.11) at the end of the project's `rules.wcl`, with the reasons
 in its `description`. A pack rule that `rules.wcl` replaces already stays
 as it is (`kept`). A second migration of the same board changes nothing.
 
-A migration before TER-222 left `merge_queue` out of the `agent-park` and
-`agent-unpark` overrides, so a move from review to the merge queue woke
-the bound agent. Each load of the config (the start and `POST
-/api/reload`) adds it one time to the API rules of a project (TER-243). It
-changes only a block that is still exactly the text of that old migration
-for the board, and the board needs a merge queue column (the role
-`merge_queue`, else the name on a column with no role). The changed block
-gets `merge_queue added (TER-243).` at the end of its `description`, and
-a block with that note is never changed again. An edited block and a
-file's rules stay as they are. The write is a `rules.put` audit row. A
-problem is one line in the load report and does not fail the load.
+A migration before TER-222 wrote `agent-park` and `agent-unpark`
+overrides with the wait columns as names. TER-243 later added
+`merge_queue` to them and appended `merge_queue added (TER-243).` to
+their `description`. A migration from TER-222 until the pack used column
+roles wrote them with the wait columns as names, `merge_queue` included,
+and without that note. Each load of the config (the start and `POST
+/api/reload`) removes these overrides from the API rules of a project, so
+the pack's role-aware rules run again (TER-1090, TER-1219). It removes
+only a block after the migration header that is still exactly the text of
+one of these migrations for the board, or exactly the TER-243 form. As
+overrides the pair had the card cap of an own rule (10 runs an hour),
+and their no-op runs counted toward it. The two blocks
+retire as a pair (TER-1130): when either one is edited (also after the
+TER-243 note, or turned off with `enabled = false`), both stay, so an
+edited legacy park never runs next to the pack's unpark. A pair with
+only one block left retires that block. A file's rules stay as they are.
+The write is a `rules.put` audit row. A problem is one line in the load
+report and does not fail the load.
 
 **The lint.** It reads the rules that the engine runs: the pack with the
 project's own rules for `board_flow = rules`, else only its own rules.
@@ -10172,6 +10244,13 @@ or `rules` does not change it back, and an older daemon reads it as
 | `timer` | a `rule.timer` event that the engine writes once in each slot of `every_seconds` (UTC epoch slots, no catch-up after downtime) | none |
 | `count_reached` | a card lands and the column then holds exactly `count` cards that are not archived (`data.to_count` of the event) | none |
 
+A `rule.timer` event of a `columns` project names the rule by its
+`rule_id`, and it runs only that rule, and only when its trigger is
+`timer` (TER-1199). The legacy batch and version timers (§19.8) do not
+scan the column rules: a column rule with a `version.cut` or a batch
+`job.queue` action runs on its own trigger only. The events `moved` and
+`created` carry `data.to_count` only on a `columns` project.
+
 Order in one event (TER-1112 Q3): the `leaves` rules of the source
 column, then the `lands` (or `job_result`) rules, then `count_reached`.
 With several cards, the cards go in board order (column, then position).
@@ -10195,7 +10274,12 @@ is a role and stays. Each column whose rules changed gets a new options
 version, and the `board.columns` audit row lists the changes
 (`renamed_in_rules`). A board change that removes a column while a rule
 of another column names it is `409 conflict` with `details.reason =
-column_in_use`, and nothing changes.
+column_in_use`, and nothing changes. A reference names the column that
+it resolves to before the change (`@x`: the column with the role `x`,
+else the column named `x`), and it holds that column when it does not
+resolve on the board after the change (TER-1199): `@x` holds the only
+column with the role `x`, unless another column has that role after the
+change.
 
 ## 20. Event sources and ingest
 
@@ -11716,6 +11800,8 @@ project, for the controls of the page widgets:
 | Field | The check it reports | Widget controls |
 |---|---|---|
 | `write_project` | `write_project` (own project, sysadmin, operator) | Board New card, moves and the card drawer |
+| `review_wiki` | `write_project` and the admin path of `review_page` (project_admin, sysadmin, operator) | wiki Approve and Comment on any page |
+| `review_as` | the `reviewer` values that name the caller: its name, ID and `project/name`; empty for the operator and without `write_project` | wiki Approve and Comment on a page whose `reviewer` is in the list |
 | `admin_project` | `admin_project` (same as `can_edit`) | Board columns, New agent, project event sources, rules, pipelines |
 | `manage_schedules` | `schedule_scope` of the project | New schedule or trigger, edit of a project schedule |
 | `manage_global` | `sysadmin` | global schedules and event sources |

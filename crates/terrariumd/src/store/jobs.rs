@@ -1861,6 +1861,8 @@ pub fn finish(t: &mut Tx<'_>, id: &str, end: &JobEnd) -> ApiResult<Option<Job>> 
     }
     let job = get(t, id)?;
     emit(t, &job, "ended")?;
+    // The job slot of a column queue is free again (TER-1114).
+    crate::store::board::queues::on_job_end(t, id)?;
     Ok(Some(job))
 }
 
@@ -1982,6 +1984,7 @@ pub fn cancel(t: &mut Tx<'_>, id: &str) -> ApiResult<Job> {
         json!({"card": job.card}),
     )?;
     emit(t, &job, "cancelled")?;
+    crate::store::board::queues::on_job_end(t, id)?;
     Ok(job)
 }
 

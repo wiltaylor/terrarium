@@ -2038,7 +2038,11 @@ async fn hot_rollback_unverified_restore_helper_never_restarts_old_release() {
     assert_eq!(calls.last().unwrap(), "stop-for-recovery c0");
 }
 
-#[tokio::test]
+// Paused time: the hold, recovery and stop deadlines are tokio deadlines.
+// With wall time a starved runtime could pass the 2 s stop reserve before the
+// 250 ms stop was polled (TER-1216). Paused time only advances when every
+// task is idle, so the reserve is measured against the updater's own work.
+#[tokio::test(start_paused = true)]
 async fn pending_helper_delete_or_inspect_leaves_final_stop_reserve_on_both_paths() {
     let mut cases = tokio::task::JoinSet::new();
     for hot in [false, true] {
@@ -2088,7 +2092,13 @@ async fn pending_helper_delete_or_inspect_leaves_final_stop_reserve_on_both_path
                     usize::from(hot)
                 );
                 assert!(!calls.iter().any(|c| c == &format!("create:{OLD} new")));
-                assert!(run.error.unwrap().contains("termination deadline elapsed"));
+                let error = run.error.unwrap();
+                assert!(error.contains("termination deadline elapsed"), "{error}");
+                // The updater itself saw the stop finish inside the reserve.
+                assert!(
+                    error.contains("container stopped") || error.contains("stop confirmed: true"),
+                    "hot={hot} phase={phase}: {error}"
+                );
             });
         }
     }

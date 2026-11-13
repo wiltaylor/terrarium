@@ -118,6 +118,8 @@ fn atomic_job_assignment_kills_immediate_detached_grandchild() {
 
 #[test]
 #[ignore = "launched only inside a test-owned job"]
+// The grandchild is left on purpose: the job close of the caller kills it.
+#[allow(clippy::zombie_processes)]
 fn immediate_child_helper() {
     use std::os::windows::process::CommandExt;
     let child = std::process::Command::new(std::env::current_exe().unwrap())

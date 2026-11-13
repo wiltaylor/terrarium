@@ -833,6 +833,7 @@ mod tests {
         assert_eq!(blkio_weight(4950), 500);
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_binds_the_workspaces_at_the_same_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -934,6 +935,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn exec_env_stays_out_of_the_cli_env() {
         let plan = plan_exec(
@@ -1025,6 +1027,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn encoded_checkout_control_stays_private_at_its_bound() {
         use std::os::unix::fs::PermissionsExt;
@@ -1076,6 +1079,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_env_file_dir_is_private_and_a_start_removes_leftovers() {
         use std::os::unix::fs::PermissionsExt;
@@ -1104,6 +1108,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_env_dir_is_refused() {
         let tmp = tempfile::tempdir().unwrap();

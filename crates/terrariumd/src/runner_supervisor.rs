@@ -1099,11 +1099,18 @@ struct Slot {
     rest_since: Option<Instant>,
     /// TER-1104: the last kick of the undrained queue of this episode. It
     /// stays over a kick restart (the same epoch), and ends when the queue
-    /// is seen drained, when a turn ends at rest, or at the next start.
+    /// is seen drained, when a turn that took a pointer of this episode
+    /// ends at rest, or at the next start.
     kick: Option<Kick>,
     /// TER-1104: a turn (`working`) began since the last rest. Its end at
-    /// rest ends the kick episode; a stall does not.
+    /// rest ends the kick episode if it took a pointer; a stall does not.
     in_turn: bool,
+    /// TER-1185: a pointer delivery of this kick episode went out since the
+    /// last rest, so the next turn that ends at rest took queued work. A
+    /// turn without it (a recap, a system turn) keeps the episode. It
+    /// clears at each rest that ends a turn, at each launch, and on a
+    /// failed delivery.
+    kick_pointer: bool,
 }
 
 /// TER-1104: the steps of a kick of an agent at rest whose deliverable
@@ -1348,6 +1355,7 @@ impl Slot {
             rest_since: None,
             kick: None,
             in_turn: false,
+            kick_pointer: false,
         }
     }
 
@@ -1356,10 +1364,13 @@ impl Slot {
     /// [`terrarium_runner::STALL_REASON`]); it keeps its first time. A
     /// question or dialog on screen and unsubmitted input are `blocked` in
     /// a turn, not rest: they end the clock, as a turn or a start does. A
-    /// turn that ends at rest (`working`, then `idle` or `waiting`) ends
-    /// the kick episode: the agent works again, so a later stall starts at
-    /// the first step. A turn that stalls does not end it, so a harness
-    /// that stalls in each turn still reaches `blocked`.
+    /// turn that ends at rest (`working`, then `idle` or `waiting`) after a
+    /// pointer delivery of this episode went out ends the kick episode: the
+    /// agent took its queued work, so a later stall starts at the first
+    /// step. A turn that took no pointer (a recap after a kick restart, a
+    /// system turn) does not end it (TER-1185), and a turn that stalls does
+    /// not either, so a harness that stalls in each turn still reaches
+    /// `blocked`.
     fn note_rest(&mut self, status: AgentStatus, reason: Option<&str>, now: Instant) {
         let stalled =
             status == AgentStatus::Blocked && reason == Some(terrarium_runner::STALL_REASON);
@@ -1370,7 +1381,10 @@ impl Slot {
         }
         if status == AgentStatus::Working {
             self.in_turn = true;
-        } else if status.is_resting() && std::mem::take(&mut self.in_turn) {
+        } else if status.is_resting()
+            && std::mem::take(&mut self.in_turn)
+            && std::mem::take(&mut self.kick_pointer)
+        {
             self.kick = None;
         }
     }
@@ -2713,6 +2727,7 @@ impl RunnerSupervisor {
                     slot.seen = runner.status();
                     slot.rest_since = None;
                     slot.in_turn = false;
+                    slot.kick_pointer = false;
                     slot.pointer_busy = false;
                     slot.account = accounts.account.clone();
                     slot.bound = accounts.bound.clone();
@@ -3074,6 +3089,7 @@ impl RunnerSupervisor {
             // TER-1104: an adopted agent at rest starts its rest clock now.
             slot.rest_since = None;
             slot.in_turn = false;
+            slot.kick_pointer = false;
             // The hello has no reason: a `blocked` runner is not taken
             // for a stall.
             slot.note_rest(hello.status, None, Instant::now());
@@ -3263,6 +3279,7 @@ impl RunnerSupervisor {
                         }
                         Err(RecvError::Lagged(n)) => {
                             warn!(agent = %id, "the supervisor missed {n} runner events");
+                            self.resync_after_lag(id, epoch, runner.as_ref());
                         }
                         Err(RecvError::Closed) => break,
                     },
@@ -3307,6 +3324,42 @@ impl RunnerSupervisor {
             }
         }
         self.on_exit(id, epoch, status).await;
+    }
+
+    /// TER-1125: the forward task lost runner events. A lost status change
+    /// leaves `seen` stale, and `maybe_push` waits for an `idle` that came
+    /// already. Take the status from the runner, report it when it
+    /// changed, and run the idle step when the agent is idle.
+    fn resync_after_lag(&self, id: AgentId, epoch: u64, runner: &dyn RunnerHandle) {
+        let now = runner.status();
+        let changed = {
+            let mut slots = lock(&self.inner.slots);
+            let Some(slot) = slots.get_mut(&id).filter(|s| s.epoch == epoch) else {
+                return;
+            };
+            let changed = slot.seen != now;
+            if changed {
+                slot.seen = now;
+                slot.note_rest(now, None, Instant::now());
+            }
+            changed
+        };
+        if changed {
+            match (self.held(id), now) {
+                (Some(h), AgentStatus::Idle) => {
+                    self.emit_status(id, AgentStatus::Blocked, hold_reason(&h));
+                }
+                _ => self.emit_status(id, now, "resynced after lost runner events"),
+            }
+            match now {
+                AgentStatus::Working => self.stream_busy(id),
+                AgentStatus::Waiting => self.stream_release(id),
+                _ => {}
+            }
+        }
+        if now == AgentStatus::Idle {
+            self.on_idle(id, epoch);
+        }
     }
 
     fn on_idle(&self, id: AgentId, epoch: u64) {
@@ -3996,6 +4049,7 @@ impl RunnerSupervisor {
         slot.rest_since = None;
         slot.kick = None;
         slot.in_turn = false;
+        slot.kick_pointer = false;
         slot.restart_requested = false;
         slot.restarts.clear();
         slot.upgrade_pending = false;
@@ -4337,6 +4391,12 @@ impl RunnerSupervisor {
             slot.pointer_busy = true;
             slot.deliveries_open += 1;
             slot.deliveries_taken += 1;
+            // TER-1185: the turn of this delivery takes the queued work of
+            // the kick episode. Set before the turn starts, so its rest
+            // cannot come first; a delivery that does not go out clears it.
+            if slot.kick.is_some() {
+                slot.kick_pointer = true;
+            }
             (runner, std::mem::take(&mut slot.pointer))
         };
         // The stored rows of these items: deleted when the pointer goes
@@ -4371,6 +4431,7 @@ impl RunnerSupervisor {
                 me.forget_stored(id, stored, upto).await;
                 let resting = lock(&me.inner.slots).get_mut(&id).map(|slot| {
                     slot.pointer_busy = false;
+                    slot.kick_pointer = false;
                     (slot.epoch, slot.seen.is_resting())
                 });
                 drop(open);
@@ -4412,6 +4473,7 @@ impl RunnerSupervisor {
                 slots.get_mut(&id).and_then(|slot| {
                     slot.pointer_busy = false;
                     if result.is_err() {
+                        slot.kick_pointer = false;
                         // Keep the items for the next idle.
                         let newer = std::mem::replace(&mut slot.pointer, pointer);
                         slot.pointer.merge(newer);
@@ -4772,6 +4834,7 @@ impl RunnerSupervisor {
             .get_mut(&id)
             .filter(|s| s.epoch == epoch && s.kickable() && s.rest_since == Some(rest))?;
         if queue.count == 0 {
+            slot.kick_pointer = false;
             if slot.kick.take().is_some() {
                 info!(agent = %id, "the queue drained: the kick episode ends");
             }
@@ -5254,7 +5317,11 @@ impl RunnerSupervisor {
 /// task panics or is cancelled: else `deliveries_open` stays set and each
 /// later reload of the agent waits for an end that never comes. On a panic
 /// it also frees `pointer_busy` and asks for a reload: the taken items are
-/// lost with the task, and the reload reads the stored ones again.
+/// lost with the task, and the reload reads the stored ones again. While
+/// the agent still rests, a panic also frees the stream that
+/// [`RunnerSupervisor::maybe_push`] took (TER-1170): no turn started, so no
+/// status change frees it. A turn that started counts its stream again
+/// with its `working` status.
 struct DeliveryOpen {
     sup: RunnerSupervisor,
     id: AgentId,
@@ -5262,11 +5329,18 @@ struct DeliveryOpen {
 
 impl Drop for DeliveryOpen {
     fn drop(&mut self) {
+        let mut release = false;
         if std::thread::panicking()
             && let Some(slot) = lock(&self.sup.inner.slots).get_mut(&self.id)
         {
             slot.pointer_busy = false;
             slot.reload_wanted = true;
+            release = slot.seen.is_resting();
+        }
+        // The release types the work of the agents that get the stream,
+        // which needs a runtime. A runtime that shuts down types nothing.
+        if release && tokio::runtime::Handle::try_current().is_ok() {
+            self.sup.stream_release(self.id);
         }
         self.sup.end_delivery(self.id);
     }
@@ -7720,6 +7794,58 @@ mod tests {
         assert_eq!(rest_seq(), Some(12));
     }
 
+    /// TER-1125: the forward task lags and loses the `idle` of the runner.
+    /// It takes the status from `runner.status()`, so the pointer that
+    /// waits for `idle` goes out without a later status event.
+    #[tokio::test]
+    async fn a_forward_lag_resyncs_the_status_and_pushes_the_pointer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sup, runner, id) = claim_runner_sup(tmp.path(), None);
+        let epoch = {
+            let mut slots = lock(&sup.inner.slots);
+            let slot = slots.get_mut(&id).unwrap();
+            slot.seen = AgentStatus::Working;
+            slot.epoch
+        };
+        sup.add_pointer(id, |p| {
+            p.add_mail(MailItem::new("m1".into(), "p/b".into(), "T1".into()))
+        });
+        assert!(lock(&runner.typed).is_empty(), "working: the pointer waits");
+        // A channel of one: the `idle` is lost, the receiver lags.
+        let (tx, rx) = broadcast::channel(1);
+        let status = |from, to| {
+            EventRecord::now(
+                id,
+                Event::StatusChanged {
+                    from,
+                    to,
+                    reason: None,
+                },
+            )
+        };
+        tx.send(status(AgentStatus::Working, AgentStatus::Idle))
+            .unwrap();
+        tx.send(EventRecord::now(
+            id,
+            Event::System {
+                message: "after the idle".into(),
+            },
+        ))
+        .unwrap();
+        let handle: Arc<dyn RunnerHandle> = runner.clone();
+        tokio::spawn(sup.clone().forward(id, epoch, handle, rx));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while lock(&runner.typed).is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the pointer goes out after the resync");
+        assert_eq!(lock(&sup.inner.slots)[&id].seen, AgentStatus::Idle);
+        assert_eq!(lock(&runner.typed).len(), 1);
+        drop(tx);
+    }
+
     #[tokio::test]
     async fn stale_exit_keeps_the_current_epochs_credentials() {
         let tmp = tempfile::tempdir().unwrap();
@@ -9885,6 +10011,46 @@ mod tests {
         assert_eq!(mail_state(&state, &second).await, "read");
     }
 
+    /// TER-1170: a delivery task that panics frees the stream that the
+    /// delivery took, and the agent that waits for it gets it, with no
+    /// status change of the agent.
+    #[tokio::test]
+    async fn a_panic_in_a_delivery_frees_its_stream() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        let streams = &state.usage.streams;
+        streams.set_limits(HashMap::from([("s".to_owned(), 1)]));
+        if let Some(slot) = lock(&sup.inner.slots).get_mut(&id) {
+            slot.agent.subscription = Some("s".into());
+        }
+        sup.inner
+            .pointer_delivery_panic
+            .store(true, Ordering::SeqCst);
+        // A mail with no stored row: the reload after the panic finds
+        // nothing, so no other delivery takes the stream.
+        let mid = ulid::Ulid::new().to_string();
+        sup.add_pointer(id, |p| {
+            p.add_mail(MailItem::new(mid, "operator".into(), "T1".into()))
+        });
+        // The delivery took the only stream; its task did not run yet.
+        assert_eq!(streams.usage("s").unwrap().in_use, 1);
+        let other = AgentId::new();
+        assert!(matches!(
+            streams.take(Some("s"), other),
+            crate::stream_limit::Take::Wait { new: true }
+        ));
+        settle(&sup, id).await;
+        assert!(!sup.inner.pointer_delivery_panic.load(Ordering::SeqCst));
+        assert!(lock(&runner.typed).is_empty());
+        assert_eq!(lock(&sup.inner.slots)[&id].seen, AgentStatus::Idle);
+        // The stream went to the agent that waited.
+        assert!(!streams.is_waiting(other));
+        let usage = streams.usage("s").unwrap();
+        assert_eq!((usage.in_use, usage.waiting), (1, 0));
+        streams.release(other);
+        assert_eq!(streams.usage("s").unwrap().in_use, 0);
+    }
+
     /// TER-1146: a reload that gives up after `RELOAD_TRIES` reads asks
     /// for a reload, which the end of the next delivery runs.
     #[tokio::test]
@@ -10189,9 +10355,17 @@ mod tests {
         );
         assert_eq!(slot.kick, kick, "a stalled turn keeps it");
         slot.note_rest(AgentStatus::Working, None, t);
-        assert_eq!(slot.kick, kick, "a turn that runs keeps it");
         slot.note_rest(AgentStatus::Idle, None, t);
-        assert_eq!(slot.kick, None, "a turn that ended at rest ends it");
+        assert_eq!(slot.kick, kick, "a turn that took no pointer keeps it");
+        slot.kick_pointer = true;
+        slot.note_rest(AgentStatus::Working, None, t);
+        assert_eq!(slot.kick, kick, "a turn that runs keeps it");
+        slot.note_rest(AgentStatus::Waiting, None, t);
+        assert_eq!(
+            slot.kick, None,
+            "a turn that took a pointer ends it at rest"
+        );
+        assert!(!slot.kick_pointer, "the rest takes the mark");
     }
 
     /// TER-1104: queued mail counts once each (a pointer mail item is
@@ -10490,6 +10664,78 @@ mod tests {
         );
     }
 
+    /// TER-1185: after a kick restart, a recap turn that takes no queued
+    /// mail and ends at rest does not end the episode: the stall that comes
+    /// again still reaches `blocked`, with one mail to the lead.
+    #[tokio::test]
+    async fn a_recap_turn_after_a_kick_restart_keeps_the_episode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        let lead = add_lead(&state).await;
+        store_mail(&state, id, false).await;
+        let rest = stall(&sup, id);
+        let at = |s: u64| rest + Duration::from_secs(s);
+        sup.kick_tick(at(61)).await;
+        settle(&sup, id).await;
+        assert_eq!(kick_step(&sup, id), Some(KickStep::Reload));
+        sup.kick_tick(at(301)).await;
+        assert_eq!(runner.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(kick_step(&sup, id), Some(KickStep::Restart));
+        let epoch = lock(&sup.inner.slots)[&id].epoch;
+        sup.on_exit(
+            id,
+            epoch,
+            ExitStatus {
+                code: 0,
+                signal: Some("KILL".into()),
+            },
+        )
+        .await;
+        let start = Instant::now();
+        while lock(&sup.inner.slots)[&id].phase == Phase::Restarting {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "the relaunch hangs"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        {
+            // The relaunch, by hand as in the test above.
+            let mut slots = lock(&sup.inner.slots);
+            let slot = slots.get_mut(&id).unwrap();
+            assert_eq!(slot.epoch, epoch);
+            slot.runner = Some(runner.clone());
+            slot.phase = Phase::Running;
+            slot.seen = AgentStatus::Starting;
+            slot.rest_since = None;
+            slot.in_turn = false;
+            slot.kick_pointer = false;
+        }
+        // A recap turn: no pointer goes out, and it ends at rest.
+        pass_status(&sup, id, AgentStatus::Starting, AgentStatus::Working, None);
+        pass_status(&sup, id, AgentStatus::Working, AgentStatus::Waiting, None);
+        settle(&sup, id).await;
+        assert!(lock(&runner.typed).is_empty());
+        assert_eq!(kick_step(&sup, id), Some(KickStep::Restart));
+        // The queue still does not drain: the stall comes again.
+        stall(&sup, id);
+        sup.kick_tick(at(600)).await;
+        assert_eq!(kick_step(&sup, id), Some(KickStep::Restart));
+        assert!(mail_to(&state, lead).await.is_empty());
+        sup.kick_tick(at(601)).await;
+        assert_eq!(kick_step(&sup, id), Some(KickStep::Blocked));
+        for s in [602, 900, 5000] {
+            sup.kick_tick(at(s)).await;
+        }
+        assert_eq!(runner.kills.load(Ordering::SeqCst), 1);
+        let mails = mail_to(&state, lead).await;
+        assert_eq!(mails.len(), 1, "{mails:?}");
+        assert_eq!(
+            kicked_steps(&kicked_events(&state).await),
+            ["reload", "restart", "blocked"]
+        );
+    }
+
     /// TER-1104: an agent that works has no rest: queue growth during its
     /// turns never kicks it.
     #[tokio::test]
@@ -10738,6 +10984,8 @@ mod tests {
         let plan = sup
             .kick_plan(id, epoch, rest, queue, at(301))
             .expect("the restart is claimed");
+        // TER-1185: the turn took a pointer of the episode.
+        lock(&sup.inner.slots).get_mut(&id).unwrap().kick_pointer = true;
         pass_status(&sup, id, AgentStatus::Blocked, AgentStatus::Working, None);
         pass_status(&sup, id, AgentStatus::Working, AgentStatus::Idle, None);
         assert_eq!(kick_step(&sup, id), None, "the turn ended the episode");

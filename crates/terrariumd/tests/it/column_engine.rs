@@ -3,7 +3,9 @@
 //! triggers, in the order of TER-1112 Q3, with the loop guards of the
 //! daemon; a project without the switch runs none of them; a column rename
 //! rewrites the rules that name it, and a removal is refused while a rule
-//! names it (TER-1159).
+//! names it (TER-1159). The follow-ups of the review (TER-1199): the
+//! removal check on the board after the change, the timers by rule ID, the
+//! R3 lockout at each entry, `wait_met`, and `to_count` only on `columns`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use crate::common;
@@ -403,6 +405,18 @@ async fn a_rename_rewrites_the_rules_and_a_removal_is_refused_while_named() {
         after["version"].as_i64().unwrap(),
         before["version"].as_i64().unwrap() + 1
     );
+    // The audit row of the PATCH lists the rewrite (TER-1199).
+    let audit = td
+        .get("/api/audit?action=board.columns&order=desc&limit=5")
+        .await
+        .ok()
+        .clone();
+    let renamed = &audit[0]["detail"]["renamed_in_rules"];
+    assert_eq!(renamed.as_array().map(Vec::len), Some(1), "{audit}");
+    assert_eq!(renamed[0]["column"], "review");
+    assert_eq!(renamed[0]["rule"], "back");
+    assert_eq!(renamed[0]["before"]["actions"][0]["args"]["to"], "ready");
+    assert_eq!(renamed[0]["after"]["actions"][0]["args"]["to"], "queue");
     // The removal of `queue` is refused while `review/back` names it.
     let r = td.patch(b, board(None)).await;
     r.err(409, "conflict");
@@ -413,4 +427,290 @@ async fn a_rename_rewrites_the_rules_and_a_removal_is_refused_while_named() {
     // Without the rule the removal goes.
     set_rules(&td, "flow", "review", json!([])).await;
     td.patch(b, board(None)).await.ok();
+}
+
+/// The board of [`board`] without `accepted`, and with `extra` before
+/// `blocked`.
+fn board_without_accepted(extra: Option<Value>) -> Value {
+    let mut b = board(Some("ready"));
+    let cols = b["columns"].as_array_mut().unwrap();
+    cols.retain(|c| c["name"] != "accepted");
+    if let Some(e) = extra {
+        let at = cols.iter().position(|c| c["name"] == "blocked").unwrap();
+        cols.insert(at, e);
+    }
+    b
+}
+
+#[tokio::test]
+async fn a_removal_checks_the_roles_of_the_board_after_the_change() {
+    let td = setup().await;
+    set_rules(
+        &td,
+        "flow",
+        "review",
+        json!([{"name": "role", "trigger": {"kind": "lands"},
+                "actions": [{"verb": "card.move", "args": {"to": "@accepted"}}]}]),
+    )
+    .await;
+    let b = "/api/projects/flow/board";
+    // `accepted` is the only column with the role `accepted`: `@accepted`
+    // would name no column after the change.
+    let r = td.patch(b, board_without_accepted(None)).await;
+    r.err(409, "conflict");
+    let d = &r.body["error"]["details"];
+    assert_eq!(d["reason"], "column_in_use", "{}", r.body);
+    assert_eq!(d["columns"], json!(["accepted"]));
+    assert_eq!(d["rules"][0]["rule"], "role");
+    assert_eq!(options(&td, "flow", "accepted").await["column"], "accepted");
+    // Another column takes the role in the same change: `@accepted` still
+    // resolves, so the removal goes, and the rule keeps its reference.
+    td.patch(
+        b,
+        board_without_accepted(Some(json!({"name": "landed", "role": "accepted"}))),
+    )
+    .await
+    .ok();
+    let o = options(&td, "flow", "review").await;
+    assert_eq!(o["rules"][0]["actions"][0]["args"]["to"], "@accepted");
+}
+
+#[tokio::test]
+async fn wait_met_runs_the_rules_of_the_cards_column() {
+    let td = setup().await;
+    set_rules(
+        &td,
+        "flow",
+        "ready",
+        json!([note(
+            "met",
+            json!({"kind": "wait_met"}),
+            "deps met in ready"
+        )]),
+    )
+    .await;
+    set_rules(
+        &td,
+        "flow",
+        "backlog",
+        json!([note(
+            "met",
+            json!({"kind": "wait_met"}),
+            "deps met in backlog"
+        )]),
+    )
+    .await;
+    switch(&td, "flow").await;
+    let a = new_card(&td, "flow", "a").await;
+    let b = new_card(&td, "flow", "b").await;
+    move_to(&td, &b, "ready").await;
+    td.patch(
+        &format!("/api/cards/{b}"),
+        json!({"wait": {"dependencies": [{"card": a, "target": "review"}], "mode": "any"}}),
+    )
+    .await
+    .ok();
+    settle(&td).await;
+    assert!(comments(&td, &b).await.is_empty());
+    move_to(&td, &a, "review").await;
+    settle(&td).await;
+    assert_eq!(bodies(&comments(&td, &b).await), vec!["deps met in ready"]);
+    assert!(comments(&td, &a).await.is_empty());
+    let r = runs(&td, "flow").await;
+    let met: Vec<&Value> = r.iter().filter(|r| r["rule"] == "ready/met").collect();
+    assert_eq!(met.len(), 1, "{r:?}");
+    assert_eq!(met[0]["card"], b.as_str());
+    assert!(r.iter().all(|r| r["rule"] != "backlog/met"), "{r:?}");
+}
+
+/// Write a `rule.timer` event as the engine does (actor `system`).
+async fn timer_event(td: &TestDaemon, data: Value) {
+    state(td)
+        .db
+        .write("system", move |t| {
+            t.emit(
+                terrariumd::events::EventDraft::new(rules_engine::TIMER_KIND, "test timer", data)
+                    .project("flow"),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_timer_event_runs_only_the_timer_rule_with_its_id() {
+    let td = setup().await;
+    set_rules(
+        &td,
+        "flow",
+        "review",
+        json!([note("land", json!({"kind": "lands"}), "landed"),
+               {"name": "tick", "trigger": {"kind": "timer", "every_seconds": 3600},
+                "actions": [{"verb": "mail", "args": {"to": ["operator"], "subject": "tick"}}]}]),
+    )
+    .await;
+    switch(&td, "flow").await;
+    settle(&td).await;
+    let o = options(&td, "flow", "review").await;
+    let land_id = o["rules"][0]["id"].as_str().unwrap().to_owned();
+    let tick_id = o["rules"][1]["id"].as_str().unwrap().to_owned();
+    let count = |r: &[Value], name: &str| r.iter().filter(|x| x["rule"] == name).count();
+    // The live engine may have fired the slot of `tick` already.
+    let ticks = count(&runs(&td, "flow").await, "review/tick");
+    // By ID: the timer rule runs, also under a stale name (a rename
+    // between the write and the plan).
+    timer_event(
+        &td,
+        json!({"rule": "old/tick", "rule_id": tick_id, "slot": "x"}),
+    )
+    .await;
+    // By name only (the shape of a legacy timer): nothing runs.
+    timer_event(&td, json!({"rule": "review/tick"})).await;
+    timer_event(&td, json!({"rule": "review/land"})).await;
+    // The ID of a rule whose trigger is not `timer`: nothing runs.
+    timer_event(&td, json!({"rule": "review/land", "rule_id": land_id})).await;
+    settle(&td).await;
+    let r = runs(&td, "flow").await;
+    assert_eq!(count(&r, "review/tick"), ticks + 1, "{r:?}");
+    assert_eq!(count(&r, "review/land"), 0, "{r:?}");
+}
+
+#[tokio::test]
+async fn the_legacy_version_timer_does_not_scan_the_column_rules() {
+    let td = setup().await;
+    // A `version.cut` that the legacy timer would run by its name: one
+    // accepted `vnext` card is more than `min_cards`.
+    set_rules(
+        &td,
+        "flow",
+        "review",
+        json!([{"name": "cut", "trigger": {"kind": "archived"},
+                "actions": [{"verb": "version.cut",
+                             "args": {"min_cards": 1, "max_wait_minutes": 240}}]}]),
+    )
+    .await;
+    let a = td
+        .post(
+            "/api/projects/flow/cards",
+            json!({"title": "a", "column": "accepted", "labels": ["version:vnext"]}),
+        )
+        .await
+        .ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    switch(&td, "flow").await;
+    let db = state(&td).db.clone();
+    let projects = rules_engine::load(&db, &mut rules_engine::Cache::default())
+        .await
+        .unwrap();
+    let written =
+        rules_engine::fire_timers(&db, &projects, &mut HashMap::new(), chrono::Utc::now())
+            .await
+            .unwrap();
+    assert_eq!(written, 0);
+    settle(&td).await;
+    let timers: i64 = db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM events WHERE project = 'flow' AND kind = 'rule.timer'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(timers, 0);
+    assert!(runs(&td, "flow").await.is_empty());
+    assert!(td.get(&format!("/api/cards/{a}")).await.ok()["group"].is_null());
+}
+
+#[tokio::test]
+async fn no_entry_but_the_upgrade_sets_columns() {
+    let td = setup().await;
+    // The project settings.
+    td.patch("/api/projects/flow", json!({"board_flow": "columns"}))
+        .await
+        .err(400, "bad_request");
+    // The board PATCH has no such field.
+    let mut b = board(Some("ready"));
+    b["board_flow"] = "columns".into();
+    td.patch("/api/projects/flow/board", b)
+        .await
+        .err(400, "bad_request");
+    assert_eq!(
+        td.get("/api/projects/flow").await.ok()["board_flow"],
+        "code"
+    );
+    // The fleet import: a fleet file gives no `board_flow` at all (only a
+    // project file does, and there `columns` does not read: the core test
+    // `a_project_file_cannot_give_the_columns_flow`).
+    let fleet = "name = \"colfleet\"\n[[projects]]\nname = \"fc\"\nboard_flow = \"columns\"\n\
+                 [[projects.agents]]\nname = \"a\"\nharness = \"claude\"\n";
+    let r = td.post("/api/fleet/apply", json!({"content": fleet})).await;
+    r.err(422, "invalid");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("board_flow")),
+        "{}",
+        r.body
+    );
+    td.get("/api/projects/fc").await.err(404, "not_found");
+    // The legacy migrate tool on a converted board.
+    switch(&td, "flow").await;
+    let r = td
+        .post("/api/projects/flow/rules/migrate", json!({"apply": true}))
+        .await;
+    r.err(409, "conflict");
+    assert_eq!(
+        td.get("/api/projects/flow").await.ok()["board_flow"],
+        "columns"
+    );
+}
+
+#[tokio::test]
+async fn to_count_is_written_only_on_a_columns_project() {
+    let td = setup().await;
+    td.project("plain").await;
+    switch(&td, "flow").await;
+    for p in ["flow", "plain"] {
+        let a = new_card(&td, p, "a").await;
+        move_to(&td, &a, "review").await;
+    }
+    let rows: Vec<(String, String, Option<i64>)> = state(&td)
+        .db
+        .read(|c| {
+            let mut st = c.prepare(
+                "SELECT project, json_extract(payload, '$.change'),
+                        json_extract(payload, '$.to_count')
+                   FROM events WHERE kind = 'card'
+                    AND json_extract(payload, '$.change') IN ('created', 'moved')
+                  ORDER BY seq",
+            )?;
+            let v = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(v)
+        })
+        .await
+        .unwrap();
+    let of = |p: &str| -> Vec<(String, Option<i64>)> {
+        rows.iter()
+            .filter(|r| r.0 == p)
+            .map(|r| (r.1.clone(), r.2))
+            .collect()
+    };
+    assert_eq!(
+        of("flow"),
+        vec![
+            ("created".to_owned(), Some(1)),
+            ("moved".to_owned(), Some(1))
+        ]
+    );
+    assert_eq!(
+        of("plain"),
+        vec![("created".to_owned(), None), ("moved".to_owned(), None)]
+    );
 }

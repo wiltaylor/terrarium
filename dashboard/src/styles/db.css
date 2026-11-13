@@ -111,6 +111,10 @@ button.db-sort {
   width: min(calc(100vw - 32px), 820px);
 }
 .db-fields {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
   gap: 12px;

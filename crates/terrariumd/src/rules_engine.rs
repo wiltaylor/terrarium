@@ -1414,6 +1414,13 @@ pub fn card_condition_fails(
     if let Some(l) = cond.has_labels.iter().find(|l| !card.labels.contains(l)) {
         return Some(format!("{} has no label {l}", card.id));
     }
+    if !cond.any_labels.is_empty() && !cond.any_labels.iter().any(|l| card.labels.contains(l)) {
+        return Some(format!(
+            "{} has none of the labels {}",
+            card.id,
+            cond.any_labels.join(", ")
+        ));
+    }
     if let Some(l) = cond.lacks_labels.iter().find(|l| card.labels.contains(l)) {
         return Some(format!("{} has the label {l}", card.id));
     }
@@ -1786,7 +1793,10 @@ struct TimerRule {
 
 fn timer_rules(projects: &[ProjectRules]) -> Vec<TimerRule> {
     let mut out = Vec::new();
-    for p in projects {
+    // The column rules have their own `timer` trigger
+    // ([`columns::fire_timers`]): a `version.cut` or batch `job.queue` of a
+    // column rule gets no legacy timer (TER-1199).
+    for p in projects.iter().filter(|p| p.columns.is_none()) {
         for r in p.set.rules.iter().filter(|r| r.enabled) {
             for a in r
                 .actions
@@ -2028,6 +2038,16 @@ async fn drive_pass(state: &Shared, cache: &mut Cache, lanes: &mut Lanes) -> Api
                     fire_timers(&state.db, &projects, &mut cache.fired, Utc::now()).await
             {
                 warn!("the rule engine cannot check the timers: {e}");
+            }
+            // The column queues (TER-1114): the wait of a batch, and a
+            // release that no move or job end triggered.
+            if !state.rule_timers.held()
+                && let Err(e) = state
+                    .db
+                    .write("system", crate::store::board::queues::sweep_all)
+                    .await
+            {
+                warn!("the rule engine cannot release the column queues: {e}");
             }
         }
         let live = Arc::new(live_rules(&projects));
