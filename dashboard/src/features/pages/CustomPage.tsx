@@ -1,6 +1,7 @@
 import { useParams } from "@solidjs/router";
 import { createEffect, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { useInstance } from "../../instance";
+import { ApiError } from "../../api/http";
 import { A, useNavigate } from "../../instance/navigation";
 import type { DashboardRange, PageWidget, ProjectPageInput } from "../../api/types";
 import { SnapGrid } from "../../components/SnapGrid";
@@ -15,14 +16,20 @@ import { isSystemWidget, SystemWidget } from "./SystemWidget";
 import { LEGACY_WIDGETS, WIDGET_REGISTRY, featureWidget, widgetDefinition, PROJECT_WIDGET_VIEWS } from "./widgetRegistry";
 import type { ProjectWidgetKind, ProjectWidgetViews } from "../../api/types";
 import { projectPagesEnabled } from "./pageCapability";
+import { moveWidget, setPageWidgets, useLayoutEditor } from "./layoutDraft";
 
 export default function CustomPage() {
   const { api, events, key: instanceKey } = useInstance();
   const params = useParams<{ project: string; slug: string }>();
   const navigate = useNavigate();
   const now = useNow(5000);
+  const editor = useLayoutEditor();
   const key = () => `${params.project}/${params.slug}`;
-  const [page, { refetch, mutate }] = createResource(key, () => api.pages.get(params.project, params.slug));
+  // A tab added in the shared draft has no saved page yet.
+  const [page, { refetch, mutate }] = createResource(key, () => api.pages.get(params.project, params.slug).catch(e => {
+    if (e instanceof ApiError && e.status === 404 && editor?.page(params.slug)) return undefined;
+    throw e;
+  }));
   const scope = () => `${instanceKey}/${params.project}`;
   const [scopedRights, { refetch: refetchRights }] = createResource(scope, async current => ({ scope: current, value: await api.pages.list(params.project) }));
   const rights = () => !scopedRights.error && scopedRights.latest?.scope === scope() ? scopedRights.latest?.value : undefined;
@@ -35,19 +42,33 @@ export default function CustomPage() {
   const [editingWidget, setEditingWidget] = createSignal<string>();
   const [part, setPart] = createSignal("markdown");
   createEffect(on(key, () => { setDraft(null); setEditingWidget(undefined); setError(null); }));
-  const widgets = () => draft()?.widgets ?? page.latest?.widgets ?? [];
+  // Project pages v2 (TER-1073): the tab row owns one draft of all tabs. This
+  // page edits only its widgets in that draft and has no Edit, Save or Delete.
+  const shared = () => !!editor && enabled();
+  const sharedPage = () => shared() && editor!.editing() ? editor!.page(params.slug) : undefined;
+  const editing = () => shared() ? !!sharedPage() && canEdit() : !!draft() && canEdit();
+  createEffect(on(() => editor?.committed(), layout => {
+    const saved = layout?.pages.find(item => item.slug === params.slug);
+    if (saved) mutate(saved);
+  }, { defer: true }));
+  createEffect(on(() => editor?.draft(), (now, before) => { if (before && !now) { setEditingWidget(undefined); void refetch(); } }, { defer: true }));
+  const widgets = () => shared() && editor!.editing() ? sharedPage()?.widgets ?? [] : draft()?.widgets ?? page.latest?.widgets ?? [];
+  function changeWidgets(change: (widgets: PageWidget[]) => PageWidget[]) {
+    if (!canEdit()) return;
+    if (shared()) editor!.update(pages => { const current = pages.find(item => item.slug === params.slug); return current && setPageWidgets(pages, params.slug, change(current.widgets)); });
+    else setDraft(d => d && { ...d, widgets: change(d.widgets) });
+  }
   const off = events.on(e => {
     if (e.project !== params.project) return;
     if (e.kind === "page.updated") {
       void refetchRights();
-      if (!draft()) void refetch();
+      if (!draft() && !editor?.draft()) void refetch();
     }
     if (e.kind === "monitor.result") void refetchMonitors();
   });
   onCleanup(off);
   function patchWidget(id: string, patch: Partial<PageWidget>) {
-    if (!canEdit()) return;
-    setDraft(d => d && { ...d, widgets: d.widgets.map(w => w.id === id ? { ...w, ...patch } : w) });
+    changeWidgets(widgets => widgets.map(w => w.id === id ? { ...w, ...patch } : w));
   }
   function addWidget() {
     if (!canEdit()) return;
@@ -58,7 +79,7 @@ export default function CustomPage() {
     const y = Math.max(0, ...widgets().map(w => w.y + w.h));
     const widget: PageWidget = definition.host === "feature" ? featureWidget(k as ProjectWidgetKind, definition.view!, id, y) : { id, kind: k, x: 0, y, w: 12, h: 3,
       ...(k === "markdown" ? { text: "" } : k === "wiki" ? { wiki: "index" } : isSystemWidget(k) ? {} : { monitor: monitors.latest?.find(m => kindsFor(m.kind).includes(k as "stat"))?.id ?? "" }) };
-    setDraft(d => d && { ...d, widgets: [...d.widgets, widget] });
+    changeWidgets(widgets => [...widgets, widget]);
     setEditingWidget(widget.id);
   }
   async function save() {
@@ -75,8 +96,8 @@ export default function CustomPage() {
     catch (e) { setError(e); } finally { setSaving(false); }
   }
   return <>
-    <PageHead title={page.latest?.title ?? "Page"} level={2}>
-      <Show when={canEdit() && page.latest}>
+    <PageHead title={sharedPage()?.title ?? page.latest?.title ?? "Page"} level={2}>
+      <Show when={!shared() && canEdit() && page.latest}>
         <Show when={draft()} fallback={<button onClick={() => { const p = page.latest!; setDraft(structuredClone({ title: p.title, position: p.position, widgets: p.widgets, ...(p.builtin ? { builtin: p.builtin } : {}) })); }}>Edit page</button>}>
           <button disabled={saving()} onClick={() => { setDraft(null); setEditingWidget(undefined); setError(null); void refetch(); }}>Cancel</button>
           <button class="primary" disabled={saving()} onClick={() => void save()}>Save page</button>
@@ -84,22 +105,32 @@ export default function CustomPage() {
         </Show>
       </Show>
     </PageHead>
-    <ErrorBanner error={error() ?? page.error ?? scopedRights.error ?? monitors.error} />
-    <Show when={canEdit() && draft()}>{d => <div class="stack dash-editbar">
+    <ErrorBanner error={error() ?? (sharedPage() ? undefined : page.error) ?? scopedRights.error ?? monitors.error} />
+    <Show when={shared() && editor!.editing() && !sharedPage()}><p class="muted">This page is removed in the unsaved draft.</p></Show>
+    <Show when={editing() && shared()}><div class="stack dash-editbar">
+      <div class="row"><label>Widget kind<select value={part()} onChange={e => setPart(e.currentTarget.value)}><For each={WIDGET_REGISTRY}>{definition => <option value={definition.part}>{definition.part}</option>}</For></select></label>
+      <button disabled={widgets().length >= 104} onClick={addWidget}>Add widget</button></div>
+      <p>Drag Move or Resize to snap to cells. Arrow keys move, Shift+arrows resize. Save pages on the tab row keeps the changes of all tabs.</p>
+    </div></Show>
+    <Show when={!shared() && canEdit() && draft()}>{d => <div class="stack dash-editbar">
       <label>Page title<input required maxlength={120} value={d().title} onInput={e => setDraft(old => old && { ...old, title: e.currentTarget.value })} /></label>
       <label>Tab order (lower comes first)<input type="number" min="0" step="1" value={d().position} onInput={e => setDraft(old => old && { ...old, position: e.currentTarget.valueAsNumber })} /></label>
       <div class="row"><label>Widget kind<select value={part()} onChange={e => setPart(e.currentTarget.value)}><For each={enabled() ? WIDGET_REGISTRY : LEGACY_WIDGETS}>{definition => <option value={definition.part}>{definition.part}</option>}</For></select></label>
       <button disabled={widgets().length >= 104} onClick={addWidget}>Add widget</button></div>
       <p>Drag Move or Resize to snap to cells. Arrow keys move, Shift+arrows resize. Save to keep changes.</p>
     </div>}</Show>
-    <SnapGrid widgets={widgets()} documentFlow={enabled()} editing={!!draft() && canEdit()} onChange={widgets => { if (canEdit()) setDraft(d => d && { ...d, widgets }); }} renderWidget={() => null} renderLiveWidget={current => {
+    <SnapGrid widgets={widgets()} documentFlow={enabled()} editing={editing()} onChange={widgets => changeWidgets(() => widgets)} renderWidget={() => null} renderLiveWidget={current => {
       const w = new Proxy({} as PageWidget, { get: (_target, key) => Reflect.get(current(), key) });
       return <>
-      <Show when={draft() && canEdit()}><div class="row">
+      <Show when={editing()}><div class="row">
         <button onClick={() => setEditingWidget(editingWidget() === w.id ? undefined : w.id)}>Edit widget</button>
-        <button onClick={() => setDraft(d => d && { ...d, widgets: d.widgets.filter(item => item.id !== w.id) })}>Remove widget</button>
+        <button onClick={() => changeWidgets(widgets => widgets.filter(item => item.id !== w.id))}>Remove widget</button>
+        <Show when={shared() && (editor!.draft()?.length ?? 0) > 1}><label>Move to page<select value="" onChange={e => {
+          const to = e.currentTarget.value; e.currentTarget.value = "";
+          if (to) editor!.update(pages => moveWidget(pages, w.id, params.slug, to));
+        }}><option value="">Choose a page</option><For each={editor!.draft()?.filter(item => item.slug !== params.slug)}>{item => <option value={item.slug}>{item.title || item.slug}</option>}</For></select></label></Show>
       </div></Show>
-      <Show when={draft() && editingWidget() === w.id && canEdit()}>
+      <Show when={editing() && editingWidget() === w.id}>
         <Show when={enabled()}><label>Frame<select value={w.frame ?? "grid"} onChange={e => {
           const frame = e.currentTarget.value as NonNullable<PageWidget["frame"]>;
           patchWidget(w.id, { frame, ...(frame === "grid" ? {} : { x: 0, w: 12 }) });
@@ -133,7 +164,7 @@ export default function CustomPage() {
         </Show>
       </Show>
     </>; }} />
-    <Show when={page.latest && !widgets().length && !draft()}><p>This page has no widgets.</p></Show>
+    <Show when={(sharedPage() || page.latest) && !widgets().length && !editing()}><p>This page has no widgets.</p></Show>
     <A href={`/p/${encodeURIComponent(params.project)}/board`}>Board</A>
   </>;
 }
