@@ -13,6 +13,8 @@
 //!     claude.lock/               Claude's own legacy lock, `<realpath(dir)>.lock`
 //!     auth.json                  Codex
 //!     token                      Copilot: the GitHub token (`gho_`)
+//!     grok/                      0700, Grok Build (an xAI plan, `terrarium_core::xai`)
+//!       auth.json                0600, Grok's `~/.grok/auth.json`, refreshed by grok itself
 //! <state>/credentials/backup/   0700: copies of the shared logins that the migration moved (0600)
 //! <harness dir>/cred/account    the per-agent pointer: a symlink to one account's `store/`
 //! ```
@@ -24,6 +26,12 @@
 //! | Claude Code | `CLAUDE_SECURESTORAGE_CONFIG_DIR=<harness dir>/cred/account/claude`. Claude resolves the dir for each request (an mtime check), takes its locks inside it, and writes by a rename inside it. | live: take `.oauth_refresh.lock` and `.storage-write.lock` of both accounts, re-point, release |
 //! | Codex | The launch binds the account's `auth.json` over `$CODEX_HOME/auth.json`. Codex writes it in place. | restart with resume |
 //! | Copilot CLI | The launch sets `COPILOT_GITHUB_TOKEN` from `store/token`. | restart with resume |
+//! | Grok Build | The launch binds the account's `grok/auth.json` (only that file) over `~/.grok/auth.json`, read-write: grok refreshes it. | restart with resume |
+//!
+//! The credential files are private (0600 in 0700 dirs), not encrypted.
+//! The redaction matcher holds the string values of each Grok `auth.json`
+//! (`crate::secrets::redact`), and is built again after a Grok login and a
+//! verify, so a refreshed token joins it.
 //!
 //! pi uses API keys only and has no plan account (PLAN §16.3). An install
 //! from before can have pi accounts and the shared pi `auth.json` as a
@@ -79,6 +87,10 @@ pub const CLAUDE_CREDENTIALS: &str = ".credentials.json";
 pub const AUTH_FILE: &str = "auth.json";
 /// Copilot's token file.
 pub const TOKEN_FILE: &str = "token";
+/// Grok Build's credential directory in a store, and in its home (`~/.grok`).
+pub const GROK_DIR: &str = "grok";
+/// Grok's home dir under `$HOME`.
+pub const GROK_HOME_DIR: &str = ".grok";
 /// The env var that moves Claude's credential directory away from its
 /// config directory (Claude Code 2.1.310, `O0()`; not in the public docs).
 pub const CLAUDE_CRED_ENV: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
@@ -150,6 +162,7 @@ pub fn credential_path(store: &Path, harness: HarnessId) -> PathBuf {
         HarnessId::Claude => store.join(CLAUDE_DIR).join(CLAUDE_CREDENTIALS),
         HarnessId::Codex | HarnessId::Pi => store.join(AUTH_FILE),
         HarnessId::Copilot => store.join(TOKEN_FILE),
+        HarnessId::Grok => store.join(GROK_DIR).join(AUTH_FILE),
     }
 }
 
@@ -158,6 +171,7 @@ pub fn credential_path(store: &Path, harness: HarnessId) -> PathBuf {
 pub fn probe_home(store: &Path, harness: HarnessId) -> PathBuf {
     match harness {
         HarnessId::Claude => store.join(CLAUDE_DIR),
+        HarnessId::Grok => store.join(GROK_DIR),
         _ => store.to_path_buf(),
     }
 }
@@ -547,11 +561,16 @@ fn write_credential_within(
     if harness == HarnessId::Claude {
         private_dir(&store.join(CLAUDE_DIR)).map_err(err)?;
     }
+    if harness == HarnessId::Grok {
+        private_dir(&store.join(GROK_DIR)).map_err(err)?;
+    }
     let _one = swaps();
     let _locks = harness_locks(harness, &[&store], timeout).map_err(err)?;
     let path = credential_path(&store, harness);
     match harness {
-        HarnessId::Codex => write_in_place(&path, bytes),
+        // Codex and Grok: in place, because a running agent has the file
+        // bound.
+        HarnessId::Codex | HarnessId::Grok => write_in_place(&path, bytes),
         _ => write_renamed(&path, bytes),
     }
     .map_err(err)
@@ -631,7 +650,65 @@ pub fn credential_in_home(
             Some((token.into_bytes(), login, None))
         }
         HarnessId::Pi => None,
+        HarnessId::Grok => {
+            // `<home>/.grok/auth.json`. Its fields are not documented: a
+            // login is a JSON object with at least one non-empty string.
+            let path = home.join(GROK_HOME_DIR).join(AUTH_FILE);
+            let v = json(&path)?;
+            if !grok_auth_usable(&v) {
+                return None;
+            }
+            Some((read_nofollow(&path).ok()?, None, None))
+        }
     }
+}
+
+/// True when a Grok `auth.json` value holds a login: an object with a
+/// non-empty string somewhere in it.
+pub fn grok_auth_usable(v: &Value) -> bool {
+    v.is_object() && !json_strings(v).is_empty()
+}
+
+/// Each non-empty string value in `v` (not the keys), in order. The
+/// redaction matcher takes these from a Grok `auth.json`.
+pub fn json_strings(v: &Value) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::String(s) if !s.trim().is_empty() => out.push(s.as_str()),
+            Value::Array(a) => stack.extend(a.iter().rev()),
+            Value::Object(o) => stack.extend(o.values().rev()),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The secret values of each Grok login in the accounts, by subscription
+/// name: the string values of `store/grok/auth.json`. Secrets: for the
+/// redaction matcher only.
+pub fn grok_secret_values(state_dir: &Path) -> Vec<(String, Vec<String>)> {
+    let Ok(entries) = fs::read_dir(credentials_dir(state_dir).join(ACCOUNTS_DIR)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let path = credential_path(&store_dir(state_dir, &name), HarnessId::Grok);
+        let Some(v) = read_nofollow(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        else {
+            continue;
+        };
+        let values: Vec<String> = json_strings(&v).into_iter().map(str::to_owned).collect();
+        if !values.is_empty() {
+            out.push((name, values));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 /// Move the login of a finished login session from its scratch home into
@@ -716,6 +793,7 @@ pub fn plan_provider(harness: HarnessId, provider: &str) -> bool {
         HarnessId::Codex => matches!(provider, "openai" | "openai-codex"),
         HarnessId::Copilot => matches!(provider, "github" | "github-copilot" | "copilot"),
         HarnessId::Pi => false,
+        HarnessId::Grok => terrarium_core::xai::is_xai(provider),
     }
 }
 
@@ -777,6 +855,8 @@ pub fn migration_pending(harness: HarnessId, home: &Path) -> bool {
             credential_in_home(harness, home).is_some()
         }
         HarnessId::Pi => pi_link_installed(home),
+        // No shared Grok login from before: nothing to move.
+        HarnessId::Grok => false,
     }
 }
 
@@ -1106,6 +1186,23 @@ pub fn prepare_launch(input: &LaunchInput<'_>) -> Result<LaunchAccounts, String>
                 writable: true,
             });
         }
+        HarnessId::Grok => {
+            // Only grok's credential file of the account, read-write
+            // (grok refreshes it). The rest of the account and of the
+            // store stays out of the sandbox. bwrap needs a mount point.
+            let mount = input.shared_home.join(AUTH_FILE);
+            if fs::symlink_metadata(&mount).is_err() {
+                fs::create_dir_all(input.shared_home).map_err(fs_err)?;
+                write_renamed(&mount, b"{}").map_err(fs_err)?;
+            }
+            let source =
+                fs::canonicalize(credential_path(&store, HarnessId::Grok)).map_err(fs_err)?;
+            out.overlays.push(FileOverlay {
+                source,
+                target: input.home_inside.join(AUTH_FILE),
+                writable: true,
+            });
+        }
         HarnessId::Copilot => {
             if copilot_token(input.state_dir, current).is_none() {
                 return Err(format!("the Copilot token of `{current}` cannot be read"));
@@ -1397,7 +1494,7 @@ mod tests {
                 HarnessId::Claude => assert_eq!(m.moved, ["anthropic-max-20x"]),
                 HarnessId::Codex => assert_eq!(m.moved, ["openai-pro"]),
                 HarnessId::Copilot => assert_eq!(m.moved, ["github-copilot"]),
-                HarnessId::Pi => assert!(m.is_empty(), "{m:?}"),
+                HarnessId::Pi | HarnessId::Grok => assert!(m.is_empty(), "{m:?}"),
             }
             for b in &m.backups {
                 assert_eq!(mode(b), 0o600);
@@ -1837,6 +1934,136 @@ mod tests {
         write_credential(&state, "pro", HarnessId::Codex, br#"{"tokens": {"a": 2}}"#).unwrap();
         assert_eq!(fs::metadata(&p).unwrap().ino(), ino);
         assert!(fs::read_to_string(&p).unwrap().contains('2'));
+    }
+
+    /// TER-1191: a Grok Build login of an xAI plan row. The import takes
+    /// only `~/.grok/auth.json` of the scratch home into `store/grok/`
+    /// (0700 dirs, a 0600 file), a relogin keeps the inode (a running agent
+    /// has it bound), the launch binds only that file read-write, and the
+    /// logout removes the account. No real sign-in: a fake `auth.json`.
+    #[test]
+    fn a_grok_login_lifecycle() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let scratch = tmp.path().join("scratch");
+        fs::create_dir_all(scratch.join(GROK_HOME_DIR)).unwrap();
+        // No login yet: an empty object is no login.
+        fs::write(scratch.join(GROK_HOME_DIR).join(AUTH_FILE), "{}").unwrap();
+        assert!(credential_in_home(HarnessId::Grok, &scratch).is_none());
+        assert!(import_login(&state, "x-super", HarnessId::Grok, "xai", &scratch).is_err());
+        let login = r#"{"session": {"access_token": "grok-access-AAAA1111bbbb2222", "refresh_token": "grok-refresh-CCCC3333dddd4444"}, "expires_at": 1}"#;
+        fs::write(scratch.join(GROK_HOME_DIR).join(AUTH_FILE), login).unwrap();
+        // Other files of the scratch home stay there.
+        fs::write(scratch.join(GROK_HOME_DIR).join("config.toml"), "x = 1").unwrap();
+        import_login(&state, "x-super", HarnessId::Grok, "xai", &scratch).unwrap();
+
+        let store = store_dir(&state, "x-super");
+        let cred = credential_path(&store, HarnessId::Grok);
+        assert_eq!(cred, store.join("grok").join("auth.json"));
+        assert_eq!(fs::read_to_string(&cred).unwrap(), login);
+        assert_eq!(mode(&cred), 0o600);
+        for d in [
+            &store,
+            &store.join(GROK_DIR),
+            &account_dir(&state, "x-super"),
+        ] {
+            assert_eq!(mode(d), 0o700, "{d:?}");
+        }
+        assert!(!store.join(GROK_DIR).join("config.toml").exists());
+        assert!(has_credential(&state, "x-super", HarnessId::Grok));
+        assert!(!has_credential(&state, "x-super", HarnessId::Codex));
+        let meta = read_meta(&state, "x-super").unwrap();
+        assert_eq!(meta.harness, HarnessId::Grok);
+        assert_eq!(meta.provider.as_deref(), Some("xai"));
+        assert_eq!(meta.source, "login");
+        // account.json has no secret.
+        let raw = fs::read_to_string(account_dir(&state, "x-super").join(META_FILE)).unwrap();
+        assert!(
+            !raw.contains("grok-access") && !raw.contains("grok-refresh"),
+            "{raw}"
+        );
+        assert!(plan_provider(HarnessId::Grok, "xai"));
+        assert!(!plan_provider(HarnessId::Grok, "anthropic"));
+
+        // The redaction values: each string of the file.
+        let values = grok_secret_values(&state);
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].0, "x-super");
+        assert!(
+            values[0]
+                .1
+                .contains(&"grok-access-AAAA1111bbbb2222".to_owned())
+        );
+        assert!(
+            values[0]
+                .1
+                .contains(&"grok-refresh-CCCC3333dddd4444".to_owned())
+        );
+
+        // A relogin replaces the file in place.
+        let ino = fs::metadata(&cred).unwrap().ino();
+        let again = r#"{"session": {"access_token": "grok-access-EEEE5555ffff6666"}}"#;
+        fs::write(scratch.join(GROK_HOME_DIR).join(AUTH_FILE), again).unwrap();
+        import_login(&state, "x-super", HarnessId::Grok, "xai", &scratch).unwrap();
+        assert_eq!(fs::metadata(&cred).unwrap().ino(), ino);
+        assert_eq!(fs::read_to_string(&cred).unwrap(), again);
+        assert_eq!(
+            read_meta(&state, "x-super").unwrap().created_at,
+            meta.created_at
+        );
+
+        // The launch: only the account's grok/auth.json, read-write, over
+        // `~/.grok/auth.json`; no store bind, no env, no credential var.
+        let home = tmp.path().join("auth/grok");
+        let l = prepare_launch(&LaunchInput {
+            state_dir: &state,
+            harness: HarnessId::Grok,
+            subscription: Some("x-super"),
+            default: None,
+            pool: &[],
+            harness_dir: &tmp.path().join("agent/harness"),
+            shared_home: &home,
+            home_inside: Path::new("/home/agent/.grok"),
+            sandboxed: true,
+        })
+        .unwrap();
+        assert_eq!(l.account.as_deref(), Some("x-super"));
+        assert!(l.stores.is_empty() && l.bound.is_empty() && l.env.is_empty());
+        assert!(l.credential_vars.is_empty() && l.cred_alias.is_none());
+        assert_eq!(
+            l.overlays,
+            [FileOverlay {
+                source: fs::canonicalize(&cred).unwrap(),
+                target: PathBuf::from("/home/agent/.grok/auth.json"),
+                writable: true,
+            }]
+        );
+        assert_eq!(fs::read_to_string(home.join(AUTH_FILE)).unwrap(), "{}");
+        assert!(credential_env(&state, HarnessId::Grok, Some("x-super")).is_empty());
+
+        // The logout removes the account and its login.
+        assert!(remove(&state, "x-super").unwrap());
+        assert!(!has_credential(&state, "x-super", HarnessId::Grok));
+        assert!(grok_secret_values(&state).is_empty());
+        assert!(!remove(&state, "x-super").unwrap());
+    }
+
+    /// An `account.json` from before TER-1191 reads as it did.
+    #[test]
+    fn a_legacy_account_record_still_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        fs::create_dir_all(account_dir(&state, "pro")).unwrap();
+        fs::write(
+            account_dir(&state, "pro").join(META_FILE),
+            r#"{"harness": "codex", "source": "migration", "created_at": "a", "updated_at": "b"}"#,
+        )
+        .unwrap();
+        let m = read_meta(&state, "pro").unwrap();
+        assert_eq!(m.harness, HarnessId::Codex);
+        assert_eq!(m.provider, None);
+        assert_eq!(list(&state).len(), 1);
     }
 
     #[test]

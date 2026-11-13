@@ -259,7 +259,7 @@ fn own_session_area(harness: HarnessId) -> Option<(&'static str, &'static str)> 
         HarnessId::Claude => Some(("claude", "projects")),
         HarnessId::Codex => Some(("codex", "sessions")),
         HarnessId::Copilot => Some(("copilot", "session-state")),
-        HarnessId::Pi => None,
+        HarnessId::Pi | HarnessId::Grok => None,
     }
 }
 
@@ -389,6 +389,8 @@ pub fn check_transcript(
             HarnessId::Copilot => parent == session,
             // A per-agent directory: no other agent writes there.
             HarnessId::Pi => true,
+            // No grok sessions are read yet (TER-1192).
+            HarnessId::Grok => false,
         };
     if !named {
         return Err(format!(

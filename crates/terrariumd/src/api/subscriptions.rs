@@ -1400,13 +1400,19 @@ async fn verify(
         Some(meta) => {
             let kind = login::kind_for(meta.harness);
             let pi = (kind == login::LoginKind::Pi).then(|| sub.provider.clone());
-            login::check_status_in(
+            let st = login::check_status_in(
                 &state,
                 kind,
                 pi.as_deref(),
                 &login::CheckHome::Account(sub.name.clone()),
             )
-            .await
+            .await;
+            // Grok refreshes its own login file: a verify puts the tokens
+            // of today into the redaction matcher (TER-1191).
+            if meta.harness == HarnessId::Grok {
+                crate::secrets::redact::rebuild(&state).await;
+            }
+            st
         }
         None => {
             let Some((kind, provider)) = login::kind_of(&sub) else {
@@ -1466,6 +1472,9 @@ async fn logout(
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?
             .map_err(|e| ApiError::internal(format!("cannot remove the account: {e}")))?;
+        // The removed login leaves the redaction matcher (a delete: after
+        // it, PLAN §16b.6).
+        crate::secrets::redact::rebuild(&state).await;
         let n = name.clone();
         state
             .db
@@ -1708,6 +1717,18 @@ async fn api_key(
                 "cannot store a moonshot key on subscription `{name}`: {why}"
             )));
         }
+    }
+    // An xai key never goes on an xai plan row (TER-1191): the X
+    // Subscription is a Grok Build login, and an API key is billed apart.
+    if terrarium_core::xai::is_xai(&key.provider)
+        && let Some(s) = &exists
+        && terrarium_core::xai::is_plan_row(&s.provider, s.plan.as_deref())
+    {
+        return Err(ApiError::invalid(format!(
+            "cannot store an xai API key on subscription `{name}`: it is an xai {} plan (a \
+             Grok Build login); store the key on another subscription",
+            s.plan.as_deref().unwrap_or_default()
+        )));
     }
     // A self-hosted key goes on a self-hosted subscription only, and a new
     // one needs the server's base URL.

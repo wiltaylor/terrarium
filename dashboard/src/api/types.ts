@@ -41,7 +41,11 @@ export type ProjectFeatureWidget = { [K in ProjectWidgetKind]: Omit<PageWidget, 
 } }[ProjectWidgetKind];
 export interface ProjectPage extends ProjectPageInput { project: string; slug: string; updated_at: string; updated_by: string }
 /** The caller's existing rights in the project (TER-1077). Each is the result of the domain endpoint's own policy check. */
-export interface ProjectPageRights { write_project: boolean; admin_project: boolean; manage_schedules: boolean; manage_global: boolean; operator: boolean }
+/**
+ * `review_wiki`: write_project and the admin path of the wiki review check, for any page.
+ * `review_as`: the page `reviewer` values that name the caller (an agent with write_project), TER-1157.
+ */
+export interface ProjectPageRights { write_project: boolean; review_wiki?: boolean; review_as?: string[]; admin_project: boolean; manage_schedules: boolean; manage_global: boolean; operator: boolean }
 export interface ProjectPageList { items: ProjectPage[]; can_edit: boolean; rights?: ProjectPageRights; dashboard_slug?: string; capabilities?: { project_pages_v2?: boolean } }
 export interface ProjectLayoutPage extends ProjectPageInput { slug: string }
 export interface ProjectLayout { revision: number; pages: ProjectPage[] }

@@ -60,22 +60,26 @@ export default function WikiPage() {
 /**
  * `search` seeds the local page-tree search. Only a changed configured value replaces it.
  * `canWrite` false (no write_project) hides Edit, review and Restore (TER-1134).
+ * `canReview` gets the page's `reviewer` and gates Approve and Comment like the
+ * review endpoint (TER-1157). Without it the review follows `canWrite`.
  */
-export function WikiBrowserPanel(props: { project: string; search?: string; canWrite?: boolean }) {
-  return <Show when={props.project} keyed>{(project) => <LocalWiki project={project} search={props.search} canWrite={props.canWrite} />}</Show>;
+type ReviewGate = (reviewer?: string | null) => boolean;
+export function WikiBrowserPanel(props: { project: string; search?: string; canWrite?: boolean; canReview?: ReviewGate }) {
+  return <Show when={props.project} keyed>{(project) => <LocalWiki project={project} search={props.search} canWrite={props.canWrite} canReview={props.canReview} />}</Show>;
 }
 
-function LocalWiki(props: { project: string; search?: string; canWrite?: boolean }) {
+function LocalWiki(props: { project: string; search?: string; canWrite?: boolean; canReview?: ReviewGate }) {
   const [path, setPath] = createSignal("index");
-  return <WikiContent project={props.project} path={path()} onPath={setPath} search={props.search} canWrite={props.canWrite} />;
+  return <WikiContent project={props.project} path={path()} onPath={setPath} search={props.search} canWrite={props.canWrite} canReview={props.canReview} />;
 }
 
-function WikiContent(props: { project: string; path: string; onPath?: (path: string) => void; search?: string; canWrite?: boolean }) {
+function WikiContent(props: { project: string; path: string; onPath?: (path: string) => void; search?: string; canWrite?: boolean; canReview?: ReviewGate }) {
   const { api, projects, bookmarks } = useInstance();
   const path = () => props.path;
   const bookmarkUrl = () => wikiHref(props.project, path());
   const [chosenTab, setTab] = createSignal<(typeof TABS)[number]["id"]>("page");
   const canWrite = () => props.canWrite !== false;
+  const canReview = (reviewer?: string | null) => canWrite() && (props.canReview ? props.canReview(reviewer) : true);
   // Without the write right the Edit tab is gone; a lost right leaves it.
   const tab = () => (chosenTab() === "edit" && !canWrite() ? "page" : chosenTab());
   const tabs = () => (canWrite() ? TABS : TABS.filter((t) => t.id !== "edit"));
@@ -191,7 +195,7 @@ function WikiContent(props: { project: string; path: string; onPath?: (path: str
                 </div>
               </div>
 
-              <Show when={p().status === "ready_for_review" && canWrite()}>
+              <Show when={p().status === "ready_for_review" && canReview(p().reviewer)}>
                 <div class="review-bar">
                   <strong>Ready for review</strong>
                   <span class="muted small">reviewer: {meta().reviewer ?? p().reviewer ?? "operator"}</span>

@@ -308,6 +308,7 @@ pub fn home_rel(harness: HarnessId) -> &'static str {
         HarnessId::Codex => ".codex",
         HarnessId::Copilot => ".copilot",
         HarnessId::Pi => ".pi/agent",
+        HarnessId::Grok => ".grok",
     }
 }
 

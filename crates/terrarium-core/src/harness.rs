@@ -11,6 +11,11 @@ pub enum HarnessId {
     Codex,
     Copilot,
     Pi,
+    /// Grok Build (`grok`), the harness of an xAI plan (`crate::xai`).
+    /// A value only: it is not in [`HarnessId::ALL`] (no pin, no installer,
+    /// no adapter) until the grok adapter lands (TER-1192), and a launch of
+    /// it is refused.
+    Grok,
 }
 
 impl HarnessId {
@@ -23,6 +28,7 @@ impl HarnessId {
             Self::Codex => "codex",
             Self::Copilot => "copilot",
             Self::Pi => "pi",
+            Self::Grok => "grok",
         }
     }
 
@@ -38,6 +44,7 @@ impl HarnessId {
             Self::Codex => "/auth/codex",
             Self::Copilot => "/auth/copilot",
             Self::Pi => "/auth/pi",
+            Self::Grok => "/auth/grok",
         }
     }
 
@@ -50,6 +57,8 @@ impl HarnessId {
     pub fn compact_command(self) -> Option<&'static str> {
         match self {
             Self::Claude | Self::Codex | Self::Copilot | Self::Pi => Some("/compact"),
+            // Not checked yet (TER-1192).
+            Self::Grok => None,
         }
     }
 
@@ -60,6 +69,9 @@ impl HarnessId {
             Self::Codex => "CODEX_HOME",
             Self::Copilot => "COPILOT_HOME",
             Self::Pi => "PI_CODING_AGENT_DIR",
+            // Grok Build reads `~/.grok` (its login is `~/.grok/auth.json`):
+            // its home is the dir that holds `.grok`.
+            Self::Grok => "HOME",
         }
     }
 }
@@ -75,6 +87,7 @@ impl FromStr for HarnessId {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::ALL
             .into_iter()
+            .chain([Self::Grok])
             .find(|h| h.as_str() == s)
             .ok_or_else(|| format!("unknown harness `{s}`"))
     }

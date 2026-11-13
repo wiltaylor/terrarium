@@ -35,8 +35,8 @@ const { default: CustomPage } = await import("./CustomPage");
 
 const P = "terrarium";
 const none: ProjectPageRights = { write_project: false, admin_project: false, manage_schedules: false, manage_global: false, operator: false };
-const member: ProjectPageRights = { ...none, write_project: true };
-const admin: ProjectPageRights = { write_project: true, admin_project: true, manage_schedules: true, manage_global: false, operator: false };
+const member: ProjectPageRights = { ...none, write_project: true, review_as: ["member", "01M7AG3NJV86WX1GT11K5BF6MB", `${P}/member`] };
+const admin: ProjectPageRights = { write_project: true, review_wiki: true, review_as: ["lead", "01M7AG3NJV86WX1GT11K5BF6LD", `${P}/lead`], admin_project: true, manage_schedules: true, manage_global: false, operator: false };
 const server = { enabled: true, rights: admin, revision: 4, pages: [] as ProjectPage[], fail: false };
 const viewport = (id: string, kind: PageWidget["kind"], view?: string, y = 0): PageWidget =>
   ({ id, kind, x: 0, y, w: 12, h: 12, frame: "viewport", ...(view ? { options: { view: view as never } } : {}) });
@@ -224,9 +224,9 @@ it("ON: a reader sees no write control in the Repos widget", async () => {
 it("ON: a reader sees no write control in the Knowledge widgets (wiki, DB types, DB records)", async () => {
   const records = { ...viewport("k-records", "db", "records", 24), options: { view: "records", search: "type:items" } } as PageWidget;
   server.pages = [page("knowledge", 0, [viewport("k-wiki", "wiki_index", "browser"), viewport("k-types", "db", "types", 12), records], "knowledge")];
-  const wiki = { id: "W1", project: P, path: "index", title: "Index", body: "# Index", rev: 2, status: "ready_for_review", author: "operator", author_name: "operator", updated_at: AT, links: [] };
+  const wiki: { reviewer?: string } & Record<string, unknown> = { id: "W1", project: P, path: "index", title: "Index", body: "# Index", rev: 2, status: "ready_for_review", author: "operator", author_name: "operator", updated_at: AT, links: [] };
   vi.spyOn(api.wiki, "tree").mockResolvedValue([{ path: "index", title: "Index" }] as never);
-  vi.spyOn(api.wiki, "get").mockResolvedValue(wiki as never);
+  vi.spyOn(api.wiki, "get").mockImplementation(async () => structuredClone(wiki) as never);
   vi.spyOn(api.wiki, "backlinks").mockResolvedValue([]);
   vi.spyOn(api.wiki, "revisions").mockResolvedValue([1, 2].map((rev) => ({ rev, author: "operator", author_name: "operator", summary: `rev ${rev}`, created_at: AT })) as never);
   const type = { id: "T1", project: P, name: "items", description: "", fields: [{ name: "title", kind: "string" }], records: 1, created_at: AT, updated_at: AT };
@@ -249,18 +249,41 @@ it("ON: a reader sees no write control in the Knowledge widgets (wiki, DB types,
   expect(button(widgetEl(host, "k-types")!, "New type")).toBeUndefined();
   const row = await waitFor(() => { const r = widgetEl(host, "k-records")!.querySelector<HTMLElement>("tr.clickable"); expect(r).toBeTruthy(); return r!; });
   for (const text of ["New record", "Schema", "Delete type"]) expect(button(widgetEl(host, "k-records")!, text), text).toBeUndefined();
-  // A reader opens a record read-only: no Save and no Delete record.
+  // A reader opens a record read-only: no Save, no Delete record, and read-only inputs (TER-1157).
   row.click();
   await waitFor(() => expect(button(document.body, "Close")).toBeTruthy());
   expect(button(document.body, "Save")).toBeUndefined();
   expect(button(document.body, "Delete record")).toBeUndefined();
+  const title = document.body.querySelector<HTMLInputElement>(".db-modal .db-field input")!;
+  expect(title.value).toBe("First");
+  expect(title.matches(":disabled")).toBe(true);
+  title.value = "Changed";
+  title.dispatchEvent(new Event("input", { bubbles: true }));
+  document.body.querySelector<HTMLFormElement>(".db-modal form")!.requestSubmit();
   for (const write of writes) expect(write).not.toHaveBeenCalled();
+  button(document.body, "Close")!.click();
 
   // A member writes the wiki and the DB, but deletes no type with records (project_admin).
+  // TER-1157: the page names another reviewer, so the member does not review it.
+  wiki.reviewer = "lead";
   server.rights = member;
   host = remount(`/p/${P}/pages/knowledge`);
   await widgetButton(host, "k-wiki", "Edit");
-  await widgetButton(host, "k-wiki", "Approve");
+  expect(button(widgetEl(host, "k-wiki")!, "Approve")).toBeUndefined();
+  expect(button(widgetEl(host, "k-wiki")!, "Comment")).toBeUndefined();
+  // The member that the page names reviews it, by name, ID or project/name.
+  for (const name of member.review_as!) {
+    wiki.reviewer = name;
+    host = remount(`/p/${P}/pages/knowledge`);
+    await widgetButton(host, "k-wiki", "Approve");
+    await widgetButton(host, "k-wiki", "Comment");
+  }
+  // The member's record inputs are editable.
+  const memberRow = await waitFor(() => { const r = widgetEl(host, "k-records")!.querySelector<HTMLElement>("tr.clickable"); expect(r).toBeTruthy(); return r!; });
+  memberRow.click();
+  await waitFor(() => expect(button(document.body, "Save")).toBeTruthy());
+  expect(document.body.querySelector<HTMLInputElement>(".db-modal .db-field input")!.matches(":disabled")).toBe(false);
+  button(document.body, "Cancel")!.click();
   await widgetButton(host, "k-types", "New type");
   await widgetButton(host, "k-records", "New record");
   await widgetButton(host, "k-records", "Schema");
@@ -268,6 +291,8 @@ it("ON: a reader sees no write control in the Knowledge widgets (wiki, DB types,
   server.rights = admin;
   host = remount(`/p/${P}/pages/knowledge`);
   await widgetButton(host, "k-records", "Delete type");
+  // An admin reviews a page that names another reviewer.
+  await widgetButton(host, "k-wiki", "Approve");
 });
 
 it("ON: a reader sees no write control in the Logs mail widget, and mail scope controls stay", async () => {
@@ -303,13 +328,30 @@ it("ON: a reader sees no write control in the Logs mail widget, and mail scope c
 });
 
 it("ON: the Repos, Knowledge and Logs grants follow the domain rights, never can_edit", () => {
+  // The boolean grants; reviewWiki is a check of the page's reviewer.
+  const flags = (g: ReturnType<typeof pageGrants>["knowledgeLogsRepos"]) => Object.fromEntries(Object.entries(g).filter(([k]) => k !== "reviewWiki"));
   const reader = pageGrants({ ...none }, P).knowledgeLogsRepos;
-  expect(Object.values(reader).some(Boolean)).toBe(false);
-  expect(Object.values(pageGrants(undefined, P).knowledgeLogsRepos).some(Boolean)).toBe(false);
-  expect(pageGrants(member, P).knowledgeLogsRepos).toEqual({
+  expect(Object.values(flags(reader)).some(Boolean)).toBe(false);
+  expect(Object.values(flags(pageGrants(undefined, P).knowledgeLogsRepos)).some(Boolean)).toBe(false);
+  for (const name of [undefined, null, "", "lead", "member"]) {
+    expect(reader.reviewWiki(name)).toBe(false);
+    expect(pageGrants(undefined, P).knowledgeLogsRepos.reviewWiki(name)).toBe(false);
+  }
+  // `review_as` without write_project (a cross-project reader) grants no review.
+  expect(pageGrants({ ...none, review_wiki: true, review_as: ["member"] }, P).knowledgeLogsRepos.reviewWiki("member")).toBe(false);
+  const m = pageGrants(member, P).knowledgeLogsRepos;
+  expect(flags(m)).toEqual({
     attachRepo: false, checkoutRepo: true, writeWiki: true, writeDb: true, purgeDbType: false, cardFromMail: true, replyAsProject: false,
   });
-  expect(Object.values(pageGrants(admin, P).knowledgeLogsRepos).every(Boolean)).toBe(true);
+  // TER-1157: a member reviews only a page that names it (policy::review_page).
+  expect(m.reviewWiki("lead")).toBe(false);
+  expect(m.reviewWiki(undefined)).toBe(false);
+  expect(m.reviewWiki("other/member")).toBe(false);
+  for (const name of member.review_as!) expect(m.reviewWiki(name)).toBe(true);
+  const a = pageGrants(admin, P).knowledgeLogsRepos;
+  expect(Object.values(flags(a)).every(Boolean)).toBe(true);
+  expect(a.reviewWiki(undefined)).toBe(true);
+  expect(a.reviewWiki("member")).toBe(true);
 });
 
 it("ON: a failed rights read leaves the widgets read-only", () => {

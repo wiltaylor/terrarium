@@ -1659,6 +1659,23 @@ alert_at = 80                          # percent of any window
         assert_eq!(def.checkout.on_agent_create, ["terrarium"]);
     }
 
+    /// R3 of TER-1113 (TER-1199): a project file cannot give `board_flow =
+    /// columns`; `code` and `rules` still read, and the stored word reads.
+    #[test]
+    fn a_project_file_cannot_give_the_columns_flow() {
+        for (word, flow) in [("code", BoardFlow::Code), ("rules", BoardFlow::Rules)] {
+            let def: ProjectDef =
+                toml::from_str(&format!("name = \"p\"\nboard_flow = \"{word}\"\n")).expect(word);
+            assert_eq!(def.board_flow, Some(flow));
+        }
+        let err = toml::from_str::<ProjectDef>("name = \"p\"\nboard_flow = \"columns\"\n")
+            .expect_err("columns is not a file value");
+        assert!(err.to_string().contains("columns"), "{err}");
+        assert!(serde_json::from_value::<BoardFlow>(serde_json::json!("columns")).is_err());
+        assert_eq!(BoardFlow::parse(Some("columns")), BoardFlow::Columns);
+        assert_eq!(BoardFlow::Columns.as_str(), "columns");
+    }
+
     #[test]
     fn target_example_round_trips() {
         let def: TargetDef = round_trip(TARGET);

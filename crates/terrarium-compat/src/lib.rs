@@ -76,7 +76,7 @@ pub fn default_model(h: HarnessId) -> &'static str {
         HarnessId::Claude => "haiku",
         HarnessId::Codex => "gpt-6-luna",
         HarnessId::Copilot => "claude-haiku-4.5",
-        HarnessId::Pi => "",
+        HarnessId::Pi | HarnessId::Grok => "",
     }
 }
 
@@ -110,6 +110,7 @@ impl Settings {
                     HarnessId::Codex => home.join(".codex"),
                     HarnessId::Copilot => home.join(".copilot"),
                     HarnessId::Pi => home.join(".pi/agent"),
+                    HarnessId::Grok => home.join(".grok"),
                 };
                 let path = var(&format!("TERRARIUM_COMPAT_{}_HOME", env_name(*h)))
                     .map(PathBuf::from)

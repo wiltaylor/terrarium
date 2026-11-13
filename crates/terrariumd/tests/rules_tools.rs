@@ -605,6 +605,7 @@ async fn rights_plan_as_a_reader_apply_as_an_admin() {
 
 /// TER-1090: a reload retires exact generated legacy wait overrides with
 /// a hash-checked write, restoring the built-ins. A later load is a no-op.
+/// An edited block keeps its pair (TER-1130).
 #[tokio::test]
 async fn a_reload_retires_old_wait_overrides() {
     let td = lab().await;
@@ -678,19 +679,44 @@ async fn a_reload_retires_old_wait_overrides() {
     assert_eq!(td.get("/api/projects/p/rules").await.ok()["text"], text);
     assert_eq!(audit_rows(&td, "rules.put").await.len(), 2);
 
-    // A custom cap makes the park block unrecognized, so a reload keeps it.
+    // A custom cap makes the park block unrecognized. The pair retires as
+    // one (TER-1130), so a reload keeps both blocks as they are.
     let edited = old.replacen("max_per_hour = 600", "max_per_hour = 60", 1);
     let r = td
         .put("/api/projects/p/rules", json!({"text": edited}))
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     td.post_empty("/api/reload").await.ok();
-    let after = td.get("/api/projects/p/rules").await.ok()["text"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(after.contains("max_per_hour = 60"), "{after}");
-    assert!(after.contains("rule \"agent-park\""), "{after}");
-    assert!(!after.contains("rule \"agent-unpark\""), "{after}");
+    assert_eq!(td.get("/api/projects/p/rules").await.ok()["text"], edited);
+    assert_eq!(audit_rows(&td, "rules.put").await.len(), 3);
+
+    // TER-1130: a TER-243 marked pair that the operator edited after the
+    // mark (the merge queue taken out again) stays at the next load.
+    let own = terrarium_core::rules_file::parse(&old, "rules.wcl", &ctx).unwrap();
+    let mut removed = old.clone();
+    for rule in own.rules {
+        let mut marked = rule.clone();
+        marked.description = Some(format!(
+            "{} {}",
+            rule.description.as_deref().unwrap_or_default(),
+            terrarium_core::rules_tools::MERGE_QUEUE_MARK
+        ));
+        removed = removed.replacen(
+            &terrarium_core::rules_tools::to_wcl(&rule),
+            &terrarium_core::rules_tools::to_wcl(&marked),
+            1,
+        );
+    }
+    assert!(
+        removed.contains("merge_queue added (TER-243)."),
+        "{removed}"
+    );
+    assert!(!removed.contains("\"merge_queue\""), "{removed}");
+    let r = td
+        .put("/api/projects/p/rules", json!({"text": removed}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    td.post_empty("/api/reload").await.ok();
+    assert_eq!(td.get("/api/projects/p/rules").await.ok()["text"], removed);
     assert_eq!(audit_rows(&td, "rules.put").await.len(), 4);
 }

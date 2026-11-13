@@ -7049,7 +7049,7 @@ all projects. Targets are project targets by default: a global target
 
 | Field | Meaning |
 |---|---|
-| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Without `work_root`, when the agent user cannot create `/src/terrarium` (permission denied or a read-only file system), the root falls back to `~/.terrarium-work/<project>/<agent-name>` of that user, with one daemon warning per target; the root keeps that base until cleanup. The run spool of other callers (`<work_root>/.terrarium-runs`, below) falls back the same way, to `~/.terrarium-work/.terrarium-runs`, and a run keeps the spool it started in. A `work_root` that is set never falls back: its failure names it and `--work-root`. Set it with `terrarium admin target edit <t> --work-root <path>`. Keep project shared caches outside each agent root. |
+| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Without `work_root`, when the agent user cannot create `/src/terrarium` (permission denied or a read-only file system), the root falls back to `~/.terrarium-work/<project>/<agent-name>` of that user, with one daemon warning per target; the root keeps that base until cleanup. The run spool of other callers (`<work_root>/.terrarium-runs`, below) falls back the same way, to `~/.terrarium-work/.terrarium-runs`, and a run keeps the spool it started in. A `work_root` that is set never falls back: when it is not writable, a symlink, foreign-owned or group/other writable, the error names it and `--work-root`. A default root in one of those last three states fails closed the same way, without the fallback. A symlinked component of `$HOME` (for example `/home -> var/home`) blocks the fallback, and the error names that component: set `work_root` on such a target. Set it with `terrarium admin target edit <t> --work-root <path>`. Keep project shared caches outside each agent root. |
 | `scope` | `global` (no `project`) or `project`. Every target view has it, also in `GET /api/projects/{name}/targets`. |
 | `state` | `running`, `stopped`, `absent`, or `unknown`: what the last lifecycle verb saw. |
 | `snapshots` | The snapshot names that `POST .../snapshot` or `snapshot_before_task` took. A destroy (the state `absent`) clears them. A snapshot delete removes a name. A snapshot list removes the names that the host no longer has (§17.3, "Snapshots"). |
@@ -7741,7 +7741,7 @@ has a daemon-owned marker. Without `work_root` it is
 `/src/terrarium/.terrarium-runs`, else `~/.terrarium-work/.terrarium-runs`
 when the remote user may not create `/src/terrarium` (permission denied, a
 read-only file system, or a missing parent); a spool that is not usable either
-way fails at once with a `spool error` that names `--work-root` (TER-1129). No-follow directory-FD checks reject symlinks,
+way fails at once with a `spool error` that names `--work-root` (TER-1129, TER-1141): also a root that is a symlink, foreign-owned or group/other writable, which never falls back, and a fallback below a symlinked `$HOME` component, which the error names. No-follow directory-FD checks reject symlinks,
 foreign ownership and group/other writable components. Python 3 is required
 for these checks; missing tools are terminal errors, never installed. The spool
 retains the first 64 MiB per stream, and is removed after 24 hours of result
@@ -10091,17 +10091,24 @@ name, §19.11) at the end of the project's `rules.wcl`, with the reasons
 in its `description`. A pack rule that `rules.wcl` replaces already stays
 as it is (`kept`). A second migration of the same board changes nothing.
 
-A migration before TER-222 left `merge_queue` out of the `agent-park` and
-`agent-unpark` overrides, so a move from review to the merge queue woke
-the bound agent. Each load of the config (the start and `POST
-/api/reload`) adds it one time to the API rules of a project (TER-243). It
-changes only a block that is still exactly the text of that old migration
-for the board, and the board needs a merge queue column (the role
-`merge_queue`, else the name on a column with no role). The changed block
-gets `merge_queue added (TER-243).` at the end of its `description`, and
-a block with that note is never changed again. An edited block and a
-file's rules stay as they are. The write is a `rules.put` audit row. A
-problem is one line in the load report and does not fail the load.
+A migration before TER-222 wrote `agent-park` and `agent-unpark`
+overrides with the wait columns as names. TER-243 later added
+`merge_queue` to them and appended `merge_queue added (TER-243).` to
+their `description`. A migration from TER-222 until the pack used column
+roles wrote them with the wait columns as names, `merge_queue` included,
+and without that note. Each load of the config (the start and `POST
+/api/reload`) removes these overrides from the API rules of a project, so
+the pack's role-aware rules run again (TER-1090, TER-1219). It removes
+only a block after the migration header that is still exactly the text of
+one of these migrations for the board, or exactly the TER-243 form. As
+overrides the pair had the card cap of an own rule (10 runs an hour),
+and their no-op runs counted toward it. The two blocks
+retire as a pair (TER-1130): when either one is edited (also after the
+TER-243 note, or turned off with `enabled = false`), both stay, so an
+edited legacy park never runs next to the pack's unpark. A pair with
+only one block left retires that block. A file's rules stay as they are.
+The write is a `rules.put` audit row. A problem is one line in the load
+report and does not fail the load.
 
 **The lint.** It reads the rules that the engine runs: the pack with the
 project's own rules for `board_flow = rules`, else only its own rules.
@@ -10172,6 +10179,13 @@ or `rules` does not change it back, and an older daemon reads it as
 | `timer` | a `rule.timer` event that the engine writes once in each slot of `every_seconds` (UTC epoch slots, no catch-up after downtime) | none |
 | `count_reached` | a card lands and the column then holds exactly `count` cards that are not archived (`data.to_count` of the event) | none |
 
+A `rule.timer` event of a `columns` project names the rule by its
+`rule_id`, and it runs only that rule, and only when its trigger is
+`timer` (TER-1199). The legacy batch and version timers (§19.8) do not
+scan the column rules: a column rule with a `version.cut` or a batch
+`job.queue` action runs on its own trigger only. The events `moved` and
+`created` carry `data.to_count` only on a `columns` project.
+
 Order in one event (TER-1112 Q3): the `leaves` rules of the source
 column, then the `lands` (or `job_result`) rules, then `count_reached`.
 With several cards, the cards go in board order (column, then position).
@@ -10195,7 +10209,12 @@ is a role and stays. Each column whose rules changed gets a new options
 version, and the `board.columns` audit row lists the changes
 (`renamed_in_rules`). A board change that removes a column while a rule
 of another column names it is `409 conflict` with `details.reason =
-column_in_use`, and nothing changes.
+column_in_use`, and nothing changes. A reference names the column that
+it resolves to before the change (`@x`: the column with the role `x`,
+else the column named `x`), and it holds that column when it does not
+resolve on the board after the change (TER-1199): `@x` holds the only
+column with the role `x`, unless another column has that role after the
+change.
 
 ## 20. Event sources and ingest
 
@@ -11716,6 +11735,8 @@ project, for the controls of the page widgets:
 | Field | The check it reports | Widget controls |
 |---|---|---|
 | `write_project` | `write_project` (own project, sysadmin, operator) | Board New card, moves and the card drawer |
+| `review_wiki` | `write_project` and the admin path of `review_page` (project_admin, sysadmin, operator) | wiki Approve and Comment on any page |
+| `review_as` | the `reviewer` values that name the caller: its name, ID and `project/name`; empty for the operator and without `write_project` | wiki Approve and Comment on a page whose `reviewer` is in the list |
 | `admin_project` | `admin_project` (same as `can_edit`) | Board columns, New agent, project event sources, rules, pipelines |
 | `manage_schedules` | `schedule_scope` of the project | New schedule or trigger, edit of a project schedule |
 | `manage_global` | `sysadmin` | global schedules and event sources |

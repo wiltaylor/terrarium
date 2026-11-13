@@ -112,32 +112,71 @@ def hint(target):
             + (target or '<target>') + ' --work-root <absolute path>`')
 
 
+def symlinked(path):
+    """The first symlinked component of an absolute path, or None. Only for
+    an error text: the walk itself refuses it through O_NOFOLLOW."""
+    current = ROOT.rstrip('/')
+    shown = ''
+    for part in path.strip('/').split('/'):
+        current += '/' + part
+        shown += '/' + part
+        try:
+            if stat.S_ISLNK(os.lstat(current).st_mode):
+                return shown
+        except OSError:
+            return None
+    return None
+
+
+def refused(label, error, target):
+    """A root that exists but fails the checks (a symlink, a foreign owner,
+    group/other write, not a directory) fails closed, and names the flag."""
+    return RuntimeError(label + ' is refused (' + str(error) + '); ' + hint(target))
+
+
 def resolve(root, card, token, mode, fallback, target):
     create = mode == 'run' and card == '0'
-    if card == '0' and fallback == '1':
+    if card != '0':
+        # Card roots are recorded by target_roots and never fall back.
+        return open_root(root, create)
+    if fallback == '1':
         home = fallback_root()
         if home is not None and has_claim(home, token):
-            return open_root(home, create)
+            try:
+                return open_root(home, create)
+            except (OSError, RuntimeError) as error:
+                raise refused('the fallback ' + home, error, target)
         try:
             return open_root(root, create)
         except OSError as error:
             if error.errno not in UNAVAILABLE:
-                raise
-            if home is None:
-                raise RuntimeError('cannot use ' + root + ' (' + str(error)
-                                   + ') and the remote user has no absolute home for the fallback; ' + hint(target))
-            try:
-                return open_root(home, create)
-            except OSError as second:
-                raise RuntimeError('cannot use ' + root + ' (' + str(error) + ') or the fallback '
-                                   + home + ' (' + str(second) + '); ' + hint(target))
+                raise refused(root, error, target)
+            first = error
+        except RuntimeError as error:
+            raise refused(root, error, target)
+        if home is None:
+            raise RuntimeError('cannot use ' + root + ' (' + str(first)
+                               + ') and the remote user has no absolute home for the fallback; ' + hint(target))
+        try:
+            return open_root(home, create)
+        except (OSError, RuntimeError) as second:
+            # O_NOFOLLOW with O_DIRECTORY gives ENOTDIR on Linux, ELOOP elsewhere.
+            link = symlinked(home)
+            note = '' if link is None else ', ' + link + ' is a symlink and the fallback refuses symlinked components'
+            raise RuntimeError('cannot use ' + root + ' (' + str(first) + ') or the fallback '
+                               + home + ' (' + str(second) + ')' + note + '; ' + hint(target))
     try:
         return open_root(root, create)
     except OSError as error:
-        if card == '0' and error.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
+        if error.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
             raise RuntimeError('work_root ' + root + ' is not writable by the remote user ('
                                + str(error) + '); fix its permissions or ' + hint(target))
-        raise
+        if error.errno == errno.ENOENT:
+            # A missing root outside a run (a cancel or read) is no refusal.
+            raise
+        raise refused('work_root ' + root, error, target)
+    except RuntimeError as error:
+        raise refused('work_root ' + root, error, target)
 
 
 def main():

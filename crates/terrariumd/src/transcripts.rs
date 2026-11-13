@@ -46,6 +46,19 @@ pub fn parser_for(harness: HarnessId) -> Box<dyn Transcript> {
             Box::new(terrarium_adapter_copilot::transcript::CopilotTranscript::new())
         }
         HarnessId::Pi => Box::new(terrarium_adapter_pi::transcript::PiTranscript::new()),
+        HarnessId::Grok => Box::new(NoTranscript(harness)),
+    }
+}
+
+/// A harness with no transcript parser yet (grok, TER-1192): no blocks.
+struct NoTranscript(HarnessId);
+
+impl Transcript for NoTranscript {
+    fn harness(&self) -> HarnessId {
+        self.0
+    }
+    fn parse_lines(&mut self, _bytes: &[u8]) -> Vec<terrarium_core::Block> {
+        Vec::new()
     }
 }
 
@@ -113,6 +126,7 @@ fn find_in_roots(harness: HarnessId, roots: &[PathBuf], sid: &str) -> Option<Pat
         }
         HarnessId::Copilot => Some(root.join(sid).join("events.jsonl")).filter(|p| p.is_file()),
         HarnessId::Pi => terrarium_adapter_pi::session::find_session_file(root, &id),
+        HarnessId::Grok => None,
     })
 }
 

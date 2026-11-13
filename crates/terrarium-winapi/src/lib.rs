@@ -637,17 +637,6 @@ fn desktop_name(run_as: bool) -> Option<[u16; 1]> {
     run_as.then_some([0])
 }
 
-#[cfg(test)]
-mod desktop_tests {
-    use super::desktop_name;
-
-    #[test]
-    fn run_as_selects_empty_name_instead_of_parent_desktop_inheritance() {
-        assert_eq!(desktop_name(true), Some([0]));
-        assert_eq!(desktop_name(false), None);
-    }
-}
-
 fn resolve_program(
     program: &Path,
     cwd: Option<&Path>,
@@ -682,4 +671,15 @@ fn resolve_program(
         io::ErrorKind::NotFound,
         format!("executable not found: {}", program.display()),
     ))
+}
+
+#[cfg(test)]
+mod desktop_tests {
+    use super::desktop_name;
+
+    #[test]
+    fn run_as_selects_empty_name_instead_of_parent_desktop_inheritance() {
+        assert_eq!(desktop_name(true), Some([0]));
+        assert_eq!(desktop_name(false), None);
+    }
 }
