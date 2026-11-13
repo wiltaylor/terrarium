@@ -8,6 +8,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createMockApi } from "../../api/mock";
 import type { AgentEvent, PageBuiltin, PageWidget, ProjectLayout, ProjectPage, ProjectPageList, ProjectPageRights } from "../../api/types";
 import { waitFor } from "../../test/wait";
+import { ApiError } from "../../api/http";
 import { PROJECT_WIDGET_VIEWS } from "./widgetRegistry";
 import { projectIndexPath } from "../projects/projectIndex";
 import { pageGrants } from "./pageGrants";
@@ -175,6 +176,23 @@ it("ON: the widget controls follow the domain rights, never the layout right", a
   ({ host } = mount(`/p/${P}/pages/board`));
   await waitFor(() => expect(button(widgetEl(host, "board-0")!, "Edit columns")).toBeTruthy());
   expect(button(nav(host), "Edit pages")).toBeTruthy();
+});
+
+it("ON: a reader's domain write from a Knowledge widget is refused visibly by the server, and the page stays", async () => {
+  // The Repos, Knowledge and Logs parts keep their route controls; the endpoint's 403 is the guard.
+  server.rights = none;
+  server.pages = [page("knowledge", 0, [viewport("knowledge-3", "db", "types")], "knowledge")];
+  const create = vi.spyOn(api.db, "createType").mockRejectedValue(new ApiError(403, "project `terrarium` is not your project; writing its DB needs sysadmin"));
+  const { host } = mount(`/p/${P}/pages/knowledge`);
+  await waitFor(() => expect(button(widgetEl(host, "knowledge-3")!, "New type")).toBeTruthy());
+  button(widgetEl(host, "knowledge-3")!, "New type")!.click();
+  const name = await waitFor(() => { const el = document.querySelector<HTMLInputElement>('input[placeholder="bug"]'); expect(el).toBeTruthy(); return el!; });
+  name.value = "notes"; name.dispatchEvent(new Event("input", { bubbles: true }));
+  name.form!.requestSubmit();
+  await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(document.body.textContent).toContain("writing its DB needs sysadmin"));
+  expect(widgetEl(host, "knowledge-3")).toBeTruthy();
+  expect(button(nav(host), "Edit pages")).toBeUndefined();
 });
 
 it("ON: a failed rights read leaves the widgets read-only", () => {
