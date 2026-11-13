@@ -338,8 +338,12 @@ async fn column_rule(ctx: &Ctx, board: &str, cmd: &ColumnRuleCmd) -> anyhow::Res
                       "queue": current["queue"], "rules": new});
     let after = ctx.api.put(&path, body).await?;
     match cmd {
-        ColumnRuleCmd::Rm { .. } | ColumnRuleCmd::Move { .. } => ctx.emit(&after["rules"], print_rules),
-        ColumnRuleCmd::Set { rule, .. } | ColumnRuleCmd::Enable { rule, .. } | ColumnRuleCmd::Disable { rule, .. } => {
+        ColumnRuleCmd::Rm { .. } | ColumnRuleCmd::Move { .. } => {
+            ctx.emit(&after["rules"], print_rules)
+        }
+        ColumnRuleCmd::Set { rule, .. }
+        | ColumnRuleCmd::Enable { rule, .. }
+        | ColumnRuleCmd::Disable { rule, .. } => {
             let items = as_items(&after["rules"]);
             match items.iter().find(|r| r["name"] == rule.as_str()) {
                 Some(r) => ctx.emit(r, print_rule),
@@ -352,20 +356,17 @@ async fn column_rule(ctx: &Ctx, board: &str, cmd: &ColumnRuleCmd) -> anyhow::Res
 
 /// The place of the rule `name` in `rules`.
 fn rule_index(rules: &[Value], name: &str, column: &str) -> anyhow::Result<usize> {
-    rules
-        .iter()
-        .position(|r| r["name"] == name)
-        .ok_or_else(|| {
-            let names: Vec<String> = rules.iter().map(|r| field(r, "name")).collect();
-            CliError::usage(format!(
-                "column `{column}` has no rule `{name}`; rules: {}",
-                if names.is_empty() {
-                    "none".to_owned()
-                } else {
-                    names.join(", ")
-                }
-            ))
-        })
+    rules.iter().position(|r| r["name"] == name).ok_or_else(|| {
+        let names: Vec<String> = rules.iter().map(|r| field(r, "name")).collect();
+        CliError::usage(format!(
+            "column `{column}` has no rule `{name}`; rules: {}",
+            if names.is_empty() {
+                "none".to_owned()
+            } else {
+                names.join(", ")
+            }
+        ))
+    })
 }
 
 /// The rule of `rule set --from-file`: one JSON object.
@@ -388,9 +389,18 @@ fn rule_from(ctx: &Ctx, arg: &str) -> anyhow::Result<Value> {
 
 /// The whole rule list of a column after one `board column rule` change.
 /// `file` is the rule of `set`. The daemon checks the rules.
-pub fn edit_rules(rules: &[Value], cmd: &ColumnRuleCmd, file: Option<Value>) -> anyhow::Result<Vec<Value>> {
+pub fn edit_rules(
+    rules: &[Value],
+    cmd: &ColumnRuleCmd,
+    file: Option<Value>,
+) -> anyhow::Result<Vec<Value>> {
     let mut rules = rules.to_vec();
-    let place = |rules: &mut Vec<Value>, r: Value, before: &Option<String>, after: &Option<String>, column: &str| -> anyhow::Result<()> {
+    let place = |rules: &mut Vec<Value>,
+                 r: Value,
+                 before: &Option<String>,
+                 after: &Option<String>,
+                 column: &str|
+     -> anyhow::Result<()> {
         match (before, after) {
             (Some(b), _) => {
                 let at = rule_index(rules, b, column)?;
@@ -421,7 +431,9 @@ pub fn edit_rules(rules: &[Value], cmd: &ColumnRuleCmd, file: Option<Value>) -> 
                 }
                 _ => r["name"] = rule.as_str().into(),
             }
-            let o = r.as_object_mut().ok_or_else(|| CliError::usage("a rule is an object"))?;
+            let o = r
+                .as_object_mut()
+                .ok_or_else(|| CliError::usage("a rule is an object"))?;
             o.remove("id");
             match rules.iter().position(|x| x["name"] == rule.as_str()) {
                 Some(at) => {

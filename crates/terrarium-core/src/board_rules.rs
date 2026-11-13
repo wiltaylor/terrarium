@@ -617,7 +617,12 @@ mod tests {
         let read = read_rules(&ctx(), rules.as_array().unwrap()).unwrap();
         assert_eq!(read.len(), 7);
         assert!(read[0].enabled && !read[6].enabled);
-        assert_eq!(read[3].trigger, Trigger::Timer { every_seconds: 3600 });
+        assert_eq!(
+            read[3].trigger,
+            Trigger::Timer {
+                every_seconds: 3600
+            }
+        );
         assert_eq!(read[0].when[0].op, MatchOp::Eq);
         // Written out and read again, each rule is the same.
         let out = serde_json::to_value(&read).unwrap();
@@ -733,7 +738,10 @@ mod tests {
         ];
         for (rules, want) in cases {
             let got = paths(rules.clone());
-            assert!(got.iter().any(|p| p == want), "{want} not in {got:?}: {rules}");
+            assert!(
+                got.iter().any(|p| p == want),
+                "{want} not in {got:?}: {rules}"
+            );
         }
         // Two rules of one name.
         assert_eq!(
@@ -778,12 +786,11 @@ mod tests {
             mv["args"][0],
             json!({"name": "to", "type": "column", "required": true})
         );
+        assert_eq!(mv["args"][3]["values"], json!(["top", "bottom"]), "{mv}");
         assert_eq!(
-            mv["args"][3]["values"],
-            json!(["top", "bottom"]),
-            "{mv}"
+            c["conditions"]["when"]["ops"],
+            json!(["eq", "ne", "glob", "in"])
         );
-        assert_eq!(c["conditions"]["when"]["ops"], json!(["eq", "ne", "glob", "in"]));
         assert_eq!(c["model_version"], MODEL_VERSION);
     }
 }

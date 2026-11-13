@@ -361,10 +361,9 @@ fn write_rules(
     )?;
     let at = now();
     for (position, r) in rules.iter().enumerate() {
-        let id = r
-            .id
-            .clone()
-            .unwrap_or_else(|| ulid::Ulid::new().to_string());
+        let id =
+            r.id.clone()
+                .unwrap_or_else(|| ulid::Ulid::new().to_string());
         let same = before.iter().any(|b| b == r);
         let (created, updated) = match times.get(&id) {
             Some((c, u)) if same => (c.clone(), u.clone()),

@@ -124,7 +124,10 @@ async fn rules_round_trip_with_stable_ids_and_order() {
     // The same name on another column is another rule.
     let v = options(&td, "validating").await;
     let other = td
-        .put(&path("validating"), with_rules(&v, json!([mail_rule("note")])))
+        .put(
+            &path("validating"),
+            with_rules(&v, json!([mail_rule("note")])),
+        )
         .await
         .ok()
         .clone();
@@ -214,19 +217,33 @@ async fn bad_rules_are_refused_with_the_path_and_nothing_is_written() {
     again2["id"] = id.clone();
     for (rules, at) in [
         (json!([bad_column]), "rules[0].actions[0].args.to"),
-        (json!([mail_rule("ok"), bad_trigger]), "rules[1].trigger.every_seconds"),
+        (
+            json!([mail_rule("ok"), bad_trigger]),
+            "rules[1].trigger.every_seconds",
+        ),
         (json!([unknown_id]), "rules[0].id"),
         (json!([foreign_id]), "rules[0].id"),
         (json!([again, again2]), "rules[1].id"),
         (json!([mail_rule("a"), mail_rule("a")]), "rules[1].name"),
-        (json!([{"name": "x", "trigger": {"kind": "lands"}, "actions": [], "colour": 1}]),
-         "rules[0].colour"),
-        (json!([{"name": "x", "trigger": {"kind": "lands"},
-                 "actions": [{"verb": "card.teleport"}]}]), "rules[0].actions[0]"),
+        (
+            json!([{"name": "x", "trigger": {"kind": "lands"}, "actions": [], "colour": 1}]),
+            "rules[0].colour",
+        ),
+        (
+            json!([{"name": "x", "trigger": {"kind": "lands"},
+                 "actions": [{"verb": "card.teleport"}]}]),
+            "rules[0].actions[0]",
+        ),
     ] {
-        let r = td.put(&path("review"), with_rules(&first, rules.clone())).await;
+        let r = td
+            .put(&path("review"), with_rules(&first, rules.clone()))
+            .await;
         r.err(422, "invalid");
-        assert_eq!(r.body["error"]["details"]["path"], at, "{rules}: {}", r.body);
+        assert_eq!(
+            r.body["error"]["details"]["path"], at,
+            "{rules}: {}",
+            r.body
+        );
         assert!(r.body["error"]["details"]["problems"].is_array());
     }
     // A bad rule list writes nothing: not the checks of the same PUT.
@@ -275,7 +292,11 @@ async fn only_the_operator_and_the_own_project_admin_write_rules() {
 #[tokio::test]
 async fn the_catalog_lists_the_model_for_every_caller() {
     let td = setup().await;
-    let c = td.get_as("proj/w1", "/api/rules/catalog").await.ok().clone();
+    let c = td
+        .get_as("proj/w1", "/api/rules/catalog")
+        .await
+        .ok()
+        .clone();
     let kinds: Vec<&str> = c["triggers"]
         .as_array()
         .unwrap()
@@ -350,11 +371,7 @@ async fn a_rename_keeps_the_rules_a_removed_column_drops_them_and_legacy_rules_s
         .unwrap()
         .state
         .db
-        .read(|c| {
-            Ok(c.query_row("SELECT count(*) FROM board_column_rules", [], |r| {
-                r.get(0)
-            })?)
-        })
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM board_column_rules", [], |r| r.get(0))?))
         .await
         .unwrap();
     assert_eq!(left, 0);

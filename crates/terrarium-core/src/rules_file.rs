@@ -1048,7 +1048,10 @@ pub fn check_action(ctx: &Context, a: &Action) -> Vec<(Option<String>, String)> 
     }
     for key in verb.required {
         if a.args.get(*key).is_none_or(Value::is_null) {
-            out.push((Some((*key).to_owned()), format!("{} needs `{key}`", verb.name)));
+            out.push((
+                Some((*key).to_owned()),
+                format!("{} needs `{key}`", verb.name),
+            ));
         }
     }
     if verb.kind == "job_queue" {

@@ -11885,7 +11885,8 @@ async fn board_column_rule_changes_put_the_whole_list_with_the_read_version() {
     let reply = column_rules_reply();
     let (a, b) = (reply["rules"][0].clone(), reply["rules"][1].clone());
     // A new rule goes last, without an ID; its name comes from the argument.
-    let new = r#"{"id": "X", "trigger": {"kind": "leaves"}, "actions": [{"verb": "card.done_mail"}]}"#;
+    let new =
+        r#"{"id": "X", "trigger": {"kind": "leaves"}, "actions": [{"verb": "card.done_mail"}]}"#;
     let c = json!({"name": "c", "trigger": {"kind": "leaves"},
                    "actions": [{"verb": "card.done_mail"}]});
     put(
@@ -11895,7 +11896,15 @@ async fn board_column_rule_changes_put_the_whole_list_with_the_read_version() {
     )
     .await;
     put(
-        &["set", "merge_queue", "c", "--from-file", "-", "--before", "b"],
+        &[
+            "set",
+            "merge_queue",
+            "c",
+            "--from-file",
+            "-",
+            "--before",
+            "b",
+        ],
         Some(new),
         json!([a, c, b]),
     )
