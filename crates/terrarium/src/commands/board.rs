@@ -273,9 +273,8 @@ pub fn options_put(current: &Value, cmd: &ColumnCmd) -> anyhow::Result<Option<Va
         queue["max_batch_cards"] = Value::Null;
         changed = true;
     }
-    Ok(changed.then(|| {
-        json!({"base_version": current["version"], "checks": checks, "queue": queue})
-    }))
+    Ok(changed
+        .then(|| json!({"base_version": current["version"], "checks": checks, "queue": queue})))
 }
 
 fn print_options(ctx: &Ctx, o: &Value) {

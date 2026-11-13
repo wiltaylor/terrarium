@@ -129,9 +129,11 @@ pub struct OptionsPut {
 
 fn check_queue(q: &ColumnQueue) -> ApiResult<()> {
     let bad = |path: &str, msg: String| {
-        Err(ApiError::invalid(format!("queue.{path}: {msg}")).with_details(json!({
-            "path": format!("queue.{path}")
-        })))
+        Err(
+            ApiError::invalid(format!("queue.{path}: {msg}")).with_details(json!({
+                "path": format!("queue.{path}")
+            })),
+        )
     };
     let batch = [
         ("batch_size", q.batch_size),
@@ -152,7 +154,11 @@ fn check_queue(q: &ColumnQueue) -> ApiResult<()> {
     }
     for (name, value, max) in [
         ("batch_size", q.batch_size, QUEUE_CARDS_MAX),
-        ("max_wait_seconds", q.max_wait_seconds, QUEUE_WAIT_MAX_SECONDS),
+        (
+            "max_wait_seconds",
+            q.max_wait_seconds,
+            QUEUE_WAIT_MAX_SECONDS,
+        ),
     ] {
         match value {
             None => return bad(name, "the release `batch` needs it".to_owned()),
@@ -321,15 +327,32 @@ mod tests {
                 .to_owned()
         };
         assert_eq!(path(queue(Wip, Some(4), None, None)), "queue.batch_size");
-        assert_eq!(path(queue(Job, None, None, Some(2))), "queue.max_batch_cards");
-        assert_eq!(path(queue(Batch, None, Some(60), None)), "queue.batch_size");
-        assert_eq!(path(queue(Batch, Some(4), None, None)), "queue.max_wait_seconds");
-        assert_eq!(path(queue(Batch, Some(0), Some(60), None)), "queue.batch_size");
         assert_eq!(
-            path(queue(Batch, Some(4), Some(QUEUE_WAIT_MAX_SECONDS + 1), None)),
+            path(queue(Job, None, None, Some(2))),
+            "queue.max_batch_cards"
+        );
+        assert_eq!(path(queue(Batch, None, Some(60), None)), "queue.batch_size");
+        assert_eq!(
+            path(queue(Batch, Some(4), None, None)),
             "queue.max_wait_seconds"
         );
-        assert_eq!(path(queue(Batch, Some(4), Some(60), Some(3))), "queue.max_batch_cards");
+        assert_eq!(
+            path(queue(Batch, Some(0), Some(60), None)),
+            "queue.batch_size"
+        );
+        assert_eq!(
+            path(queue(
+                Batch,
+                Some(4),
+                Some(QUEUE_WAIT_MAX_SECONDS + 1),
+                None
+            )),
+            "queue.max_wait_seconds"
+        );
+        assert_eq!(
+            path(queue(Batch, Some(4), Some(60), Some(3))),
+            "queue.max_batch_cards"
+        );
     }
 
     #[test]

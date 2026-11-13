@@ -11688,7 +11688,10 @@ async fn board_column_options_show_set_and_from_file() {
         vec![req(Get, PATH)],
     )
     .await;
-    assert!(out.contains("column merge_queue (options version 3)"), "{out}");
+    assert!(
+        out.contains("column merge_queue (options version 3)"),
+        "{out}"
+    );
     assert!(out.contains("clear_eta_on_enter"), "{out}");
     assert!(
         out.contains("queue_release") && out.contains("batch, batch_size 4"),
@@ -11763,9 +11766,27 @@ async fn board_column_options_show_set_and_from_file() {
     .await;
     // Flags do not mix with --from-file, and a bool needs a value.
     for bad in [
-        vec!["terrarium", "board", "column", "options", "x", "--from-file", "-", "--terminal", "true"],
+        vec![
+            "terrarium",
+            "board",
+            "column",
+            "options",
+            "x",
+            "--from-file",
+            "-",
+            "--terminal",
+            "true",
+        ],
         vec!["terrarium", "board", "column", "options", "x", "--terminal"],
-        vec!["terrarium", "board", "column", "options", "x", "--queue-release", "lifo"],
+        vec![
+            "terrarium",
+            "board",
+            "column",
+            "options",
+            "x",
+            "--queue-release",
+            "lifo",
+        ],
     ] {
         assert!(Cli::try_parse_from(&bad).is_err(), "{bad:?}");
     }

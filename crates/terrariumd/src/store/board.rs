@@ -3216,7 +3216,11 @@ fn carry_role_checks(t: &Tx<'_>, old: &ColumnRow, role: Option<&str>) -> ApiResu
             "UPDATE board_columns SET require_comment_on_enter = ?2,
                 require_dependencies_met = ?3, options_version = options_version + 1
              WHERE id = ?1",
-            params![old.id, c.require_comment_on_enter, c.require_dependencies_met],
+            params![
+                old.id,
+                c.require_comment_on_enter,
+                c.require_dependencies_met
+            ],
         )?;
     }
     Ok(())
