@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Agent } from "../api/types";
-import { compactButton, idleStopped, lastCompactedText, lifecycleActions, lifecycleBadge, newSessionButton, queuedLabel, resetBody, resetChip, resetNotice, resetThenProblem } from "./lifecycle";
+import { compactButton, heldLabel, heldText, idleStopped, lastCompactedText, lifecycleActions, lifecycleBadge, newSessionButton, queuedLabel, resetBody, resetChip, resetNotice, resetThenProblem } from "./lifecycle";
 
 type L = Pick<Agent, "status" | "paused" | "status_reason" | "waiting_on" | "queued">;
 const a = (over: Partial<L> = {}): L => ({ status: "idle", paused: false, ...over });
@@ -38,6 +38,24 @@ describe("queuedLabel", () => {
     expect(queuedLabel({ queued: 3 })).toBe("3 queued");
     expect(queuedLabel({ queued: 0 })).toBeNull();
     expect(queuedLabel({})).toBeNull();
+  });
+});
+
+describe("heldLabel and heldText (TER-1105)", () => {
+  it("counts held mail apart from the queued work", () => {
+    const a = { queued: 1, held_mail: 2 };
+    expect(queuedLabel(a)).toBe("1 queued");
+    expect(heldLabel(a)).toBe("2 held");
+    const onlyHeld = { queued: 0, held_mail: 2 };
+    expect(queuedLabel(onlyHeld)).toBeNull();
+    expect(heldLabel(onlyHeld)).toBe("2 held");
+  });
+  it("tells zero from unavailable", () => {
+    expect(heldLabel({ held_mail: 0 })).toBeNull();
+    expect(heldLabel({})).toBeNull();
+    expect(heldText({ held_mail: 0 })).toBe("0");
+    expect(heldText({ held_mail: 3 })).toBe("3");
+    expect(heldText({})).toBe("unavailable");
   });
 });
 

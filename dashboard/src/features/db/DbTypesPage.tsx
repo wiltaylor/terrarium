@@ -18,11 +18,12 @@ export default function DbTypesPage() {
   return <DbTypesPanel project={params.project} />;
 }
 
-export function DbTypesPanel(props: { project: string }) {
-  return <Show when={props.project} keyed>{(project) => <DbTypesContent project={project} />}</Show>;
+/** `canWrite` false (no write_db) hides New type (TER-1134); the route shows it. */
+export function DbTypesPanel(props: { project: string; canWrite?: boolean }) {
+  return <Show when={props.project} keyed>{(project) => <DbTypesContent project={project} canWrite={props.canWrite !== false} />}</Show>;
 }
 
-function DbTypesContent(props: { project: string }) {
+function DbTypesContent(props: { project: string; canWrite: boolean }) {
   const { api, events } = useInstance();
   const navigate = useNavigate();
   const [typesRes, { refetch }] = createResource(() => props.project, (p) => api.db.types(p));
@@ -45,9 +46,11 @@ function DbTypesContent(props: { project: string }) {
   return (
     <>
       <PageHead title="DB" level={2}>
-        <button class="primary" onClick={() => setCreating(true)}>
-          New type
-        </button>
+        <Show when={props.canWrite}>
+          <button class="primary" onClick={() => setCreating(true)}>
+            New type
+          </button>
+        </Show>
       </PageHead>
       <ErrorBanner error={typesRes.error} />
       <p class="muted small" style={{ margin: "0 0 10px" }}>
@@ -87,7 +90,7 @@ function DbTypesContent(props: { project: string }) {
           </div>
         </Show>
       </Show>
-      <Show when={creating()}>
+      <Show when={creating() && props.canWrite}>
         <SchemaEditor
           project={props.project}
           typeNames={(types() ?? []).map((t) => t.name)}

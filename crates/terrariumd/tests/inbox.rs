@@ -1229,3 +1229,118 @@ async fn only_the_operator_asks_and_a_bad_ask_is_refused() {
         .await;
     r.err(403, "forbidden");
 }
+
+/// `held_mail` of agent `agent` in the list of project `p` and in its
+/// show, as `caller` (`None`: the operator) sees it. Both views must give
+/// the same value: `None` is an absent field.
+async fn held_seen(td: &TestDaemon, caller: Option<&str>, agent: &str) -> Option<u64> {
+    let (list, show) = match caller {
+        None => (
+            td.get("/api/agents?project=p").await,
+            td.get(&format!("/api/agents/{agent}")).await,
+        ),
+        Some(c) => (
+            td.get_as(c, "/api/agents?project=p").await,
+            td.get_as(c, &format!("/api/agents/{agent}")).await,
+        ),
+    };
+    let row = list
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == agent)
+        .cloned()
+        .unwrap_or_else(|| panic!("{agent} is not in the list"));
+    let shown = show.ok().clone();
+    assert_eq!(
+        row.get("held_mail"),
+        shown.get("held_mail"),
+        "{row}\n{shown}"
+    );
+    shown.get("held_mail").map(|v| v.as_u64().expect("a count"))
+}
+
+/// The `queued` count of agent `agent` (absent: 0).
+async fn queued_of(td: &TestDaemon, agent: &str) -> u64 {
+    td.get(&format!("/api/agents/{agent}")).await.ok()["queued"]
+        .as_u64()
+        .unwrap_or(0)
+}
+
+/// TER-1105 (T3 to T7): held mail has its own count, `held_mail`, apart
+/// from `queued`. The operator, the agent itself, a project_admin of its
+/// project, and a reader of every project see it; a plain member gets no
+/// field; another project gets 403 as before. Zero is `0`, not absent.
+/// A daemon restart releases nothing, and the lead still may not release.
+#[tokio::test]
+async fn held_mail_is_counted_apart_from_queued_work() {
+    let World {
+        mut td,
+        lead,
+        w1,
+        w2,
+        sys,
+    } = setup().await;
+    let arch = id(&td
+        .agent("ops", "arch", json!({"roles": ["architect"]}))
+        .await);
+    let other = id(&td.agent("ops", "other", json!({})).await);
+
+    // T6: zero held mail is `0` for each reader that may see it.
+    for caller in [
+        None,
+        Some(w2.as_str()),
+        Some(lead.as_str()),
+        Some(sys.as_str()),
+        Some(arch.as_str()),
+    ] {
+        assert_eq!(held_seen(&td, caller, &w2).await, Some(0), "{caller:?}");
+    }
+    assert_eq!(held_seen(&td, Some(&w1), &w2).await, None);
+
+    // T3: the 7th message is held. Six are queued work, one is held mail.
+    let (thread, held) = chatty_thread(&td, &w1, "p/w2").await;
+    assert_eq!(held["state"], "delivered", "{held}");
+    assert_eq!(queued_of(&td, &w2).await, 6);
+    // T5: who sees the count. The plain member gets no field, and its
+    // own count stays visible to it.
+    for caller in [
+        None,
+        Some(w2.as_str()),
+        Some(lead.as_str()),
+        Some(sys.as_str()),
+        Some(arch.as_str()),
+    ] {
+        assert_eq!(held_seen(&td, caller, &w2).await, Some(1), "{caller:?}");
+    }
+    assert_eq!(held_seen(&td, Some(&w1), &w2).await, None);
+    assert_eq!(held_seen(&td, Some(&w1), &w1).await, Some(0));
+    td.get_as(&other, "/api/agents?project=p")
+        .await
+        .err(403, "forbidden");
+    td.get_as(&other, &format!("/api/agents/{w2}"))
+        .await
+        .err(403, "forbidden");
+
+    // T7: a restart keeps the counts and releases nothing. The lead still
+    // may not release or resume.
+    td.boot(None, None).await;
+    assert_eq!(held_seen(&td, None, &w2).await, Some(1));
+    assert_eq!(queued_of(&td, &w2).await, 6);
+    let hid = id(&held);
+    td.post_empty_as(&lead, &format!("/api/mail/{hid}/release"))
+        .await
+        .err(403, "forbidden");
+    td.post_empty_as(&lead, &format!("/api/mail/threads/{thread}/resume"))
+        .await
+        .err(403, "forbidden");
+    assert_eq!(held_seen(&td, Some(&lead), &w2).await, Some(1));
+
+    // T4: the operator releases it: it moves from held to queued.
+    td.post_empty(&format!("/api/mail/{hid}/release"))
+        .await
+        .ok();
+    assert_eq!(held_seen(&td, None, &w2).await, Some(0));
+    assert_eq!(queued_of(&td, &w2).await, 7);
+}

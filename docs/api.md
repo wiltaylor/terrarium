@@ -2084,6 +2084,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `status_reason` | The reason of the last status change: `idle` after an idle stop, `paused` after the stop of a pause, `subscription_disabled` (the subscription is disabled, §16.2), `stream_limit: waiting for a free stream on `<sub>`` (the work waits for a stream of a self-hosted subscription, §16.2), `stopped`, an exit, or an error text. Absent when not known. |
 | `paused` | `true` while the agent is paused (§6.2): nothing wakes it, and its work waits. Always present. |
 | `queued` | The work that waits for the agent: queued turns, `queued` mail, card and nudge lines, and a pending reset with a `then` prompt (§6.2). Absent when 0. |
+| `held_mail` | The mail to the agent that the loop guard held and the operator did not release yet (`held` and no `released_at`, whatever its `state`; §7.4). It is not in `queued`: held mail is not deliverable work, and nothing releases it but `release` or `resume` (§7.4). A count only, in `GET /api/agents` and `GET /api/agents/{id}`. Present (`0` when none) for the operator, the agent itself, a `project_admin` of its project, a `sysadmin`, and an `architect`. Absent for any other caller: absent means unavailable, not 0. It can differ from the Inbox `system` count, which counts threads (§6.9). |
 | `idle_stop` | The idle stop of the agent (§6.2): `off`, or a duration such as `30m`. Absent: the daemon's `TERRARIUM_IDLE_STOP`. |
 | `compact_on_idle` | `true` or `false`: the agent compacts its session at its idle stop (§6.2, "Auto compact"). Absent: the daemon's `TERRARIUM_COMPACT_ON_IDLE`. |
 | `compact_max_age` | The maximum age of the session context (§6.2, "Auto compact"): `off`, or a duration such as `24h`. Absent: the daemon's `TERRARIUM_COMPACT_MAX_AGE`. |
@@ -4498,6 +4499,10 @@ of agent-to-agent mail on thread T since the last operator or project-inbox
 message (limit 6)`. The daemon sets both at the send and does not change
 them. Messages from before migration 16 have `held: false`.
 `thread_paused` is about the thread now; `held` is about the message.
+So a held message is never `queued` until a release: its `state` is
+`delivered` (later `read` or `replied` when the recipient reads it), and
+only `released_at` ends the hold. The CLI shows its state as
+`delivered (held)`, and the agent's `held_mail` counts it (§6).
 
 A message from an agent in `GET /api/mail` and `GET /api/mail/{id}` can
 have `session_id` and `session_label`: the sender's session at

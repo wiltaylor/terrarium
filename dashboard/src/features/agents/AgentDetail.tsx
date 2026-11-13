@@ -33,7 +33,7 @@ import { WaitsPanel, WatchesPanel } from "./Waits";
 import { QuestionsPanel } from "../inbox/QuestionsPanel";
 import { SkillsPicker } from "../skills/SkillsPicker";
 import { RESTART_NOTE, skillsLabel, type SkillSelection } from "../skills/model";
-import { compactButton, lastCompactedText, lifecycleActions, newSessionButton, resetChip, resetNotice, type LifecycleAction } from "../../lib/lifecycle";
+import { compactButton, HELD_TITLE, heldText, lastCompactedText, lifecycleActions, newSessionButton, resetChip, resetNotice, type LifecycleAction } from "../../lib/lifecycle";
 import { ResetDialog } from "./ResetDialog";
 import { EphemeralLine, SpawnedPanel } from "./Spawned";
 import { spawnedTabLabel, spawnRightsText } from "./spawn";
@@ -999,6 +999,12 @@ function DetailsPanel(props: {
         <dd class="small">
           targets: {props.agent.policy?.targets.join(", ") || "none"} · mail to: {props.agent.policy?.mail_to.join(", ") || "none"} · cross-project:{" "}
           {(props.agent.policy?.cross_project ?? []).join(", ") || "none"}
+        </dd>
+        <dt>Held mail</dt>
+        <dd>
+          <span classList={{ muted: !props.agent.held_mail }} title={HELD_TITLE}>
+            {heldText(props.agent)}
+          </span>
         </dd>
         <dt>Card</dt>
         <dd>
