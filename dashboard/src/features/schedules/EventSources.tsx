@@ -17,7 +17,7 @@ import { emptySourceForm, sortSources, SOURCE_KINDS, sourceBody, sourceFieldOf, 
 
 const COLS = 8;
 
-type EventSourcesProps = { project: string | null; canCreate?: boolean; canManage?: (source: EventSource) => boolean };
+type EventSourcesProps = { project: string | null; search?: string; canCreate?: boolean; canManage?: (source: EventSource) => boolean };
 
 export function EventSourcesSection(props: EventSourcesProps) {
   return <Show when={{ project: props.project }} keyed>{(scope) => <EventSourcesBody {...props} project={scope.project} />}</Show>;
@@ -27,6 +27,7 @@ function EventSourcesBody(props: EventSourcesProps) {
   const { api, events } = useInstance();
   const [data, setData] = createStore<{ items: EventSource[] }>({ items: [] });
   const items = () => data.items;
+  const visible = () => items().filter((s) => !props.search || s.name.toLowerCase().includes(props.search.toLowerCase()));
   const setItems = (next: EventSource[] | ((previous: EventSource[]) => EventSource[])) => setData("items", reconcile(typeof next === "function" ? next(items()) : next));
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<unknown>(null);
@@ -149,8 +150,8 @@ function EventSourcesBody(props: EventSourcesProps) {
             </tr>
           </thead>
           <tbody>
-            <Show when={items().length} fallback={<tr><td colSpan={COLS}><Empty>{loading() ? "Loading…" : "No event sources. Make one with New event source, then add its hook URL and secret to the forge."}</Empty></td></tr>}>
-              <For each={items()}>
+            <Show when={visible().length} fallback={<tr><td colSpan={COLS}><Empty>{loading() ? "Loading…" : props.search && items().length ? "No event sources match the search." : "No event sources. Make one with New event source, then add its hook URL and secret to the forge."}</Empty></td></tr>}>
+              <For each={visible()}>
                 {(s) => (
                   <>
                     <tr aria-label={`Event source ${s.name}`}>

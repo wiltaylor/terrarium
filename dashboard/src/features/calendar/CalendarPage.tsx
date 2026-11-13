@@ -147,11 +147,11 @@ export default function CalendarPage() {
   return <Show when={{ project: params.project ?? null }} keyed>{(scope) => <CalendarBody project={scope.project} legacy />}</Show>;
 }
 
-export function CalendarPanel(props: { project: string; view?: ViewMode; onViewChange?: (view: ViewMode) => void; onSelectionChange?: (occurrence: CalendarOccurrence | null) => void }) {
-  return <Show when={props.project} keyed>{(project) => <CalendarBody project={project} view={props.view} onViewChange={props.onViewChange} onSelectionChange={props.onSelectionChange} />}</Show>;
+export function CalendarPanel(props: { project: string; view?: ViewMode; search?: string; onViewChange?: (view: ViewMode) => void; onSelectionChange?: (occurrence: CalendarOccurrence | null) => void }) {
+  return <Show when={props.project} keyed>{(project) => <CalendarBody project={project} view={props.view} search={props.search} onViewChange={props.onViewChange} onSelectionChange={props.onSelectionChange} />}</Show>;
 }
 
-function CalendarBody(props: { project: string | null; legacy?: boolean; view?: ViewMode; onViewChange?: (view: ViewMode) => void; onSelectionChange?: (occurrence: CalendarOccurrence | null) => void }) {
+function CalendarBody(props: { project: string | null; legacy?: boolean; view?: ViewMode; search?: string; onViewChange?: (view: ViewMode) => void; onSelectionChange?: (occurrence: CalendarOccurrence | null) => void }) {
   const { api, events } = useInstance();
   const project = () => props.project;
   const now = useNow(30_000);
@@ -215,7 +215,7 @@ function CalendarBody(props: { project: string | null; legacy?: boolean; view?: 
     onCleanup(() => (off(), clearTimeout(t), phone?.removeEventListener?.("change", onPhone)));
   });
 
-  const occ = () => view.latest?.occurrences ?? [];
+  const occ = () => (view.latest?.occurrences ?? []).filter((o) => !props.search || o.title.toLowerCase().includes(props.search.toLowerCase()));
   const [days, setDays] = createStore<{ month: ReturnType<typeof monthGrid>; week: ReturnType<typeof weekDays>; agenda: ReturnType<typeof agenda> }>({ month: [], week: [], agenda: [] });
   createEffect(() => {
     setDays("month", reconcile(monthGrid(anchor(), occ(), now()), { key: "key" }));

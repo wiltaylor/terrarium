@@ -38,9 +38,10 @@ export default function SchedulesPage() {
   return <ScheduleListPanel project={params.project ?? null} kind={tabOf(search.tab)} scope={search.scope === "project" || search.scope === "global" ? search.scope : "all"} initialOpen={search.open} onKindChange={(k) => setSearch({ tab: tabParam(k), open: undefined }, { replace: true })} onScopeChange={(f) => setSearch({ scope: f === "all" ? undefined : f }, { replace: true })} legacy />;
 }
 
-export function SchedulesPanel(props: { project: string; part: "schedules" | "triggers" | "event_sources"; scope?: ScopeFilter; search?: string; canCreate?: boolean; canManageSchedule?: (schedule: Schedule) => boolean; canManageSource?: (source: EventSource) => boolean; onScopeChange?: (scope: ScopeFilter) => void; onSelectionChange?: (ids: ReadonlySet<string>) => void }) {
-  return <Show when={props.part !== "event_sources"} fallback={<EventSourcesSection project={props.project} canCreate={props.canCreate ?? false} canManage={(source) => props.canManageSource?.(source) ?? false} />}>
-    <ScheduleListPanel project={props.project} kind={props.part === "triggers" ? "trigger" : "time"} scope={props.scope} search={props.search} canCreate={props.canCreate} canManage={props.canManageSchedule} onScopeChange={props.onScopeChange} onSelectionChange={props.onSelectionChange} />
+/** Embedded parts. Schedule creation (`manage_schedule`) and event-source creation (`admin_project`) are separate server rights, so each has its own grant. All default to read-only. */
+export function SchedulesPanel(props: { project: string; part: "schedules" | "triggers" | "event_sources"; scope?: ScopeFilter; search?: string; canCreateSchedule?: boolean; canCreateSource?: boolean; canManageSchedule?: (schedule: Schedule) => boolean; canManageSource?: (source: EventSource) => boolean; onScopeChange?: (scope: ScopeFilter) => void; onSelectionChange?: (ids: ReadonlySet<string>) => void }) {
+  return <Show when={props.part !== "event_sources"} fallback={<EventSourcesSection project={props.project} search={props.search} canCreate={props.canCreateSource ?? false} canManage={(source) => props.canManageSource?.(source) ?? false} />}>
+    <ScheduleListPanel project={props.project} kind={props.part === "triggers" ? "trigger" : "time"} scope={props.scope} search={props.search} canCreate={props.canCreateSchedule} canManage={props.canManageSchedule} onScopeChange={props.onScopeChange} onSelectionChange={props.onSelectionChange} />
   </Show>;
 }
 
