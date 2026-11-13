@@ -899,6 +899,13 @@ terrarium board column options <name> [--require-comment B] [--require-dependenc
                               [--clear-eta B] [--queue-release wip|batch|job] [--batch-size N]
                               [--max-wait-seconds S] [--max-batch-cards N | --no-max-batch-cards]
                               [--from-file f.json | -]
+terrarium board column rule ls <column>
+terrarium board column rule show <column> <rule>
+terrarium board column rule set <column> <rule> --from-file (f.json | -) [--before r | --after r]
+terrarium board column rule rm <column> <rule>
+terrarium board column rule move <column> <rule> (--before r | --after r)
+terrarium board column rule enable|disable <column> <rule>
+terrarium board column rule catalog
 terrarium card ls [-c column] [--mine | --assignee a] [--unassigned] [--label l] [--archived]
 terrarium card show <id>
 terrarium card new <title> [-b body | -] [-c column] [--label l]... [--depends-on id]...
@@ -1037,6 +1044,21 @@ without a `base_version` in the file, the version just read is used, so the
 `--json` output of a read is a valid file. A change needs project_admin of
 the project or the operator; a sysadmin only reads. The queue settings are
 stored only: no column queues cards yet.
+
+`board column rule` reads and changes the structured rules of a column
+(TER-1120, docs/api.md §8.2.1). `ls` lists them in order (place, name,
+on or off, trigger, verbs, ID); `show` prints one as JSON. A change reads
+the options, changes the rule list, and sends the whole list with the
+version it read; another write in between fails with `409 stale_base`.
+`set` takes one rule as JSON (`-` reads stdin), named by the argument: a
+`name` in the file must be the same. It replaces the rule of that name and
+keeps its ID and place, or adds a new rule at the end; `--before` and
+`--after` place it. The `--json` output of `show` is a valid file. `rm`,
+`move`, `enable`, and `disable` change one rule. `catalog` lists the
+triggers, the verbs with their arguments (`*`: required), and, with
+`--json`, the condition fields, placeholders, and limits. A change needs
+project_admin of the project or the operator. The engine does not run
+these rules yet.
 
 `card eta` sets when the work is expected to be done: a duration from now
 with one or more parts (`45m`, `2h30m`, `1d`), or an RFC 3339 time. The

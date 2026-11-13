@@ -3254,6 +3254,7 @@ pub fn set_columns(
     let wanted = check_columns(&current, specs)?;
     let kept: HashSet<i64> = wanted.iter().filter_map(|w| w.keeps).collect();
     let backlog = column(t, project, BACKLOG)?;
+    let mut dropped_rules: Vec<Value> = Vec::new();
     for c in current.iter().filter(|c| !kept.contains(&c.id)) {
         let mut stmt = t.prepare(
             "SELECT id FROM cards WHERE column_id = ?1 AND archived = 0 ORDER BY number",
@@ -3270,6 +3271,11 @@ pub fn set_columns(
                 cards.join(", ")
             ))
             .with_details(json!({"column": c.name, "cards": cards})));
+        }
+        // The column's rules go with it (TER-1120): that needs the options
+        // right, and the audit row keeps them.
+        if let Some(d) = column_options::drop_rules(t, actor, project, c)? {
+            dropped_rules.push(d);
         }
         // Archived cards of a removed column go to the backlog.
         t.execute(
@@ -3349,12 +3355,11 @@ pub fn set_columns(
                    "rename_from": w.rename_from})
         })
         .collect();
-    t.audit(
-        "board.columns",
-        project,
-        Some(project),
-        json!({"columns": after}),
-    )?;
+    let mut detail = json!({"columns": after});
+    if !dropped_rules.is_empty() {
+        detail["dropped_rules"] = dropped_rules.into();
+    }
+    t.audit("board.columns", project, Some(project), detail)?;
     t.emit(
         EventDraft::new(
             "board",
