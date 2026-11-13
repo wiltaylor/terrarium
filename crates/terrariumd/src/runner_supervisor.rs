@@ -8859,7 +8859,7 @@ mod tests {
 
     /// TER-1103 T1: the push listener lags. The queued mail of the lost
     /// event is reloaded from the store and typed once to the idle agent,
-    /// and the mail is `delivered`.
+    /// and the mail is no longer `queued`.
     #[tokio::test]
     async fn a_lagged_push_listener_reloads_the_queued_mail() {
         let tmp = tempfile::tempdir().unwrap();
@@ -8879,7 +8879,8 @@ mod tests {
         assert_eq!(typed.len(), 1, "{typed:?}");
         assert!(typed[0].contains(&mid), "{typed:?}");
         assert_eq!(mail_blocks(&runner), 1);
-        assert_eq!(mail_state(&state, &mid).await, "delivered");
+        // The turn held the whole body: `read` (PLAN §8.5).
+        assert_eq!(mail_state(&state, &mid).await, "read");
     }
 
     /// TER-1103 T2: two reloads and the live event of the same mail type
@@ -8943,7 +8944,8 @@ mod tests {
         settle(&sup, id).await;
         assert_eq!(mail_blocks(&runner), 1, "{:?}", lock(&runner.typed));
         assert!(lock(&sup.inner.slots)[&id].pointer.is_empty());
-        assert_eq!(mail_state(&state, &mid).await, "delivered");
+        // The turn held the whole body: `read` (PLAN §8.5).
+        assert_eq!(mail_state(&state, &mid).await, "read");
     }
 
     /// TER-1103 T4: held mail is not typed by a reload. After its release
@@ -9080,10 +9082,11 @@ mod tests {
         let row = crate::store::pointers::PendingPointer {
             id: row_id,
             agent: id.to_string(),
-            kind: "reservation".into(),
-            key: "R1".into(),
-            line: "reservation R1 is ready".into(),
-            data: serde_json::json!({"id": "R1", "line": "reservation R1 is ready"}).to_string(),
+            kind: "lease".into(),
+            key: "t1103".into(),
+            line: crate::leases::ended_line("t1103"),
+            data: serde_json::json!({"target": "t1103", "lease": "L1", "change": "ended"})
+                .to_string(),
         };
         state
             .db
@@ -9096,7 +9099,10 @@ mod tests {
         settle(&sup, id).await;
         let typed = lock(&runner.typed).clone();
         assert_eq!(typed.len(), 1, "{typed:?}");
-        assert!(typed[0].contains("reservation R1 is ready"), "{typed:?}");
+        assert!(
+            typed[0].contains(&crate::leases::ended_line("t1103")),
+            "{typed:?}"
+        );
         let rows = state
             .db
             .read(|c| crate::store::pointers::load(c))
