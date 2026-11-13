@@ -358,7 +358,8 @@ async fn windows_git_checkout_goes_only_to_a_capable_host_in_managed_mode() {
                     .await
                     .unwrap();
             }
-            if !matches!(frame, DaemonFrame::Ping { .. }) {
+            // Only checkout frames: the daemon also sends acks and releases.
+            if matches!(frame, DaemonFrame::GitCheckout(_)) {
                 sent.send(frame).unwrap();
             }
         }
