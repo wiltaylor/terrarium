@@ -12,6 +12,18 @@ import { ProjectTabs } from "./ProjectTabs";
 import { blockedAgents, createProjectCounts, tabBadge } from "./tabCounts";
 import { createLayoutEditor, LayoutEditorContext } from "../pages/layoutDraft";
 
+/**
+ * The draft stays only inside the same project of the same instance. Compare
+ * full browser paths: `/p/demo` of the home and `/remote/a/p/demo` are two
+ * instances, even with the same project name. A history step (a number) leaves.
+ */
+export function leavesProject(href: (path: string) => string, base: string, to: string | number): boolean {
+  if (typeof to !== "string") return true;
+  const path = decodePath(to.split(/[?#]/)[0]!).replace(/\/$/, "");
+  const target = decodePath(href(base));
+  return path !== target && !path.startsWith(`${target}/`);
+}
+
 export const LEAVE_DRAFT = "Discard your unsaved page layout changes?";
 
 export default function ProjectScreen(props: RouteSectionProps) {
@@ -29,14 +41,10 @@ export default function ProjectScreen(props: RouteSectionProps) {
   createEffect(on(project, () => void refresh()));
   // One layout draft for all tabs of this project in this instance (TER-1073).
   const editor = createLayoutEditor(api, events, instance.key, project);
-  const inProject = (to: string) => {
-    const path = decodePath(instance.path(to.split(/[?#]/)[0]!)).replace(/\/$/, "");
-    const target = decodePath(base());
-    return path === target || path.startsWith(`${target}/`);
-  };
-  // Links, history and instance switches all leave through the router.
+  // Links, history and instance switches (RemoteScope is a route) all leave
+  // through the router, so one guard covers them.
   useBeforeLeave(event => {
-    if (!editor.dirty() || (typeof event.to === "string" && inProject(event.to))) return;
+    if (!editor.dirty() || !leavesProject(instance.href, base(), event.to)) return;
     if (window.confirm(LEAVE_DRAFT)) editor.cancel();
     else event.preventDefault();
   });

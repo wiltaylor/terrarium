@@ -246,3 +246,36 @@ it("gives readers and OFF projects no shared editor", async () => {
   expect(has(off.host, "Edit pages")).toBe(false);
   expect(api.pages.layout).not.toHaveBeenCalled();
 });
+
+it("treats an instance switch as leaving, even to the same project name", async () => {
+  const { leavesProject } = await import("./ProjectScreen");
+  const { instanceHref } = await import("../../instance");
+  const remote = (path: string) => instanceHref("a", path);
+  const home = (path: string) => instanceHref(undefined, path);
+  // Inside the same project of the same instance: stay.
+  expect(leavesProject(remote, "/p/demo", "/remote/a/p/demo/pages/b?x=1")).toBe(false);
+  expect(leavesProject(home, "/p/demo", "/p/demo/board#top")).toBe(false);
+  // Remote a to home, home to remote a, remote a to remote b: leave.
+  expect(leavesProject(remote, "/p/demo", "/p/demo/pages/b")).toBe(true);
+  expect(leavesProject(remote, "/p/demo", "/")).toBe(true);
+  expect(leavesProject(home, "/p/demo", "/remote/a/p/demo/pages/b")).toBe(true);
+  expect(leavesProject(remote, "/p/demo", "/remote/b/p/demo")).toBe(true);
+  // Another project with a shared prefix, and history steps: leave.
+  expect(leavesProject(home, "/p/demo", "/p/demo2/board")).toBe(true);
+  expect(leavesProject(home, "/p/demo", -1)).toBe(true);
+});
+
+it("prompts when a link switches to another instance with unsaved changes", async () => {
+  seed();
+  const confirm = vi.fn(() => false);
+  vi.stubGlobal("confirm", confirm);
+  const { host } = await mount();
+  await startEdit(host);
+  input(host.querySelector<HTMLInputElement>('input[aria-label="Title of a"]')!, "Unsaved");
+  const other = Object.assign(document.createElement("a"), { href: "/remote/a/p/demo/pages/a", textContent: "Remote a" });
+  host.append(other);
+  other.click();
+  await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+  expect(host.querySelector<HTMLInputElement>('input[aria-label="Title of a"]')!.value).toBe("Unsaved");
+  expect(api.pages.saveLayout).not.toHaveBeenCalled();
+});
