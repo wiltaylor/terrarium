@@ -380,7 +380,7 @@ pub(crate) fn start_named_locked(
     def: &TargetDef,
     cmd: &RemoteCmd,
     pidfile: String,
-    _guard: &tokio::sync::OwnedMutexGuard<()>,
+    _guard: &crate::executor::ObservedResourceGuard,
 ) -> ApiResult<(Running, Option<Report>)> {
     start_named_inner(state, def, cmd, pidfile, true)
 }
@@ -390,7 +390,7 @@ pub(crate) fn start_registered(
     state: &Shared,
     def: &TargetDef,
     cmd: &RemoteCmd,
-    _guard: &tokio::sync::OwnedMutexGuard<()>,
+    _guard: &crate::executor::ObservedResourceGuard,
 ) -> ApiResult<(Running, Option<Report>)> {
     start_named_inner(state, def, cmd, new_pidfile(), true)
 }

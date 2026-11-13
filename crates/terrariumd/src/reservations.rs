@@ -1,5 +1,6 @@
 //! Reservation enforcement, authorization, and the restart-safe sweep.
 
+use crate::executor::ResourceOperation;
 use crate::store::{
     agents, hosts,
     reservations::{self as store, Holder, Reservation, State},
@@ -386,7 +387,11 @@ pub async fn grant(
     host: &str,
     body: NewBody,
 ) -> ApiResult<Reservation> {
-    let _guard = state.executor.resource_lock(host).lock_owned().await;
+    let _guard = state
+        .executor
+        .resource_lock(host)
+        .lock_owned(ResourceOperation::Grant)
+        .await;
     let busy = state.executor.resource_verb_idle(host);
     let deferred = busy.is_err();
     if !body.queue {
@@ -710,7 +715,11 @@ pub async fn extend(
     value: &str,
 ) -> ApiResult<Reservation> {
     let r = row(state, id).await?;
-    let _guard = state.executor.resource_lock(&r.host).lock_owned().await;
+    let _guard = state
+        .executor
+        .resource_lock(&r.host)
+        .lock_owned(ResourceOperation::Extend)
+        .await;
     state.executor.resource_verb_idle(&r.host)?;
     authorize(state, actor, &r, false).await?;
     let end = until(value)?;
@@ -723,7 +732,11 @@ pub async fn extend(
 
 pub async fn retract(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Reservation> {
     let r = row(state, id).await?;
-    let _guard = state.executor.resource_lock(&r.host).lock_owned().await;
+    let _guard = state
+        .executor
+        .resource_lock(&r.host)
+        .lock_owned(ResourceOperation::Finish)
+        .await;
     state.executor.resource_verb_idle(&r.host)?;
     authorize(state, actor, &r, true).await?;
     let id = id.to_owned();
@@ -736,7 +749,11 @@ pub async fn retract(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Reser
 
 pub async fn cancel(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Reservation> {
     let r = row(state, id).await?;
-    let _guard = state.executor.resource_lock(&r.host).lock_owned().await;
+    let _guard = state
+        .executor
+        .resource_lock(&r.host)
+        .lock_owned(ResourceOperation::Cancel)
+        .await;
     state.executor.resource_verb_idle(&r.host)?;
     authorize(state, actor, &r, true).await?;
     let id = id.to_owned();
@@ -760,7 +777,11 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
         if !needs_work && !state.executor.resource_pending(&host.name) {
             continue;
         }
-        let _guard = state.executor.resource_lock(&host.name).lock_owned().await;
+        let _guard = state
+            .executor
+            .resource_lock(&host.name)
+            .lock_owned(ResourceOperation::Sweep)
+            .await;
         if state.executor.resource_verb_idle(&host.name).is_err() {
             continue;
         }
@@ -885,7 +906,11 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
 /// Reapply persisted enforcement before permitting new work after a host
 /// reconnect. Failure leaves the admission gate closed and the sweep retries.
 pub async fn reconcile_host(state: &Shared, host: &str) -> ApiResult<()> {
-    let _guard = state.executor.resource_lock(host).lock_owned().await;
+    let _guard = state
+        .executor
+        .resource_lock(host)
+        .lock_owned(ResourceOperation::Reconcile)
+        .await;
     reconcile_host_locked(state, host).await
 }
 

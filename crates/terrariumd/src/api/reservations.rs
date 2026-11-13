@@ -1,6 +1,7 @@
 //! Resource reservations and operator-owned host capacity budgets.
 
 use super::{ApiJson, Shared};
+use crate::executor::ResourceOperation;
 use crate::store::{hosts, reservations as store};
 use crate::{actor::Actor, error::ApiResult, policy, reservations};
 use axum::{
@@ -112,7 +113,11 @@ async fn configure(
     ApiJson(body): ApiJson<CapacityBody>,
 ) -> ApiResult<Json<Value>> {
     policy::sysadmin(&actor, "configure reservable host capacity")?;
-    let _guard = state.executor.resource_lock(&host).lock_owned().await;
+    let _guard = state
+        .executor
+        .resource_lock(&host)
+        .lock_owned(ResourceOperation::Capacity)
+        .await;
     state.executor.resource_verb_idle(&host)?;
     state
         .db

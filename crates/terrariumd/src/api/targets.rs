@@ -11,6 +11,7 @@
 //! - `DELETE .../sessions/{id}` kills the run.
 //! - `GET .../sessions/{id}/ws` is a WebSocket for an operator terminal.
 
+use crate::executor::ResourceOperation;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -563,7 +564,7 @@ async fn update(
     let _resources = state
         .executor
         .target_resource_lock(&current.def)
-        .lock_owned()
+        .lock_owned(ResourceOperation::TargetUpdate)
         .await;
     let current = load(&state, &actor, name.clone()).await?;
     policy::define_target(&actor, current.def.project.as_deref())?;

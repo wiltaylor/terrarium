@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+pub use crate::resource_lock::{ObservedResourceGuard, ObservedResourceLock, ResourceOperation};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1481,7 +1482,7 @@ async fn pull_via_cat(
 /// The executor state: the host registry and the exec sessions.
 pub struct Executor {
     /// Serialize reservation enforcement and cleanup across API calls/timers.
-    resource_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    resource_locks: Mutex<HashMap<String, Arc<ObservedResourceLock>>>,
     resource_verbs: Mutex<HashMap<String, usize>>,
     resource_pending: Mutex<HashMap<String, String>>,
     pub hosts: Arc<HostRegistry>,
@@ -1540,11 +1541,11 @@ impl Drop for ResourceVerb {
 }
 
 impl Executor {
-    pub fn resource_lock(&self, host: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub fn resource_lock(&self, host: &str) -> Arc<ObservedResourceLock> {
         self.resource_lock_key(format!("host:{host}"))
     }
 
-    fn resource_lock_key(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
+    fn resource_lock_key(&self, key: String) -> Arc<ObservedResourceLock> {
         self.resource_locks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1553,7 +1554,7 @@ impl Executor {
             .clone()
     }
 
-    pub fn target_resource_lock(&self, def: &TargetDef) -> Arc<tokio::sync::Mutex<()>> {
+    pub fn target_resource_lock(&self, def: &TargetDef) -> Arc<ObservedResourceLock> {
         match def.host.as_deref() {
             Some(host) => self.resource_lock(host),
             None => self.resource_lock_key(format!("target:{}", def.name)),
@@ -1566,11 +1567,12 @@ impl Executor {
     pub(crate) async fn target_admission(
         &self,
         def: &TargetDef,
-    ) -> ApiResult<tokio::sync::OwnedMutexGuard<()>> {
+        operation: ResourceOperation,
+    ) -> ApiResult<ObservedResourceGuard> {
         let lock = self.target_resource_lock(def);
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
-                let guard = lock.clone().lock_owned().await;
+                let guard = lock.clone().lock_owned(operation).await;
                 if !def
                     .host
                     .as_deref()
@@ -1902,7 +1904,7 @@ pub(crate) fn known_hosts(state_dir: &Path) -> ApiResult<PathBuf> {
 /// Start a command on a target.
 pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Running> {
     let lock = state.executor.target_resource_lock(def);
-    if let Ok(_resources) = lock.clone().try_lock_owned() {
+    if let Ok(_resources) = lock.clone().try_lock_owned(ResourceOperation::Command) {
         let run = start_cmd_locked(state, def, cmd)?;
         return track_resource_run(state, def, cmd, run, None);
     }
@@ -1915,12 +1917,14 @@ pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<
     let def = def.clone();
     let cmd = cmd.clone();
     tokio::spawn(async move {
+        let started = tokio::time::Instant::now();
         let guard = tokio::select! {
             _ = tx.closed() => return,
-            result = tokio::time::timeout(Duration::from_millis(500), lock.lock_owned()) => {
+            result = tokio::time::timeout(Duration::from_millis(500), lock.clone().lock_owned(ResourceOperation::Command)) => {
                 match result {
                     Ok(guard) => guard,
                     Err(_) => {
+                        lock.log_timeout(started);
                         let _ = tx.send(Ev::End(End::error("resource_busy", "host admission is busy; retry the command"))).await;
                         return;
                     }
@@ -2432,7 +2436,10 @@ async fn start_exec_secrets(
     if let Some(sync) = &sync {
         sync.translate_cmd(&mut cmd);
     }
-    let resources = state.executor.target_admission(&def).await?;
+    let resources = state
+        .executor
+        .target_admission(&def, ResourceOperation::Exec)
+        .await?;
     let (run, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     // The output is redacted for the caller (PLAN §16b.6, TER-33).
     let view = match actor {
@@ -2550,7 +2557,10 @@ pub async fn start_tool_exec(
     cmd.pty = None;
     cmd.holder = holder_of(actor);
     cmd.operator = actor.is_operator();
-    let resources = state.executor.target_admission(&def).await?;
+    let resources = state
+        .executor
+        .target_admission(&def, ResourceOperation::Copy)
+        .await?;
     let (running, report) = crate::run_kill::start_registered(state, &def, &cmd, &resources)?;
     let (sess, ctl) = ExecSession::new(
         name,
@@ -3377,7 +3387,11 @@ fn docker_limits(state: &Shared, def: &TargetDef) -> ApiResult<Option<Limits>> {
 
 async fn docker_start(state: &Shared, def: &TargetDef) -> ApiResult<()> {
     {
-        let _admission = state.executor.target_resource_lock(def).lock_owned().await;
+        let _admission = state
+            .executor
+            .target_resource_lock(def)
+            .lock_owned(ResourceOperation::Lifecycle)
+            .await;
         crate::reservations::before_docker_start(state, def).await?;
     }
     let container = container_name(def);
@@ -3432,7 +3446,11 @@ pub async fn recreate(
     }
     host_online(state, def)?;
     let _resource_verb = {
-        let _admission = state.executor.target_resource_lock(def).lock_owned().await;
+        let _admission = state
+            .executor
+            .target_resource_lock(def)
+            .lock_owned(ResourceOperation::Lifecycle)
+            .await;
         state.executor.begin_resource_verb(def)?
     };
     if state.executor.live_on(&def.name) > 0 && !opts.force {
@@ -3674,9 +3692,16 @@ pub async fn lifecycle(
     // across image pulls or blocking work on any other host.
     let _resource_verb = if def.kind == TargetKind::Docker {
         let _admission = if verb_kind == V::Up {
-            state.executor.target_admission(def).await?
+            state
+                .executor
+                .target_admission(def, ResourceOperation::Lifecycle)
+                .await?
         } else {
-            state.executor.target_resource_lock(def).lock_owned().await
+            state
+                .executor
+                .target_resource_lock(def)
+                .lock_owned(ResourceOperation::Lifecycle)
+                .await
         };
         if verb_kind == V::Up {
             crate::reservations::lifecycle_admission(state, def)?;
@@ -3686,7 +3711,10 @@ pub async fn lifecycle(
         None
     };
     if verb_kind == V::Up && def.kind != TargetKind::Docker {
-        let _admission = state.executor.target_admission(def).await?;
+        let _admission = state
+            .executor
+            .target_admission(def, ResourceOperation::Lifecycle)
+            .await?;
         crate::reservations::lifecycle_admission(state, def)?;
     }
     let mut add_snapshot = None;
@@ -5959,17 +5987,29 @@ mod tests {
         executor.set_resource_pending("h", true);
         let waiting = {
             let executor = executor.clone();
-            tokio::spawn(async move { executor.target_admission(&def).await })
+            tokio::spawn(async move {
+                executor
+                    .target_admission(&def, ResourceOperation::Reconcile)
+                    .await
+            })
         };
         tokio::task::yield_now().await;
         assert!(!waiting.is_finished());
-        let reconcile = executor.resource_lock("h").try_lock_owned().unwrap();
+        let reconcile = executor
+            .resource_lock("h")
+            .try_lock_owned(ResourceOperation::Reconcile)
+            .unwrap();
         let epoch = executor.resource_epoch("h");
         assert!(executor.finish_resource_reconcile("h", epoch.as_deref()));
         drop(reconcile);
         tokio::time::advance(Duration::from_millis(50)).await;
         let guard = waiting.await.unwrap().unwrap();
-        assert!(executor.resource_lock("h").try_lock_owned().is_err());
+        assert!(
+            executor
+                .resource_lock("h")
+                .try_lock_owned(ResourceOperation::Reconcile)
+                .is_err()
+        );
         drop(guard);
     }
 
@@ -5979,11 +6019,19 @@ mod tests {
         let def: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
         executor.set_resource_pending("h", true);
         let started = tokio::time::Instant::now();
-        let error = executor.target_admission(&def).await.unwrap_err();
+        let error = executor
+            .target_admission(&def, ResourceOperation::Reconcile)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("reconciliation is pending"));
         assert_eq!(started.elapsed(), Duration::from_secs(60));
         assert!(executor.resource_pending("h"));
-        assert!(executor.resource_lock("h").try_lock_owned().is_ok());
+        assert!(
+            executor
+                .resource_lock("h")
+                .try_lock_owned(ResourceOperation::Reconcile)
+                .is_ok()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -5991,9 +6039,17 @@ mod tests {
         let executor = Executor::default();
         let def: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
         executor.set_resource_pending("h", true);
-        let _reconcile = executor.resource_lock("h").lock_owned().await;
+        let _reconcile = executor
+            .resource_lock("h")
+            .lock_owned(ResourceOperation::Reconcile)
+            .await;
         let started = tokio::time::Instant::now();
-        assert!(executor.target_admission(&def).await.is_err());
+        assert!(
+            executor
+                .target_admission(&def, ResourceOperation::Reconcile)
+                .await
+                .is_err()
+        );
         assert_eq!(started.elapsed(), Duration::from_secs(60));
         assert!(executor.resource_pending("h"));
     }
