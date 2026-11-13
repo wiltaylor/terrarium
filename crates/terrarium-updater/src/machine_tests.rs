@@ -437,7 +437,9 @@ impl Engine for Fake {
             };
             if argv.get(1).is_some_and(|s| s == "release-env-keys") {
                 if self.0.lock().unwrap().release_env_engine_error {
-                    return Err("Docker POST /containers/create: 500: secret-sentinel-engine".into());
+                    return Err(
+                        "Docker POST /containers/create: 500: secret-sentinel-engine".into(),
+                    );
                 }
                 return Ok(match self.0.lock().unwrap().release_env.clone() {
                     Some(stdout) => ExecOut {
@@ -2434,7 +2436,10 @@ fn unreadable_release_entries_are_reported_by_line() {
         &prepared,
     )
     .unwrap();
-    assert!(both.starts_with("WARNING: the deployed compose lacks"), "{both}");
+    assert!(
+        both.starts_with("WARNING: the deployed compose lacks"),
+        "{both}"
+    );
     assert!(both.ends_with("; the release compose.yaml has environment entries that the check cannot read, not checked: lines 21"), "{both}");
     assert!(!both.contains("secret-sentinel"));
 }

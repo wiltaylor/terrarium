@@ -178,7 +178,13 @@ volumes:
         let env = service_env(SAMPLE, "terrarium");
         assert_eq!(
             env.keys,
-            ["TERRARIUM_TOKEN", "TERRARIUM_NEW", "QUOTED_KEY", "PLAIN", "BLOCK"]
+            [
+                "TERRARIUM_TOKEN",
+                "TERRARIUM_NEW",
+                "QUOTED_KEY",
+                "PLAIN",
+                "BLOCK"
+            ]
         );
         assert_eq!(env.required, ["TERRARIUM_NEW"]);
         // The continuation of BLOCK is no entry; the bad line is reported
@@ -211,6 +217,10 @@ volumes:
         for key in &env.required {
             assert!(env.keys.contains(key));
         }
-        assert!(env.skipped.is_empty(), "unreadable lines: {:?}", env.skipped);
+        assert!(
+            env.skipped.is_empty(),
+            "unreadable lines: {:?}",
+            env.skipped
+        );
     }
 }
