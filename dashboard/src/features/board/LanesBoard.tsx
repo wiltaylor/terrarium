@@ -35,6 +35,8 @@ export function LanesBoard(props: {
   /** The column with the "+" (new card) button. */
   addColumn?: string;
   addButton: (col: Column) => JSX.Element;
+  /** The cog of a column head: its options and rules (TER-1116). */
+  columnCog?: (col: Column) => JSX.Element;
   /** `also`: the other version names of the card, in a version lane. */
   card: (c: Card, lane: Lane, drag: LaneDrag, also: string[]) => JSX.Element;
   /** A drop: `index` is the place in the lane cell, without the dragged card. */
@@ -196,6 +198,7 @@ export function LanesBoard(props: {
             {p.col.wip_limit !== undefined ? ` / ${p.col.wip_limit}` : ""}
           </span>
           <Show when={p.col.name === props.addColumn}>{props.addButton(p.col)}</Show>
+          {props.columnCog?.(p.col)}
         </span>
       </div>
     );

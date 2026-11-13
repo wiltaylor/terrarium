@@ -4908,8 +4908,13 @@ reader; a role alias names the column with that role):
            "max_batch_cards": 8}}
 ```
 
+The answer also has `can_edit`: whether the caller may write the options
+(the rule below). The dashboard cog shows an editor or a viewer from it
+(TER-1116).
+
 `PUT` on the same path takes the whole `checks` and `queue` and the
-`base_version` that was read, and returns the new options. Only the
+`base_version` that was read, and returns the new options. It ignores a
+`can_edit` in the body, so a client may send back what it read. Only the
 operator and a `project_admin` of that project write (`403` for every other
 actor, a `sysadmin` too: it reads only). A `base_version` that is not the
 current `version` is `409 stale_base` with `details.version`, and nothing is

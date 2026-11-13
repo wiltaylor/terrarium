@@ -7,3 +7,5 @@
 .home-status-area { min-height: 136px; }
 .home-status { display: flex; flex-direction: column; align-items: start; gap: 8px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; }
 .nominal { font-size: 1.6rem; padding: 16px 0; }
+.home-lane-head { align-items: center; }
+.home-lane-head h3 { margin: 0; }

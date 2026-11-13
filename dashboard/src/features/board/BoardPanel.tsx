@@ -26,6 +26,7 @@ import { type CardQuestionBadge, cardQuestionBadges, isCardQuestionEvent, linkab
 import { emptyNewCardForm, type NewCardErrors, type NewCardForm, newCardBody, newCardColumn, nextNewCardForm } from "./newCard";
 import { columnTitle, isBlockedColumn } from "./columns";
 import { ColumnsEditor } from "./ColumnsEditor";
+import { ColumnCog } from "./ColumnCog";
 import { editCardForm, editCardPatch, type EditCardForm } from "./editCard";
 import { LanesBoard } from "./LanesBoard";
 import { buildLanes, columnIndex, laneCells, laneMoveLabels, laneStateKey, readLaneState, toggleCollapsed } from "./lanes";
@@ -400,6 +401,7 @@ function BoardPanelContent(props: BoardPanelProps) {
               visible={visible}
               addColumn={props.done || !canWrite() ? undefined : newCardColumn(columnNames())}
               addButton={addCardButton}
+              columnCog={(col) => <ColumnCog project={props.project} column={col.name} title={columnTitle(col)} columns={columnNames()} />}
               onDrop={(...a) => {
                 void onLaneDrop(...a).finally(() => setDragging(null));
               }}
