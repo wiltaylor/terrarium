@@ -186,7 +186,7 @@ cloned terrarium in work/terrarium of worker
 HEAD 3f2c1e0b9a0d... (main)
 ```
 
-`--target <name>` runs the clone or fetch on that target through its host agent. A vmlab target is refused (422).
+`--target <name>` runs the clone or fetch on that target through its host agent. A vmlab target is refused (422). `--path` is an absolute path on the target. Without it an agent's checkout goes to the repo's path in its workspace, `/work/<project>/<agent>/<repo path>`, the same path as a local checkout. The operator must give `--path` (422 without it).
 
 `terrarium repo credential get` is hidden. git runs it as the credential
 helper that the daemon writes into each workspace clone. It reads git's

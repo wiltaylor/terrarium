@@ -249,6 +249,23 @@ fn check_dir(dir: &str) -> ApiResult<()> {
     }
 }
 
+/// The checkout directory on a target when the body has no `path`: the
+/// repo's path in the agent's workspace, `/work/<project>/<agent>/<repo>`,
+/// the same path as a local checkout (TER-1109). The operator has no
+/// workspace, so it must give the path.
+fn target_default_dir(agent: Option<(&str, &str)>, repo_path: &str) -> ApiResult<String> {
+    let Some((project, name)) = agent else {
+        return Err(ApiError::invalid(
+            "a checkout on a target needs `--path` (an absolute path on the target) when the operator runs it",
+        ));
+    };
+    check_dir(repo_path)?;
+    Ok(crate::workspace::inside(&format!("{project}/{name}"))
+        .join(repo_path)
+        .display()
+        .to_string())
+}
+
 pub(super) fn git_error(e: GitError) -> ApiError {
     match e {
         GitError::Refused(m) => ApiError::conflict(m),
@@ -508,7 +525,13 @@ async fn checkout_target(
             repo.project
         )));
     }
-    let dir = body.path.clone().unwrap_or_else(|| repo.path.clone());
+    let dir = match &body.path {
+        Some(p) => p.clone(),
+        None => target_default_dir(
+            actor.agent().map(|a| (a.project.as_str(), a.name.as_str())),
+            &repo.path,
+        )?,
+    };
     let secret = secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await?;
     let branch = body.branch.clone().or_else(|| repo.default_branch.clone());
     let event = |summary: String, data: serde_json::Value| {
@@ -782,4 +805,22 @@ pub async fn checkout_on_create(
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_checkout_defaults_to_the_workspace_path() {
+        // TER-1109: the default was the bare repo path, which the target
+        // checkout refused as "bad checkout path".
+        assert_eq!(
+            target_default_dir(Some(("terrarium", "fix-1109")), "terrarium").unwrap(),
+            "/work/terrarium/fix-1109/terrarium"
+        );
+        let e = target_default_dir(None, "terrarium").unwrap_err();
+        assert!(e.message.contains("--path"), "{}", e.message);
+        assert!(target_default_dir(Some(("p", "a")), "../x").is_err());
+    }
 }

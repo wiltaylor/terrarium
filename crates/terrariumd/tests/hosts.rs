@@ -2610,6 +2610,17 @@ async fn repo_checkout_runs_on_the_target() {
     );
     let audit = lab.td.get("/api/audit?action=repo.checkout").await;
     assert_eq!(audit.ok()[0]["detail"]["target"], "box");
+    // The operator has no workspace: without a path the checkout says to
+    // give one (TER-1109), and does not send the bare repo path.
+    let r = lab
+        .td
+        .post(
+            &format!("/api/repos/{repo_id}/checkout"),
+            json!({"target": "box", "branch": "main"}),
+        )
+        .await;
+    assert!(r.body.to_string().contains("--path"), "{}", r.body);
+    r.err(422, "invalid");
     // An agent needs the target in its policy.
     let a = lab.td.agent("terra", "worker", json!({})).await;
     lab.td
