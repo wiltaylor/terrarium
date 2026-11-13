@@ -49,6 +49,9 @@ pub mod native;
 #[path = "native_windows.rs"]
 pub mod native;
 pub mod outbox;
+// Production reservation creation is Windows-only; portable tests exercise it.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod pending_logon;
 pub mod prepare;
 pub mod protocol;
 pub mod selfupdate;

@@ -31,11 +31,17 @@ use crate::session::{self, SessionInput};
 use crate::transfer::{self, PushFile};
 use crate::verb::{BuildError, VerbPlan};
 use crate::{docker, vmlab};
+use crate::pending_logon::{Event as PendingEvent, Pending, Reservations, Routed};
 
 /// How many heartbeat intervals may pass with nothing received.
 const MISSED_HEARTBEATS: u32 = 3;
 /// Queued push chunks before the reader waits for the disk.
 const PUSH_QUEUE: usize = 64;
+
+#[cfg(windows)]
+type PreparedIdentity = Arc<terrarium_winapi::Identity>;
+#[cfg(not(windows))]
+type PreparedIdentity = ();
 
 /// Everything the client needs. `main` builds it from the config file.
 #[derive(Debug, Clone)]
@@ -255,6 +261,7 @@ struct Entry {
 }
 
 struct Shared {
+    pending_logons: Reservations,
     #[cfg(windows)]
     windows_jobs: Mutex<HashMap<(String, String), Arc<terrarium_winapi::Job>>>,
     sessions: Mutex<HashMap<SessionId, Entry>>,
@@ -308,9 +315,27 @@ pub struct Client {
     shared: Arc<Shared>,
 }
 
+#[cfg(windows)]
+struct LogonPreparation {
+    client: Client,
+    lease: crate::pending_logon::Lease,
+}
+
+#[cfg(windows)]
+impl Drop for LogonPreparation {
+    fn drop(&mut self) {
+        // A failed/panicked preparation must not orphan a partially published
+        // session. A successful empty-queue handoff has removed this ownership.
+        if self.client.shared.pending_logons.owns(self.lease.id, Some(&self.lease.pending)) {
+            self.client.cancel_pending(self.lease.id);
+        }
+    }
+}
+
 impl Client {
     pub fn new(opts: ClientOptions) -> Self {
         let shared = Shared {
+            pending_logons: Reservations::default(),
             #[cfg(windows)]
             windows_jobs: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
@@ -396,7 +421,8 @@ impl Client {
 
     /// The number of sessions held (live and finished but not released).
     pub fn session_count(&self) -> usize {
-        self.sessions().len()
+        let sessions = self.sessions();
+        sessions.len() + self.shared.pending_logons.unpublished(|id| sessions.contains_key(&id))
     }
 
     /// Dial, serve, and redial for ever. Returns when the transport is
@@ -830,8 +856,12 @@ impl Client {
     }
 
     fn detach_all(&self) {
+        self.shared.pending_logons.cancel_all();
         let now = Instant::now();
-        for e in self.sessions().values_mut() {
+        for (id, e) in self.sessions().iter_mut() {
+            if self.shared.pending_logons.contains(*id) && let Some(input) = &e.input {
+                let _ = input.send(SessionInput::Kill(ExitReason::DetachedTimeout));
+            }
             e.outbox.detach();
             e.detached_since.get_or_insert(now);
             if let Some(push) = e.push.take() {
@@ -862,6 +892,24 @@ impl Client {
     }
 
     async fn on_binary(&self, bytes: &[u8], tx: &Link) {
+        if let Ok(frame) = DataFrame::decode(bytes)
+            && matches!(frame.stream, StreamTag::Stdin | StreamTag::File)
+            && self.shared.pending_logons.contains(frame.session)
+        {
+            match self.shared.pending_logons.route(frame.session, PendingEvent::Binary(bytes.to_vec()), bytes.len()) {
+                Routed::Absent(_) => {}
+                Routed::Overflow => {
+                    self.cancel_pending(frame.session);
+                    send_error(tx, frame.session, ErrorCode::Busy, "pending logon input queue is full".into());
+                    return;
+                }
+                Routed::Queued | Routed::Cancelled => return,
+            }
+        }
+        self.on_binary_ready(bytes, tx).await;
+    }
+
+    async fn on_binary_ready(&self, bytes: &[u8], tx: &Link) {
         let frame = match DataFrame::decode(bytes) {
             Ok(f) => f,
             Err(e) => {
@@ -903,8 +951,101 @@ impl Client {
         }
     }
 
+    fn cancel_pending(&self, id: SessionId) -> bool {
+        let committed = self.shared.pending_logons.cancel(id).unwrap_or(false);
+        if let Some(entry) = self.sessions().get_mut(&id) {
+            if let Some(input) = &entry.input {
+                let _ = input.send(SessionInput::Kill(ExitReason::Signaled));
+            }
+            if let Some(push) = entry.push.take() {
+                let _ = push.try_send(PushMsg::Abort);
+            }
+        }
+        committed
+    }
+
+    fn route_pending_control(&self, frame: DaemonFrame, tx: &Link, bytes: usize) -> Option<DaemonFrame> {
+        let (id, cancel) = match &frame {
+            DaemonFrame::Release {session} | DaemonFrame::Signal {session, ..} => (*session, true),
+            DaemonFrame::Eof {session} | DaemonFrame::Resize {session, ..}
+                | DaemonFrame::CpEnd {session, ..} => (*session, false),
+            _ => return Some(frame),
+        };
+        if !self.shared.pending_logons.contains(id) { return Some(frame); }
+        if let DaemonFrame::Signal {signal, ..} = &frame && parse_signal(signal).is_none() {
+            send_error(tx, id, ErrorCode::BadRequest, format!("unknown signal {signal:?}"));
+            return None;
+        }
+        if cancel {
+            let committed = self.cancel_pending(id);
+            if !committed && !matches!(frame, DaemonFrame::Release {..}) {
+                send_error(tx, id, ErrorCode::Interrupted, "pending logon was cancelled".into());
+            }
+            if matches!(frame, DaemonFrame::Release {..}) { self.sessions().remove(&id); }
+            return None;
+        }
+        match self.shared.pending_logons.route(id, PendingEvent::Control(frame), bytes) {
+            Routed::Absent(PendingEvent::Control(frame)) => Some(frame),
+            Routed::Absent(PendingEvent::Binary(_)) => unreachable!("control routing preserves type"),
+            Routed::Overflow => {
+                self.cancel_pending(id);
+                send_error(tx, id, ErrorCode::Busy, "pending logon input queue is full".into());
+                None
+            }
+            Routed::Queued | Routed::Cancelled => None,
+        }
+    }
+
+    #[cfg(windows)]
+    fn prepare_logon(&self, id: SessionId, frame: DaemonFrame,
+        credentials: crate::protocol::WindowsRunAs, tx: Link,
+    ) {
+        let lease = self.shared.pending_logons.reserve(id);
+        let client = self.clone();
+        tokio::spawn(async move {
+            let preparation = LogonPreparation { client, lease };
+            let client = &preparation.client;
+            let lease = &preparation.lease;
+            // The reservation remains charged during an uncancellable native
+            // API call, including after connection-close/revoke cancellation.
+            let result = crate::windows_run_as::logon(Some(credentials), &client.opts.windows_run_as).await;
+            if lease.pending.cancelled() {
+                return;
+            }
+            let identity = match result {
+                Ok(Some(identity)) => identity,
+                Ok(None) => { send_error(&tx, id, ErrorCode::BadRequest, "Windows logon did not provide an identity".into()); return; }
+                Err(error) => { send_error(&tx, id, error.code, error.message); return; }
+            };
+            {
+                // Exec's final synchronous spawn is the admission commit.
+                // Copy opens may block on a remote server, so their builders
+                // take the fence only for checks/publication, never disk IO.
+                let _admission = if matches!(&frame, DaemonFrame::Exec(_)) {
+                    Some(client.shared.admission.lock().await)
+                } else { None };
+                if lease.pending.cancelled() { return; }
+                if client.on_frame(frame, &tx, Some(identity), Some(&lease.pending)).await.is_err() {
+                    return;
+                }
+            }
+            if !client.sessions().contains_key(&id) { return; }
+            // Preparation/start has published an entry. Route its early frames
+            // in order until an atomic empty-queue handoff to normal routing.
+            while let Some(event) = lease.pop_or_handoff() {
+                if lease.pending.cancelled() { break; }
+                match event {
+                    PendingEvent::Control(frame) => {
+                        let _ = client.on_frame(frame, &tx, None, None).await;
+                    }
+                    PendingEvent::Binary(bytes) => client.on_binary_ready(&bytes, &tx).await,
+                }
+            }
+            if lease.pending.cancelled() { client.cancel_pending(id); }
+        });
+    }
+
     async fn on_text(&self, text: &str, tx: &Link) -> Result<(), ClientError> {
-        let _admission = self.shared.admission.lock().await;
         let frame: DaemonFrame = match decode_control(text) {
             Ok(f) => f,
             Err(e) => {
@@ -918,6 +1059,56 @@ impl Client {
                 return Ok(());
             }
         };
+        #[cfg(windows)]
+        let mut frame = frame;
+        #[cfg(windows)]
+        {
+            let credentials = match &mut frame {
+                DaemonFrame::Exec(req) => req.windows_run_as.take(),
+                DaemonFrame::CpPush(req) => req.windows_run_as.take(),
+                DaemonFrame::CpPull(req) => req.windows_run_as.take(),
+                _ => None,
+            };
+            if let Some(credentials) = credentials {
+                let id = match &frame {
+                    DaemonFrame::Exec(req) => req.session,
+                    DaemonFrame::CpPush(req) => req.session,
+                    DaemonFrame::CpPull(req) => req.session,
+                    _ => unreachable!("credentials only on native admission frames"),
+                };
+                let Ok(_admission) = self.shared.admission.try_lock() else {
+                    send_error(tx, id, ErrorCode::Busy, "host admission is committing another session".into());
+                    return Ok(());
+                };
+                if self.admit(id, tx) {
+                    self.prepare_logon(id, frame, credentials, tx.clone());
+                }
+                return Ok(());
+            }
+        }
+        let Some(frame) = self.route_pending_control(frame, tx, text.len()) else { return Ok(()) };
+        // Only new work participates in the admission/drain fence. Heartbeats,
+        // kill/release and input must not wait for another session's preparation.
+        let admission = !matches!(&frame, DaemonFrame::Welcome(_) | DaemonFrame::Ping {..} | DaemonFrame::Pong {..}
+            | DaemonFrame::Goodbye {..} | DaemonFrame::Ack {..} | DaemonFrame::Release {..}
+            | DaemonFrame::Eof {..} | DaemonFrame::Resize {..} | DaemonFrame::Signal {..}
+            | DaemonFrame::CpEnd {..});
+        let _admission = if admission && self.shared.pending_logons.count() > 0 {
+            match self.shared.admission.try_lock() {
+                Ok(guard) => Some(guard),
+                Err(_) => {
+                    send_error(tx, frame.session().unwrap_or(0), ErrorCode::Busy, "host admission is committing another session".into());
+                    return Ok(());
+                }
+            }
+        } else if admission { Some(self.shared.admission.lock().await) } else { None };
+        self.on_frame(frame, tx, None, None).await
+    }
+
+    async fn on_frame(&self, frame: DaemonFrame, tx: &Link,
+        identity: Option<PreparedIdentity>,
+        owner: Option<&Arc<Pending>>,
+    ) -> Result<(), ClientError> {
         let o = &self.opts;
         let docker_ok = o.capabilities.docker.present;
         let vmlab_ok = o.capabilities.vmlab.present;
@@ -979,29 +1170,10 @@ impl Client {
                     None => unknown(tx, session),
                 }
             }
-            F::CpPush(req) => self.start_push(req, tx).await,
-            F::CpPull(req) => self.start_pull(req, tx).await,
+            F::CpPush(req) => self.start_push(req, tx, identity, owner).await,
+            F::CpPull(req) => self.start_pull(req, tx, identity, owner).await,
             F::Exec(req) => {
                 let id = req.session;
-                #[cfg(windows)]
-                if req.windows_run_as.is_some() && !self.admit(id, tx) {
-                    return Ok(());
-                }
-                #[cfg(windows)]
-                let mut req = req;
-                #[cfg(windows)]
-                let identity = match crate::windows_run_as::logon(
-                    req.windows_run_as.take(),
-                    &o.windows_run_as,
-                )
-                .await
-                {
-                    Ok(identity) => identity,
-                    Err(error) => {
-                        send_error(tx, id, error.code, error.message);
-                        return Ok(());
-                    }
-                };
                 #[cfg(not(windows))]
                 let plan = crate::verb::plan_exec(&req, p);
                 #[cfg(windows)]
@@ -1022,7 +1194,7 @@ impl Client {
                     (Ok(plan), Some(l)) => self.limited(plan, l, id).await,
                     (plan, _) => plan,
                 };
-                self.start(id, plan, tx);
+                self.start_reserved(id, plan, tx, owner);
             }
             F::DockerRun(r) => self.start(
                 r.session,
@@ -1296,6 +1468,10 @@ impl Client {
     /// Check the session ID and the session limit. Errors go straight to
     /// the link: a session that never started holds no entry.
     fn admit(&self, session: SessionId, tx: &Link) -> bool {
+        self.admit_reserved(session, tx, None)
+    }
+
+    fn admit_reserved(&self, session: SessionId, tx: &Link, owner: Option<&Arc<Pending>>) -> bool {
         if session == 0 {
             send_error(tx, 0, ErrorCode::BadRequest, "session 0 is reserved".into());
             return false;
@@ -1314,7 +1490,13 @@ impl Client {
             return false;
         }
         let sessions = self.sessions();
-        if sessions.contains_key(&session) {
+        let reserved = self.shared.pending_logons.contains(session);
+        let owned = self.shared.pending_logons.owns(session, owner);
+        if owner.is_some() && (!owned || owner.is_some_and(|p| p.cancelled())) {
+            send_error(tx, session, ErrorCode::Interrupted, "pending logon was cancelled".into());
+            return false;
+        }
+        if sessions.contains_key(&session) || (reserved && !owned) {
             drop(sessions);
             send_error(
                 tx,
@@ -1327,7 +1509,9 @@ impl Client {
         let live = sessions
             .values()
             .filter(|e| !e.outbox.is_finished())
-            .count();
+            .count()
+            + self.shared.pending_logons.unpublished(|id| sessions.contains_key(&id))
+            - usize::from(owned);
         if live >= self.opts.max_sessions as usize {
             drop(sessions);
             send_error(
@@ -1348,7 +1532,11 @@ impl Client {
     }
 
     fn start(&self, session: SessionId, plan: Result<VerbPlan, BuildError>, tx: &Link) {
-        if !self.admit(session, tx) {
+        self.start_reserved(session, plan, tx, None);
+    }
+
+    fn start_reserved(&self, session: SessionId, plan: Result<VerbPlan, BuildError>, tx: &Link, owner: Option<&Arc<Pending>>) {
+        if !self.admit_reserved(session, tx, owner) {
             return;
         }
         let plan = match plan {
@@ -1357,6 +1545,13 @@ impl Client {
         };
         let outbox = self.new_outbox(session, tx);
         let program = plan.exec.program.clone();
+        let commitment = match owner {
+            Some(owner) => match owner.commit() {
+                Some(commitment) => Some(commitment),
+                None => return send_error(tx, session, ErrorCode::Interrupted, "pending logon was cancelled".into()),
+            },
+            None => None,
+        };
         let running = match session::spawn(plan.exec, outbox.clone()) {
             Ok(r) => r,
             Err(e) => {
@@ -1364,6 +1559,7 @@ impl Client {
                 return send_error(tx, session, ErrorCode::SpawnFailed, e.to_string());
             }
         };
+        drop(commitment);
         tracing::info!(session, %program, pid = running.pid, "session started");
         outbox.send_now(HostFrame::Started {
             session,
@@ -1378,6 +1574,9 @@ impl Client {
                 detached_since: None,
             },
         );
+        if owner.is_some_and(|owner| owner.cancelled()) {
+            self.cancel_pending(session);
+        }
         let parser = plan.parser;
         let done = running.done;
         tokio::spawn(async move {
@@ -1666,8 +1865,11 @@ impl Client {
         });
     }
 
-    async fn start_push(&self, req: CpPush, tx: &Link) {
-        if !self.admit(req.session, tx) {
+    async fn start_push(&self, req: CpPush, tx: &Link, identity: Option<PreparedIdentity>, owner: Option<&Arc<Pending>>) {
+        let prepare_admission = if owner.is_some() { Some(self.shared.admission.lock().await) } else { None };
+        #[cfg(not(windows))]
+        let _ = identity;
+        if !self.admit_reserved(req.session, tx, owner) {
             return;
         }
         #[cfg(not(windows))]
@@ -1680,22 +1882,11 @@ impl Client {
             );
             return;
         }
-        #[cfg(windows)]
-        let mut req = req;
-        #[cfg(windows)]
-        let identity = match crate::windows_run_as::logon(
-            req.windows_run_as.take(),
-            &self.opts.windows_run_as,
-        )
-        .await
-        {
-            Ok(identity) => identity,
-            Err(error) => return send_error(tx, req.session, error.code, error.message),
-        };
         let session = req.session;
-        if !self.admit(session, tx) {
+        if !self.admit_reserved(session, tx, owner) {
             return;
         }
+        drop(prepare_admission);
         #[cfg(windows)]
         let checked_path =
             crate::windows_run_as::check_path(identity.as_deref(), &self.opts.policy, &req.path);
@@ -1713,6 +1904,12 @@ impl Client {
             Ok(f) => f,
             Err(e) => return send_error(tx, session, e.code(), e.to_string()),
         };
+        let commit_admission = if owner.is_some() { Some(self.shared.admission.lock().await) } else { None };
+        if !self.admit_reserved(session, tx, owner) {
+            drop(commit_admission);
+            file.abort().await;
+            return;
+        }
         let outbox = self.new_outbox(session, tx);
         outbox.send_now(HostFrame::Started { session, pid: None });
         let (ptx, mut prx) = mpsc::channel(PUSH_QUEUE);
@@ -1775,8 +1972,11 @@ impl Client {
         });
     }
 
-    async fn start_pull(&self, req: CpPull, tx: &Link) {
-        if !self.admit(req.session, tx) {
+    async fn start_pull(&self, req: CpPull, tx: &Link, identity: Option<PreparedIdentity>, owner: Option<&Arc<Pending>>) {
+        let prepare_admission = if owner.is_some() { Some(self.shared.admission.lock().await) } else { None };
+        #[cfg(not(windows))]
+        let _ = identity;
+        if !self.admit_reserved(req.session, tx, owner) {
             return;
         }
         #[cfg(not(windows))]
@@ -1789,22 +1989,11 @@ impl Client {
             );
             return;
         }
-        #[cfg(windows)]
-        let mut req = req;
-        #[cfg(windows)]
-        let identity = match crate::windows_run_as::logon(
-            req.windows_run_as.take(),
-            &self.opts.windows_run_as,
-        )
-        .await
-        {
-            Ok(identity) => identity,
-            Err(error) => return send_error(tx, req.session, error.code, error.message),
-        };
         let session = req.session;
-        if !self.admit(session, tx) {
+        if !self.admit_reserved(session, tx, owner) {
             return;
         }
+        drop(prepare_admission);
         #[cfg(windows)]
         let checked_path =
             crate::windows_run_as::check_path(identity.as_deref(), &self.opts.policy, &req.path);
@@ -1814,6 +2003,8 @@ impl Client {
             Ok(p) => p,
             Err(m) => return send_error(tx, session, ErrorCode::PathDenied, m),
         };
+        let _commit_admission = if owner.is_some() { Some(self.shared.admission.lock().await) } else { None };
+        if !self.admit_reserved(session, tx, owner) { return; }
         let outbox = self.new_outbox(session, tx);
         outbox.send_now(HostFrame::Started { session, pid: None });
         self.sessions().insert(
@@ -2084,6 +2275,82 @@ pub(crate) mod tests {
             .draining
             .store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(client.admit(3, &tx));
+    }
+
+    #[tokio::test]
+    async fn pending_logon_capacity_stays_reserved_after_release_until_auth_returns() {
+        let mut options = ClientOptions::new("ws://localhost", "fixture", "fixture");
+        options.max_sessions = 1;
+        let client = Client::new(options);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(client.admit(1, &tx));
+        let lease = client.shared.pending_logons.reserve(1);
+        assert_eq!(client.session_count(), 1);
+        assert!(client.admit_reserved(1, &tx, Some(&lease.pending)));
+        assert!(!client.admit(2, &tx));
+        assert!(matches!(rx.recv().await, Some(Outgoing::Control(HostFrame::Error {code: ErrorCode::Busy, ..}))));
+        client.on_text(r#"{"type":"release","session":1}"#, &tx).await.unwrap();
+        assert!(lease.pending.cancelled());
+        assert!(lease.pending.commit().is_none());
+        assert!(!client.admit(2, &tx));
+        assert!(matches!(rx.recv().await, Some(Outgoing::Control(HostFrame::Error {code: ErrorCode::Busy, ..}))));
+        drop(lease); // The delayed native operation has finally returned.
+        assert_eq!(client.session_count(), 0);
+        assert!(client.admit(2, &tx));
+    }
+
+    #[tokio::test]
+    async fn pending_logon_close_cancels_delayed_auth_before_process_commit() {
+        let client = Client::new(ClientOptions::new("ws://localhost", "fixture", "fixture"));
+        let lease = client.shared.pending_logons.reserve(1);
+        let (complete, waiting) = tokio::sync::oneshot::channel();
+        let actor = tokio::spawn(async move {
+            waiting.await.unwrap();
+            lease.pending.commit().map(|_| ()).is_some()
+        });
+        client.detach_all();
+        assert_eq!(client.session_count(), 1);
+        complete.send(()).unwrap();
+        assert!(!actor.await.unwrap());
+        assert_eq!(client.session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn pending_logon_early_file_chunks_and_end_keep_wire_order() {
+        let client = Client::new(ClientOptions::new("ws://localhost", "fixture", "fixture"));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let lease = client.shared.pending_logons.reserve(1);
+        for payload in [b"one".to_vec(), b"two".to_vec()] {
+            client.on_binary(&DataFrame::new(1, StreamTag::File, payload).encode(), &tx).await;
+        }
+        client.on_text(r#"{"type":"cp_end","session":1,"bytes":6,"sha256":"fixture"}"#, &tx).await.unwrap();
+        for expected in [b"one", b"two"] {
+            let Some(PendingEvent::Binary(bytes)) = lease.pop_or_handoff() else { panic!("missing queued chunk"); };
+            assert_eq!(DataFrame::decode(&bytes).unwrap().payload, expected.as_slice());
+        }
+        assert!(matches!(lease.pop_or_handoff(), Some(PendingEvent::Control(DaemonFrame::CpEnd {bytes:6, ..}))));
+        assert!(lease.pop_or_handoff().is_none());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pending_logon_heartbeat_and_other_session_signal_bypass_admission() {
+        let client = Client::new(ClientOptions::new("ws://localhost", "fixture", "fixture"));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (input, mut inputs) = mpsc::unbounded_channel();
+        let lease = client.shared.pending_logons.reserve(1);
+        client.sessions().insert(2, Entry { outbox: client.new_outbox(2, &tx), input: Some(input), push: None, detached_since: None });
+        // Simulate final admission being busy while a separate logon is still
+        // pending. Control processing must never acquire this lock.
+        let _admission = client.shared.admission.lock().await;
+        tokio::time::timeout(Duration::from_secs(1), client.on_text(r#"{"type":"ping","nonce":19}"#, &tx)).await.unwrap().unwrap();
+        assert!(matches!(rx.recv().await, Some(Outgoing::Control(HostFrame::Pong {nonce:19}))));
+        tokio::time::timeout(Duration::from_secs(1), client.on_text(r#"{"type":"signal","session":2,"signal":"KILL"}"#, &tx)).await.unwrap().unwrap();
+        assert!(matches!(inputs.recv().await, Some(SessionInput::Signal(_))));
+        tokio::time::timeout(Duration::from_secs(1), client.on_text(r#"{"type":"signal","session":1,"signal":"KILL"}"#, &tx)).await.unwrap().unwrap();
+        assert!(lease.pending.cancelled());
+        assert!(matches!(rx.recv().await, Some(Outgoing::Control(HostFrame::Error {code:ErrorCode::Interrupted, ..}))));
     }
 
     #[tokio::test]
