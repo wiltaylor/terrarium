@@ -4,7 +4,7 @@ import { useInstance } from "../../instance";
 
 import { useParams } from "@solidjs/router";
 import { A } from "../../instance/navigation";
-import { createMemo, createResource, createSignal, For, Match, Show, Switch, type JSX } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, Match, on, Show, Switch, type JSX } from "solid-js";
 import { Markdown } from "../../components/Markdown";
 import { Empty, ErrorBanner, PageHead, Tabs } from "../../components/ui";
 import type { Artifact } from "../../api/types";
@@ -57,22 +57,24 @@ export default function WikiPage() {
   return <WikiContent project={params.project} path={params.path && params.path.length ? decodeURIComponent(params.path) : "index"} />;
 }
 
-export function WikiBrowserPanel(props: { project: string }) {
-  return <Show when={props.project} keyed>{(project) => <LocalWiki project={project} />}</Show>;
+/** `search` seeds the local page-tree search. Only a changed configured value replaces it. */
+export function WikiBrowserPanel(props: { project: string; search?: string }) {
+  return <Show when={props.project} keyed>{(project) => <LocalWiki project={project} search={props.search} />}</Show>;
 }
 
-function LocalWiki(props: { project: string }) {
+function LocalWiki(props: { project: string; search?: string }) {
   const [path, setPath] = createSignal("index");
-  return <WikiContent project={props.project} path={path()} onPath={setPath} />;
+  return <WikiContent project={props.project} path={path()} onPath={setPath} search={props.search} />;
 }
 
-function WikiContent(props: { project: string; path: string; onPath?: (path: string) => void }) {
+function WikiContent(props: { project: string; path: string; onPath?: (path: string) => void; search?: string }) {
   const { api, projects, bookmarks } = useInstance();
   const path = () => props.path;
   const bookmarkUrl = () => wikiHref(props.project, path());
   const [tab, setTab] = createSignal<(typeof TABS)[number]["id"]>("page");
   const [error, setError] = createSignal<unknown>(null);
-  const [q, setQ] = createSignal("");
+  const [q, setQ] = createSignal(props.search ?? "");
+  createEffect(on(() => props.search, (search, old) => { if (search !== old) setQ(search ?? ""); }, { defer: true }));
 
   const [tree, { refetch: refetchTree }] = createResource(() => ({ p: props.project, q: q() }), (k) => api.wiki.tree(k.p, k.q ? { q: k.q } : {}));
   const [allPages, { refetch: refetchAll }] = createResource(() => props.project, (p) => api.wiki.tree(p));

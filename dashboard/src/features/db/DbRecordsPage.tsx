@@ -25,14 +25,19 @@ export default function DbRecordsPage() {
   return <DbRecordsContent project={params.project} typeName={decodeURIComponent(params.type)} search={search} onSearch={setSearch} onBack={() => navigate(`${projectBase(params.project)}/knowledge/db`)} />;
 }
 
-export function DbRecordsPanel(props: { project: string }) {
-  return <Show when={props.project} keyed>{(project) => <RecordsSelector project={project} />}</Show>;
+/** The `type:` term of a configured query, the type it selects. */
+export const queryType = (q: string | undefined) => splitTerms(q ?? "").find((t) => t.startsWith("type:"))?.slice(5) ?? "";
+
+/** `search` is a DB query: its `type:` term selects a local type, the rest seeds the query box. */
+export function DbRecordsPanel(props: { project: string; search?: string }) {
+  return <Show when={props.project} keyed>{(project) => <RecordsSelector project={project} search={props.search} />}</Show>;
 }
 
-function RecordsSelector(props: { project: string }) {
+function RecordsSelector(props: { project: string; search?: string }) {
   const { api } = useInstance();
   const [types] = createResource(() => props.project, (p) => api.db.types(p));
-  const [name, setName] = createSignal("");
+  const [name, setName] = createSignal(queryType(props.search));
+  createEffect(on(() => props.search, (search, old) => { if (search !== old) setName(queryType(search)); }, { defer: true }));
   const selected = () => types.error ? undefined : types()?.find((t) => t.name === name())?.name;
   return (
     <>
@@ -44,14 +49,15 @@ function RecordsSelector(props: { project: string }) {
       </label>
       <ErrorBanner error={types.error} />
       <Show when={selected()} keyed fallback={<Empty>{types.loading ? "Loading…" : name() ? "Not Found" : "Choose a type."}</Empty>}>
-        {(typeName) => <LocalRecords project={props.project} typeName={typeName} onBack={() => setName("")} />}
+        {(typeName) => <LocalRecords project={props.project} typeName={typeName} search={queryType(props.search) === typeName ? props.search : undefined} onBack={() => setName("")} />}
       </Show>
     </>
   );
 }
 
-function LocalRecords(props: { project: string; typeName: string; onBack: () => void }) {
-  const [search, setSearch] = createSignal<RecordSearch>({});
+function LocalRecords(props: { project: string; typeName: string; search?: string; onBack: () => void }) {
+  const [search, setSearch] = createSignal<RecordSearch>(props.search ? { q: props.search } : {});
+  createEffect(on(() => props.search, (q, old) => { if (q !== old) setSearch((s) => ({ ...s, q })); }, { defer: true }));
   return <DbRecordsContent project={props.project} typeName={props.typeName} search={search()} onSearch={(patch) => setSearch((old) => ({ ...old, ...patch }))} onBack={props.onBack} />;
 }
 

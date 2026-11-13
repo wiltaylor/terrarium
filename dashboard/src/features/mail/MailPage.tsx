@@ -48,12 +48,14 @@ export default function MailPage() {
   return <MailContent project={route.project} params={params} onParams={setParams} />;
 }
 
-export function MailPanel(props: { project: string }) {
-  return <Show when={props.project} keyed>{(project) => <LocalMail project={project} />}</Show>;
+/** `search` seeds the local free-text filter. Only a changed configured value replaces it. */
+export function MailPanel(props: { project: string; search?: string }) {
+  return <Show when={props.project} keyed>{(project) => <LocalMail project={project} search={props.search} />}</Show>;
 }
 
-function LocalMail(props: { project: string }) {
-  const [params, setParams] = createSignal<LogParams>({});
+function LocalMail(props: { project: string; search?: string }) {
+  const [params, setParams] = createSignal<LogParams>(props.search ? { q: props.search } : {});
+  createEffect(on(() => props.search, (search, old) => { if (search !== old) setParams((p) => ({ ...p, q: search || undefined })); }, { defer: true }));
   return <MailContent project={props.project} params={params()} onParams={(patch) => setParams((old) => ({ ...old, ...patch }))} />;
 }
 
