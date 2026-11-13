@@ -64,7 +64,7 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
         // No question-bearing v2 part is defined yet. C7 must preserve this
         // alias fallback until explicit question metadata replaces it.
         const badge = () => {
-          const alias = page.slug === (pages.latest?.dashboard_slug ?? "dashboard");
+          const alias = page.slug === (enabled() ? pages.latest?.dashboard_slug : pages.latest?.dashboard_slug ?? "dashboard");
           if (!enabled()) return alias ? props.badge?.("dashboard") : null;
           return combineWidgetBadges([
             ...widgetBadgeSources(page.widgets), ...(alias ? ["dashboard" as const] : []),

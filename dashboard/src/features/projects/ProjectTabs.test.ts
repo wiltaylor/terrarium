@@ -50,3 +50,12 @@ it("does not expose Add page to a reader", async () => {
   try { await waitFor(() => expect(host.textContent).toContain("Board")); expect(host.textContent).not.toContain("Add page"); }
   finally { dispose(); }
 });
+it("does not infer a question-bearing Dashboard from its slug when no dashboard is designated", async () => {
+  const page = { project: "terrarium", slug: "dashboard", title: "Old dashboard slug", position: 0, updated_at: "", updated_by: "operator", widgets: [] };
+  vi.spyOn(api.pages, "list").mockResolvedValue({ items: [page], can_edit: false, capabilities: { project_pages_v2: true } });
+  const { host, dispose } = mount(path => path === "dashboard" ? { n: 2, cls: "nav-count info", text: "2 open questions" } : null);
+  try {
+    await waitFor(() => expect(host.textContent).toContain("Old dashboard slug"));
+    expect(host.querySelector('a[href$="/pages/dashboard"] .nav-count')).toBeNull();
+  } finally { dispose(); }
+});
