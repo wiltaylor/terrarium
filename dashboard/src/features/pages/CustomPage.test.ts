@@ -30,6 +30,126 @@ function click(host: HTMLElement, text: string) {
   expect(button).toBeTruthy(); button!.click();
 }
 
+it("keeps the shipped picker and grid when capability is absent or false", async () => {
+  const { host, dispose } = await mount();
+  try {
+    await waitFor(() => expect(host.textContent).toContain("Edit page"));
+    click(host, "Edit page");
+    expect([...host.querySelectorAll("select option")].map(option => option.textContent)).not.toContain("board:lanes");
+    expect(host.querySelector(".snap-grid-document")).toBeNull();
+  } finally { dispose(); }
+});
+
+it("adds independent feature parts only when enabled and preserves their options on save", async () => {
+  const originalList = api.pages.list;
+  vi.spyOn(api.pages, "list").mockImplementation(async project => ({ ...await originalList(project), capabilities: { project_pages_v2: true } }));
+  const { host, dispose } = await mount();
+  try {
+    await waitFor(() => expect(host.textContent).toContain("Edit page"));
+    click(host, "Edit page");
+    const picker = host.querySelector("select")!;
+    picker.value = "board:lanes"; picker.dispatchEvent(new Event("change", { bubbles: true }));
+    click(host, "Add widget");
+    click(host, "Add widget");
+    const sections = [...host.querySelectorAll<HTMLElement>("section[data-widget-id]")];
+    expect(sections.length).toBe(2);
+    expect(sections[0]!.dataset.widgetId).not.toBe(sections[1]!.dataset.widgetId);
+    const search = [...host.querySelectorAll("label")].find(label => label.textContent?.startsWith("Search"))!.querySelector("input")!;
+    search.value = "second only"; search.dispatchEvent(new Event("input", { bubbles: true }));
+    const previous = await api.pages.get("terrarium", "overview");
+    const save = vi.spyOn(api.pages, "save").mockImplementation(async (_project, _slug, body) => ({ ...previous, ...body }));
+    click(host, "Save page");
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    const widgets = save.mock.calls[0]![2].widgets;
+    expect(widgets.map(widget => widget.options)).toEqual([{ view: "lanes" }, { view: "lanes", search: "second only" }]);
+  } finally { dispose(); }
+});
+
+it("keeps enabled frames and open editors through page and save rights refreshes", async () => {
+  const originalList = api.pages.list;
+  let initial = true;
+  const pending: Array<(value: Awaited<ReturnType<typeof originalList>>) => void> = [];
+  const list = vi.spyOn(api.pages, "list").mockImplementation(async project => {
+    if (initial) {
+      initial = false;
+      return { ...await originalList(project), capabilities: { project_pages_v2: true } };
+    }
+    return new Promise(resolve => pending.push(value => resolve({ ...value, capabilities: { project_pages_v2: true } })));
+  });
+  const { host, dispose } = await mount();
+  const expectEnabled = () => {
+    expect(host.querySelector(".snap-grid-document")).not.toBeNull();
+    expect(host.querySelector("section[data-widget-id]")?.getAttribute("data-frame")).toBe("viewport");
+  };
+  try {
+    await waitFor(() => expect(host.textContent).toContain("Edit page"));
+    click(host, "Edit page");
+    const picker = host.querySelector("select")!;
+    picker.value = "board:lanes"; picker.dispatchEvent(new Event("change", { bubbles: true }));
+    click(host, "Add widget");
+    const frame = [...host.querySelectorAll("label")].find(label => label.textContent?.startsWith("Frame"))!.querySelector("select")!;
+    frame.value = "viewport"; frame.dispatchEvent(new Event("change", { bubbles: true }));
+    expectEnabled();
+    expect([...host.querySelectorAll("select option")].map(option => option.textContent)).toContain("board:lanes");
+    expect([...host.querySelectorAll("label")].some(label => label.textContent?.startsWith("Search"))).toBe(true);
+
+    listeners.forEach(fn => fn(pageEvent()));
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+    expectEnabled();
+    expect([...host.querySelectorAll("select option")].map(option => option.textContent)).toContain("board:lanes");
+    expect([...host.querySelectorAll("label")].some(label => label.textContent?.startsWith("Search"))).toBe(true);
+    const current = await originalList("terrarium");
+    pending.shift()!(current);
+    await waitFor(() => expect(pending).toHaveLength(0));
+
+    const previous = await api.pages.get("terrarium", "overview");
+    vi.spyOn(api.pages, "save").mockImplementation(async (_project, _slug, body) => ({ ...previous, ...body }));
+    click(host, "Save page");
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(3));
+    expectEnabled();
+    pending.shift()!(current);
+    await waitFor(() => expect(host.textContent).toContain("Edit page"));
+  } finally {
+    pending.forEach(resolve => resolve({ items: [], can_edit: true, capabilities: { project_pages_v2: true } }));
+    dispose();
+  }
+});
+
+it("keeps oversized search text in the draft and reports its UTF-8 byte count", async () => {
+  const originalList = api.pages.list;
+  vi.spyOn(api.pages, "list").mockImplementation(async project => ({ ...await originalList(project), capabilities: { project_pages_v2: true } }));
+  const { host, dispose } = await mount();
+  try {
+    await waitFor(() => expect(host.textContent).toContain("Edit page"));
+    click(host, "Edit page");
+    const picker = host.querySelector("select")!;
+    picker.value = "board:lanes"; picker.dispatchEvent(new Event("change", { bubbles: true }));
+    click(host, "Add widget");
+    const search = [...host.querySelectorAll("label")].find(label => label.textContent?.startsWith("Search"))!.querySelector("input")!;
+    const oversized = "é".repeat(129);
+    search.value = oversized; search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(search.value).toBe(oversized);
+    expect(search.getAttribute("aria-invalid")).toBe("true");
+    expect([...host.querySelectorAll("p")].find(p => p.textContent === "258 / 256 bytes")?.className).toBe("error");
+    const previous = await api.pages.get("terrarium", "overview");
+    const save = vi.spyOn(api.pages, "save").mockImplementation(async (_project, _slug, body) => ({ ...previous, ...body }));
+    click(host, "Save page");
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    expect(save.mock.calls[0]![2].widgets[0]?.options?.search).toBe(oversized);
+  } finally { dispose(); }
+});
+
+it("renders an unresolved target-local monitor as Not Found without fetching source data", async () => {
+  const originalList = api.pages.list;
+  vi.spyOn(api.pages, "list").mockImplementation(async project => ({ ...await originalList(project), capabilities: { project_pages_v2: true } }));
+  const series = vi.spyOn(api.monitors, "series");
+  const { host, dispose } = await mount([{ id: "copied", kind: "chart", x: 0, y: 0, w: 12, h: 3, monitor: "missing-source-id" }]);
+  try {
+    await waitFor(() => expect(host.textContent).toContain("Not Found"));
+    expect(series).not.toHaveBeenCalled();
+  } finally { dispose(); }
+});
+
 it("keeps an edit draft when another editor emits page.updated", async () => {
   const { host, dispose } = await mount();
   try {

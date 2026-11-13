@@ -5,8 +5,13 @@
 .snap-grid-controls { display: flex; justify-content: space-between; }
 .snap-grid-controls button { touch-action: none; cursor: grab; }
 .snap-grid-controls button:last-child { position: absolute; right: 0; bottom: 0; z-index: 1; cursor: nwse-resize; }
+.snap-grid-document > .snap-grid-item > .snap-grid-content { overflow: visible; }
+.snap-grid-document > .snap-grid-item[data-frame="full_width"],
+.snap-grid-document > .snap-grid-item[data-frame="viewport"] { grid-column: 1 / -1 !important; }
+.snap-grid-document > .snap-grid-item[data-frame="viewport"] { min-height: 100dvh; }
 @media (max-width: 600px) {
   .snap-grid { grid-template-columns: minmax(0, 1fr); grid-auto-rows: auto; }
   .snap-grid > .snap-grid-item { grid-column: 1 !important; grid-row: auto !important; min-height: 64px; }
   .snap-grid > .snap-grid-item[data-auto="false"] { height: var(--widget-height); }
+  .snap-grid-document > .snap-grid-item[data-auto="false"] { height: auto; }
 }

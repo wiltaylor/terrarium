@@ -3,19 +3,47 @@
 
 export type Harness = "claude" | "codex" | "copilot" | "pi";
 
+export interface ProjectWidgetViews {
+  board: "lanes" | "done" | "columns";
+  tests: "runs";
+  schedules: "schedules" | "triggers" | "event_sources";
+  rules: "flow" | "lint" | "table" | "last_runs";
+  agents: "agents" | "card_agents";
+  repos: "list" | "files";
+  wiki_index: "browser";
+  memory: "list" | "graph";
+  db: "types" | "records";
+  pipelines: "state" | "runs";
+  calendar: "month" | "week" | "agenda";
+  mail: "messages";
+  events: "events";
+}
+export type ProjectWidgetKind = keyof ProjectWidgetViews;
+export type PageFrame = "grid" | "full_width" | "viewport";
+export type PageBuiltin = "board" | "tests" | "schedules" | "rules" | "agents" | "repos" | "knowledge" | "pipelines" | "calendar" | "logs";
+
 export interface PageWidget {
   id: string;
-  kind: "markdown" | "wiki" | "stat" | "status" | "chart" | "text" | "table" | "actions" | "monitor_summary" | "job_queue" | "eta_accuracy";
+  kind: "markdown" | "wiki" | "stat" | "status" | "chart" | "text" | "table" | "actions" | "monitor_summary" | "job_queue" | "eta_accuracy" | ProjectWidgetKind;
   x: number; y: number; w: number; h: number;
   auto_height?: boolean;
+  frame?: PageFrame;
   title?: string;
   text?: string;
   wiki?: string;
   monitor?: string;
-  options?: DashboardBlock["options"];
+  options?: DashboardBlock["options"] & { search?: string; view?: ProjectWidgetViews[ProjectWidgetKind] };
 }
-export interface ProjectPageInput { title: string; position: number; widgets: PageWidget[] }
+export interface ProjectPageInput { title: string; position: number; widgets: PageWidget[]; builtin?: PageBuiltin }
+export type ProjectFeatureWidget = { [K in ProjectWidgetKind]: Omit<PageWidget, "kind" | "options" | "text" | "wiki" | "monitor"> & {
+  kind: K; options?: { search?: string; view?: ProjectWidgetViews[K] };
+  text?: never; wiki?: never; monitor?: never;
+} }[ProjectWidgetKind];
 export interface ProjectPage extends ProjectPageInput { project: string; slug: string; updated_at: string; updated_by: string }
+export interface ProjectPageList { items: ProjectPage[]; can_edit: boolean; dashboard_slug?: string; capabilities?: { project_pages_v2?: boolean } }
+export interface ProjectLayoutPage extends ProjectPageInput { slug: string }
+export interface ProjectLayout { revision: number; pages: ProjectPage[] }
+export interface ProjectLayoutInput { base_revision: number; pages: ProjectLayoutPage[] }
 
 export const AGENT_STATUSES = [
   "starting",
