@@ -1312,6 +1312,8 @@ struct Inner {
     /// The `id` of the last `pending_pointers` row: a newer item gets a
     /// higher one.
     pointer_seq: AtomicI64,
+    /// The event replays of the push listener that ended (TER-1124).
+    replays: AtomicU64,
     tx: broadcast::Sender<SupervisorEvent>,
     state: OnceLock<Weak<AppState>>,
     /// The ssh-agent socket of each running agent with an `ssh_key` grant
@@ -1447,6 +1449,7 @@ impl RunnerSupervisor {
                 parked: Mutex::new(HashMap::new()),
                 gates: Mutex::new(std::collections::HashSet::new()),
                 pointer_seq: AtomicI64::new(0),
+                replays: AtomicU64::new(0),
                 tx,
                 state: OnceLock::new(),
                 ssh_agents: Mutex::new(HashMap::new()),
@@ -4533,8 +4536,14 @@ impl RunnerSupervisor {
     /// not handled, oldest first. Mail events are left out: the reload
     /// reads the `queued` mail, and a mail that went out since is no
     /// longer `queued`. The read follows the `seq` key in pages, at most
-    /// [`REPLAY_MAX`] events; on a read error the rest is not replayed.
+    /// [`REPLAY_MAX`] events; on a read error the rest is not replayed,
+    /// and the warning names the `seq` range that is dropped.
     async fn replay_lost_events(&self, seen: &mut HubSeen) {
+        self.replay_lost_events_once(seen).await;
+        self.inner.replays.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn replay_lost_events_once(&self, seen: &mut HubSeen) {
         let Some(state) = self.state() else { return };
         seen.prune();
         let mut since = seen.floor;
@@ -4554,7 +4563,11 @@ impl RunnerSupervisor {
             let page = match page {
                 Ok(p) => p,
                 Err(e) => {
-                    warn!("cannot read the events that the push listener missed: {e}");
+                    warn!(
+                        from = since,
+                        "cannot read the events that the push listener missed: \
+                         the events after `from` are not replayed and are dropped: {e}"
+                    );
                     break;
                 }
             };
@@ -4564,14 +4577,31 @@ impl RunnerSupervisor {
             read += page.len();
             since = last;
             for ev in page {
-                if seen.first(ev.seq) && ev.kind != "mail" {
+                // The kind first: a mail `seq` never counts as handled
+                // here, so a late hub copy of the mail is still handled.
+                if ev.kind != "mail" && seen.first(ev.seq) {
                     self.handle_hub_event(&ev).await;
                     replayed += 1;
                 }
             }
         }
         if read >= REPLAY_MAX {
-            warn!(read, "the event replay stopped at its limit");
+            match state.db.read(crate::events::last_seq).await {
+                Ok(to) if to > since => warn!(
+                    read,
+                    from = since,
+                    to,
+                    "the event replay stopped at its limit: the events after \
+                     `from` up to `to` are not replayed and are dropped"
+                ),
+                Ok(_) => {}
+                Err(e) => warn!(
+                    read,
+                    from = since,
+                    "the event replay stopped at its limit: the events after \
+                     `from` are not replayed and are dropped ({e})"
+                ),
+            }
         }
         seen.prune();
         info!(
@@ -9262,10 +9292,44 @@ mod tests {
             .sum()
     }
 
-    /// Let the push listener run its replay, then the delivery end.
-    async fn settle_listener(sup: &RunnerSupervisor, id: AgentId) {
-        tokio::time::sleep(Duration::from_millis(300)).await;
+    /// Wait until the push listener has ended `n` replays, then for the
+    /// delivery end.
+    async fn settle_listener(sup: &RunnerSupervisor, id: AgentId, n: u64) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while sup.inner.replays.load(Ordering::SeqCst) < n {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the push listener ends its replay");
         settle(sup, id).await;
+    }
+
+    /// Store the event of a mail to `id` without the hub: an event that a
+    /// lagged listener lost.
+    async fn store_mail_event(
+        state: &Shared,
+        id: AgentId,
+        mid: &str,
+    ) -> crate::events::StoredEvent {
+        let m = mid.to_owned();
+        state
+            .db
+            .write("system", move |t| {
+                crate::events::insert(
+                    t,
+                    "system",
+                    crate::events::EventDraft::new(
+                        "mail",
+                        "mail",
+                        serde_json::json!({"message_id": m, "thread_id": "T1", "from": "operator"}),
+                    )
+                    .agent(id.to_string(), "a")
+                    .project("p"),
+                )
+            })
+            .await
+            .unwrap()
     }
 
     /// TER-1124 T1: a lease end that the lagged push listener lost (in
@@ -9287,12 +9351,12 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), runner.typed_ready.notified())
             .await
             .expect("the replay types the pointer");
-        settle_listener(&sup, id).await;
+        settle_listener(&sup, id, 1).await;
         let line = crate::leases::ended_line("t1124");
         assert_eq!(typed_count(&runner, &line), 1, "{:?}", lock(&runner.typed));
         state.db.hub().publish(lost);
         flood_hub(&state);
-        settle_listener(&sup, id).await;
+        settle_listener(&sup, id, 2).await;
         assert_eq!(typed_count(&runner, &line), 1, "{:?}", lock(&runner.typed));
         assert!(lock(&sup.inner.slots)[&id].pointer.is_empty());
     }
@@ -9311,11 +9375,11 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), runner.typed_ready.notified())
             .await
             .expect("the live event types the pointer");
-        settle_listener(&sup, id).await;
+        settle(&sup, id).await;
         let line = crate::leases::ended_line("t1124b");
         assert_eq!(typed_count(&runner, &line), 1, "{:?}", lock(&runner.typed));
         flood_hub(&state);
-        settle_listener(&sup, id).await;
+        settle_listener(&sup, id, 1).await;
         assert_eq!(typed_count(&runner, &line), 1, "{:?}", lock(&runner.typed));
     }
 
@@ -9328,28 +9392,46 @@ mod tests {
         let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
         // A mail that was read: no longer `queued`.
         let mid = store_mail(&state, id, true).await;
-        let m = mid.clone();
-        state
-            .db
-            .write("system", move |t| {
-                crate::events::insert(
-                    t,
-                    "system",
-                    crate::events::EventDraft::new(
-                        "mail",
-                        "mail",
-                        serde_json::json!({"message_id": m, "thread_id": "T1", "from": "operator"}),
-                    )
-                    .agent(id.to_string(), "a")
-                    .project("p"),
-                )
-            })
-            .await
-            .unwrap();
+        store_mail_event(&state, id, &mid).await;
         flood_hub(&state);
-        settle_listener(&sup, id).await;
+        settle_listener(&sup, id, 1).await;
         assert_eq!(mail_blocks(&runner), 0, "{:?}", lock(&runner.typed));
         assert!(lock(&sup.inner.slots)[&id].pointer.is_empty());
+    }
+
+    /// TER-1124 review: a mail that commits after the reload has read the
+    /// `queued` mail, and before the replay reads its event. The replay
+    /// leaves the mail out and does not count its `seq` as handled, so the
+    /// late hub copy of the event is still handled: the mail is typed
+    /// once, also after one more reload.
+    #[tokio::test]
+    async fn a_mail_between_the_reload_and_the_replay_is_typed_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        // Working: nothing goes out until the idle.
+        lock(&sup.inner.slots).get_mut(&id).unwrap().seen = AgentStatus::Working;
+        // The reload reads before the mail commits: it finds none.
+        sup.reload_pointer(id).await;
+        assert!(lock(&sup.inner.slots)[&id].pointer.is_empty());
+        let mid = store_mail(&state, id, false).await;
+        let ev = store_mail_event(&state, id, &mid).await;
+        // The replay reads the mail event and leaves it out.
+        let mut seen = HubSeen::new(0);
+        sup.replay_lost_events(&mut seen).await;
+        assert!(lock(&sup.inner.slots)[&id].pointer.mail.is_empty());
+        // The late hub copy: the listener handles it.
+        assert!(seen.first(ev.seq), "the replay did not mark the mail seen");
+        sup.handle_hub_event(&ev).await;
+        assert!(!seen.first(ev.seq));
+        lock(&sup.inner.slots).get_mut(&id).unwrap().seen = AgentStatus::Idle;
+        sup.maybe_push(id);
+        settle(&sup, id).await;
+        assert_eq!(mail_blocks(&runner), 1, "{:?}", lock(&runner.typed));
+        assert!(lock(&runner.typed)[0].contains(&mid));
+        sup.reload_pointer(id).await;
+        settle(&sup, id).await;
+        assert_eq!(mail_blocks(&runner), 1, "{:?}", lock(&runner.typed));
+        assert_eq!(mail_state(&state, &mid).await, "read");
     }
 
     /// TER-1124: each `seq` is handled once, also out of order; an event
