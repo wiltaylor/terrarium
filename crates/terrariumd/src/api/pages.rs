@@ -78,53 +78,96 @@ fn enabled(s: &Shared) -> ApiResult<()> {
     Ok(())
 }
 
-async fn layout_show(State(s): State<Shared>, actor: Actor, Path(project): Path<String>)
-    -> ApiResult<Json<pages::Snapshot>> {
+async fn layout_show(
+    State(s): State<Shared>,
+    actor: Actor,
+    Path(project): Path<String>,
+) -> ApiResult<Json<pages::Snapshot>> {
     policy::read_project(&actor, &project)?;
     enabled(&s)?;
-    Ok(Json(s.db.read(move |c| pages::snapshot(c, &project)).await?))
+    Ok(Json(
+        s.db.read(move |c| pages::snapshot(c, &project)).await?,
+    ))
 }
 
-async fn layout_set(State(s): State<Shared>, actor: Actor, Path(project): Path<String>,
-    ApiJson(value): ApiJson<Value>) -> ApiResult<Json<pages::Snapshot>> {
+async fn layout_set(
+    State(s): State<Shared>,
+    actor: Actor,
+    Path(project): Path<String>,
+    ApiJson(value): ApiJson<Value>,
+) -> ApiResult<Json<pages::Snapshot>> {
     policy::admin_project(&actor, &project, "editing project pages")?;
     enabled(&s)?;
     let input: pages::LayoutInput = serde_json::from_value(value)
         .map_err(|e| ApiError::invalid(format!("invalid layout: {e}")))?;
     let author = actor.label();
-    Ok(Json(s.db.write(author.clone(), move |t|
-        pages::replace_layout(t, &project, &input, &author, "replace")).await?))
+    Ok(Json(
+        s.db.write(author.clone(), move |t| {
+            pages::replace_layout(t, &project, &input, &author, "replace")
+        })
+        .await?,
+    ))
 }
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ResetInput { base_revision: u64, builtin: pages::Builtin }
+struct ResetInput {
+    base_revision: u64,
+    builtin: pages::Builtin,
+}
 
-async fn layout_reset(State(s): State<Shared>, actor: Actor, Path(project): Path<String>,
-    ApiJson(value): ApiJson<Value>) -> ApiResult<Json<pages::Snapshot>> {
+async fn layout_reset(
+    State(s): State<Shared>,
+    actor: Actor,
+    Path(project): Path<String>,
+    ApiJson(value): ApiJson<Value>,
+) -> ApiResult<Json<pages::Snapshot>> {
     policy::admin_project(&actor, &project, "resetting project pages")?;
     enabled(&s)?;
     let input: ResetInput = serde_json::from_value(value)
         .map_err(|e| ApiError::invalid(format!("invalid reset: {e}")))?;
     let author = actor.label();
-    Ok(Json(s.db.write(author.clone(), move |t|
-        pages::reset_builtin(t, &project, input.base_revision, input.builtin, &author)).await?))
+    Ok(Json(
+        s.db.write(author.clone(), move |t| {
+            pages::reset_builtin(t, &project, input.base_revision, input.builtin, &author)
+        })
+        .await?,
+    ))
 }
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CopyInput { base_revision: u64, source_project: String, confirm: bool }
+struct CopyInput {
+    base_revision: u64,
+    source_project: String,
+    confirm: bool,
+}
 
-async fn layout_copy(State(s): State<Shared>, actor: Actor, Path(project): Path<String>,
-    ApiJson(value): ApiJson<Value>) -> ApiResult<Json<pages::Snapshot>> {
+async fn layout_copy(
+    State(s): State<Shared>,
+    actor: Actor,
+    Path(project): Path<String>,
+    ApiJson(value): ApiJson<Value>,
+) -> ApiResult<Json<pages::Snapshot>> {
     policy::admin_project(&actor, &project, "copying project pages")?;
     enabled(&s)?;
     let input: CopyInput = serde_json::from_value(value)
         .map_err(|e| ApiError::invalid(format!("invalid copy: {e}")))?;
     policy::read_project(&actor, &input.source_project)?;
     let author = actor.label();
-    Ok(Json(s.db.write(author.clone(), move |t|
-        pages::copy_layout(t, &project, &input.source_project, input.base_revision, input.confirm, &author)).await?))
+    Ok(Json(
+        s.db.write(author.clone(), move |t| {
+            pages::copy_layout(
+                t,
+                &project,
+                &input.source_project,
+                input.base_revision,
+                input.confirm,
+                &author,
+            )
+        })
+        .await?,
+    ))
 }
 
 async fn show(

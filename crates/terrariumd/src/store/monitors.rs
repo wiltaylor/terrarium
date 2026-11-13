@@ -913,14 +913,15 @@ fn write_layout(t: &mut Tx<'_>, project: &str, l: &Layout, by: &str) -> ApiResul
                 .widgets
                 .iter()
                 .filter(|w| {
-                    w.kind.is_panel() || matches!(
-                        w.kind,
-                        WidgetKind::Actions
-                            | WidgetKind::MonitorSummary
-                            | WidgetKind::JobQueue
-                            | WidgetKind::EtaAccuracy
-                            | WidgetKind::Wiki
-                    )
+                    w.kind.is_panel()
+                        || matches!(
+                            w.kind,
+                            WidgetKind::Actions
+                                | WidgetKind::MonitorSummary
+                                | WidgetKind::JobQueue
+                                | WidgetKind::EtaAccuracy
+                                | WidgetKind::Wiki
+                        )
                 })
                 .cloned()
                 .collect::<Vec<_>>()

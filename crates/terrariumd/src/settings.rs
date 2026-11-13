@@ -887,8 +887,18 @@ mod tests {
     #[test]
     fn switches_and_origins() {
         assert!(!WebConfig::default().project_pages_v2);
-        assert!(!Settings::try_parse_from(["terrariumd", "--project-pages-v2", "0"]).unwrap().web().project_pages_v2);
-        assert!(Settings::try_parse_from(["terrariumd", "--project-pages-v2", "1"]).unwrap().web().project_pages_v2);
+        assert!(
+            !Settings::try_parse_from(["terrariumd", "--project-pages-v2", "0"])
+                .unwrap()
+                .web()
+                .project_pages_v2
+        );
+        assert!(
+            Settings::try_parse_from(["terrariumd", "--project-pages-v2", "1"])
+                .unwrap()
+                .web()
+                .project_pages_v2
+        );
         assert!(Settings::try_parse_from(["terrariumd", "--project-pages-v2", "maybe"]).is_err());
         assert!(parse_switch("1").unwrap());
         assert!(!parse_switch("off").unwrap());
