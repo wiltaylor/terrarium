@@ -20,7 +20,10 @@ function fieldErrors(e: unknown): Record<string, string> | null {
   return f && typeof f === "object" ? (f as Record<string, string>) : null;
 }
 
-/** `readOnly` (no write_db, TER-1134): the record shows without Save and Delete record. */
+/**
+ * `readOnly` (no write_db, TER-1134): the record shows without Save and Delete
+ * record, and its inputs are disabled by the fieldset (TER-1157).
+ */
 export function RecordModal(props: { project: string; type: DbType; record?: DbRecord; readOnly?: boolean; onClose: () => void; onSaved: (r: DbRecord) => void; onDeleted: () => void }) {
   const { api } = useInstance();
   const [record, setRecord] = createSignal<DbRecord | undefined>(props.record);
@@ -29,7 +32,9 @@ export function RecordModal(props: { project: string; type: DbType; record?: DbR
   const [error, setError] = createSignal<unknown>(null);
   const [conflict, setConflict] = createSignal<DbRecord | null>(null);
   const [busy, setBusy] = createSignal(false);
-  const set = (name: string, v: FormValue) => setForm((f) => ({ ...f, [name]: v }));
+  const set = (name: string, v: FormValue) => {
+    if (!props.readOnly) setForm((f) => ({ ...f, [name]: v }));
+  };
 
   const save = async () => {
     const r = record();
@@ -107,7 +112,7 @@ export function RecordModal(props: { project: string; type: DbType; record?: DbR
         <Show when={errors()["*"]}>
           <div class="field-error small">{errors()["*"]}</div>
         </Show>
-        <div class="db-fields">
+        <fieldset class="db-fields" disabled={props.readOnly} aria-label="Fields">
           <For each={props.type.fields}>
             {(f) => (
               <div class={`field db-field db-field-${f.kind}${errors()[f.name] ? " field-bad" : ""}`}>
@@ -120,7 +125,7 @@ export function RecordModal(props: { project: string; type: DbType; record?: DbR
               </div>
             )}
           </For>
-        </div>
+        </fieldset>
         <div class="row db-actions">
           <Show when={!props.readOnly}>
             <button type="submit" class="primary" disabled={busy()}>
