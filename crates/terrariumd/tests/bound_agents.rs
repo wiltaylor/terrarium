@@ -651,37 +651,64 @@ async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
     assert_eq!(before.len(), 1, "{before:?}");
     let session = before[0]["id"].clone();
 
-    // These are ordinary non-wait moves: the legacy unpark runs, but the
-    // bound agent is not parked, so every run ends `noop`. Each counts
-    // against the ten-run card budget of an override.
-    for (n, to) in ["ready", "in_progress"]
-        .into_iter()
-        .cycle()
-        .take(10)
-        .enumerate()
-    {
-        mv(&td, &c, to, None).await;
-        // `until` with the runs in the timeout message.
+    // Ordinary non-wait moves: the legacy unpark runs, but the bound agent
+    // is not parked, so every run ends `noop`. Each counts against the
+    // ten-run card budget of an override. The setup above already moved
+    // the card: count those moves first, so the history is exact.
+    let (tdr, cr) = (&td, c.as_str());
+    let non_wait_moves = move || async move {
+        tdr.get("/api/events?kind=card&limit=1000")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                e["card"] == cr
+                    && e["data"]["change"] == "moved"
+                    && !["review", "accepted", "done"]
+                        .contains(&e["data"]["to"].as_str().unwrap())
+            })
+            .count()
+    };
+    let unpark_runs = move || async move {
+        tdr.get("/api/projects/p/rules/runs?rule=agent-unpark&limit=500")
+            .await
+            .ok()["runs"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    // `until` with the runs in the timeout message.
+    let noop_runs = move |want: usize| async move {
         let start = std::time::Instant::now();
         loop {
-            let runs = td
-                .get("/api/projects/p/rules/runs?rule=agent-unpark&limit=500")
-                .await
-                .ok()["runs"]
-                .as_array()
-                .unwrap()
-                .clone();
-            if runs.len() == n + 1 && runs.iter().all(|r| r["state"] == "noop") {
-                break;
+            let runs = unpark_runs().await;
+            if runs.len() == want && runs.iter().all(|r| r["state"] == "noop") {
+                return;
             }
             assert!(
                 start.elapsed() < Duration::from_secs(60),
-                "timed out waiting for legacy no-op run {}: {runs:#?}",
-                n + 1
+                "timed out waiting for {want} legacy no-op runs: {runs:#?}"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    };
+    let setup_moves = non_wait_moves().await;
+    assert!(setup_moves < 10, "{setup_moves}");
+    noop_runs(setup_moves).await;
+    let column = td.get(&format!("/api/cards/{c}")).await.ok()["column"].clone();
+    assert_eq!(column, "in_progress");
+    for (n, to) in ["ready", "in_progress"]
+        .into_iter()
+        .cycle()
+        .take(10 - setup_moves)
+        .enumerate()
+    {
+        mv(&td, &c, to, None).await;
+        noop_runs(setup_moves + n + 1).await;
     }
+    assert_eq!(non_wait_moves().await, 10);
     td.post_empty("/api/reload").await.ok();
     let effective = td.get("/api/projects/p/rules/effective").await.ok().clone();
     assert_eq!(origin(&effective), "pack", "{effective}");
