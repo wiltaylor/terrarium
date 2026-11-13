@@ -3921,7 +3921,8 @@ async fn an_api_key_never_goes_on_an_xai_plan_row() {
             json!({"provider": "xai", "key": "xai-key-for-pi-0042"}),
         )
         .await;
-    assert_eq!(r.ok()["login_status"], "api_key", "{}", r.body);
+    assert_eq!(r.ok()["has_api_key"], true, "{}", r.body);
+    assert_eq!(r.body["env_var"], "XAI_API_KEY", "{}", r.body);
 }
 
 /// TER-1205: `finish` checks the row again before it imports the tokens. A
