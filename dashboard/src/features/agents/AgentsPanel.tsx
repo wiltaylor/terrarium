@@ -130,11 +130,14 @@ export function AgentsPanel(props: { project: string; onRefresh?: () => void }) 
   );
 }
 
-export function CardAgentsPanel(props: { project: string; refreshKey?: number }) {
+// `empty` is the text that a page widget shows when the project has no card agents.
+// The Agents tab leaves it out and shows nothing.
+type CardAgentsProps = { project: string; refreshKey?: number; empty?: string };
+export function CardAgentsPanel(props: CardAgentsProps) {
   return <Show when={props.project} keyed>{(project) => <CardAgentsContent {...props} project={project} />}</Show>;
 }
 
-function CardAgentsContent(props: { project: string; refreshKey?: number }) {
+function CardAgentsContent(props: CardAgentsProps) {
   const { leases, api, events } = useInstance();
   const now = useNow(1000);
   const project = () => props.project;
@@ -156,10 +159,11 @@ function CardAgentsContent(props: { project: string; refreshKey?: number }) {
     off();
   });
 
-  return <><Show when={(cardAgents() ?? []).length}>
+  return <><ErrorBanner error={props.empty === undefined ? undefined : cardAgents.error} />
+      <Show when={(cardAgents.latest ?? []).length} fallback={<Show when={props.empty !== undefined && cardAgents.state === "ready"}><Empty>{props.empty}</Empty></Show>}>
         <h3>Card agents</h3>
         <div class="grid card-agents">
-          <For each={cardAgents()}>{(a) => <AgentCard agent={a} now={now()} />}</For>
+          <For each={cardAgents.latest}>{(a) => <AgentCard agent={a} now={now()} />}</For>
         </div>
       </Show>
   </>;
