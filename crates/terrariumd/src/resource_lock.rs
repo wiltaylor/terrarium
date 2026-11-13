@@ -205,7 +205,7 @@ mod tests {
     macro_rules! poll {
         ($future:expr) => {
             std::future::poll_fn(|cx| {
-                std::task::Poll::Ready(std::future::Future::poll($future.as_mut(), cx))
+                std::task::Poll::Ready(std::future::Future::poll(($future).as_mut(), cx))
             })
             .await
         };
