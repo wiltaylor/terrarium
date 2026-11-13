@@ -4136,3 +4136,56 @@ echo '{{"loggedIn": false, "authMethod": "none"}}'; exit 1"#,
         assert!(!text.contains("xai-daemon-env-key-0042"), "{f} has the key");
     }
 }
+
+/// TER-1205 (rev-1205, major): a file that turns an xai API-key row into an
+/// xai plan row drops the key. The row loses its variable and its key
+/// login, the key file goes, and the key leaves the redaction matcher, so
+/// no grok agent can get `XAI_API_KEY` from it.
+#[tokio::test]
+async fn a_file_that_makes_an_xai_key_row_a_plan_row_drops_the_key() {
+    const KEY_ROW: &str = "provider = \"xai\"\nplan = \"API key\"\nharnesses = [\"pi\"]\n";
+    const PLAN_ROW: &str = "provider = \"xai\"\nplan = \"Super\"\nharnesses = [\"grok\"]\n";
+    const KEY: &str = "xai-file-row-key-0123456789";
+    let env = boot(
+        |c| write(c, "subscriptions/x-file.toml", KEY_ROW),
+        |_, _| {},
+    )
+    .await;
+    let td = &env.td;
+    td.project("p").await;
+    let r = td
+        .post(
+            "/api/subscriptions/x-file/api-key",
+            json!({"provider": "xai", "key": KEY}),
+        )
+        .await;
+    assert_eq!(r.ok()["env_var"], "XAI_API_KEY", "{}", r.body);
+    assert_eq!(card_body(td, KEY).await, "t=[secret:subscription/x-file]");
+
+    write(&td.config, "subscriptions/x-file.toml", PLAN_ROW);
+    td.post_empty("/api/reload").await.ok();
+    let s = td.get("/api/subscriptions/x-file").await;
+    assert_eq!(s.ok()["plan"], "Super", "{}", s.body);
+    assert_eq!(s.body["source"], "file", "{}", s.body);
+    assert!(s.body["env_var"].is_null(), "{}", s.body);
+    assert_eq!(s.body["has_api_key"], false, "{}", s.body);
+    assert_ne!(s.body["login_status"], "logged_in", "{}", s.body);
+    let key_file = terrariumd::login_session::key_path(&td.state, "x-file");
+    assert!(!key_file.exists(), "the key file stays");
+    let sub = td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(|c| terrariumd::store::subscriptions::get(c, "x-file"))
+        .await
+        .unwrap();
+    let vars = terrariumd::login_session::credential_env_for(&td.state, &sub);
+    assert!(vars.is_empty(), "a plan row gives an API key");
+    assert_eq!(card_body(td, KEY).await, format!("t={KEY}"));
+    let audit = td
+        .get("/api/audit?action=subscription.api_key_dropped")
+        .await;
+    assert!(audit.ok().to_string().contains("x-file"), "{}", audit.body);
+}

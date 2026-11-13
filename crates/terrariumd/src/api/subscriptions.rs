@@ -1718,18 +1718,13 @@ async fn api_key(
             )));
         }
     }
-    // No API key goes on an xai plan row (TER-1191, TER-1205): the X
-    // Subscription is a Grok Build login, its only credential. An xai key is
-    // billed apart, and a key of another provider is not this row's.
-    if let Some(s) = &exists
-        && terrarium_core::xai::is_plan_row(&s.provider, s.plan.as_deref())
+    // No API key goes on an xai plan row (TER-1191, TER-1205). The write
+    // below checks it again on the row of its own transaction.
+    if let Some(e) = exists
+        .as_ref()
+        .and_then(|s| xai_plan_key_refusal(&name, &key.provider, s))
     {
-        return Err(ApiError::invalid(format!(
-            "cannot store a {} API key on subscription `{name}`: it is an xai {} plan (a \
-             Grok Build login); store the key on another subscription",
-            key.provider,
-            s.plan.as_deref().unwrap_or_default()
-        )));
+        return Err(e);
     }
     // A self-hosted key goes on a self-hosted subscription only, and a new
     // one needs the server's base URL.
@@ -1857,6 +1852,15 @@ async fn api_key(
     state
         .db
         .write(actor.label(), move |t| {
+            // A fleet or file apply can make the row an xai plan row after
+            // the read above: check the row of this transaction before the
+            // key file is written (TER-1205).
+            if let Some(e) = subs::find(t, &n)?
+                .as_ref()
+                .and_then(|s| xai_plan_key_refusal(&n, &provider, s))
+            {
+                return Err(e);
+            }
             // The key file, then the matcher, in the write: the new key
             // joins the redaction matcher before any other write (PLAN
             // §16b.6, S9 and S11).
@@ -1961,6 +1965,20 @@ async fn api_key(
         })
         .await?;
     Ok(Json(load(&state, name).await?))
+}
+
+/// Why an API key of `provider` cannot go on the row `s`, or `None`. An
+/// xai plan row (TER-1191 R7, TER-1205) takes no API key: the X
+/// Subscription is a Grok Build login, its only credential. An xai key is
+/// billed apart, and a key of another provider is not this row's.
+fn xai_plan_key_refusal(name: &str, provider: &str, s: &Subscription) -> Option<ApiError> {
+    terrarium_core::xai::is_plan_row(&s.provider, s.plan.as_deref()).then(|| {
+        ApiError::invalid(format!(
+            "cannot store a {provider} API key on subscription `{name}`: it is an xai {} plan \
+             (a Grok Build login); store the key on another subscription",
+            s.plan.as_deref().unwrap_or_default()
+        ))
+    })
 }
 
 /// The name of a provider whose subscription is an API key only (no

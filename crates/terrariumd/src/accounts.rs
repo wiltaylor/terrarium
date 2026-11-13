@@ -754,6 +754,19 @@ pub fn remove(state_dir: &Path, sub: &str) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Remove the credential of `harness` from the account of `sub`, and
+/// nothing else of it: a login whose register failed leaves no orphan
+/// credential behind (TER-1205). True when a file went.
+pub fn remove_credential(state_dir: &Path, sub: &str, harness: HarnessId) -> io::Result<bool> {
+    let path = credential_path(&store_dir(state_dir, sub), harness);
+    if !is_regular(&path) {
+        return Ok(false);
+    }
+    let _one = swaps();
+    fs::remove_file(&path)?;
+    Ok(true)
+}
+
 /// The credential env of a launched account (PLAN §16b.4): the Copilot
 /// token of `account` for a Copilot agent, else nothing. `account` is the
 /// account that the launch picked (`private/accounts.json`). Secrets:
@@ -1934,6 +1947,29 @@ mod tests {
         write_credential(&state, "pro", HarnessId::Codex, br#"{"tokens": {"a": 2}}"#).unwrap();
         assert_eq!(fs::metadata(&p).unwrap().ino(), ino);
         assert!(fs::read_to_string(&p).unwrap().contains('2'));
+    }
+
+    /// TER-1205: a failed register removes only the Grok credential of the
+    /// account; the account dir and its meta stay.
+    #[test]
+    fn remove_credential_takes_only_the_one_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let scratch = tmp.path().join("scratch");
+        fs::create_dir_all(scratch.join(GROK_HOME_DIR)).unwrap();
+        fs::write(
+            scratch.join(GROK_HOME_DIR).join(AUTH_FILE),
+            r#"{"session": {"access_token": "grok-access-EEEE5555ffff6666"}}"#,
+        )
+        .unwrap();
+        import_login(&state, "x-super", HarnessId::Grok, "xai", &scratch).unwrap();
+        let rm = |sub: &str| remove_credential(&state, sub, HarnessId::Grok).unwrap();
+        assert!(has_credential(&state, "x-super", HarnessId::Grok));
+        assert!(rm("x-super"));
+        assert!(!has_credential(&state, "x-super", HarnessId::Grok));
+        assert!(exists(&state, "x-super"));
+        assert!(!rm("x-super"));
+        assert!(!rm("nope"));
     }
 
     /// TER-1191: a Grok Build login of an xAI plan row. The import takes
