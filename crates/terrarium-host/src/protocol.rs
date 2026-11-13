@@ -1637,6 +1637,7 @@ mod tests {
         assert!(matches!(&h, HostFrame::Hello(h) if h.update_failed.is_none()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn signals_parse_with_or_without_prefix() {
         use nix::sys::signal::Signal;

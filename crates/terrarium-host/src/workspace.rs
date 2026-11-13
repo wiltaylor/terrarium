@@ -70,6 +70,7 @@ mod tests {
         assert!(!available(&file));
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolves_under_work_dir_only() {
         let dir = tempfile::tempdir().unwrap();

@@ -23,6 +23,7 @@ fn budget() -> RuntimeLimits {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn create_has_device_limits_but_live_update_refuses_them() {
     let b = budget();

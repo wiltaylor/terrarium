@@ -6,6 +6,7 @@
 //! `--` as the test user; the fake `systemctl` records its calls. Real
 //! device policy needs root and a GPU host: that is the hardware follow-up
 //! of TER-345.
+#![cfg(unix)]
 
 use std::collections::{BTreeMap, HashMap};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
