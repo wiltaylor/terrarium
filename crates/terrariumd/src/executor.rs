@@ -6808,10 +6808,7 @@ exit 0
         std::fs::write(origin.join("crates/x/fixtures/data"), "x\n").unwrap();
         let out = Command::new("sh")
             .current_dir(&origin)
-            .args([
-                "-c",
-                "git init -q && git add -A && git commit -q -m one",
-            ])
+            .args(["-c", "git init -q && git add -A && git commit -q -m one"])
             .env("GIT_AUTHOR_NAME", "t")
             .env("GIT_AUTHOR_EMAIL", "t@t")
             .env("GIT_COMMITTER_NAME", "t")
@@ -6859,13 +6856,16 @@ exit 0
                 .unwrap();
             assert!(out.status.success(), "{umask}: {out:?}");
             assert!(String::from_utf8_lossy(&out.stdout).contains("action=cloned"));
-            let mode = |p: &std::path::Path| {
-                std::fs::metadata(p).unwrap().permissions().mode() & 0o777
-            };
+            let mode =
+                |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
             for d in ["", "crates", "crates/x", "crates/x/fixtures"] {
                 assert_eq!(mode(&dest.join(d)), dir_mode, "{umask}: {d}");
             }
-            assert_eq!(mode(&dest.join("crates/x/fixtures/data")), file_mode, "{umask}");
+            assert_eq!(
+                mode(&dest.join("crates/x/fixtures/data")),
+                file_mode,
+                "{umask}"
+            );
             assert_eq!(mode(&dest.join(".git/hooks/pre-push")), 0o755, "{umask}");
         }
     }
