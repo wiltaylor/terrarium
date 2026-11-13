@@ -142,6 +142,10 @@ pub struct OptionsPut {
     /// ([`board_rules::read_rules`]).
     #[serde(default)]
     pub rules: Option<Vec<Value>>,
+    /// The `can_edit` of a `GET` (TER-1116), so that a client may send back
+    /// what it read. Ignored.
+    #[serde(default, rename = "can_edit")]
+    pub _can_edit: Option<bool>,
 }
 
 fn check_queue(q: &ColumnQueue) -> ApiResult<()> {

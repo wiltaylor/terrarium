@@ -1747,6 +1747,91 @@ export interface ColumnEdit {
   rename_from?: string;
 }
 
+/** The move checks of a column (docs/api.md §8.2.1, TER-1112). */
+export interface ColumnChecks {
+  require_comment_on_enter: boolean;
+  require_dependencies_met: boolean;
+  terminal_for_members: boolean;
+  clear_eta_on_enter: boolean;
+}
+
+export type QueueRelease = "wip" | "batch" | "job";
+/** The queue settings of a column (§8.2.1): stored, not run until C3. Only `batch` takes the numbers. */
+export interface ColumnQueue {
+  release: QueueRelease;
+  batch_size?: number | null;
+  max_wait_seconds?: number | null;
+  max_batch_cards?: number | null;
+}
+
+/** A trigger of a column rule (§8.2.1, TER-1120): `kind` and the fields of that kind. */
+export interface RuleTrigger {
+  kind: string;
+  [field: string]: unknown;
+}
+/** A `when` condition on the event: `{path, op, value}`. */
+export interface RuleWhen { path: string; op: string; value: unknown }
+/** An action of a rule: a verb of the rules file (§19.8) and its arguments. */
+export interface RuleAction { verb: string; args?: Record<string, unknown> }
+
+/** A rule of a column (§8.2.1). `id` comes from the daemon; a new rule has none. */
+export interface ColumnRule {
+  id?: string;
+  name: string;
+  description?: string;
+  enabled?: boolean;
+  trigger: RuleTrigger;
+  when?: RuleWhen[];
+  if_card?: Record<string, unknown>[];
+  if_job?: Record<string, unknown>[];
+  max_per_hour?: number;
+  actions: RuleAction[];
+}
+
+/** `GET /api/projects/{name}/board/columns/{column}/options` (§8.2.1). */
+export interface ColumnOptions {
+  project: string;
+  column: string;
+  version: number;
+  checks: ColumnChecks;
+  queue: ColumnQueue;
+  rules: ColumnRule[];
+  /** The caller may write the options: the operator and that project's project_admin, not a sysadmin (TER-1116). An older daemon sends none. */
+  can_edit?: boolean;
+}
+
+/** The `PUT` body of the column options: the whole options and the version that was read. */
+export interface ColumnOptionsPut {
+  base_version: number;
+  checks: ColumnChecks;
+  queue: ColumnQueue;
+  rules?: ColumnRule[];
+}
+
+/** A field of a trigger, a condition or an action in the rule catalog. */
+export interface CatalogField {
+  name: string;
+  /** `bool`, `text`, `list`, `count`, `column`, `columns`, `one_of`, `one_of_list`, or `code`. */
+  type: string;
+  required?: boolean;
+  values?: string[];
+  min?: number;
+  max?: number;
+}
+/** `GET /api/rules/catalog` (§8.2.1, TER-1120): the column rule model for an editor. */
+export interface RuleCatalog {
+  model_version: number;
+  triggers: { kind: string; description: string; fields: CatalogField[] }[];
+  conditions: {
+    when: { description: string; paths: string[]; ops: string[] };
+    if_card: { description: string; fields: CatalogField[] };
+    if_job: { description: string; fields: CatalogField[] };
+  };
+  actions: { verb: string; args: CatalogField[] }[];
+  placeholders: Record<string, string[]>;
+  limits: Record<string, number>;
+}
+
 export interface CardComment {
   id?: string;
   author: string;

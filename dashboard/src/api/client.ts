@@ -16,7 +16,7 @@ import { withScope } from "../lib/target-scope";
 // Secrets (PLAN §16b): a block of its own.
 import type { Pin, ProjectFolder, ProjectFolderTree, ProjectPlacement } from "./types";
 import type { HostCapacityBudget, Reservation } from "./types";
-import type { EffectiveRules, RuleRun, RuleToggle, RulesLint, RulesMigration } from "./types";
+import type { ColumnOptions, ColumnOptionsPut, EffectiveRules, RuleCatalog, RuleRun, RuleToggle, RulesLint, RulesMigration } from "./types";
 import type { NewThread, Thread, ThreadClose, ThreadQuery } from "./types";
 import type { CalendarEvent, CalendarGrant, CalendarGrantResult, CalendarInput, CalendarRange, CalendarView, CalendarWatcher, CalendarWatchResult } from "./types";
 import type { NewSecret, NewSecretGrant, RevealedSecret, Secret, SecretGenerate, SecretGrant, SecretPut, TargetPatch, TargetTestReport } from "./types";
@@ -446,6 +446,10 @@ export interface Api {
   board: {
     get(project: string, q?: { done?: boolean; cursor?: string; limit?: number }): Promise<Board>;
     update(project: string, columns: ColumnEdit[]): Promise<Board>;
+    /** The options of a column (§8.2.1): checks, queue, rules, `version` and `can_edit`. A role alias names the column with that role. */
+    options(project: string, column: string): Promise<ColumnOptions>;
+    /** Write the whole options. `409 stale_base`: the version moved on; `422 invalid`: `details.path` and `details.problems`. */
+    putOptions(project: string, column: string, body: ColumnOptionsPut): Promise<ColumnOptions>;
   };
 
   cards: {
@@ -574,6 +578,8 @@ export interface Api {
      * `baseHash`: the `hash` of the plan that the user saw (`""`: none), so a change since then is `409`.
      */
     migrate(project: string, apply?: boolean, baseHash?: string): Promise<RulesMigration>;
+    /** `GET /api/rules/catalog` (§8.2.1): the triggers, conditions and actions of the column rules. */
+    catalog(): Promise<RuleCatalog>;
   };
 
   /**
@@ -1286,6 +1292,8 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
     board: {
       get: (project, q) => get(`${p(project)}/board`, q),
       update: (project, columns) => patch(`${p(project)}/board`, { columns }),
+      options: (project, column) => get(`${p(project)}/board/columns/${seg(column)}/options`),
+      putOptions: (project, column, body) => put(`${p(project)}/board/columns/${seg(column)}/options`, body),
     },
 
     home: {
@@ -1401,6 +1409,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       disable: (project, rule) => post(`${p(project)}/rules/${seg(rule)}/disable`),
       migrate: (project, apply = false, baseHash) =>
         post(`${p(project)}/rules/migrate`, baseHash === undefined ? { apply } : { apply, base_hash: baseHash }),
+      catalog: () => get("/api/rules/catalog"),
     },
 
     testRuns: {
