@@ -33,7 +33,7 @@ use crate::transfer::{self, PushFile};
 use crate::verb::{BuildError, VerbPlan};
 use crate::{docker, vmlab};
 
-/// How many heartbeat intervals may pass with nothing received.
+/// How many heartbeat intervals may pass with nothing received, seen on two ticks.
 const MISSED_HEARTBEATS: u32 = 3;
 /// Queued push chunks before the reader waits for the disk.
 const PUSH_QUEUE: usize = 64;
@@ -789,28 +789,44 @@ impl Client {
 
         let hb = Duration::from_secs(welcome.heartbeat_secs.max(1));
         let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + hb, hb);
+        // After a late wake-up, the next tick comes one heartbeat later, not in
+        // a burst: the stream gets a turn before the second overdue tick.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_rx = Instant::now();
+        // `last_rx` as the previous tick saw it overdue.
+        let mut overdue: Option<Instant> = None;
         let mut nonce = 0u64;
         let mut writer_joined = false;
         let result = loop {
             tokio::select! {
                 msg = stream.next() => {
                     last_rx = Instant::now();
-                    match msg {
-                        Some(Ok(Message::Text(t))) => {
-                            if let Err(e) = self.on_text(&t, &tx).await {
-                                break Err(e);
-                            }
-                        }
-                        Some(Ok(Message::Binary(b))) => self.on_binary(&b, &tx).await,
-                        Some(Ok(Message::Close(_))) | None => break Ok(()),
-                        Some(Ok(_)) => {}
-                        Some(Err(e)) => break Err(e.into()),
+                    if let Some(end) = self.on_message(msg, &tx).await {
+                        break end;
                     }
                 }
                 _ = ticker.tick() => {
                     if last_rx.elapsed() > hb * MISSED_HEARTBEATS {
-                        break Err(ClientError::Timeout("heartbeat"));
+                        // A late wake-up of this task is not silence from the
+                        // daemon (TER-1151, the host side of TER-1132). Under
+                        // load the ticker and a frame that arrived meanwhile
+                        // become ready together, and `select!` may pick the
+                        // ticker first, or the runtime has not yet seen the
+                        // socket readable. Count a waiting frame, and close
+                        // only when the next tick, one heartbeat later, still
+                        // sees no frame.
+                        match futures_util::FutureExt::now_or_never(stream.next()) {
+                            Some(msg) => {
+                                last_rx = Instant::now();
+                                if let Some(end) = self.on_message(msg, &tx).await {
+                                    break end;
+                                }
+                            }
+                            None if overdue == Some(last_rx) => {
+                                break Err(ClientError::Timeout("heartbeat"));
+                            }
+                            None => overdue = Some(last_rx),
+                        }
                     }
                     nonce += 1;
                     let _ = tx.send(Outgoing::Control(HostFrame::Ping { nonce }));
@@ -836,6 +852,27 @@ impl Client {
             writer.abort();
         }
         result
+    }
+
+    /// Handle one message read from the daemon link. Returns how the
+    /// connection ends, or `None` to keep it.
+    async fn on_message(
+        &self,
+        msg: Option<Result<Message, tungstenite::Error>>,
+        tx: &Link,
+    ) -> Option<Result<(), ClientError>> {
+        match msg {
+            Some(Ok(Message::Text(t))) => {
+                if let Err(e) = self.on_text(&t, tx).await {
+                    return Some(Err(e));
+                }
+            }
+            Some(Ok(Message::Binary(b))) => self.on_binary(&b, tx).await,
+            Some(Ok(Message::Close(_))) | None => return Some(Ok(())),
+            Some(Ok(_)) => {}
+            Some(Err(e)) => return Some(Err(e.into())),
+        }
+        None
     }
 
     fn apply_welcome(&self, welcome: &Welcome, tx: &Link) {
@@ -2337,6 +2374,124 @@ pub(crate) mod tests {
                 .expect("writer completion must end the connection")
                 .expect("writer-first disconnect is reconnectable");
         }
+    }
+
+    // A daemon link fed from a channel. Everything the host writes is
+    // accepted and dropped.
+    struct ChannelDaemon {
+        rx: mpsc::UnboundedReceiver<Message>,
+    }
+
+    impl futures_util::Stream for ChannelDaemon {
+        type Item = Result<Message, tungstenite::Error>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            self.rx.poll_recv(cx).map(|m| m.map(Ok))
+        }
+    }
+
+    impl futures_util::Sink<Message> for ChannelDaemon {
+        type Error = tungstenite::Error;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: std::pin::Pin<&mut Self>, _: Message) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A daemon link with a one-second heartbeat and its welcome queued.
+    fn channel_daemon() -> (mpsc::UnboundedSender<Message>, ChannelDaemon) {
+        let welcome = DaemonFrame::Welcome(Welcome {
+            host_id: "test".into(),
+            heartbeat_secs: 1,
+            resume_token: "resume".into(),
+            resume: vec![],
+            token: None,
+            metrics: false,
+            update: None,
+        });
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(Message::Text(encode_control(&welcome).unwrap().into()))
+            .unwrap();
+        (tx, ChannelDaemon { rx })
+    }
+
+    /// TER-1151 (the host side of TER-1132): the connection task wakes late
+    /// with a daemon frame already waiting. The heartbeat check must count
+    /// that frame and keep the link, not blame the daemon for the host's
+    /// own delay.
+    #[tokio::test(flavor = "current_thread")]
+    async fn heartbeat_counts_a_frame_that_waits_while_the_host_is_late() {
+        let client = Client::new(ClientOptions::new("ws://localhost", "test", "test"));
+        let (daemon, link) = channel_daemon();
+        let hb = Duration::from_secs(1);
+        let serve = client.serve_connection(link);
+        tokio::pin!(serve);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut serve)
+                .await
+                .is_err(),
+            "the link ended after the welcome"
+        );
+        for nonce in 0..5 {
+            daemon
+                .send(Message::Text(
+                    encode_control(&DaemonFrame::Pong { nonce }).unwrap().into(),
+                ))
+                .unwrap();
+            // Block the only runtime thread past the deadline: the connection
+            // task cannot read the Pong until its ticker is overdue too.
+            std::thread::sleep(hb * MISSED_HEARTBEATS + hb / 2);
+            if let Ok(end) = tokio::time::timeout(Duration::from_millis(50), &mut serve).await {
+                panic!("the link ended after pong {nonce}: {end:?}");
+            }
+        }
+        daemon.send(Message::Close(None)).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), &mut serve)
+            .await
+            .expect("a close from the daemon ends the link")
+            .expect("a close from the daemon is a clean end");
+    }
+
+    /// A daemon that stays silent still loses the link, on the second
+    /// overdue tick.
+    #[tokio::test]
+    async fn heartbeat_closes_a_silent_link_on_the_second_overdue_tick() {
+        let client = Client::new(ClientOptions::new("ws://localhost", "test", "test"));
+        let (_daemon, link) = channel_daemon();
+        let started = Instant::now();
+        let end = tokio::time::timeout(Duration::from_secs(10), client.serve_connection(link))
+            .await
+            .expect("a silent link must end");
+        assert!(
+            matches!(end, Err(ClientError::Timeout("heartbeat"))),
+            "unexpected end: {end:?}"
+        );
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_secs(4), "closed after {waited:?}");
     }
 
     #[tokio::test]
