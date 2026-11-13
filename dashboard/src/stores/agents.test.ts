@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
 import { createMockApi } from "../api/mock";
 import type { Agent, AgentEvent } from "../api/types";
-import { applyAgentEvent, createAgentsStore, mergeFresh, removeAgent } from "./agents";
+import { applyAgentEvent, createAgentsStore, isHeldMail, mergeFresh, removeAgent } from "./agents";
 import { createEventsStore } from "./events";
 import { fakeClock, waitFor } from "../test/wait";
 
@@ -195,6 +195,53 @@ describe("agent removal", () => {
       await tick(600);
       expect(calls).toBe(0);
       store.dispose();
+      dispose();
+    });
+  });
+});
+
+describe("held mail (TER-1154)", () => {
+  const mail = (data: Record<string, unknown>) => ev({ kind: "mail", agent_id: "A1", data });
+
+  it("knows the mail events that hold or release a message", () => {
+    expect(isHeldMail(mail({ held: true, held_reason: "loop" }))).toBe(true);
+    expect(isHeldMail(mail({ released: true }))).toBe(true);
+    expect(isHeldMail(mail({}))).toBe(false);
+    expect(isHeldMail(ev({ kind: "status", data: { held: true } }))).toBe(false);
+  });
+
+  it("reads the list again after a held message, and not after a plain one", async () => {
+    let held = 0;
+    const list = async () => [agent(held ? { held_mail: held } : {})];
+    await createRoot(async (dispose) => {
+      let listen: (e: AgentEvent) => void = () => {};
+      let calls = 0;
+      const api = { agents: { list: async () => (calls++, list()) } } as unknown as Parameters<typeof createAgentsStore>[0];
+      const store = createAgentsStore(api, { on: (fn) => ((listen = fn), () => {}) });
+      await store.refresh();
+      calls = 0;
+      const tick = fakeClock();
+      listen(mail({}));
+      await tick(600);
+      expect(calls).toBe(0);
+      held = 1;
+      listen(mail({ held: true }));
+      await tick(600);
+      expect(calls).toBe(1);
+      expect(store.byId("A1")!.held_mail).toBe(1);
+      store.dispose();
+      dispose();
+    });
+  });
+
+  it("keeps the old held_mail when a fresh copy has none", () => {
+    createRoot((dispose) => {
+      const store = createAgentsStore({ agents: { list: async () => [] } } as unknown as Parameters<typeof createAgentsStore>[0]);
+      store.upsert(agent({ held_mail: 2 }));
+      store.upsert(agent({ model: "x" }));
+      expect(store.byId("A1")!.held_mail).toBe(2);
+      store.upsert(agent({ held_mail: 0 }));
+      expect(store.byId("A1")!.held_mail).toBe(0);
       dispose();
     });
   });

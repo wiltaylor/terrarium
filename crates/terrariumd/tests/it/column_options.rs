@@ -121,6 +121,21 @@ async fn operator_and_own_project_admin_write_everyone_else_reads() {
     td.get_as("other/x", &path("review"))
         .await
         .err(403, "forbidden");
+    // `can_edit` is the write right of the caller, for the dashboard cog
+    // (TER-1116): a sysadmin reads only.
+    assert_eq!(options(&td, "review").await["can_edit"], true);
+    for (who, can) in [
+        ("proj/lead", true),
+        ("proj/w1", false),
+        ("ops/root", false),
+        ("ops/arch", false),
+    ] {
+        assert_eq!(
+            td.get_as(who, &path("review")).await.ok()["can_edit"],
+            can,
+            "{who}"
+        );
+    }
     // Only the operator and the project_admin of proj write: not a member,
     // not a sysadmin, not an architect, not the admin of another project.
     for who in ["proj/w1", "ops/root", "ops/arch", "other/x", "other/boss"] {
@@ -132,8 +147,12 @@ async fn operator_and_own_project_admin_write_everyone_else_reads() {
     let r = td.put_as("proj/lead", &path("review"), body(1, true)).await;
     assert_eq!(r.ok()["version"], 2);
     assert_eq!(r.ok()["checks"]["require_dependencies_met"], true);
-    let r = td.put(&path("review"), body(2, false)).await;
+    // A client may send back the `can_edit` that it read.
+    let mut b = body(2, false);
+    b["can_edit"] = true.into();
+    let r = td.put(&path("review"), b).await;
     assert_eq!(r.ok()["version"], 3);
+    assert_eq!(r.ok()["can_edit"], true);
     // The legacy board PATCH keeps its rights: a sysadmin still edits columns.
     let b = td.get("/api/projects/proj/board").await.ok().clone();
     let cols: Vec<Value> = b["columns"]

@@ -507,6 +507,64 @@ async fn stall_blocks_then_stop_unblocks() {
     h.runner.kill().expect("kill");
 }
 
+/// TER-1104: a stalled turn that turns into a question with no output (a
+/// `Notification` hook only) reports the new block: `blocked` -> `blocked`
+/// with the question as the reason, so the daemon no longer takes it for a
+/// stall.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stall_that_turns_into_a_question_reports_the_question() {
+    let mut h = start(Opts {
+        stall: Duration::from_millis(400),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    let d = h.runner.type_turn("/hold");
+    timeout(wait(), d.wait())
+        .await
+        .expect("time")
+        .expect("delivered");
+    let seen = until_status(&mut h.events, AgentStatus::Blocked).await;
+    assert!(seen.iter().any(|e| matches!(e,
+        Event::StatusChanged { to: AgentStatus::Blocked, reason: Some(r), .. }
+            if r == terrarium_runner::STALL_REASON)));
+    // The hook, as the harness sends it: no screen output with it.
+    let msg = serde_json::json!({
+        "type": "hook",
+        "hook": "Notification",
+        "payload": {"message": "Allow the tool?"},
+    });
+    let mut sock =
+        std::os::unix::net::UnixStream::connect(h.runner.socket_path()).expect("connect");
+    std::io::Write::write_all(&mut sock, format!("{msg}\n").as_bytes()).expect("send");
+    drop(sock);
+    let changed = timeout(wait(), async {
+        loop {
+            match h.events.recv().await {
+                Ok(rec) => {
+                    if let Event::StatusChanged { from, to, reason } = rec.event {
+                        break (from, to, reason);
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e) => panic!("events: {e}"),
+            }
+        }
+    })
+    .await
+    .expect("the block change");
+    assert_eq!(
+        changed,
+        (
+            AgentStatus::Blocked,
+            AgentStatus::Blocked,
+            Some("Allow the tool?".to_owned())
+        )
+    );
+    assert_eq!(h.runner.status(), AgentStatus::Blocked);
+    h.runner.kill().expect("kill");
+}
+
 /// The Stop of the dashboard (issue #12): the interrupt keys go out, the
 /// harness sends no Stop hook (as Claude Code on Esc), and the settled
 /// screen ends the turn with the reason `interrupted`. The next turn goes

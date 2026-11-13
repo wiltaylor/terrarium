@@ -7,7 +7,7 @@ import { allHome, type HomeCard } from "../../api/home";
 const home = { cards: vi.fn(), monitors: vi.fn(), pipelines: vi.fn() };
 const open = vi.fn();
 let refresh: (e: { kind: string }) => void;
-vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({ api: { home }, cardPeek: { open }, projects: { projects: () => [{ name: "one" }, { name: "two" }] }, events: { on: (fn: typeof refresh) => { refresh = fn; return () => {}; } } })); });
+vi.mock("../../stores", async () => { const { instanceTestStores } = await import("../../test/instance"); return instanceTestStores(({ api: { home }, cardPeek: { open }, projects: { projects: () => [{ name: "one" }, { name: "two", home_board_columns: { in_progress: ["working"], review: ["review", "merge_queue"], accepted: [], blocked: ["blocked"] } }] }, events: { on: (fn: typeof refresh) => { refresh = fn; return () => {}; } } })); });
 vi.mock("@solidjs/router", () => ({ A: (p: { children: unknown }) => p.children }));
 const { HomeBoard } = await import("./HomeBoard");
 let dispose: (() => void) | undefined;
@@ -132,4 +132,17 @@ it("shows labels, project, agent, ETA and blocked reason, and opens the sidebar"
   expect(tile.textContent).toContain("Need access"); expect(tile.textContent).not.toContain("more");
   tile.click(); expect(open).toHaveBeenCalledWith({ id: "ONE-1", project: "one" });
   expect(home.cards).toHaveBeenCalledWith(expect.objectContaining({ project: "one" }));
+});
+it("shows a column cog for each column of a lane only when one project is chosen (TER-1116)", async () => {
+  home.monitors.mockResolvedValue({ items: [], next: null });
+  home.pipelines.mockResolvedValue({ items: [], next: null });
+  mount(); await settle();
+  expect(document.querySelector("[data-column-cog]")).toBeNull();
+  const select = document.querySelector<HTMLSelectElement>('select[aria-label="Project"]')!;
+  select.value = "two"; select.dispatchEvent(new Event("change", { bubbles: true })); await settle();
+  const lane = (title: string) => [...document.querySelector(`section[aria-label="${title}"]`)!.querySelectorAll<HTMLElement>("[data-column-cog]")].map(b => b.dataset.columnCog);
+  expect(lane("In progress")).toEqual(["working"]);
+  expect(lane("Review")).toEqual(["review", "merge_queue"]);
+  expect(lane("Accepted")).toEqual([]);
+  expect(document.querySelector('[data-column-cog="merge_queue"]')?.getAttribute("aria-label")).toBe("Options of merge queue (two)");
 });

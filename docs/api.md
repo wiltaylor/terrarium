@@ -4908,8 +4908,13 @@ reader; a role alias names the column with that role):
            "max_batch_cards": 8}}
 ```
 
+The answer also has `can_edit`: whether the caller may write the options
+(the rule below). The dashboard cog shows an editor or a viewer from it
+(TER-1116).
+
 `PUT` on the same path takes the whole `checks` and `queue` and the
-`base_version` that was read, and returns the new options. Only the
+`base_version` that was read, and returns the new options. It ignores a
+`can_edit` in the body, so a client may send back what it read. Only the
 operator and a `project_admin` of that project write (`403` for every other
 actor, a `sysadmin` too: it reads only). A `base_version` that is not the
 current `version` is `409 stale_base` with `details.version`, and nothing is
@@ -4923,8 +4928,8 @@ nothing.
 ##### Column rules (TER-1120)
 
 The options also hold the column's rules, in order, in `rules` (C1b of the
-kanban rework). They are stored and checked only: the engine still runs
-the legacy rules (§19.8) until C2. Each rule has a stable `id` (the daemon
+kanban rework). The engine runs them only for a project with `board_flow
+= columns` (§19.13); the other projects run the legacy rules (§19.8). Each rule has a stable `id` (the daemon
 gives it), a `name` (unique in the column: a-z, A-Z, 0-9, `.`, `_`, `-`, at
 most 64), an optional `description`, `enabled` (default `true`), a
 `trigger`, conditions, and actions:
@@ -10146,6 +10151,51 @@ The dry run of §19.9 plans the pack too when the project runs it
 (`board_flow = rules`), with the stored rules or with `text`, as the lint
 does. Such a project with no `rules.wcl` plans the pack alone (before
 TER-171 it was `404`).
+
+### 19.13 Column rules in the engine (TER-1113)
+
+A project with `board_flow = columns` runs the rules of its board
+columns (§8.2.1) and nothing else: no built-in pack, no `rules.wcl`. The
+coded flow stays off, as with `rules`. Only the upgrade that converts the
+boards (kanban rework C5) sets `columns`. A project file cannot give
+it, a project file or the migrate tool (§19.12, `409`) that names `code`
+or `rules` does not change it back, and an older daemon reads it as
+`code`. An event older than the switch (`board_flow_at`) starts no run.
+
+| Trigger | Runs on | Card of the run |
+|---|---|---|
+| `lands` | a `card` event `created` in the column, or `moved` into it | the card |
+| `leaves` | a `card` event `moved` out of the column | the card |
+| `archived` | a `card` event `archived` of a card in the column | the card |
+| `wait_met` | a `card` event `wait_met` of a card in the column | the card |
+| `job_result` | a `job` event whose `change` is in `events`, or a `job.verdict` event (`verdict`), of a job of `job_kinds` (empty: any) | each card of the job that is in the column when the engine plans |
+| `timer` | a `rule.timer` event that the engine writes once in each slot of `every_seconds` (UTC epoch slots, no catch-up after downtime) | none |
+| `count_reached` | a card lands and the column then holds exactly `count` cards that are not archived (`data.to_count` of the event) | none |
+
+Order in one event (TER-1112 Q3): the `leaves` rules of the source
+column, then the `lands` (or `job_result`) rules, then `count_reached`.
+With several cards, the cards go in board order (column, then position).
+In a column, the rules go in their order. Each card has its own lane
+(§19.9), so two cards do not wait on each other.
+
+In the engine a column rule is named `<column>/<rule>`: the run log
+(`rule`, plus `rule_id` and `column`), the dry run, and the actor
+`rule:<project>/<column>/<rule>` use that name, and `{{rule.name}}`
+renders it. The loop guards of §19.9 stay in the daemon: the chain
+depth, the self events, `max_per_hour` (default 30) and 10 runs per card
+in an hour. A rule with an explicit `max_per_hour` also has that number
+as its per-card cap. Neither cap goes above 600. The counts are by rule
+ID, so a rename does not reset them.
+
+A board change (§8.2) that renames a column rewrites the name in every
+column rule of the board, in the same write: `if_card.column`,
+`if_card.not_column`, and each verb argument of a column kind
+(`card.move.to`, ...). A reference `@x` where a column has the role `x`
+is a role and stays. Each column whose rules changed gets a new options
+version, and the `board.columns` audit row lists the changes
+(`renamed_in_rules`). A board change that removes a column while a rule
+of another column names it is `409 conflict` with `details.reason =
+column_in_use`, and nothing changes.
 
 ## 20. Event sources and ingest
 

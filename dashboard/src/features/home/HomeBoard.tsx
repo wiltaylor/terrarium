@@ -1,7 +1,8 @@
 import { useInstance } from "../../instance";
 import { A } from "../../instance/navigation";
 import { createResource, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
-import { allHome, type HomeColumn, type HomeAttention, type HomeCard } from "../../api/home";
+import { allHome, defaultHomeColumns, type HomeColumn, type HomeAttention, type HomeCard } from "../../api/home";
+import { ColumnCog } from "../board/ColumnCog";
 import { Empty, ErrorBanner } from "../../components/ui";
 import { span } from "../../lib/eta";
 
@@ -41,6 +42,8 @@ export function HomeBoard(props: { now: number; children?: JSX.Element }) {
       return stableRows(rows, value);
     } catch (error) { setCardsError(error); return value ?? []; }
   });
+  /** The board roles or column names of a Home lane for one project (its `home_board_columns`, else the defaults). */
+  const laneColumns = (name: string, lane: HomeColumn) => (projects.projects().find(x => x.name === name)?.home_board_columns ?? defaultHomeColumns)[lane];
   onMount(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const off = events.on(e => {
@@ -78,7 +81,13 @@ export function HomeBoard(props: { now: number; children?: JSX.Element }) {
       <Show when={cards.loading && cards.latest === undefined}><p class="muted">Loading cards…</p></Show>
       <div class="home-kanban">
         <For each={columns}>{column => <section class="home-lane" aria-label={column.title}>
-          <h3>{column.title}</h3>
+          <div class="spread home-lane-head">
+            <h3>{column.title}</h3>
+            {/* One project chosen: a cog for each of its columns in this lane (TER-1116). All projects: none. */}
+            <Show when={project()}>{p => <span class="row">
+              <For each={laneColumns(p(), column.id)}>{name => <ColumnCog project={p()} column={name} title={`${name.replace(/_/g, " ")} (${p()})`} />}</For>
+            </span>}</Show>
+          </div>
           <For each={(cards.latest ?? []).filter(c => c.home_column === column.id)} fallback={<Show when={cards.latest !== undefined}><Empty>No cards.</Empty></Show>}>
             {c => <button class="home-card" onClick={() => cardPeek.open({ id: c.id, project: c.project })}>
               <span class="mono small muted">{c.id}</span><strong>{c.title}</strong>

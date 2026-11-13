@@ -570,6 +570,9 @@ async fn update(
     let mut v = v;
     let runs = state.supervisor.harness_runs();
     mark_skills(&state, &runs, std::slice::from_mut(&mut v)).await;
+    // The same `held_mail` as the list and show (TER-1154), so the
+    // dashboard view does not go stale after a change.
+    mark_held(&state, &actor, std::slice::from_mut(&mut v)).await?;
     Ok(Json(v))
 }
 

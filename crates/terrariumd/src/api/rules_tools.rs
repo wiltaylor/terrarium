@@ -200,6 +200,14 @@ async fn migrate(
         policy::read_project(&actor, &name)?;
     }
     let r = read(&state, &name).await?;
+    if body.apply && r.flow == BoardFlow::Columns {
+        // A converted board runs its column rules (TER-1113): the pack
+        // does not come back.
+        return Err(ApiError::conflict(format!(
+            "project `{name}` runs the rules of its board columns (`board_flow = columns`); \
+             the built-in pack does not apply"
+        )));
+    }
     let own = r.own();
     let columns = r.columns();
     let m = tokio::task::spawn_blocking({

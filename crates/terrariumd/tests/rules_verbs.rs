@@ -3898,6 +3898,10 @@ async fn the_merge_queue_batch_goes_when_4_cards_wait() {
 #[tokio::test]
 async fn one_card_goes_30_minutes_after_it_came() {
     let td = queue_lab().await;
+    // Only the explicit timer checks below may fire. An engine tick after
+    // the 30-minute backdate can write the timer first, and the check then
+    // counts 0 (TER-1156, as TER-764).
+    state(&td).rule_timers.hold(true);
     put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
     let a = new_card(&td, "p", json!({"title": "a", "column": "review"})).await;
     settle(&td).await;
@@ -4141,6 +4145,10 @@ async fn a_release_blocker_waits_for_the_lane_then_goes_first_and_alone() {
 #[tokio::test]
 async fn a_release_blocker_label_on_a_waiting_card_fires_the_timer_now() {
     let td = queue_lab().await;
+    // Only the explicit timer checks below may fire. An engine tick after
+    // the label can write the timer first, and the check then counts 0
+    // (TER-1156, as TER-764).
+    state(&td).rule_timers.hold(true);
     put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
     let mut ids = Vec::new();
     for i in 0..2 {
@@ -4190,6 +4198,10 @@ async fn a_release_blocker_label_on_a_waiting_card_fires_the_timer_now() {
 #[tokio::test]
 async fn the_merge_queue_batch_goes_30_minutes_after_the_first_card() {
     let td = queue_lab().await;
+    // Only the explicit timer checks below may fire. An engine tick after
+    // the backdate can write the timer first, and the check then counts 0
+    // (TER-1156, as TER-764).
+    state(&td).rule_timers.hold(true);
     put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
     let mut ids = Vec::new();
     for i in 0..3 {
@@ -4260,8 +4272,8 @@ async fn the_merge_queue_batch_goes_30_minutes_after_the_first_card() {
     let cards: Vec<&str> = open[0].batch.iter().map(|x| x.card.as_str()).collect();
     let want: Vec<&str> = ids.iter().map(String::as_str).collect();
     assert_eq!(cards, want);
-    // A timer run has no card. (The engine's own timer check may write a
-    // second timer in the same minute: its run is then a no-op.)
+    // A timer run has no card. (The engine timers are held: only the
+    // timer of the explicit check runs.)
     let r = runs_of(&td, "p", "merge-queue-batch").await;
     let timed: Vec<&Value> = r.iter().filter(|x| x["card"].is_null()).collect();
     assert_eq!(
@@ -4351,6 +4363,10 @@ async fn timer_events(td: &TestDaemon) -> Vec<(Option<String>, Value)> {
 #[tokio::test]
 async fn the_timer_runs_the_batch_when_a_hold_is_released_in_place() {
     let td = queue_lab().await;
+    // Only the explicit timer check below may fire. With 4 cards waiting,
+    // an engine tick after the label change can write the timer first, and
+    // the check then counts 0 (TER-1156, as TER-764).
+    state(&td).rule_timers.hold(true);
     put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
     let mut ids = Vec::new();
     for i in 0..3 {
@@ -4557,6 +4573,10 @@ async fn the_engine_pass_writes_one_timer_for_a_wait_with_a_failed_batch() {
 #[tokio::test]
 async fn a_card_without_a_usable_repo_is_left_out_of_the_batch() {
     let td = queue_lab().await;
+    // Only the explicit timer check below may fire. An engine tick after
+    // the backdate can write the timer first, and the check then counts 0
+    // (TER-1156, as TER-764).
+    state(&td).rule_timers.hold(true);
     add_repo(&td, "lib").await;
     let r = td
         .put(
@@ -4609,6 +4629,10 @@ async fn a_card_without_a_usable_repo_is_left_out_of_the_batch() {
 #[tokio::test]
 async fn an_error_in_one_project_does_not_stop_the_timers_of_another() {
     let td = queue_lab().await;
+    // Only the explicit timer check below may fire. An engine tick after
+    // the backdate can write the timer of q first, and the check then
+    // counts 0 (TER-1156, as TER-764).
+    state(&td).rule_timers.hold(true);
     // Project q, set up as p.
     td.project("q").await;
     let r = td
@@ -4675,4 +4699,131 @@ async fn an_error_in_one_project_does_not_stop_the_timers_of_another() {
     assert_eq!(jobs_q.len(), 1, "{jobs_q:?}");
     assert_eq!(jobs_q[0].card, z);
     assert!(open_jobs(&td).await.is_empty(), "no job in p");
+}
+
+/// The pack rule `name` as a column rule, as the C5 conversion places it
+/// (TER-1113): `on = ["job"]` becomes every job event, `on =
+/// ["job.verdict"]` the verdict; the `when`, conditions, cap, and actions
+/// stay.
+fn pack_as_column_rule(name: &str) -> Value {
+    let r = terrarium_core::rules_file::default_pack()
+        .rules
+        .iter()
+        .find(|r| r.name == name)
+        .unwrap_or_else(|| panic!("no pack rule {name}"));
+    let trigger = if r.on.iter().any(|k| k == "job.verdict") {
+        json!({"kind": "job_result", "events": ["verdict"]})
+    } else {
+        assert_eq!(r.on, vec!["job".to_owned()], "{name}");
+        json!({"kind": "job_result",
+               "events": ["queued", "started", "requeued", "cancelled", "ended"]})
+    };
+    json!({"name": r.name, "trigger": trigger, "when": r.when, "if_card": r.if_card,
+           "if_job": r.if_job, "max_per_hour": r.max_per_hour, "actions": r.actions})
+}
+
+async fn put_column_rules(td: &TestDaemon, column: &str, rules: Value) {
+    let path = format!("/api/projects/p/board/columns/{column}/options");
+    let o = td.get(&path).await.ok().clone();
+    let r = td
+        .put(
+            &path,
+            json!({"base_version": o["version"], "checks": o["checks"], "queue": o["queue"],
+                   "rules": rules}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
+#[tokio::test]
+async fn column_rules_run_a_merge_group_and_a_version_cut_without_the_pack() {
+    let td = queue_lab().await;
+    put_column_rules(
+        &td,
+        "review",
+        json!([
+            pack_as_column_rule("merge-queued"),
+            pack_as_column_rule("merge-group-started"),
+            pack_as_column_rule("merge-pass"),
+        ]),
+    )
+    .await;
+    put_column_rules(
+        &td,
+        "accepted",
+        json!([{"name": "version-cut", "trigger": {"kind": "lands"}, "max_per_hour": 600,
+                "actions": [{"verb": "version.cut",
+                             "args": {"min_cards": 2, "max_wait_minutes": 240}}]}]),
+    )
+    .await;
+    state(&td)
+        .db
+        .write("operator", |t| {
+            terrariumd::store::projects::set_columns_flow(t, "p")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app", "labels":["version:vnext"]}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b", "column":"review", "repo":"app", "labels":["version:vnext"]}),
+    )
+    .await;
+    let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    settle(&td).await;
+    let g = card(&td, &a).await["group"].clone();
+    assert!(
+        !g.is_null(),
+        "{:?}",
+        runs_of(&td, "p", "review/merge-queued").await
+    );
+    let gid = g["id"].as_str().unwrap().to_owned();
+    assert_eq!(g["members"], json!([a, b]));
+
+    let id = job.id.clone();
+    let passed = state(&td)
+        .db
+        .write("system", move |t| {
+            jobs::start(t, &id, "machine", None)?;
+            Ok(jobs::finish(
+                t,
+                &id,
+                &JobEnd {
+                    passed: true,
+                    exit_code: Some(0),
+                    ..JobEnd::default()
+                },
+            )?
+            .unwrap())
+        })
+        .await
+        .unwrap();
+    settle(&td).await;
+    verdict(&td, &passed, &a, "passed").await;
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["column"], "accepted");
+    verdict(&td, &passed, &b, "passed").await;
+    settle(&td).await;
+    assert_eq!(card(&td, &b).await["column"], "accepted");
+    assert_eq!(card(&td, &gid).await["archived"], true);
+    let pass = runs_of(&td, "p", "review/merge-pass").await;
+    assert!(pass.iter().all(|r| r["state"] != "failed"), "{pass:?}");
+    assert!(pass.iter().all(|r| r["column"] == "review"), "{pass:?}");
+    // Two accepted cards: the `lands` rule of `accepted` froze them into a
+    // version group.
+    let v = card(&td, &a).await["group"].clone();
+    assert!(
+        v["key"].as_str().is_some_and(|k| k.starts_with("version:")),
+        "{v} {:?}",
+        runs_of(&td, "p", "accepted/version-cut").await
+    );
+    // Nothing ran from the pack.
+    assert!(runs(&td, "p").await.iter().all(|r| r["column"].is_string()));
 }

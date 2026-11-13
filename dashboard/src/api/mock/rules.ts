@@ -149,7 +149,7 @@ export function createRulesMock(ctx: RulesMockContext) {
     return out;
   };
 
-  const api: Api["rules"] = {
+  const api: Omit<Api["rules"], "catalog"> = {
     effective: (project) =>
       ctx.reply(() => {
         const s = of(project);
