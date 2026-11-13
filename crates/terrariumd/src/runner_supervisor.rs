@@ -1099,11 +1099,18 @@ struct Slot {
     rest_since: Option<Instant>,
     /// TER-1104: the last kick of the undrained queue of this episode. It
     /// stays over a kick restart (the same epoch), and ends when the queue
-    /// is seen drained, when a turn ends at rest, or at the next start.
+    /// is seen drained, when a turn that took a pointer of this episode
+    /// ends at rest, or at the next start.
     kick: Option<Kick>,
     /// TER-1104: a turn (`working`) began since the last rest. Its end at
-    /// rest ends the kick episode; a stall does not.
+    /// rest ends the kick episode if it took a pointer; a stall does not.
     in_turn: bool,
+    /// TER-1185: a pointer delivery of this kick episode went out since the
+    /// last rest, so the next turn that ends at rest took queued work. A
+    /// turn without it (a recap, a system turn) keeps the episode. It
+    /// clears at each rest that ends a turn, at each launch, and on a
+    /// failed delivery.
+    kick_pointer: bool,
 }
 
 /// TER-1104: the steps of a kick of an agent at rest whose deliverable
@@ -1348,6 +1355,7 @@ impl Slot {
             rest_since: None,
             kick: None,
             in_turn: false,
+            kick_pointer: false,
         }
     }
 
@@ -1356,10 +1364,13 @@ impl Slot {
     /// [`terrarium_runner::STALL_REASON`]); it keeps its first time. A
     /// question or dialog on screen and unsubmitted input are `blocked` in
     /// a turn, not rest: they end the clock, as a turn or a start does. A
-    /// turn that ends at rest (`working`, then `idle` or `waiting`) ends
-    /// the kick episode: the agent works again, so a later stall starts at
-    /// the first step. A turn that stalls does not end it, so a harness
-    /// that stalls in each turn still reaches `blocked`.
+    /// turn that ends at rest (`working`, then `idle` or `waiting`) after a
+    /// pointer delivery of this episode went out ends the kick episode: the
+    /// agent took its queued work, so a later stall starts at the first
+    /// step. A turn that took no pointer (a recap after a kick restart, a
+    /// system turn) does not end it (TER-1185), and a turn that stalls does
+    /// not either, so a harness that stalls in each turn still reaches
+    /// `blocked`.
     fn note_rest(&mut self, status: AgentStatus, reason: Option<&str>, now: Instant) {
         let stalled =
             status == AgentStatus::Blocked && reason == Some(terrarium_runner::STALL_REASON);
@@ -1371,7 +1382,9 @@ impl Slot {
         if status == AgentStatus::Working {
             self.in_turn = true;
         } else if status.is_resting() && std::mem::take(&mut self.in_turn) {
-            self.kick = None;
+            if std::mem::take(&mut self.kick_pointer) {
+                self.kick = None;
+            }
         }
     }
 
@@ -2705,6 +2718,7 @@ impl RunnerSupervisor {
                     slot.seen = runner.status();
                     slot.rest_since = None;
                     slot.in_turn = false;
+                    slot.kick_pointer = false;
                     slot.pointer_busy = false;
                     slot.account = accounts.account.clone();
                     slot.bound = accounts.bound.clone();
@@ -3066,6 +3080,7 @@ impl RunnerSupervisor {
             // TER-1104: an adopted agent at rest starts its rest clock now.
             slot.rest_since = None;
             slot.in_turn = false;
+            slot.kick_pointer = false;
             // The hello has no reason: a `blocked` runner is not taken
             // for a stall.
             slot.note_rest(hello.status, None, Instant::now());
@@ -3988,6 +4003,7 @@ impl RunnerSupervisor {
         slot.rest_since = None;
         slot.kick = None;
         slot.in_turn = false;
+        slot.kick_pointer = false;
         slot.restart_requested = false;
         slot.restarts.clear();
         slot.upgrade_pending = false;
@@ -4329,6 +4345,12 @@ impl RunnerSupervisor {
             slot.pointer_busy = true;
             slot.deliveries_open += 1;
             slot.deliveries_taken += 1;
+            // TER-1185: the turn of this delivery takes the queued work of
+            // the kick episode. Set before the turn starts, so its rest
+            // cannot come first; a delivery that does not go out clears it.
+            if slot.kick.is_some() {
+                slot.kick_pointer = true;
+            }
             (runner, std::mem::take(&mut slot.pointer))
         };
         // The stored rows of these items: deleted when the pointer goes
@@ -4363,6 +4385,7 @@ impl RunnerSupervisor {
                 me.forget_stored(id, stored, upto).await;
                 let resting = lock(&me.inner.slots).get_mut(&id).map(|slot| {
                     slot.pointer_busy = false;
+                    slot.kick_pointer = false;
                     (slot.epoch, slot.seen.is_resting())
                 });
                 drop(open);
@@ -4404,6 +4427,7 @@ impl RunnerSupervisor {
                 slots.get_mut(&id).and_then(|slot| {
                     slot.pointer_busy = false;
                     if result.is_err() {
+                        slot.kick_pointer = false;
                         // Keep the items for the next idle.
                         let newer = std::mem::replace(&mut slot.pointer, pointer);
                         slot.pointer.merge(newer);
@@ -4764,6 +4788,7 @@ impl RunnerSupervisor {
             .get_mut(&id)
             .filter(|s| s.epoch == epoch && s.kickable() && s.rest_since == Some(rest))?;
         if queue.count == 0 {
+            slot.kick_pointer = false;
             if slot.kick.take().is_some() {
                 info!(agent = %id, "the queue drained: the kick episode ends");
             }
@@ -10181,9 +10206,14 @@ mod tests {
         );
         assert_eq!(slot.kick, kick, "a stalled turn keeps it");
         slot.note_rest(AgentStatus::Working, None, t);
-        assert_eq!(slot.kick, kick, "a turn that runs keeps it");
         slot.note_rest(AgentStatus::Idle, None, t);
-        assert_eq!(slot.kick, None, "a turn that ended at rest ends it");
+        assert_eq!(slot.kick, kick, "a turn that took no pointer keeps it");
+        slot.kick_pointer = true;
+        slot.note_rest(AgentStatus::Working, None, t);
+        assert_eq!(slot.kick, kick, "a turn that runs keeps it");
+        slot.note_rest(AgentStatus::Waiting, None, t);
+        assert_eq!(slot.kick, None, "a turn that took a pointer ends it at rest");
+        assert!(!slot.kick_pointer, "the rest takes the mark");
     }
 
     /// TER-1104: queued mail counts once each (a pointer mail item is
@@ -10479,6 +10509,78 @@ mod tests {
         assert_eq!(
             kicked_steps(&kicked_events(&state).await),
             ["reload", "restart", "blocked", "reload"]
+        );
+    }
+
+    /// TER-1185: after a kick restart, a recap turn that takes no queued
+    /// mail and ends at rest does not end the episode: the stall that comes
+    /// again still reaches `blocked`, with one mail to the lead.
+    #[tokio::test]
+    async fn a_recap_turn_after_a_kick_restart_keeps_the_episode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        let lead = add_lead(&state).await;
+        store_mail(&state, id, false).await;
+        let rest = stall(&sup, id);
+        let at = |s: u64| rest + Duration::from_secs(s);
+        sup.kick_tick(at(61)).await;
+        settle(&sup, id).await;
+        assert_eq!(kick_step(&sup, id), Some(KickStep::Reload));
+        sup.kick_tick(at(301)).await;
+        assert_eq!(runner.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(kick_step(&sup, id), Some(KickStep::Restart));
+        let epoch = lock(&sup.inner.slots)[&id].epoch;
+        sup.on_exit(
+            id,
+            epoch,
+            ExitStatus {
+                code: 0,
+                signal: Some("KILL".into()),
+            },
+        )
+        .await;
+        let start = Instant::now();
+        while lock(&sup.inner.slots)[&id].phase == Phase::Restarting {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "the relaunch hangs"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        {
+            // The relaunch, by hand as in the test above.
+            let mut slots = lock(&sup.inner.slots);
+            let slot = slots.get_mut(&id).unwrap();
+            assert_eq!(slot.epoch, epoch);
+            slot.runner = Some(runner.clone());
+            slot.phase = Phase::Running;
+            slot.seen = AgentStatus::Starting;
+            slot.rest_since = None;
+            slot.in_turn = false;
+            slot.kick_pointer = false;
+        }
+        // A recap turn: no pointer goes out, and it ends at rest.
+        pass_status(&sup, id, AgentStatus::Starting, AgentStatus::Working, None);
+        pass_status(&sup, id, AgentStatus::Working, AgentStatus::Waiting, None);
+        settle(&sup, id).await;
+        assert!(lock(&runner.typed).is_empty());
+        assert_eq!(kick_step(&sup, id), Some(KickStep::Restart));
+        // The queue still does not drain: the stall comes again.
+        stall(&sup, id);
+        sup.kick_tick(at(600)).await;
+        assert_eq!(kick_step(&sup, id), Some(KickStep::Restart));
+        assert!(mail_to(&state, lead).await.is_empty());
+        sup.kick_tick(at(601)).await;
+        assert_eq!(kick_step(&sup, id), Some(KickStep::Blocked));
+        for s in [602, 900, 5000] {
+            sup.kick_tick(at(s)).await;
+        }
+        assert_eq!(runner.kills.load(Ordering::SeqCst), 1);
+        let mails = mail_to(&state, lead).await;
+        assert_eq!(mails.len(), 1, "{mails:?}");
+        assert_eq!(
+            kicked_steps(&kicked_events(&state).await),
+            ["reload", "restart", "blocked"]
         );
     }
 
