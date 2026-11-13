@@ -4601,6 +4601,6 @@ async fn replaced_and_removed_grok_tokens_stay_in_the_redaction_matcher() {
     fault("x-drop-old", false);
     assert!(terrariumd::accounts::exists(&td.state, "x-drop-old"));
     assert!(!grok_file("x-drop-old").exists());
-    assert_redacted(td, GROK_TOKEN_D, "x-drop-old", "token before the failed one").await;
+    assert_redacted(td, GROK_TOKEN_D, "x-drop-old", "token before it").await;
     assert_redacted(td, GROK_TOKEN_E, "x-drop-old", "token of the failed login").await;
 }
