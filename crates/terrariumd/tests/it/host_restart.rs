@@ -97,10 +97,11 @@ async fn process_restart(offline: bool) {
     // wait for a full line, not for the file to exist (TER-1166).
     let pid = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            if let Ok(text) = std::fs::read_to_string(&pidfile) {
-                if text.len() > 1 && text.ends_with('\n') {
-                    return text;
-                }
+            if let Ok(text) = std::fs::read_to_string(&pidfile)
+                && text.len() > 1
+                && text.ends_with('\n')
+            {
+                return text;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
