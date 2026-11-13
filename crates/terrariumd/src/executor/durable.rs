@@ -809,14 +809,23 @@ mod tests {
         };
         let output = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg(script_for_spool(&path, &cmd, chrono::Utc::now().timestamp(), RETAIN, &spool))
+            .arg(script_for_spool(
+                &path,
+                &cmd,
+                chrono::Utc::now().timestamp(),
+                RETAIN,
+                &spool,
+            ))
             .env("HOME", home.path())
             .output()
             .await
             .unwrap();
         assert!(!output.status.success());
         let message = String::from_utf8_lossy(&output.stdout);
-        assert!(message.starts_with("Bspool error: work_root /sys/"), "{message}");
+        assert!(
+            message.starts_with("Bspool error: work_root /sys/"),
+            "{message}"
+        );
         assert!(
             message.contains("terrarium admin target edit box --work-root <absolute path>"),
             "{message}"
