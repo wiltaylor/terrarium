@@ -6,7 +6,7 @@
 // `thread_paused` on the whole thread). `onNew` gets the IDs of the
 // messages that a pull found for the first time, for the live mode.
 
-import { batch, createEffect, createMemo, createSignal, on } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import type { Api } from "../../api/client";
 import type { MailQuery, Message } from "../../api/types";
 import { newKeys } from "../../components/live";
@@ -24,6 +24,7 @@ export function createMailFeed(api: Pick<Api, "mail">, query: () => MailQuery, o
   /** The newest ID that the server query returned: the cursor of the next pull. */
   let cursor: string | undefined;
   let generation = 0;
+  onCleanup(() => { generation++; });
 
   const all = (q: MailQuery, from?: string) => collectAll((c) => api.mail.list({ ...q, cursor: c ?? from, limit: PAGE }), MAX_PAGES);
 

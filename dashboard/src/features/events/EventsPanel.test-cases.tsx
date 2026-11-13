@@ -1,0 +1,72 @@
+// @vitest-environment jsdom
+import { createSignal } from "solid-js";
+import { render } from "solid-js/web";
+import { afterEach, expect, it, vi } from "vitest";
+import type { AgentEvent, EventQuery } from "../../api/types";
+import { waitFor } from "../../test/wait";
+
+const listeners = new Set<(event: AgentEvent) => void>();
+const event = (project: string, seq: number): AgentEvent => ({
+  project, seq, id: `${project}-${seq}`, kind: "mail", at: "2026-11-13T00:00:00Z", summary: `${project} event ${seq}`, data: {},
+});
+const history = vi.fn(async (q: EventQuery) => ({ items: [event(q.project!, 1)], next: null }));
+vi.mock("../../stores", async () => {
+  const { instanceTestStores } = await import("../../test/instance");
+  return instanceTestStores({
+    api: { events: { history } },
+    projects: { selected: () => "wrong-project" },
+    agents: { inProject: (p: string) => [{ id: `${p}-agent`, project: p, name: "lead" }] },
+    events: {
+      status: () => ({ lastSeq: 1 }), state: () => "live",
+      on: (fn: (event: AgentEvent) => void) => { listeners.add(fn); return () => listeners.delete(fn); },
+    },
+  });
+});
+const { EventsPanel } = await import("./EventsPage");
+let dispose: (() => void) | undefined;
+afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); history.mockClear(); });
+
+it("keeps duplicate filters local and never consults the global project", async () => {
+  const root = document.createElement("div"); document.body.append(root);
+  dispose = render(() => <><section><EventsPanel project="alpha" /></section><section><EventsPanel project="beta" /></section></>, root);
+  await waitFor(() => expect(root.querySelectorAll(".event-row")).toHaveLength(2));
+  expect(root.querySelector('[aria-label="Scope"]')).toBeNull();
+  const kinds = root.querySelectorAll<HTMLSelectElement>('[aria-label="Kind"]');
+  kinds[0]!.value = "mail"; kinds[0]!.dispatchEvent(new Event("change", { bubbles: true }));
+  await waitFor(() => expect(history).toHaveBeenCalledWith(expect.objectContaining({ project: "alpha", kind: "mail" })));
+  expect(kinds[1]!.value).toBe("");
+  expect(history.mock.calls.every(([q]) => q.project === "alpha" || q.project === "beta")).toBe(true);
+  expect(root.querySelectorAll('[aria-label="Agent"]')[0]!.textContent).not.toContain("beta");
+});
+
+it("retains rows, focus and filter state on live arrival and cleans subscriptions", async () => {
+  const [project, setProject] = createSignal("alpha");
+  const root = document.createElement("div"); document.body.append(root);
+  dispose = render(() => <EventsPanel project={project()} />, root);
+  await waitFor(() => expect(root.querySelector(".event-row")).toBeTruthy());
+  const row = root.querySelector(".event-row");
+  const since = root.querySelector<HTMLInputElement>('[aria-label="Since"]')!;
+  since.focus();
+  root.scrollTop = 31;
+  for (const fn of listeners) fn(event("beta", 2));
+  expect(root.querySelectorAll(".event-row")).toHaveLength(1);
+  for (const fn of listeners) fn(event("alpha", 2));
+  await waitFor(() => expect(root.querySelectorAll(".event-row")).toHaveLength(2));
+  expect(root.querySelectorAll(".event-row")[1]).toBe(row);
+  expect(document.activeElement).toBe(since);
+  expect(root.scrollTop).toBe(31);
+  expect(listeners.size).toBe(1);
+  setProject("beta");
+  await waitFor(() => expect(root.textContent).toContain("beta event 1"));
+  expect(root.textContent).not.toContain("alpha event");
+  expect(listeners.size).toBe(1);
+  dispose!(); dispose = undefined;
+  expect(listeners.size).toBe(0);
+});
+
+it("does not fetch an empty project as all projects", () => {
+  const root = document.createElement("div");
+  dispose = render(() => <EventsPanel project="" />, root);
+  expect(history).not.toHaveBeenCalled();
+  expect(listeners.size).toBe(0);
+});

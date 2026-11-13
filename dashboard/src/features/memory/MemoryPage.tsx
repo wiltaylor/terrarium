@@ -20,9 +20,19 @@ export function sortLinks(links: MemoryEdge[]): MemoryEdge[] {
 }
 
 export default function MemoryPage() {
-  const { api } = useInstance();
   const params = useParams<{ project: string }>();
   const [search, setSearch] = useSearchParams<{ id?: string }>();
+  return <MemoryContent project={params.project} selected={search.id} onSelect={(id) => setSearch({ id })} />;
+}
+
+export function MemoryPanel(props: { project: string; view: "list" | "graph" }) {
+  return <Show when={props.project} keyed>{(project) => <MemoryContent project={project} view={props.view} />}</Show>;
+}
+
+function MemoryContent(props: { project: string; view?: "list" | "graph"; selected?: string; onSelect?: (id: string) => void }) {
+  const { api } = useInstance();
+  const [localId, setLocalId] = createSignal<string>();
+  const pick = (id: string) => props.onSelect ? props.onSelect(id) : setLocalId(id);
   const [q, setQ] = createSignal("");
   const [tag, setTag] = createSignal("");
   const [author, setAuthor] = createSignal("");
@@ -30,17 +40,17 @@ export default function MemoryPage() {
   const [all, setAll] = createSignal(false);
 
   const [list] = createResource(
-    () => ({ project: params.project, q: q(), tag: tag(), author: author(), all: all() }),
+    () => ({ project: props.project, q: q(), tag: tag(), author: author(), all: all() }),
     (k) => api.memories.list(k.project, { q: k.q || undefined, tag: k.tag || undefined, author: k.author || undefined, all: k.all }),
   );
-  const [everything] = createResource(() => params.project, (p) => api.memories.list(p, { all: true }));
+  const [everything] = createResource(() => props.project, (p) => api.memories.list(p, { all: true }));
   const tags = () => [...new Set((everything() ?? []).flatMap((m) => m.tags))].sort();
   const authors = () => [...new Map((everything() ?? []).map((m) => [m.author, m.author_name ?? m.author])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
   const recent = () => (everything() ?? []).slice().sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, 6);
 
-  const selectedId = () => search.id ?? list()?.[0]?.id;
+  const selectedId = () => (props.onSelect ? props.selected : localId()) ?? list()?.[0]?.id;
   // `project/MEM-n`: a bare ID is ambiguous for the operator (docs/api.md §10.1).
-  const [graph] = createResource(selectedId, (id) => api.memories.graph(`${params.project}/${id}`, 1));
+  const [graph] = createResource(() => selectedId() ? `${props.project}/${selectedId()}` : undefined, (id) => api.memories.graph(id, 1));
   const selected = createMemo<Memory | undefined>(() => graph()?.nodes.find((n) => n.id === selectedId()));
   const filteredGraph = () => {
     const g = graph();
@@ -48,7 +58,7 @@ export default function MemoryPage() {
     return { ...g, edges: g.edges.filter((l) => l.relation === relation()) };
   };
   const sourceHref = (s: Memory["sources"][number]) =>
-    s.kind === "card" ? `/p/${params.project}/board?card=${s.ref}` : s.kind === "thread" ? `/logs/mail` : s.kind === "url" && /^https?:/.test(s.ref) ? s.ref : undefined;
+    s.kind === "card" ? `/p/${props.project}/board?card=${s.ref}` : s.kind === "thread" ? `/logs/mail` : s.kind === "url" && /^https?:/.test(s.ref) ? s.ref : undefined;
 
   return (
     <>
@@ -71,12 +81,13 @@ export default function MemoryPage() {
         </label>
       </PageHead>
 
-      <div class="split">
+      <div class={props.view === "graph" ? "stack" : "split"}>
+        <Show when={props.view !== "graph"}>
         <div class="stack">
           <div class="card-box thread-list" style={{ padding: "4px" }}>
             <For each={list()} fallback={<Empty>No memories match.</Empty>}>
               {(m) => (
-                <button class={selectedId() === m.id ? "active" : ""} onClick={() => setSearch({ id: m.id })}>
+                <button class={selectedId() === m.id ? "active" : ""} onClick={() => pick(m.id)}>
                   <span class="subject">
                     <span class="mono muted small">{m.id}</span> {m.title}
                   </span>
@@ -94,7 +105,7 @@ export default function MemoryPage() {
               <For each={recent()}>
                 {(m) => (
                   <li>
-                    <InstanceAnchor href={`?id=${m.id}`} onClick={(e) => (e.preventDefault(), setSearch({ id: m.id }))}>
+                    <InstanceAnchor href={`${props.onSelect ? "" : `/p/${encodeURIComponent(props.project)}/knowledge/memory`}?id=${m.id}`} onClick={(e) => (e.preventDefault(), pick(m.id))}>
                       {m.id}
                     </InstanceAnchor>{" "}
                     {m.title} <span class="muted">· {m.author_name ?? m.author}, {ago(m.updated_at)}</span>
@@ -105,8 +116,9 @@ export default function MemoryPage() {
           </div>
         </div>
 
+        </Show>
         <div class="stack">
-          <Show when={filteredGraph()}>{(g) => <MemoryGraph graph={g()} center={selectedId()!} onPick={(id) => setSearch({ id })} />}</Show>
+          <Show when={props.view !== "list" && filteredGraph()}>{(g) => <MemoryGraph graph={g()} center={selectedId()!} onPick={(id) => pick(id)} />}</Show>
           <Show when={selected()}>
             {(m) => (
               <div class="card-box stack" style={{ gap: "8px" }}>
@@ -121,7 +133,7 @@ export default function MemoryPage() {
                 <div class="muted small">
                   {m().author_name ?? m().author} · updated {ago(m().updated_at)} · {m().tags.map((t) => `#${t}`).join(" ")}
                 </div>
-                <TextMarkdown text={m().body} project={params.project} />
+                <TextMarkdown text={m().body} project={props.project} />
                 <Show when={m().sources.length}>
                   <div class="small">
                     Sources:{" "}
@@ -141,7 +153,7 @@ export default function MemoryPage() {
                       <li>
                         <span class={`chip ${FIRST.includes(l.relation) ? "bad" : ""}`}>{humanize(l.relation)}</span>{" "}
                         {l.from === m().id ? "→" : "←"}{" "}
-                        <InstanceAnchor href={`?id=${l.from === m().id ? l.to : l.from}`} onClick={(e) => (e.preventDefault(), setSearch({ id: l.from === m().id ? l.to : l.from }))}>
+                        <InstanceAnchor href={`${props.onSelect ? "" : `/p/${encodeURIComponent(props.project)}/knowledge/memory`}?id=${l.from === m().id ? l.to : l.from}`} onClick={(e) => (e.preventDefault(), pick(l.from === m().id ? l.to : l.from))}>
                           {l.from === m().id ? l.to : l.from}
                         </InstanceAnchor>{" "}
                         <Show when={l.other_title}>

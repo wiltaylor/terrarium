@@ -13,7 +13,7 @@ import { PostEditor } from "../../components/PostEditor";
 
 import { useParams, useSearchParams } from "@solidjs/router";
 import { A } from "../../instance/navigation";
-import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, Show } from "solid-js";
 import { createLive, createScrollKeeper, LiveControl, NewAbove } from "../../components/Live";
 import { SessionLink } from "../../components/SessionLink";
 import { Empty, ErrorBanner, LoadMore, PageHead, useNow } from "../../components/ui";
@@ -43,18 +43,32 @@ import { Compose, MessageView, StateChips } from "./parts";
 const PAGE = 50;
 
 export default function MailPage() {
-  const { api, projects, events } = useInstance();
   const route = useParams<{ project?: string }>();
   const [params, setParams] = useSearchParams<LogParams>();
+  return <MailContent project={route.project} params={params} onParams={setParams} />;
+}
+
+export function MailPanel(props: { project: string }) {
+  return <Show when={props.project} keyed>{(project) => <LocalMail project={project} />}</Show>;
+}
+
+function LocalMail(props: { project: string }) {
+  const [params, setParams] = createSignal<LogParams>({});
+  return <MailContent project={props.project} params={params()} onParams={(patch) => setParams((old) => ({ ...old, ...patch }))} />;
+}
+
+function MailContent(props: { project?: string; params: LogParams; onParams: (patch: LogParams, options?: { replace: boolean }) => void }) {
+  const { api, projects, events } = useInstance();
+  const namesId = `mail-log-names-${createUniqueId()}`;
   /** The project of the route wins over the filter. */
   const filter = createMemo<LogFilter>(() => {
-    const f = filterFromParams({ ...params });
-    return route.project ? { ...f, project: route.project } : f;
+    const f = filterFromParams({ ...props.params });
+    return props.project ? { ...f, project: props.project } : f;
   });
   const [limit, setLimit] = createSignal(PAGE);
   const setFilter = (patch: Partial<LogFilter>) => {
     const next = filterToParams({ ...filter(), ...patch });
-    setParams({ ...next, ...(route.project ? { project: undefined } : {}) }, { replace: true });
+    props.onParams({ ...next, ...(props.project ? { project: undefined } : {}) }, { replace: true });
     setLimit(PAGE);
   };
   const now = useNow(60_000);
@@ -70,11 +84,11 @@ export default function MailPage() {
   const [error, setError] = createSignal<unknown>(null);
   const [composing, setComposing] = createSignal<{ to?: string } | null>(null);
   /** `?open=`: the clicked message, or a thread from a link. */
-  const expanded = () => params.open;
+  const expanded = () => props.params.open;
   /** One open row: the clicked row, or the newest shown row of a linked thread. */
   const openRow = createMemo(() => openRowOf(visible(), expanded())?.id);
   const openThread = createMemo(() => openThreadOf(feed.messages(), expanded()));
-  const toggle = (m: Message) => setParams({ open: openRow() === m.id ? undefined : m.id });
+  const toggle = (m: Message) => props.onParams({ open: openRow() === m.id ? undefined : m.id });
 
   // A `mail` event pulls the new messages and its thread again, live or
   // not: off, the new messages wait (held) and "Show N new" counts the ones
@@ -110,18 +124,18 @@ export default function MailPage() {
       <PageHead title="Mail" level={2}>
         <LiveControl live={live} count={live.held(matching(), (m) => m.id)} onShow={showHeld} />
         <button onClick={() => (live.release(), void feed.reload())}>Refresh</button>
-        <button class="primary" onClick={() => setComposing(route.project ? { to: `project:${route.project}` } : {})}>
+        <button class="primary" onClick={() => setComposing(props.project ? { to: `project:${props.project}` } : {})}>
           Compose
         </button>
       </PageHead>
 
       <div class="row log-filters" role="search">
-        <input list="mail-log-names" placeholder="From" aria-label="From" value={filter().from} onInput={(e) => setFilter({ from: e.currentTarget.value })} />
-        <input list="mail-log-names" placeholder="To" aria-label="To" value={filter().to} onInput={(e) => setFilter({ to: e.currentTarget.value })} />
-        <datalist id="mail-log-names">
+        <input list={namesId} placeholder="From" aria-label="From" value={filter().from} onInput={(e) => setFilter({ from: e.currentTarget.value })} />
+        <input list={namesId} placeholder="To" aria-label="To" value={filter().to} onInput={(e) => setFilter({ to: e.currentTarget.value })} />
+        <datalist id={namesId}>
           <For each={names()}>{(n) => <option value={n} />}</For>
         </datalist>
-        <Show when={!route.project}>
+        <Show when={!props.project}>
           <select aria-label="Filter by project" value={filter().project} onChange={(e) => setFilter({ project: e.currentTarget.value })}>
             <option value="">All projects</option>
             <For each={projects.projects()}>
@@ -166,7 +180,7 @@ export default function MailPage() {
           </thead>
           <tbody ref={keeper.ref}>
             <For
-              each={visible()}
+              each={visible().map((m) => m.id)}
               fallback={
                 <tr>
                   <td colspan={5}>
@@ -175,19 +189,23 @@ export default function MailPage() {
                 </tr>
               }
             >
-              {(m) => (
+              {(id) => {
+                // Refreshes replace message objects, not the row or its reply draft.
+                const m = () => feed.messages().find((message) => message.id === id)!;
+                return (
                 <LogRow
-                  message={m}
+                  message={m()}
                   now={now()}
-                  open={openRow() === m.id}
-                  project={route.project}
-                  onToggle={() => toggle(m)}
-                  onThread={() => setFilter({ thread: m.thread_id })}
+                  open={openRow() === id}
+                  project={props.project}
+                  onToggle={() => toggle(m())}
+                  onThread={() => setFilter({ thread: m().thread_id })}
                   feed={feed}
                   onCompose={(to) => setComposing({ to })}
                   onError={setError}
                 />
-              )}
+                );
+              }}
             </For>
           </tbody>
         </table>

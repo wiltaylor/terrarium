@@ -1,4 +1,4 @@
-import { createMemo, For } from "solid-js";
+import { createMemo, createUniqueId, For } from "solid-js";
 import type { MemoryGraph as Graph } from "../../api/types";
 import { forceLayout } from "../../lib/force";
 
@@ -6,6 +6,7 @@ const W = 640;
 const H = 480;
 
 export function MemoryGraph(props: { graph: Graph; center: string; onPick: (id: string) => void }) {
+  const markerId = `memory-arrow-${createUniqueId()}`;
   const layout = createMemo(() =>
     forceLayout(
       props.graph.nodes.map((n) => n.id),
@@ -20,7 +21,7 @@ export function MemoryGraph(props: { graph: Graph; center: string; onPick: (id: 
   return (
     <svg class="graph" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Memory graph, neighbours to depth 1">
       <defs>
-        <marker id="arrow" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <marker id={markerId} viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
           <path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity="0.6" />
         </marker>
       </defs>
@@ -30,7 +31,7 @@ export function MemoryGraph(props: { graph: Graph; center: string; onPick: (id: 
           const b = () => pos(l.to);
           return (
             <g>
-              <line class={l.relation} x1={a().x} y1={a().y} x2={b().x} y2={b().y} marker-end="url(#arrow)" />
+              <line class={l.relation} x1={a().x} y1={a().y} x2={b().x} y2={b().y} marker-end={`url(#${markerId})`} />
               <text class="edge-label" x={(a().x + b().x) / 2} y={(a().y + b().y) / 2 - 3} text-anchor="middle">
                 {l.relation}
               </text>

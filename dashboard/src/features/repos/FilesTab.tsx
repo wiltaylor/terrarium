@@ -9,7 +9,7 @@ import { useInstance } from "../../instance";
 // only. The one HTML render is a Markdown file with "Rendered" on, through
 // the safe Markdown component (lib/sanitize).
 
-import { createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, createUniqueId, For, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { buildQuery, seg } from "../../api/http";
 import { isMock } from "../../api";
 import type { Repo, TreeEntry } from "../../api/types";
@@ -55,6 +55,7 @@ function rawUrl(instance: ReturnType<typeof useInstance>, repo: string, tree: st
 }
 
 export function FilesTab(props: { repo: Repo; tree: string; head?: string | null; reload: string; path: string; onPath: (p: string) => void }) {
+  const treeId = `repo-file-tree-${createUniqueId()}`;
   const { api, key, storage } = useInstance();
   const ft = createMemo(() => {
     const id = props.repo.id;
@@ -94,14 +95,14 @@ export function FilesTab(props: { repo: Repo; tree: string; head?: string | null
 
   return (
     <div class={`repo-browser${treeOpen() ? "" : " tree-closed"}`} style={{ "--tree-w": `${width()}px` }}>
-      <button ref={toggleBtn} class="repo-tree-toggle small" aria-expanded={treeOpen()} aria-controls="repo-file-tree" onClick={() => setTreeOpen(!treeOpen())}>
+      <button ref={toggleBtn} class="repo-tree-toggle small" aria-expanded={treeOpen()} aria-controls={treeId} onClick={() => setTreeOpen(!treeOpen())}>
         <span class={`tree-chevron${treeOpen() ? " open" : ""}`} aria-hidden="true">
           ▸
         </span>
         Files
       </button>
-      <TreePane tree={ft()} selected={props.path} onSelect={select} />
-      <Splitter width={width()} onWidth={keepWidth} />
+      <TreePane id={treeId} tree={ft()} selected={props.path} onSelect={select} />
+      <Splitter treeId={treeId} width={width()} onWidth={keepWidth} />
       <div class="repo-preview">
         <Preview repo={props.repo} tree={props.tree} ft={ft()} reload={props.reload} path={props.path} onPath={(p) => select(p)} />
       </div>
@@ -113,7 +114,7 @@ export function FilesTab(props: { repo: Repo; tree: string; head?: string | null
 
 const NOTE_TEXT: Record<string, string> = { loading: "Loading…", empty: "Empty folder.", error: "This folder did not load.", truncated: "More than 5000 entries: the list shows the first 5000." };
 
-function TreePane(props: { tree: FileTree; selected: string; onSelect: (path: string, kind: TreeEntry["kind"]) => void }) {
+function TreePane(props: { id: string; tree: FileTree; selected: string; onSelect: (path: string, kind: TreeEntry["kind"]) => void }) {
   const [query, setQuery] = createSignal("");
   const items = createMemo(() => visibleRows(props.tree.dirs(), props.tree.expanded(), query()));
   const byKey = createMemo(() => new Map(items().map((i) => [i.key, i])));
@@ -145,7 +146,7 @@ function TreePane(props: { tree: FileTree; selected: string; onSelect: (path: st
     });
 
   return (
-    <div class="repo-tree-pane" id="repo-file-tree">
+    <div class="repo-tree-pane" id={props.id}>
       <input type="search" class="tree-filter" placeholder="Filter the loaded files" aria-label="Filter the loaded files" value={query()} onInput={(e) => setQuery(e.currentTarget.value)} />
       <ul class="tree file-tree" role="tree" aria-label="Files" ref={nav.ref} onKeyDown={onKeyDown}>
         <For each={keys()}>
@@ -249,7 +250,7 @@ function EntryIcon(props: { kind: TreeEntry["kind"] }) {
 }
 
 /** The bar between the panes: drag it, or focus it and use the arrows (Home, End). */
-function Splitter(props: { width: number; onWidth: (w: number) => void }) {
+function Splitter(props: { treeId: string; width: number; onWidth: (w: number) => void }) {
   let start = 0;
   let startW = 0;
   const onKeyDown = (e: KeyboardEvent) => {
@@ -265,7 +266,7 @@ function Splitter(props: { width: number; onWidth: (w: number) => void }) {
       role="separator"
       aria-orientation="vertical"
       aria-label="Width of the file tree"
-      aria-controls="repo-file-tree"
+      aria-controls={props.treeId}
       aria-valuemin={MIN_W}
       aria-valuemax={MAX_W}
       aria-valuenow={props.width}
