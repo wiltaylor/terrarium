@@ -9831,7 +9831,9 @@ mod tests {
             AgentStatus::Blocked,
             Some(terrarium_runner::STALL_REASON),
         );
-        lock(&sup.inner.slots)[&id].rest_since.expect("a stall is rest")
+        lock(&sup.inner.slots)[&id]
+            .rest_since
+            .expect("a stall is rest")
     }
 
     fn kick_step(sup: &RunnerSupervisor, id: AgentId) -> Option<KickStep> {
@@ -10013,7 +10015,11 @@ mod tests {
         slot.note_rest(AgentStatus::Idle, None, t);
         assert_eq!(slot.kick, kick, "a rest with no turn keeps it");
         slot.note_rest(AgentStatus::Working, None, t);
-        slot.note_rest(AgentStatus::Blocked, Some(terrarium_runner::STALL_REASON), t);
+        slot.note_rest(
+            AgentStatus::Blocked,
+            Some(terrarium_runner::STALL_REASON),
+            t,
+        );
         assert_eq!(slot.kick, kick, "a stalled turn keeps it");
         slot.note_rest(AgentStatus::Working, None, t);
         assert_eq!(slot.kick, kick, "a turn that runs keeps it");
@@ -10250,7 +10256,10 @@ mod tests {
         // (an error). The new runner of a relaunch is put in by hand.
         let start = Instant::now();
         while lock(&sup.inner.slots)[&id].phase == Phase::Restarting {
-            assert!(start.elapsed() < Duration::from_secs(10), "the relaunch hangs");
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "the relaunch hangs"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         {
