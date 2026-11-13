@@ -10,6 +10,9 @@ import { SafeHtml } from "../../components/SafeHtml";
 import { renderMarkdown } from "../../lib/markdown";
 
 
+/** True for a message that the loop guard held and the operator did not release yet. */
+export const heldOpen = (m: Pick<Message, "held" | "released_at">): boolean => m.held === true && !m.released_at;
+
 /** The delivery state of a message, as chips. The state is the recipient's; the log keeps no unread state for the operator. */
 export function StateChips(props: { message: Message }) {
   const m = () => props.message;
@@ -24,6 +27,11 @@ export function StateChips(props: { message: Message }) {
             read by {who()}
           </span>
         )}
+      </Show>
+      <Show when={heldOpen(m())}>
+        <span class="chip warn" title={`The loop guard held it${m().held_reason ? ` (${m().held_reason})` : ""}. No pointer went to the recipient. The operator resumes the thread in the Inbox.`}>
+          held
+        </span>
       </Show>
       <Show when={m().released_at}>
         {(at) => (

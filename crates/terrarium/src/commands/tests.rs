@@ -6673,7 +6673,11 @@ async fn system_prompt_flags() {
         vec![req(Get, "/api/agents/w")],
     )
     .await;
-    assert_eq!(out, "name  w\nsystem_prompt:\nLine one.\nLine two.\n");
+    // `held_mail` is absent: the caller may not see it (TER-1105).
+    assert_eq!(
+        out,
+        "held_mail  unavailable\nname       w\nsystem_prompt:\nLine one.\nLine two.\n"
+    );
 
     // Templates: the flag sets the key; `--no-system-prompt` removes it.
     ok(
@@ -8506,6 +8510,96 @@ async fn agent_lifecycle_commands() {
     assert!(Cli::try_parse_from(["terrarium", "agent", "pause"]).is_err());
 }
 
+/// TER-1105 (T9): `agent ls` shows `HELD` apart from `QUEUED`: the count,
+/// `0`, or `-` when the caller may not see it. `agent show` says
+/// `unavailable` for an absent count, and names the operator command for
+/// held mail. `mail ls` shows `delivered (held)` until a release.
+#[tokio::test]
+async fn held_mail_shows_apart_from_queued() {
+    let out = ok(
+        false,
+        &["-p", "terra", "agent", "ls"],
+        vec![(
+            200,
+            json!([
+                {"id": "A1", "name": "a", "project": "terra", "status": "idle",
+                 "queued": 2, "held_mail": 3},
+                {"id": "A2", "name": "b", "project": "terra", "status": "idle",
+                 "held_mail": 0},
+                {"id": "A3", "name": "c", "project": "terra", "status": "idle"},
+            ]),
+        )],
+        vec![(
+            Get,
+            "/api/agents",
+            vec![("project", "terra"), ("include", "card")],
+            None,
+        )],
+    )
+    .await;
+    let head = out.lines().next().unwrap();
+    assert!(head.contains("QUEUED") && head.contains("HELD"), "{out}");
+    let col = |line: &str| -> String {
+        let at = head.find("HELD").unwrap();
+        line[at..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_owned()
+    };
+    let rows: Vec<&str> = out.lines().skip(1).collect();
+    assert_eq!(col(rows[0]), "3", "{out}");
+    assert_eq!(col(rows[1]), "0", "{out}");
+    assert_eq!(col(rows[2]), "-", "{out}");
+
+    let show = |held: Value| async move {
+        let mut a = json!({"id": "A1", "name": "w"});
+        if !held.is_null() {
+            a["held_mail"] = held;
+        }
+        ok(
+            false,
+            &["agent", "show", "w"],
+            vec![(200, a)],
+            vec![req(Get, "/api/agents/w")],
+        )
+        .await
+    };
+    let out = show(json!(3)).await;
+    assert!(
+        out.contains("3 (operator: terrarium admin inbox resume <thread>)"),
+        "{out}"
+    );
+    let out = show(json!(0)).await;
+    assert!(!out.contains("resume"), "{out}");
+    let out = show(Value::Null).await;
+    assert!(out.contains("unavailable"), "{out}");
+
+    let out = ok(
+        false,
+        &["mail", "ls"],
+        vec![(
+            200,
+            json!([
+                {"id": "M1", "state": "delivered", "held": true, "subject": "one"},
+                {"id": "M2", "state": "queued", "held": true,
+                 "released_at": "2026-11-13T00:00:00Z", "subject": "two"},
+                {"id": "M3", "state": "delivered", "held": false, "subject": "three"},
+            ]),
+        )],
+        vec![(Get, "/api/mail", vec![], None)],
+    )
+    .await;
+    let line = |id: &str| out.lines().find(|l| l.starts_with(id)).unwrap().to_owned();
+    assert!(line("M1").contains("delivered (held)"), "{out}");
+    assert!(!line("M2").contains("(held)"), "{out}");
+    assert!(!line("M3").contains("(held)"), "{out}");
+    assert_eq!(
+        super::mail::mail_state(&json!({"state": "read", "held": true})),
+        "read (held)"
+    );
+}
+
 /// `agent compact`, and the auto compact flags of `agent new`, `agent set`,
 /// and `template new` (PLAN §18, "Auto compact").
 #[tokio::test]
@@ -9610,7 +9704,8 @@ async fn default_skill_flags_and_effective_skills() {
     .await;
     assert_eq!(
         out,
-        "effective_skills  fern-check (explicit), terrarium-db (default)\nname              w\n"
+        "effective_skills  fern-check (explicit), terrarium-db (default)\n\
+         held_mail         unavailable\nname              w\n"
     );
 }
 

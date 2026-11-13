@@ -71,7 +71,11 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
         AgentCmd::Show { agent } => {
             let a = ctx.api.get(&agent_path(agent), vec![]).await?;
             ctx.emit(&a, |c, v| {
-                print_object_with_text(c, &super::with_effective_skills_text(v), "system_prompt")
+                print_object_with_text(
+                    c,
+                    &with_held_text(&super::with_effective_skills_text(v)),
+                    "system_prompt",
+                )
             })
         }
         AgentCmd::New(a) => new(ctx, a).await,
@@ -553,6 +557,20 @@ async fn pause(ctx: &Ctx, agent: &str, action: &str) -> anyhow::Result<()> {
         .post(&format!("{}/{action}", agent_path(agent)), None)
         .await?;
     ctx.emit(&r, |c, r| c.line(pause_line(action, r)))
+}
+
+/// `v` with `held_mail` as text for `agent show` (TER-1105): the count,
+/// with the operator command when it is above 0, or `unavailable` when
+/// the caller may not see it. It names no thread: the operator finds the
+/// threads in the Inbox.
+fn with_held_text(v: &Value) -> Value {
+    let mut out = v.clone();
+    out["held_mail"] = match v["held_mail"].as_u64() {
+        None => "unavailable".into(),
+        Some(0) => "0".into(),
+        Some(n) => format!("{n} (operator: terrarium admin inbox resume <thread>)").into(),
+    };
+    out
 }
 
 /// The line of `agent pause|unpause` from the agent after the call

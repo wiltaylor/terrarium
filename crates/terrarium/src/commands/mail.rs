@@ -35,9 +35,34 @@ pub fn print_message(ctx: &Ctx, m: &Value) {
     ctx.line(format!(
         "date:    {}  state: {}",
         short_time(&field(m, "created_at")),
-        field(m, "state")
+        mail_state(m)
     ));
     delimited(ctx, "MAIL BODY", m["body"].as_str().unwrap_or_default());
+}
+
+/// The state of message `m` for a person: `delivered (held)` for a held
+/// message that the operator did not release yet (TER-1105). The store
+/// keeps a held message as `delivered`, but it did not reach the agent as
+/// a turn, and only `terrarium admin inbox release|resume` sends it on.
+pub fn mail_state(m: &Value) -> String {
+    let state = field(m, "state");
+    if m["held"].as_bool() == Some(true) && m["released_at"].is_null() {
+        format!("{state} (held)")
+    } else {
+        state
+    }
+}
+
+/// The messages of a list with `state` as [`mail_state`], for a table.
+fn mail_rows(items: &[Value]) -> Vec<Value> {
+    items
+        .iter()
+        .map(|m| {
+            let mut m = m.clone();
+            m["state"] = mail_state(&m).into();
+            m
+        })
+        .collect()
 }
 
 fn print_messages(ctx: &Ctx, v: &Value) {
@@ -78,7 +103,9 @@ pub async fn mail(ctx: &Ctx, cmd: &MailCmd) -> anyhow::Result<()> {
                 ("state", state),
             ]);
             let v = Value::Array(ctx.api.list("/api/mail", q, None).await?);
-            ctx.emit(&v, |c, v| print_table(c, as_items(v), MAIL_COLS, "no mail"))
+            ctx.emit(&v, |c, v| {
+                print_table(c, &mail_rows(as_items(v)), MAIL_COLS, "no mail")
+            })
         }
         MailCmd::Check => {
             let me = ctx.me().await?;
@@ -103,7 +130,7 @@ pub async fn mail(ctx: &Ctx, cmd: &MailCmd) -> anyhow::Result<()> {
                     field(v, "total")
                 ));
                 if !as_items(&v["messages"]).is_empty() {
-                    print_table(c, as_items(&v["messages"]), MAIL_COLS, "");
+                    print_table(c, &mail_rows(as_items(&v["messages"])), MAIL_COLS, "");
                     c.line("Run `terrarium mail read` to read them.");
                 }
             })
@@ -171,7 +198,7 @@ pub async fn mail(ctx: &Ctx, cmd: &MailCmd) -> anyhow::Result<()> {
                 if !page.items.is_empty() {
                     let v = Value::Array(page.items);
                     return ctx.emit(&v, |c, v| {
-                        print_table(c, as_items(v), MAIL_COLS, "");
+                        print_table(c, &mail_rows(as_items(v)), MAIL_COLS, "");
                         c.line("Run `terrarium mail read` to read them.");
                     });
                 }
@@ -267,7 +294,7 @@ pub async fn inbox(ctx: &Ctx, cmd: &InboxCmd) -> anyhow::Result<()> {
             ]);
             let v = Value::Array(ctx.api.list(&base, q, None).await?);
             ctx.emit(&v, |c, v| {
-                print_table(c, as_items(v), MAIL_COLS, "the inbox is empty");
+                print_table(c, &mail_rows(as_items(v)), MAIL_COLS, "the inbox is empty");
             })
         }
         InboxCmd::Read { id, mark } => {
