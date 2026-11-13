@@ -23,14 +23,14 @@ function mount(node: () => JSX.Element) {
 const text = () => document.body.textContent ?? "";
 
 it("is a viewer when the server says the caller may not write (a sysadmin)", async () => {
-  const real = await api.board.options("terrarium", "merge_queue");
+  const real = await api.board.options("terrarium", "review");
   vi.spyOn(api.board, "options").mockResolvedValue({ ...real, can_edit: false });
   const catalog = vi.spyOn(api.rules, "catalog");
-  const root = mount(() => <ColumnOptionsPanel project="terrarium" column="merge_queue" />);
+  const root = mount(() => <ColumnOptionsPanel project="terrarium" column="review" />);
   await waitFor(() => expect(root.querySelector("[data-options-view]")).not.toBeNull());
   expect(text()).toContain("You can read these options");
   expect(text()).toContain("Cards are released in batches of 4");
-  expect(root.querySelector('[data-rule="merge-pass"]')?.textContent).toContain("move the card to the accepted column");
+  expect(root.querySelector('[data-rule="merge-pass"]')?.textContent).toContain("When the merge job of a card here has a verdict, if the job outcome is passed: move the card to done.");
   expect(root.querySelector('[data-rule="merge-red-note"]')?.textContent).toContain("off");
   expect(text()).toContain("Last runs and the queue strip come with");
   expect(root.querySelector("input, select, button[type=submit]")).toBeNull();
@@ -38,9 +38,9 @@ it("is a viewer when the server says the caller may not write (a sysadmin)", asy
 });
 
 it("opens from the cog as an editor for the operator, and saves with the read version", async () => {
-  const root = mount(() => <ColumnCog project="terrarium" column="review" title="Review" />);
-  const cog = root.querySelector<HTMLButtonElement>('[data-column-cog="review"]')!;
-  expect(cog.getAttribute("aria-label")).toBe("Options of Review");
+  const root = mount(() => <ColumnCog project="terrarium" column="in_progress" title="In progress" />);
+  const cog = root.querySelector<HTMLButtonElement>('[data-column-cog="in_progress"]')!;
+  expect(cog.getAttribute("aria-label")).toBe("Options of In progress");
   cog.click();
   await waitFor(() => expect(document.querySelector("[data-options-edit]")).not.toBeNull());
   const put = vi.spyOn(api.board, "putOptions");
@@ -48,12 +48,13 @@ it("opens from the cog as an editor for the operator, and saves with the read ve
   box.click();
   document.querySelector<HTMLButtonElement>("[data-options-edit] button[type=submit]")!.click();
   await waitFor(() => expect(text()).toContain("Saved."));
-  expect(put).toHaveBeenCalledWith("terrarium", "review", expect.objectContaining({ base_version: 1, checks: expect.objectContaining({ require_comment_on_enter: true }) }));
-  expect((await api.board.options("terrarium", "review")).version).toBe(2);
+  expect(put).toHaveBeenCalledWith("terrarium", "in_progress", expect.objectContaining({ base_version: 1, checks: expect.objectContaining({ require_comment_on_enter: true }) }));
+  expect((await api.board.options("terrarium", "in_progress")).version).toBe(2);
+  expect(text()).toContain("Version 2");
 });
 
 it("asks for a reload on a 409 stale base", async () => {
-  const root = mount(() => <ColumnOptionsPanel project="terrarium" column="accepted" />);
+  const root = mount(() => <ColumnOptionsPanel project="terrarium" column="ready" />);
   await waitFor(() => expect(root.querySelector("[data-options-edit]")).not.toBeNull());
   vi.spyOn(api.board, "putOptions").mockRejectedValue(new ApiError(409, "the options are at version 2", undefined, "stale_base", { version: 2 }));
   const options = vi.spyOn(api.board, "options");

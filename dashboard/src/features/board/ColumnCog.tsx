@@ -49,6 +49,8 @@ export function ColumnOptionsPanel(props: { project: string; column: string; col
   const { api } = useInstance();
   const [options, { mutate, refetch }] = createResource(() => [props.project, props.column] as const, ([p, c]) => api.board.options(p, c));
   // The viewer needs no catalog: a failed catalog read only stops the editor.
+  // The version of the last save here: the editor says "Saved." until the next change.
+  const [savedVersion, setSavedVersion] = createSignal<number>();
   const [catalog] = createResource(() => options()?.can_edit === true, (yes) => (yes ? api.rules.catalog() : Promise.resolve(undefined)));
   return <div class="stack column-options">
     <ErrorBanner error={options.error} />
@@ -57,7 +59,8 @@ export function ColumnOptionsPanel(props: { project: string; column: string; col
       {(o) => <Show when={o.can_edit === true} fallback={<OptionsViewer options={o} />}>
         <ErrorBanner error={catalog.error} />
         <Show when={catalog.latest} keyed fallback={<Show when={!catalog.error}><p class="muted">Loading the rule catalog…</p></Show>}>
-          {(cat) => <OptionsEditor options={o} catalog={cat} columns={props.columns ?? []} onSaved={(next) => mutate(next)} onReload={() => void refetch()} />}
+          {(cat) => <OptionsEditor options={o} catalog={cat} columns={props.columns ?? []} saved={savedVersion() === o.version}
+            onSaved={(next) => { setSavedVersion(next.version); mutate(next); }} onReload={() => { setSavedVersion(undefined); void refetch(); }} />}
         </Show>
       </Show>}
     </Show>
@@ -108,7 +111,7 @@ function Problem(props: { problems: Record<string, string>; path: string }) {
   return <Show when={props.problems[props.path]}>{(m) => <span class="bad small" role="alert" data-problem={props.path}>{m()}</span>}</Show>;
 }
 
-function OptionsEditor(props: { options: ColumnOptions; catalog: RuleCatalog; columns: string[]; onSaved: (o: ColumnOptions) => void; onReload: () => void }) {
+function OptionsEditor(props: { options: ColumnOptions; catalog: RuleCatalog; columns: string[]; saved: boolean; onSaved: (o: ColumnOptions) => void; onReload: () => void }) {
   const { api } = useInstance();
   const listId = createUniqueId();
   // The props are a snapshot: the panel makes a new editor for each read (keyed).
@@ -120,7 +123,6 @@ function OptionsEditor(props: { options: ColumnOptions; catalog: RuleCatalog; co
   const [stale, setStale] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
   const [busy, setBusy] = createSignal(false);
-  const [saved, setSaved] = createSignal(false);
   const body = createMemo(() => putBody(start, { checks: checks(), queue: queue(), rules: rules() }));
   const dirty = () => JSON.stringify(body()) !== JSON.stringify(putBody(start, start));
   const columnWords = createMemo(() => {
@@ -128,7 +130,7 @@ function OptionsEditor(props: { options: ColumnOptions; catalog: RuleCatalog; co
     return [...props.columns, ...roles];
   });
 
-  const editRule = (i: number, f: (r: ColumnRule) => ColumnRule) => { setSaved(false); setRules((rs) => rs.map((r, j) => (j === i ? f(structuredClone(r)) : r))); };
+  const editRule = (i: number, f: (r: ColumnRule) => ColumnRule) => { setRules((rs) => rs.map((r, j) => (j === i ? f(structuredClone(r)) : r))); };
   const moveRule = (i: number, by: number) => setRules((rs) => {
     const j = i + by;
     if (j < 0 || j >= rs.length) return rs;
@@ -139,10 +141,9 @@ function OptionsEditor(props: { options: ColumnOptions; catalog: RuleCatalog; co
 
   const save = async () => {
     if (busy()) return;
-    setBusy(true); setError(null); setProblems({}); setSaved(false);
+    setBusy(true); setError(null); setProblems({});
     try {
       const next = await api.board.putOptions(start.project, start.column, body());
-      setSaved(true);
       props.onSaved(next);
     } catch (e) {
       if (isStale(e)) setStale(true);
@@ -174,7 +175,7 @@ function OptionsEditor(props: { options: ColumnOptions; catalog: RuleCatalog; co
     <fieldset>
       <legend>Checks</legend>
       <For each={CHECK_KEYS}>{(k) => <label class="row">
-        <input type="checkbox" checked={checks()[k]} onChange={(e) => { setSaved(false); setChecks({ ...checks(), [k]: e.currentTarget.checked }); }} />
+        <input type="checkbox" checked={checks()[k]} onChange={(e) => setChecks({ ...checks(), [k]: e.currentTarget.checked })} />
         {CHECK_TEXT[k]}
       </label>}</For>
       <Problem problems={problems()} path="checks" />
@@ -183,7 +184,7 @@ function OptionsEditor(props: { options: ColumnOptions; catalog: RuleCatalog; co
     <fieldset>
       <legend>Queue</legend>
       <label>Release
-        <select value={queue().release} onChange={(e) => { setSaved(false); setQueue({ ...queue(), release: e.currentTarget.value as QueueRelease }); }} aria-label="Queue release">
+        <select value={queue().release} onChange={(e) => setQueue({ ...queue(), release: e.currentTarget.value as QueueRelease })} aria-label="Queue release">
           <option value="wip">When the WIP limit has room</option>
           <option value="batch">In batches</option>
           <option value="job">One job at a time</option>
@@ -193,7 +194,7 @@ function OptionsEditor(props: { options: ColumnOptions; catalog: RuleCatalog; co
       <Show when={queue().release === "batch"}>
         <For each={[["batch_size", "Cards in a batch"], ["max_wait_seconds", "Most seconds the oldest card waits"], ["max_batch_cards", "Most cards in one batch (optional)"]] as const}>{([key, label]) => <label>
           {label}
-          <input type="number" min="1" value={queue()[key] ?? ""} aria-label={label} onInput={(e) => { setSaved(false); setQueue({ ...queue(), [key]: e.currentTarget.value === "" ? null : Number(e.currentTarget.value) }); }} />
+          <input type="number" min="1" value={queue()[key] ?? ""} aria-label={label} onInput={(e) => setQueue({ ...queue(), [key]: e.currentTarget.value === "" ? null : Number(e.currentTarget.value) })} />
           <Problem problems={problems()} path={`queue.${key}`} />
         </label>}</For>
       </Show>
@@ -228,7 +229,7 @@ function OptionsEditor(props: { options: ColumnOptions; catalog: RuleCatalog; co
     <NotYet />
     <div class="row">
       <button class="primary" type="submit" disabled={busy() || stale() || !dirty()}>{busy() ? "Saving…" : "Save"}</button>
-      <Show when={saved()}><span class="good small" role="status">Saved.</span></Show>
+      <Show when={props.saved && !dirty()}><span class="good small" role="status">Saved.</span></Show>
       <span class="small muted">Version {start.version}</span>
     </div>
   </form>;

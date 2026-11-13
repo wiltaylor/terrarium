@@ -119,14 +119,14 @@ export function createColumnOptionsMock(ctx: ColumnOptionsMockContext) {
       return read(project, column);
     }),
   };
-  /** Project `terrarium`: a batch queue and two rules on merge_queue, as C5 will convert them. */
+  /** Project `terrarium`: a batch queue and two rules on review (the mock board has no merge_queue). */
   const seed = () => {
-    stored.set("terrarium/merge_queue", {
+    stored.set("terrarium/review", {
       version: 3,
       checks: { require_comment_on_enter: false, require_dependencies_met: false, terminal_for_members: false, clear_eta_on_enter: true },
       queue: { release: "batch", batch_size: 4, max_wait_seconds: 1800, max_batch_cards: 8 },
       rules: [
-        { id: "01M7MOCKRULE0000000000001", name: "merge-pass", enabled: true, trigger: { kind: "job_result", events: ["verdict"], job_kinds: ["merge"] }, if_job: [{ outcome: ["passed"] }], actions: [{ verb: "card.move", args: { to: "@accepted" } }] },
+        { id: "01M7MOCKRULE0000000000001", name: "merge-pass", enabled: true, trigger: { kind: "job_result", events: ["verdict"], job_kinds: ["merge"] }, if_job: [{ outcome: ["passed"] }], actions: [{ verb: "card.move", args: { to: "done" } }] },
         { id: "01M7MOCKRULE0000000000002", name: "merge-red-note", description: "Tell the card why the merge failed.", enabled: false, trigger: { kind: "job_result", events: ["ended"] }, if_card: [{ lacks_labels: ["hold"] }], actions: [{ verb: "card.comment", args: { body: "Merge failed: {{job.state}}" } }] },
       ],
     });
