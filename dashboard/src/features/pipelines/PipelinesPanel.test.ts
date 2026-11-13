@@ -42,7 +42,7 @@ it("keeps duplicate searches independent and retains row focus and scroll on liv
   expect(second.textContent).toContain("octopus-deploy");
   const button = first.querySelector<HTMLButtonElement>("button.link")!;
   button.focus(); first.scrollTop = 75;
-  listeners.forEach((fn) => fn({ kind: "pipeline.updated", project: "terrarium" } as AgentEvent));
+  listeners.forEach((fn) => fn({ seq: 1, id: "pipeline-refresh", at: "", kind: "pipeline.updated", project: "terrarium", summary: "", data: {} }));
   await tick(450);
   expect(first.querySelector("button.link")).toBe(button);
   expect(document.activeElement).toBe(button);

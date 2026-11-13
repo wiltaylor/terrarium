@@ -53,7 +53,7 @@ it("retains grid DOM, focus, scroll and anchor through project live refresh", as
   const cell = root.querySelector<HTMLElement>("[role=gridcell]")!;
   const title = root.querySelector("[role=grid]")!.getAttribute("aria-label");
   cell.tabIndex = 0; cell.focus(); root.scrollTop = 90;
-  listeners.forEach((fn) => fn({ kind: "calendar.updated", project: "terrarium" } as AgentEvent));
+  listeners.forEach((fn) => fn({ seq: 1, id: "calendar-refresh", at: "", kind: "calendar.updated", project: "terrarium", summary: "", data: {} }));
   await tick(450);
   expect(root.querySelector("[role=gridcell]")).toBe(cell);
   expect(document.activeElement).toBe(cell);
