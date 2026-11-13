@@ -186,7 +186,7 @@ cloned terrarium in work/terrarium of worker
 HEAD 3f2c1e0b9a0d... (main)
 ```
 
-`--target <name>` runs the clone or fetch on that target through its host agent. A vmlab target is refused (422). The work tree gets the modes of a plain `git clone` under the umask of the target user (`0002` gives `rwxrwxr-x` on an executable file), as in 0.64. Only the staging of the managed hooks and the SSH key file are owner-only (TER-1127). On a 0.65 checkout made before this fix the tree is `700`/`600`: run `chmod -R go+rX` on your own checkout.
+`--target <name>` runs the clone or fetch on that target through its host agent. A vmlab target is refused (422). The work tree gets the modes of a plain `git clone` under the umask of the target user (`0002` gives `rwxrwxr-x` on an executable file), as in 0.64. Only the staging of the managed hooks and the SSH key file are owner-only (TER-1127). On a 0.65 checkout made before this fix the tree is `700`/`600`: run `chmod -R go+rX` on your own checkout. `--path` is an absolute path on the target. Without it an agent's checkout goes to the repo's path under the agent's work root on the target, `<work_root>/<project>/<agent>/<repo path>` (`/src/terrarium/...` when the target sets no `work_root`, or the home fallback the agent's root already uses), not to the workspace. The operator must give `--path` (422 without it).
 
 `terrarium repo credential get` is hidden. git runs it as the credential
 helper that the daemon writes into each workspace clone. It reads git's
