@@ -205,7 +205,8 @@ it("adds a draft-only tab that opens before Save and keeps the draft inside the 
   await waitFor(() => expect(tabOrder(host)).toEqual(["a", "b", "new-tab"]));
   await waitFor(() => expect(host.querySelector("h2")?.textContent).toContain("New tab"));
   expect(host.querySelector(".error-banner")).toBeNull();
-  link(host, "/p/demo/board").click();
+  // With pages ON the fixed tabs are gone: the page's own Board link stays inside the project.
+  [...host.querySelectorAll<HTMLAnchorElement>('a[href="/p/demo/board"]')].find(a => !a.closest("nav"))!.click();
   await waitFor(() => expect(host.textContent).toContain("Board view"));
   expect(tabOrder(host)).toEqual(["a", "b", "new-tab"]);
 });

@@ -126,7 +126,7 @@ async fn v2_atomic_revisions_conflict_validation_and_rights() {
         .await;
     let sys = td.agent("q", "sys", json!({"roles":["sysadmin"]})).await;
     let path = "/api/projects/p/page-layout";
-    let input = json!({"base_revision":0,"pages":[panel("one",0)]});
+    let input = json!({"base_revision":1,"pages":[panel("one",0)]});
     for id in [
         member["id"].as_str().unwrap(),
         outsider["id"].as_str().unwrap(),
@@ -161,13 +161,13 @@ async fn v2_atomic_revisions_conflict_validation_and_rights() {
     );
     let conflict = if a.status == 409 { a } else { b };
     conflict.err(409, "conflict");
-    assert_eq!(conflict.body["error"]["details"]["revision"], 1);
+    assert_eq!(conflict.body["error"]["details"]["revision"], 2);
     assert_eq!(layout_counts(&td).await, (before.0 + 1, before.1 + 1));
     let saved = td.get(path).await;
-    assert_eq!(saved.ok()["revision"], 1);
+    assert_eq!(saved.ok()["revision"], 2);
     for bad in [
-        json!({"base_revision":1,"pages":[panel("one",0),panel("one",1)]}),
-        json!({"base_revision":1,"pages":[panel("one",2)]}),
+        json!({"base_revision":2,"pages":[panel("one",0),panel("one",1)]}),
+        json!({"base_revision":2,"pages":[panel("one",2)]}),
         json!({"pages":[]}),
     ] {
         td.put(path, bad).await.err(422, "invalid");
@@ -176,7 +176,7 @@ async fn v2_atomic_revisions_conflict_validation_and_rights() {
     invalid["widgets"][0]["options"]["project"] = json!("q");
     td.put(
         path,
-        json!({"base_revision":1,"pages":[panel("valid",0),invalid]}),
+        json!({"base_revision":2,"pages":[panel("valid",0),invalid]}),
     )
     .await
     .err(422, "invalid");
@@ -185,11 +185,11 @@ async fn v2_atomic_revisions_conflict_validation_and_rights() {
     td.put_as(
         sys["id"].as_str().unwrap(),
         path,
-        json!({"base_revision":1,"pages":[]}),
+        json!({"base_revision":2,"pages":[]}),
     )
     .await
     .ok();
-    assert_eq!(td.get(path).await.ok()["revision"], 2);
+    assert_eq!(td.get(path).await.ok()["revision"], 3);
 }
 
 #[tokio::test]
@@ -205,12 +205,12 @@ async fn v2_bounds_options_and_compatibility_writers() {
     ] {
         let mut p = panel("bad", 0);
         p["widgets"][0]["options"][field] = value;
-        td.put(path, json!({"base_revision":0,"pages":[p]}))
+        td.put(path, json!({"base_revision":1,"pages":[p]}))
             .await
             .err(422, "invalid");
     }
     let thirty: Vec<_> = (0..30).map(|i| panel(&format!("p{i}"), i)).collect();
-    td.put(path, json!({"base_revision":0,"pages":thirty}))
+    td.put(path, json!({"base_revision":1,"pages":thirty}))
         .await
         .ok();
     assert_eq!(
@@ -221,23 +221,23 @@ async fn v2_bounds_options_and_compatibility_writers() {
         30
     );
     let too_many: Vec<_> = (0..31).map(|i| panel(&format!("p{i}"), i)).collect();
-    td.put(path, json!({"base_revision":1,"pages":too_many}))
+    td.put(path, json!({"base_revision":2,"pages":too_many}))
         .await
         .err(422, "invalid");
     td.put("/api/projects/p/pages/extra", body())
         .await
         .err(422, "invalid");
     td.put("/api/projects/p/pages/p0", body()).await.ok();
-    assert_eq!(td.get(path).await.ok()["revision"], 2);
-    td.put(path, json!({"base_revision":1,"pages":[]}))
+    assert_eq!(td.get(path).await.ok()["revision"], 3);
+    td.put(path, json!({"base_revision":2,"pages":[]}))
         .await
         .err(409, "conflict");
     td.delete("/api/projects/p/pages/p29").await.ok();
-    assert_eq!(td.get(path).await.ok()["revision"], 3);
+    assert_eq!(td.get(path).await.ok()["revision"], 4);
     td.put("/api/projects/p/dashboard", json!({"blocks":[]}))
         .await
         .ok();
-    assert_eq!(td.get(path).await.ok()["revision"], 4);
+    assert_eq!(td.get(path).await.ok()["revision"], 5);
     // A direct monitor-removal compatibility write participates too.
     let mut dashboard = body();
     dashboard["widgets"] = json!([{"id":"m","kind":"status","monitor":"missing-local",
@@ -255,8 +255,8 @@ async fn v2_bounds_options_and_compatibility_writers() {
         })
         .await
         .unwrap();
-    assert_eq!(td.get(path).await.ok()["revision"], 6);
-    td.put(path, json!({"base_revision":5,"pages":[]}))
+    assert_eq!(td.get(path).await.ok()["revision"], 7);
+    td.put(path, json!({"base_revision":6,"pages":[]}))
         .await
         .err(409, "conflict");
 }
@@ -277,11 +277,43 @@ async fn v2_explicit_initializer_preserves_upgrade_collisions_and_deleted_builti
     }).await.unwrap();
     let custom = td.get("/api/projects/p/pages/board").await.body;
     let dashboard = td.get("/api/projects/p/pages/dashboard").await.body;
+    let old_items = td.get("/api/projects/p/pages").await.body["items"].clone();
+    assert_eq!(old_items.as_array().unwrap().len(), 11);
+    // The enabled start initializes every project before it serves (TER-1077).
     td.web.project_pages_v2 = true;
     td.boot(None, None).await;
-    // Neither enabled startup nor GET may seed.
-    let old_layout = td.get("/api/projects/p/page-layout").await.body;
-    assert_eq!(old_layout["pages"].as_array().unwrap().len(), 11);
+    assert_eq!(td.get("/api/projects/p/pages/board").await.ok(), &custom);
+    assert_eq!(
+        td.get("/api/projects/p/pages/dashboard").await.ok(),
+        &dashboard
+    );
+    let initialized = td.get("/api/projects/p/page-layout").await.body;
+    assert_eq!(initialized["revision"], 1);
+    assert_eq!(initialized["pages"].as_array().unwrap().len(), 21);
+    assert_eq!(
+        &initialized["pages"].as_array().unwrap()[..11],
+        old_items.as_array().unwrap().as_slice()
+    );
+    // A project that no initializer has seen yet (written past the store).
+    // GET does not seed it, and an interrupted initialization leaves nothing.
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("fixture", |t| {
+            t.execute(
+                "INSERT INTO projects(name,created_at,updated_at) VALUES('raw','x','x')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let raw = td.get("/api/projects/raw/page-layout").await.body;
+    assert_eq!(raw["revision"], 0);
+    assert_eq!(raw["pages"].as_array().unwrap().len(), 1);
+    assert_eq!(td.get("/api/projects/raw/page-layout").await.body, raw);
     let counts = layout_counts(&td).await;
     let interrupted: terrariumd::error::ApiResult<()> = td
         .daemon
@@ -290,35 +322,24 @@ async fn v2_explicit_initializer_preserves_upgrade_collisions_and_deleted_builti
         .state
         .db
         .write("test", |t| {
-            terrariumd::store::pages::initialize_defaults(t, "p", "test")?;
+            terrariumd::store::pages::initialize_defaults(t, "raw", "test")?;
             Err(terrariumd::error::ApiError::invalid(
                 "simulated interruption",
             ))
         })
         .await;
     assert!(interrupted.is_err());
-    assert_eq!(td.get("/api/projects/p/page-layout").await.body, old_layout);
+    assert_eq!(td.get("/api/projects/raw/page-layout").await.body, raw);
     assert_eq!(layout_counts(&td).await, counts);
-    td.daemon
-        .as_ref()
-        .unwrap()
-        .state
-        .db
-        .write("test", |t| {
-            terrariumd::store::pages::initialize_defaults(t, "p", "test")
-        })
-        .await
-        .unwrap();
-    assert_eq!(td.get("/api/projects/p/pages/board").await.ok(), &custom);
+    // The next enabled start finishes it, once.
+    td.boot(None, None).await;
+    let raw_initialized = td.get("/api/projects/raw/page-layout").await.body;
+    assert_eq!(raw_initialized["revision"], 1);
+    assert_eq!(raw_initialized["pages"].as_array().unwrap().len(), 11);
+    assert_eq!(layout_counts(&td).await, (counts.0 + 1, counts.1 + 1));
     assert_eq!(
-        td.get("/api/projects/p/pages/dashboard").await.ok(),
-        &dashboard
-    );
-    let initialized = td.get("/api/projects/p/page-layout").await.body;
-    assert_eq!(initialized["pages"].as_array().unwrap().len(), 21);
-    assert_eq!(
-        &initialized["pages"].as_array().unwrap()[..11],
-        old_layout["pages"].as_array().unwrap().as_slice()
+        td.get("/api/projects/p/page-layout").await.body,
+        initialized
     );
     assert_eq!(
         td.get("/api/projects/p/pages/board-1").await.ok()["builtin"],
@@ -357,7 +378,11 @@ async fn v2_explicit_initializer_preserves_upgrade_collisions_and_deleted_builti
         td.get("/api/projects/p/pages/board-1").await.ok()["builtin"],
         "board"
     );
+    // An enabled project creation initializes in the same write (TER-1077).
     td.project("fresh").await;
+    let created = td.get("/api/projects/fresh/page-layout").await.body;
+    assert_eq!(created["revision"], 1);
+    assert_eq!(created["pages"].as_array().unwrap().len(), 11);
     td.daemon
         .as_ref()
         .unwrap()
@@ -395,9 +420,30 @@ async fn v2_explicit_initializer_preserves_upgrade_collisions_and_deleted_builti
         td.get("/api/projects/fresh/pages").await.body["items"],
         inventory
     );
+    // Rollback writes: an OFF save of a page with panel or frame widgets is
+    // refused (422) and changes nothing, so nothing is lost silently. The
+    // legacy dashboard alias of a page without panels still saves.
+    let board = td.get("/api/projects/fresh/pages/board").await.body;
+    let mut input = board.clone();
+    for key in ["project", "slug", "updated_at", "updated_by"] {
+        input.as_object_mut().unwrap().remove(key);
+    }
+    td.put("/api/projects/fresh/pages/board", input)
+        .await
+        .err(422, "invalid");
+    assert_eq!(td.get("/api/projects/fresh/pages/board").await.body, board);
+    td.put("/api/projects/fresh/dashboard", json!({"blocks":[]}))
+        .await
+        .ok();
+    let inventory = td.get("/api/projects/fresh/pages").await.body["items"].clone();
     td.web.project_pages_v2 = true;
     td.boot(None, None).await;
-    assert_eq!(td.get("/api/projects/fresh/page-layout").await.body, before);
+    let after = td.get("/api/projects/fresh/page-layout").await.body;
+    assert_eq!(after["pages"], inventory);
+    assert_eq!(
+        after["pages"].as_array().unwrap().len(),
+        before["pages"].as_array().unwrap().len()
+    );
 }
 
 #[tokio::test]
@@ -413,7 +459,7 @@ async fn v2_duplicate_instances_and_frame_bounds_round_trip() {
     duplicate["options"]["search"] = json!("second");
     page["widgets"].as_array_mut().unwrap().push(duplicate);
     let saved = td
-        .put(path, json!({"base_revision":0,"pages":[page.clone()]}))
+        .put(path, json!({"base_revision":1,"pages":[page.clone()]}))
         .await;
     assert_eq!(saved.ok()["pages"][0]["widgets"], page["widgets"]);
     td.get("/api/projects/p/pages/layout").await.ok();
@@ -424,7 +470,7 @@ async fn v2_duplicate_instances_and_frame_bounds_round_trip() {
     ] {
         let mut bad = page.clone();
         bad["widgets"][0][field] = value;
-        td.put(path, json!({"base_revision":1,"pages":[bad]}))
+        td.put(path, json!({"base_revision":2,"pages":[bad]}))
             .await
             .err(422, "invalid");
     }
@@ -457,14 +503,14 @@ async fn v2_copy_does_not_grant_foreign_monitor_access() {
     ]});
     td.put(
         "/api/projects/q/page-layout",
-        json!({"base_revision":0,"pages":[source]}),
+        json!({"base_revision":1,"pages":[source]}),
     )
     .await
     .ok();
     let copied = td
         .post(
             "/api/projects/p/page-layout/copy",
-            json!({"base_revision":0,
+            json!({"base_revision":1,
         "source_project":"q","confirm":true}),
         )
         .await;
@@ -497,19 +543,19 @@ async fn v2_copy_confirmation_source_rights_and_target_local_missing_references(
         "x":0,"y":0,"w":12,"h":4}]);
     td.put(
         "/api/projects/q/page-layout",
-        json!({"base_revision":0,"pages":[source]}),
+        json!({"base_revision":1,"pages":[source]}),
     )
     .await
     .ok();
     let path = "/api/projects/p/page-layout/copy";
-    let input = json!({"base_revision":0,"source_project":"q","confirm":true});
+    let input = json!({"base_revision":1,"source_project":"q","confirm":true});
     td.post_as(admin["id"].as_str().unwrap(), path, input.clone())
         .await
         .err(403, "forbidden");
     let before = layout_counts(&td).await;
     td.post(
         path,
-        json!({"base_revision":0,"source_project":"q","confirm":false}),
+        json!({"base_revision":1,"source_project":"q","confirm":false}),
     )
     .await
     .err(422, "invalid");
@@ -524,7 +570,7 @@ async fn v2_copy_confirmation_source_rights_and_target_local_missing_references(
     td.post(path, input).await.err(409, "conflict");
     assert_eq!(
         td.get("/api/projects/q/page-layout").await.ok()["revision"],
-        1
+        2
     );
     // No source identity/grant is saved in the widget.
     assert!(
@@ -771,4 +817,60 @@ async fn monitor_sources_are_local_compatible_and_preserved_when_deleted() {
         td.get(dashboard).await.ok()["widgets"],
         json!([dashboard_body["widgets"][0]])
     );
+}
+
+#[tokio::test]
+async fn page_list_reports_the_existing_domain_rights() {
+    let td = v2_daemon().await;
+    td.project("p").await;
+    td.project("q").await;
+    let member = td.agent("p", "member", json!({})).await;
+    let lead = td
+        .agent("p", "lead", json!({"roles":["project_admin"]}))
+        .await;
+    let architect = td.agent("q", "arch", json!({"roles":["architect"]})).await;
+    let sys = td.agent("q", "sys", json!({"roles":["sysadmin"]})).await;
+    let path = "/api/projects/p/pages";
+    let rights = |body: &Value| body["rights"].clone();
+    let operator = td.get(path).await;
+    assert_eq!(
+        rights(operator.ok()),
+        json!({"write_project":true,"admin_project":true,"manage_schedules":true,
+            "manage_global":true,"operator":true})
+    );
+    for (agent, expect) in [
+        (
+            &member,
+            json!({"write_project":true,"admin_project":false,"manage_schedules":false,
+            "manage_global":false,"operator":false}),
+        ),
+        (
+            &lead,
+            json!({"write_project":true,"admin_project":true,"manage_schedules":true,
+            "manage_global":false,"operator":false}),
+        ),
+        // A cross-project reader reads, but has no write right in `p`.
+        (
+            &architect,
+            json!({"write_project":false,"admin_project":false,"manage_schedules":false,
+            "manage_global":false,"operator":false}),
+        ),
+        (
+            &sys,
+            json!({"write_project":true,"admin_project":true,"manage_schedules":true,
+            "manage_global":true,"operator":false}),
+        ),
+    ] {
+        let got = td.get_as(agent["id"].as_str().unwrap(), path).await;
+        assert_eq!(rights(got.ok()), expect, "{}", agent["name"]);
+        assert_eq!(got.body["can_edit"], expect["admin_project"]);
+    }
+    // The rights only describe the endpoints: the reader's write is still refused.
+    td.post_as(
+        architect["id"].as_str().unwrap(),
+        "/api/projects/p/cards",
+        json!({"title":"no"}),
+    )
+    .await
+    .err(403, "forbidden");
 }

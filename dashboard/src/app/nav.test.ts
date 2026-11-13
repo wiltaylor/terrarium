@@ -53,7 +53,8 @@ describe("navigation", () => {
     ]);
     expect(app).toMatch(/<Route path="\/p\/:project" component=\{ProjectScreen\}>/);
     expect(app).toMatch(/<Route path="\/" component=\{ProjectIndex\} \/>/);
-    expect(app).toMatch(/<Navigate href=\{`\/p\/\$\{params\.project\}\/board`\} \/>/);
+    // OFF and on a failed read the index opens Board; ON, the Board page (projectIndexPath, TER-1077).
+    expect(app).toMatch(/<Navigate href=\{`\/p\/\$\{params\.project\}\/\$\{projectIndexPath\(list\(\)\)\}`\} \/>/);
     expect(app).not.toMatch(/<Navigate href=\{`\/p\/\$\{params\.project\}\/dashboard`\} \/>/);
   });
 

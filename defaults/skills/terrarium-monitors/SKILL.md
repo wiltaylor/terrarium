@@ -142,7 +142,11 @@ layout, so read it first and keep the blocks of others.
 The Dashboard is now a custom page at `/p/<project>/pages/dashboard`.
 Edit its snap-grid widgets with Edit page or `terrarium page show` and
 `terrarium page set`. Monitors are managed under project Settings, Monitors
-(`/p/<project>/settings/monitors`). The dashboard commands and API remain
+(`/p/<project>/settings/monitors`). When the daemon runs with project pages
+on (`TERRARIUM_PROJECT_PAGES_V2=1`), the stored pages are the tab row: one
+Edit pages on the tab row edits every page, Save pages saves them all
+(`terrarium page layout` and `terrarium page save-layout` from the CLI), and
+the settings are behind the cog next to Edit pages. The dashboard commands and API remain
 compatibility aliases for at least one release. A deleted dashboard page
 reads as an empty layout. Saving through the alias replaces monitor and
 Markdown widgets, preserving system and wiki widgets.

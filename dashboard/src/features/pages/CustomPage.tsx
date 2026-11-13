@@ -1,5 +1,5 @@
 import { useParams } from "@solidjs/router";
-import { createEffect, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { useInstance } from "../../instance";
 import { ApiError } from "../../api/http";
 import { A, useNavigate } from "../../instance/navigation";
@@ -17,6 +17,8 @@ import { LEGACY_WIDGETS, WIDGET_REGISTRY, featureWidget, widgetDefinition, PROJE
 import type { ProjectWidgetKind, ProjectWidgetViews } from "../../api/types";
 import { projectPagesEnabled } from "./pageCapability";
 import { moveWidget, setPageWidgets, useLayoutEditor } from "./layoutDraft";
+import { FeatureWidget } from "./FeatureWidget";
+import { pageGrants } from "./pageGrants";
 
 export default function CustomPage() {
   const { api, events, key: instanceKey } = useInstance();
@@ -36,6 +38,8 @@ export default function CustomPage() {
   // Solid throws when `latest` of an errored resource is read. Check the error first (fail closed).
   const enabled = () => !scopedRights.error && projectPagesEnabled(scopedRights.latest, scope(), undefined);
   const canEdit = () => !scopedRights.error && rights()?.can_edit === true;
+  // The widget grants come from the domain rights, never from `can_edit` (TER-1077).
+  const grants = createMemo(() => pageGrants(rights()?.rights, params.project));
   const [monitors, { refetch: refetchMonitors }] = createResource(() => params.project, p => api.monitors.list(p));
   const [draft, setDraft] = createSignal<ProjectPageInput | null>(null);
   const [error, setError] = createSignal<unknown>();
@@ -160,7 +164,11 @@ export default function CustomPage() {
       <Show when={w.kind === "markdown"}><Markdown html={renderMarkdown(w.text ?? "", params.project)} project={params.project} /></Show>
       <Show when={w.kind === "wiki"}><WikiWidget project={params.project} path={w.wiki ?? ""} /></Show>
       <Show when={isSystemWidget(w.kind)}><SystemWidget kind={w.kind} project={params.project} monitors={monitors.latest ?? []} now={now()} /></Show>
-      <Show when={!widgetDefinition(w) || widgetDefinition(w)?.host === "feature"}><p>Not Found</p></Show>
+      <Show when={!widgetDefinition(w)}><p>Not Found</p></Show>
+      <Show when={widgetDefinition(w)?.host === "feature"}>
+        {/* Until the first capability answer nothing shows, so an ON page never flashes Not Found. */}
+        <Show when={enabled()} fallback={<Show when={scopedRights.error || scopedRights.latest}><p>Not Found</p></Show>}><FeatureWidget project={params.project} widget={current()} grants={grants()} /></Show>
+      </Show>
       <Show when={widgetDefinition(w)?.host === "monitor"}>
         <Show when={!enabled() || monitors.latest?.some(m => m.id === w.monitor && m.project === params.project)} fallback={<p>Not Found</p>}>
           <BlockView block={{ id: w.id, title: w.title, monitor: w.monitor, kind: w.kind as "stat", size: "l", options: w.options ?? {} }} monitor={monitors.latest?.find(m => m.id === w.monitor && m.project === params.project)} project={params.project} now={now()} version={Date.parse(monitors.latest?.find(m => m.id === w.monitor && m.project === params.project)?.last?.at ?? "") || 0} />

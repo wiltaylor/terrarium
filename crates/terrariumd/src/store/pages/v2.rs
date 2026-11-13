@@ -261,8 +261,21 @@ fn unused_slug(pages: &[ProjectPage], builtin: Builtin) -> String {
     unreachable!("bounded page inventory")
 }
 
-/// Explicit, idempotent initializer. No GET, SQL trigger or startup calls this.
-/// C7 calls it before serving enabled projects, including new-project creation.
+/// Projects whose stored layout is not initialized yet, by name.
+pub fn uninitialized_projects(c: &Connection) -> ApiResult<Vec<String>> {
+    let mut stmt = c.prepare(
+        "SELECT p.name FROM projects p LEFT JOIN project_page_layouts l ON l.project=p.name
+        WHERE COALESCE(l.initialized,0)=0 ORDER BY p.name",
+    )?;
+    let names = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(names)
+}
+
+/// Explicit, idempotent initializer. No GET or SQL trigger calls this. With
+/// the capability ON (TER-1077), the daemon calls it for every project at
+/// startup before it serves requests, and in project creation.
 pub fn initialize_defaults(t: &mut Tx<'_>, project: &str, actor: &str) -> ApiResult<()> {
     base(t, project, revision(t, project)?)?;
     let initialized: bool = t
