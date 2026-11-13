@@ -3796,7 +3796,9 @@ mod tests {
                  FROM board_columns ORDER BY position",
             )
             .unwrap();
-        let rows: Vec<(String, i64, i64, i64, i64, String, Option<i64>, i64)> = q
+        // name, comment, dependencies, terminal, ETA, release, batch, version
+        type Options = (String, i64, i64, i64, i64, String, Option<i64>, i64);
+        let rows: Vec<Options> = q
             .query_map([], |r| {
                 Ok((
                     r.get(0)?,
