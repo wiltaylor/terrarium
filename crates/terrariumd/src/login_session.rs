@@ -656,7 +656,9 @@ pub async fn check_status_in(
                 CheckHome::Shared => None,
             };
             let Some(file) = file else {
-                st.detail = Some("a Grok Build login lives only in the account of its xai plan row".into());
+                st.detail = Some(
+                    "a Grok Build login lives only in the account of its xai plan row".into(),
+                );
                 return st;
             };
             let found = tokio::task::spawn_blocking(move || grok_login_in(&file))
@@ -715,12 +717,14 @@ pub fn grok_login_refusal(list: &[Subscription], name: Option<&str>) -> Option<S
     let tiers = terrarium_core::xai::TIERS.join(", ");
     let Some(name) = name else {
         return Some(format!(
-            "a Grok Build login needs `name`: an xai subscription with plan {tiers} and              harnesses [\"grok\"]; define it first"
+            "a Grok Build login needs `name`: an xai subscription with plan {tiers} and \
+             harnesses [\"grok\"]; define it first"
         ));
     };
     let Some(s) = list.iter().find(|s| s.name == name) else {
         return Some(format!(
-            "subscription `{name}` does not exist; define it with provider xai, plan one of              {tiers}, and harnesses [\"grok\"] first"
+            "subscription `{name}` does not exist; define it with provider xai, plan one of \
+             {tiers}, and harnesses [\"grok\"] first"
         ));
     };
     if !matches!(
