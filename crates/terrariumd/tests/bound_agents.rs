@@ -666,8 +666,7 @@ async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
             .filter(|e| {
                 e["card"] == cr
                     && e["data"]["change"] == "moved"
-                    && !["review", "accepted", "done"]
-                        .contains(&e["data"]["to"].as_str().unwrap())
+                    && !["review", "accepted", "done"].contains(&e["data"]["to"].as_str().unwrap())
             })
             .count()
     };
