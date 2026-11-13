@@ -4350,7 +4350,12 @@ async fn a_register_that_makes_an_xai_key_row_a_plan_row_drops_the_key_file() {
         .await;
     assert_eq!(r.ok()["env_var"], "XAI_API_KEY", "{}", r.body);
     // An xai row with no plan is an API-key row (`xai::plan(None)`).
-    set_row(td, "x-reg", "UPDATE subscriptions SET plan = NULL WHERE name = ?1").await;
+    set_row(
+        td,
+        "x-reg",
+        "UPDATE subscriptions SET plan = NULL WHERE name = ?1",
+    )
+    .await;
     let st = terrariumd::login_session::LoginStatus {
         kind: terrariumd::login_session::LoginKind::Pi,
         harness: HarnessId::Pi,
