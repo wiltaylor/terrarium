@@ -2,7 +2,8 @@ import { useInstance } from "../../instance";
 import { ReadBoundary, useReadBoundary } from "../../components/ReadBoundary";
 import { CommentPost } from "../../components/CommentPost";
 import { PostEditor } from "../../components/PostEditor";
-import { A } from "../../instance/navigation";
+import { A, useNavigate } from "../../instance/navigation";
+import { projectBase } from "../../lib/url";
 import { createEffect, createUniqueId, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { createStore } from "solid-js/store";
 import { createPagedList } from "../../components/paged";
@@ -42,6 +43,13 @@ export interface BoardPanelProps {
   query: BoardQuery;
   onQueryChange: (patch: BoardQuery, options?: { replace?: boolean }) => void;
   onToggleDone: () => void;
+  /**
+   * Card writes: New card, drag and drop, and the card drawer. Absent is the route page (true).
+   * False: a card opens its board detail route instead of the drawer. The server checks each write.
+   */
+  canWriteCards?: boolean;
+  /** Edit columns (`PATCH board`, project_admin). Absent is the route page (true). */
+  canEditColumns?: boolean;
 }
 export function BoardPanel(props: BoardPanelProps) {
   return <Show when={props.project} keyed>{(project) => <BoardPanelContent {...props} project={project} />}</Show>;
@@ -50,6 +58,9 @@ export function BoardPanel(props: BoardPanelProps) {
 function BoardPanelContent(props: BoardPanelProps) {
   const { api, events, agents } = useInstance();
   const filterId = createUniqueId();
+  const navigate = useNavigate();
+  const canWrite = () => props.canWriteCards !== false;
+  const canColumns = () => props.canEditColumns !== false;
   const setSearch = (patch: BoardQuery, options?: { replace?: boolean }) => props.onQueryChange(patch, options);
   const board = createBoardStore(api);
   const view = createMemo(() => board.state.board ? boardView(board.state.board, props.done) : undefined);
@@ -119,7 +130,7 @@ function BoardPanelContent(props: BoardPanelProps) {
   /** A drop: in the same lane it moves the card; into another version lane it changes the card's version label first. */
   const onLaneDrop = async (id: string, fromLane: string, toLane: string, column: string, cellIndex: number) => {
     const b = board.state.board;
-    if (!b) return;
+    if (!b || !canWrite()) return;
     const lane = lanes().find((l) => l.key === toLane);
     const cell = lane ? laneCells(lane, column).filter((c) => c.id !== id && c.kind !== "group") : [];
     const index = columnIndex(cell, cardsIn(b, column).filter((c) => c.id !== id), cellIndex);
@@ -197,6 +208,7 @@ function BoardPanelContent(props: BoardPanelProps) {
   const boardColumns = (): Column[] => board.state.board?.columns ?? [];
   const titleOf = (name: string) => columnTitle(boardColumns().find((c) => c.name === name) ?? { name });
   const commitMove = async (id: string, column: string, index: number, comment?: string) => {
+    if (!canWrite()) return;
     // The column with the role `blocked` (columns.ts roleColumn) needs a comment.
     if (isBlockedColumn(boardColumns(), column) && !comment) {
       setPendingBlock({ id, column, index });
@@ -209,7 +221,7 @@ function BoardPanelContent(props: BoardPanelProps) {
   let detailGen = 0;
   onCleanup(() => { ++detailGen; });
   const [detail, { mutate: setSelected, refetch: reloadSelected }] = createResource(
-    () => props.query.card ? [props.project, props.query.card] as const : false,
+    () => canWrite() && props.query.card ? [props.project, props.query.card] as const : false,
     async ([project, id]) => {
       const mine = ++detailGen;
       setDetailError(null);
@@ -219,7 +231,7 @@ function BoardPanelContent(props: BoardPanelProps) {
       } catch (e) { if (mine === detailGen) setDetailError(e); return undefined; }
     },
   );
-  const selected = () => detail()?.project === props.project && detail()?.id.toUpperCase() === props.query.card?.toUpperCase() ? detail() : undefined;
+  const selected = () => canWrite() && detail()?.project === props.project && detail()?.id.toUpperCase() === props.query.card?.toUpperCase() ? detail() : undefined;
 
   // The column of the phone board: `?col=` in the URL, so a reload and the back button keep it.
   // A tap on a column chip and a swipe on the board change it; a change of the URL scrolls the board to it.
@@ -337,9 +349,11 @@ function BoardPanelContent(props: BoardPanelProps) {
           <input type="checkbox" checked={grouped()} onChange={(e) => setSearch({ group: e.currentTarget.checked ? "version" : undefined })} />
           Group by version
         </label>
-        <button type="button" ref={editColumnsButton} aria-haspopup="dialog" disabled={!board.state.board} onClick={() => setEditColumns(true)}>
-          Edit columns
-        </button>
+        <Show when={canColumns()}>
+          <button type="button" ref={editColumnsButton} aria-haspopup="dialog" disabled={!board.state.board} onClick={() => setEditColumns(true)}>
+            Edit columns
+          </button>
+        </Show>
       </PageHead>
       <ErrorBanner error={board.state.error} onDismiss={board.clearError} />
       <ErrorBanner error={laneError()} onDismiss={() => setLaneError(null)} />
@@ -377,7 +391,7 @@ function BoardPanelContent(props: BoardPanelProps) {
               collapsed={laneState().collapsed}
               onToggle={(key) => saveLaneState(toggleCollapsed(laneState(), key))}
               visible={visible}
-              addColumn={props.done ? undefined : newCardColumn(columnNames())}
+              addColumn={props.done || !canWrite() ? undefined : newCardColumn(columnNames())}
               addButton={addCardButton}
               onDrop={(...a) => {
                 void onLaneDrop(...a).finally(() => setDragging(null));
@@ -391,10 +405,10 @@ function BoardPanelContent(props: BoardPanelProps) {
                   questions={badges().get(card.id)}
                   hidden={!visible(card)}
                   dragging={drag.dragging}
-                  draggable={drag.draggable}
+                  draggable={drag.draggable && canWrite()}
                   note={also.length ? `also in ${also.join(", ")}` : undefined}
                   lane={lane.key}
-                  onOpen={() => setSearch({ card: card.id })}
+                  onOpen={() => canWrite() ? setSearch({ card: card.id }) : navigate(`${projectBase(props.project)}/board?card=${encodeURIComponent(card.id)}`)}
                   onDragStart={(e) => {
                     drag.onDragStart(e);
                     setDragging(card.id);
@@ -412,7 +426,7 @@ function BoardPanelContent(props: BoardPanelProps) {
 
       <LoadMore hasMore={!!board.state.board?.next_cursor} loading={board.state.loading} onMore={() => void board.more()} />
       <ErrorBanner error={detailError()} />
-      <Show when={newCardIn()}>
+      <Show when={canWrite() && newCardIn()}>
         {(column) => (
           <NewCardModal
             project={props.project}
@@ -434,7 +448,7 @@ function BoardPanelContent(props: BoardPanelProps) {
         )}
       </Show>
 
-      <Show when={pendingBlock()}>
+      <Show when={canWrite() && pendingBlock()}>
         {(p) => (
           <BlockModal
             cardId={p().id}
@@ -449,7 +463,7 @@ function BoardPanelContent(props: BoardPanelProps) {
         )}
       </Show>
 
-      <Show when={editColumns()}>
+      <Show when={canColumns() && editColumns()}>
         <ColumnsEditor
           columns={boardColumns()}
           onSave={async (edits) => {
