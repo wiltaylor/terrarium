@@ -3263,6 +3263,7 @@ impl RunnerSupervisor {
                         }
                         Err(RecvError::Lagged(n)) => {
                             warn!(agent = %id, "the supervisor missed {n} runner events");
+                            self.resync_after_lag(id, epoch, runner.as_ref());
                         }
                         Err(RecvError::Closed) => break,
                     },
@@ -3307,6 +3308,42 @@ impl RunnerSupervisor {
             }
         }
         self.on_exit(id, epoch, status).await;
+    }
+
+    /// TER-1125: the forward task lost runner events. A lost status change
+    /// leaves `seen` stale, and `maybe_push` waits for an `idle` that came
+    /// already. Take the status from the runner, report it when it
+    /// changed, and run the idle step when the agent is idle.
+    fn resync_after_lag(&self, id: AgentId, epoch: u64, runner: &dyn RunnerHandle) {
+        let now = runner.status();
+        let changed = {
+            let mut slots = lock(&self.inner.slots);
+            let Some(slot) = slots.get_mut(&id).filter(|s| s.epoch == epoch) else {
+                return;
+            };
+            let changed = slot.seen != now;
+            if changed {
+                slot.seen = now;
+                slot.note_rest(now, None, Instant::now());
+            }
+            changed
+        };
+        if changed {
+            match (self.held(id), now) {
+                (Some(h), AgentStatus::Idle) => {
+                    self.emit_status(id, AgentStatus::Blocked, hold_reason(&h));
+                }
+                _ => self.emit_status(id, now, "resynced after lost runner events"),
+            }
+            match now {
+                AgentStatus::Working => self.stream_busy(id),
+                AgentStatus::Waiting => self.stream_release(id),
+                _ => {}
+            }
+        }
+        if now == AgentStatus::Idle {
+            self.on_idle(id, epoch);
+        }
     }
 
     fn on_idle(&self, id: AgentId, epoch: u64) {
@@ -7718,6 +7755,58 @@ mod tests {
             status(AgentStatus::Working, AgentStatus::Waiting, Some(12)),
         );
         assert_eq!(rest_seq(), Some(12));
+    }
+
+    /// TER-1125: the forward task lags and loses the `idle` of the runner.
+    /// It takes the status from `runner.status()`, so the pointer that
+    /// waits for `idle` goes out without a later status event.
+    #[tokio::test]
+    async fn a_forward_lag_resyncs_the_status_and_pushes_the_pointer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sup, runner, id) = claim_runner_sup(tmp.path(), None);
+        let epoch = {
+            let mut slots = lock(&sup.inner.slots);
+            let slot = slots.get_mut(&id).unwrap();
+            slot.seen = AgentStatus::Working;
+            slot.epoch
+        };
+        sup.add_pointer(id, |p| {
+            p.add_mail(MailItem::new("m1".into(), "p/b".into(), "T1".into()))
+        });
+        assert!(lock(&runner.typed).is_empty(), "working: the pointer waits");
+        // A channel of one: the `idle` is lost, the receiver lags.
+        let (tx, rx) = broadcast::channel(1);
+        let status = |from, to| {
+            EventRecord::now(
+                id,
+                Event::StatusChanged {
+                    from,
+                    to,
+                    reason: None,
+                },
+            )
+        };
+        tx.send(status(AgentStatus::Working, AgentStatus::Idle))
+            .unwrap();
+        tx.send(EventRecord::now(
+            id,
+            Event::System {
+                message: "after the idle".into(),
+            },
+        ))
+        .unwrap();
+        let handle: Arc<dyn RunnerHandle> = runner.clone();
+        tokio::spawn(sup.clone().forward(id, epoch, handle, rx));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while lock(&runner.typed).is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the pointer goes out after the resync");
+        assert_eq!(lock(&sup.inner.slots)[&id].seen, AgentStatus::Idle);
+        assert_eq!(lock(&runner.typed).len(), 1);
+        drop(tx);
     }
 
     #[tokio::test]
