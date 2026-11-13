@@ -327,6 +327,72 @@ fn run(socket: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn run_kill_reports_cleanup_and_keeps_json_before_nonzero_exit() {
+    let dir = temp_dir("run-cleanup");
+    let socket = dir.join("api.sock");
+    let app = axum::Router::new().route(
+        "/api/waits/{id}",
+        axum::routing::delete(
+            |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                let mut v = json!({"id":id,"state":"cancelled"});
+                if id != "old-server" {
+                    v["cleanup"] =
+                        json!({"operation_id":"same-operation","status":id,"evidence_kind":"none"});
+                }
+                Json(v)
+            },
+        ),
+    );
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = std::thread::spawn(move || {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = stopped.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+    });
+    for status in [
+        "pending",
+        "unknown",
+        "unavailable",
+        "remaining",
+        "verified_terminated",
+        "unexpected",
+        "old-server",
+    ] {
+        let out = run(&socket, &["--json", "run", "kill", status]);
+        assert!(!out.status.success(), "{}", text(&out.stderr));
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        if status != "old-server" {
+            assert_eq!(v["cleanup"]["operation_id"], "same-operation");
+        }
+        let out = run(&socket, &["run", "kill", status]);
+        assert!(!out.status.success());
+        let output = text(&out.stdout);
+        assert!(output.contains("cancelled"));
+        assert!(output.contains("cleanup:"));
+        assert!(!output.contains("killed the run"));
+        assert!(!output.contains("no process of the run is left"));
+        let wait_kill = run(&socket, &["--json", "wait", "cancel", status, "--kill"]);
+        assert!(!wait_kill.status.success());
+        let _: Value = serde_json::from_slice(&wait_kill.stdout).unwrap();
+    }
+    let ordinary = run(&socket, &["wait", "cancel", "unknown"]);
+    assert!(ordinary.status.success(), "{}", text(&ordinary.stderr));
+    stop.send(()).unwrap();
+    server.join().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn update_jobs_drain_reports_timeout_and_resumes_against_daemon_api() {
     let dir = temp_dir("update-jobs");
     let socket = dir.join("api.sock");
@@ -508,6 +574,50 @@ fn operator_mode_over_the_unix_socket() {
     assert!(out.contains("mail to lead"), "{out}");
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn checkout_resource_busy_is_one_request_and_exit_one() {
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = requests.clone();
+    let message =
+        "cannot check target python3 availability: host admission is busy; retry the command";
+    let app = axum::Router::new()
+        .route(
+            "/api/projects/terra/repos",
+            get(|| async { Json(json!([{"id": "repo", "name": "repo"}])) }),
+        )
+        .fallback(move || {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": {"code": "resource_busy", "message": message}})),
+                )
+            }
+        });
+    let dir = temp_dir("checkout-busy");
+    let socket = dir.join("api.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+            axum::serve(listener, app).await.unwrap();
+        });
+    });
+    let output = run(
+        &socket,
+        &["-p", "terra", "repo", "checkout", "repo", "--target", "box"],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stderr),
+        format!("terrarium: {message} [resource_busy]\n")
+    );
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 /// Issue #13: `card edit --depends-on none` (and `--label none`) sends
@@ -1336,6 +1446,44 @@ fn agent_mode_tunnels_every_call_over_the_runner_socket() {
     assert!(text(&o.stderr).contains("cannot connect to the runner"));
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn runner_checkout_preserves_busy_code_and_existing_details_envelope() {
+    let dir = temp_dir("runner-checkout-busy");
+    let (socket, seen) = fake_runner(&dir, |p| {
+        if p["method"] == "GET" && p["path"] == "/api/projects/terra/repos" {
+            return json!({"status": 200, "headers": {}, "body": [{"id": "repo", "name": "repo"}]});
+        }
+        json!({"status": 409, "headers": {}, "body": {"error": {
+            "code": "resource_busy",
+            "message": "cannot check target python3 availability: host admission is busy; retry the command",
+            "details": {"fixture": "existing-envelope"}
+        }}})
+    });
+    let output = bin()
+        .env("TERRARIUM_AGENT", "01AGENT")
+        .env("TERRARIUM_SOCKET", socket)
+        .args([
+            "-p", "terra", "--json", "repo", "checkout", "repo", "--target", "box",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    let body: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(body["error"]["code"], "resource_busy");
+    assert_eq!(
+        body["error"]["details"],
+        json!({"fixture": "existing-envelope"})
+    );
+    let seen = seen.lock().unwrap();
+    let checkouts: Vec<_> = seen
+        .iter()
+        .filter(|r| {
+            r["params"]["method"] == "POST" && r["params"]["path"] == "/api/repos/repo/checkout"
+        })
+        .collect();
+    assert_eq!(checkouts.len(), 1);
 }
 
 /// `card attach` and `card files get` over the runner tunnel (docs/api.md

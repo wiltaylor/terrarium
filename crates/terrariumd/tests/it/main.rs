@@ -11,6 +11,7 @@ mod live_workspace;
 mod pages;
 mod read_positions;
 mod remotes;
+mod run_cancel;
 mod ssh_restart;
 mod ter221_latency;
 #[path = "../trouble.rs"]
@@ -162,6 +163,7 @@ mod skills;
 mod spawn_rights;
 #[path = "../spawns.rs"]
 mod spawns;
+mod subscription_counts;
 #[path = "../subscriptions.rs"]
 mod subscriptions;
 #[path = "../system_prompts.rs"]

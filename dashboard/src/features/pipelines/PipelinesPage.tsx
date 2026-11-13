@@ -10,7 +10,8 @@ import { useInstance } from "../../instance";
 // of the project.
 
 import { useParams } from "@solidjs/router";
-import { createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
 import type { Pipeline, PipelineRun, PipelineRunDetail, PipelineTestReport } from "../../api/types";
 import { ConfirmButton, Empty, ErrorBanner, Modal, PageHead, useNow } from "../../components/ui";
 import { ago } from "../../lib/format";
@@ -391,23 +392,40 @@ function TestReport(props: { report: PipelineTestReport }) {
 }
 
 export default function PipelinesPage() {
-  const { api, events } = useInstance();
   const params = useParams<{ project: string }>();
+  return <PipelinesPanel project={params.project} canManage />;
+}
+
+export function PipelinesPanel(props: { project: string; part?: "state" | "runs"; search?: string; canManage?: boolean; onSelectionChange?: (selection: { pipeline: string; run: string } | null) => void }) {
+  return <Show when={props.project} keyed>{(project) => <PipelinesBody {...props} project={project} />}</Show>;
+}
+
+function PipelinesBody(props: { project: string; part?: "state" | "runs"; search?: string; canManage?: boolean; onSelectionChange?: (selection: { pipeline: string; run: string } | null) => void }) {
+  const { api, events } = useInstance();
   const now = useNow(5_000);
   const [error, setError] = createSignal<unknown>(null);
   const [list, { refetch }] = createResource(
-    () => params.project,
+    () => props.project,
     (p) => api.pipelines.list(p),
   );
+  const [data, setData] = createStore<{ pipelines: Pipeline[] }>({ pipelines: [] });
+  createEffect(() => { if (list.latest) setData("pipelines", reconcile(list.latest)); });
   const [open, setOpen] = createSignal<string | null>(null);
   const [detail, setDetail] = createSignal<{ pipeline: string; run: string } | null>(null);
   const [editing, setEditing] = createSignal<Pipeline | "new" | null>(null);
   const [refreshing, setRefreshing] = createSignal<string | null>(null);
+  createEffect(on(() => props.project, () => {
+    setOpen(null);
+    setDetail(null);
+    setEditing(null);
+    setRefreshing(null);
+    setError(null);
+  }));
 
   onMount(() => {
     let t: ReturnType<typeof setTimeout> | undefined;
     const off = events.on((e) => {
-      if (e.project !== params.project || !e.kind.startsWith("pipeline.")) return;
+      if (e.project !== props.project || !e.kind.startsWith("pipeline.")) return;
       clearTimeout(t);
       t = setTimeout(() => void refetch(), 400);
     });
@@ -434,22 +452,27 @@ export default function PipelinesPage() {
     });
 
   const summary = createMemo(() => {
-    const c = stateCounts(list.latest ?? []);
+    const c = stateCounts(data.pipelines);
     const order: PipelineState[] = ["failed", "error", "waiting", "running", "queued", "success", "cancelled", "skipped", "unknown", "pending", "off"];
     return order.filter((s) => (c[s] ?? 0) > 0).map((s) => ({ s, n: c[s]! }));
   });
+  const visible = () => data.pipelines.filter((p) => !props.search || `${p.name} ${p.description ?? ""}`.toLowerCase().includes(props.search.toLowerCase()));
+  const selectRun = (selection: { pipeline: string; run: string } | null) => {
+    setDetail(selection);
+    props.onSelectionChange?.(selection);
+  };
 
   return (
     <>
       <PageHead title="Pipelines" level={2}>
-        <button class="primary" onClick={() => setEditing("new")}>
+        <Show when={props.canManage}><button class="primary" onClick={() => setEditing("new")}>
           New pipeline
-        </button>
+        </button></Show>
       </PageHead>
       <p class="muted small">
         The CI/CD runs of the project, polled on a schedule: GitHub Actions, or a script on a target for any other system (Octopus Deploy, Jenkins, GitLab). Agents add them with <code>terrarium pipeline new</code>.
       </p>
-      <Show when={summary().length}>
+      <Show when={props.part !== "runs" && summary().length}>
         <div class="row" style={{ "flex-wrap": "wrap", gap: "8px", "margin-bottom": "8px" }} aria-label="Pipelines by state">
           <For each={summary()}>
             {(x) => (
@@ -477,14 +500,14 @@ export default function PipelinesPage() {
               </tr>
             </thead>
             <tbody>
-              <For each={list.latest!}>
+              <For each={visible()}>
                 {(p) => (
                   <>
                     <tr>
                       <td>
-                        <button class="link" aria-expanded={open() === p.id} onClick={() => setOpen(open() === p.id ? null : p.id)} style={{ "font-weight": 600 }}>
+                        <Show when={props.part === undefined} fallback={<strong>{p.name}</strong>}><button class="link" aria-expanded={open() === p.id} onClick={() => setOpen(open() === p.id ? null : p.id)} style={{ "font-weight": 600 }}>
                           {open() === p.id ? "▾" : "▸"} {p.name}
-                        </button>
+                        </button></Show>
                         <div class="muted small">
                           {sourceText(p.source)}
                           <Show when={p.description}> · {p.description}</Show>
@@ -498,7 +521,7 @@ export default function PipelinesPage() {
                         <Show when={p.latest} fallback={<span class="muted small">–</span>}>
                           {(r) => (
                             <>
-                              <button class="link" onClick={() => setDetail({ pipeline: p.id, run: r().id })}>
+                              <button class="link" onClick={() => selectRun({ pipeline: p.id, run: r().id })}>
                                 {r().name ?? r().id}
                               </button>
                               <div class="muted small">
@@ -512,12 +535,12 @@ export default function PipelinesPage() {
                         {p.running ? "polling now" : p.polled_at ? ago(p.polled_at, now()) : "never"}
                       </td>
                       <td data-label="On">
-                        <label class="switch">
+                        <Show when={props.canManage} fallback={<span>{p.enabled ? "On" : "Off"}</span>}><label class="switch">
                           <input type="checkbox" checked={p.enabled} aria-label={`Poll ${p.name} on its schedule`} onChange={(e) => void act(() => api.pipelines.update(p.id, { enabled: e.currentTarget.checked }))} />
-                        </label>
+                        </label></Show>
                       </td>
                       <td>
-                        <div class="row mon-actions">
+                        <Show when={props.canManage}><div class="row mon-actions">
                           <button class="small" disabled={refreshing() === p.id || p.running} onClick={() => void refresh(p)}>
                             {refreshing() === p.id ? "Polling…" : "Refresh"}
                           </button>
@@ -525,13 +548,13 @@ export default function PipelinesPage() {
                             Edit
                           </button>
                           <ConfirmButton class="small danger" label="Delete" onConfirm={() => act(() => api.pipelines.remove(p.id))} />
-                        </div>
+                        </div></Show>
                       </td>
                     </tr>
-                    <Show when={open() === p.id}>
+                    <Show when={props.part === "runs" || (props.part === undefined && open() === p.id)}>
                       <tr>
                         <td colSpan={6}>
-                          <RunsTable pipeline={p} version={p.polled_at} now={now()} onOpen={(run) => setDetail({ pipeline: p.id, run })} />
+                          <RunsTable pipeline={p} version={p.polled_at} now={now()} onOpen={(run) => selectRun({ pipeline: p.id, run })} />
                         </td>
                       </tr>
                     </Show>
@@ -542,11 +565,11 @@ export default function PipelinesPage() {
           </table>
         </div>
       </Show>
-      <Show when={detail()}>{(d) => <RunDetail pipeline={d().pipeline} run={d().run} onClose={() => setDetail(null)} />}</Show>
+      <Show when={detail()}>{(d) => <RunDetail pipeline={d().pipeline} run={d().run} onClose={() => selectRun(null)} />}</Show>
       <Show when={editing()}>
         {(e) => (
           <PipelineDialog
-            project={params.project}
+            project={props.project}
             pipeline={e() === "new" ? undefined : (e() as Pipeline)}
             onClose={() => setEditing(null)}
             onSaved={() => {

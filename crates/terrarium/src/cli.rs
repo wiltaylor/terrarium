@@ -2639,6 +2639,27 @@ pub enum DashboardCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum PageCmd {
+    /// Read the revisioned whole layout (project pages v2)
+    Layout,
+    /// Atomically replace the whole layout from {base_revision,pages} JSON
+    SaveLayout {
+        #[arg(long)]
+        from_file: String,
+    },
+    /// Reset or re-add one built-in page
+    Reset {
+        builtin: String,
+        #[arg(long)]
+        base_revision: u64,
+    },
+    /// Replace this project's layout with another project's layout
+    Copy {
+        source_project: String,
+        #[arg(long)]
+        base_revision: u64,
+        #[arg(long)]
+        confirm: bool,
+    },
     /// List the project pages in tab order
     Ls,
     /// Show a page and its widgets
@@ -2809,7 +2830,7 @@ pub enum WaitCmd {
     },
     /// Show one wait with its result
     Show { id: String },
-    /// Cancel an open wait. `--kill` also ends the run of a process wait
+    /// Cancel an open wait. `--kill` requests cleanup and fails unless termination is verified
     Cancel {
         id: String,
         #[arg(long)]
@@ -3317,7 +3338,7 @@ pub enum RunCmd {
         #[arg(long)]
         bytes: Option<usize>,
     },
-    /// Kill a run; its wait is cancelled
+    /// Cancel a run's wait and request cleanup; nonzero unless termination is verified
     Kill { id: String },
 }
 

@@ -63,6 +63,7 @@ pub mod required_templates;
 pub mod research_helpers;
 pub mod reservations;
 pub mod reset;
+mod resource_lock;
 pub mod review_dispatcher;
 pub mod rule_script;
 pub mod rules_engine;
@@ -310,7 +311,7 @@ async fn start_with_usage_and_executor(
         )),
         started: Instant::now(),
         started_at: chrono::Utc::now(),
-        db: Db::new(conn, EventHub::default()),
+        db: Db::new(conn, EventHub::default()).with_project_pages_v2(cfg.web.project_pages_v2),
         definitions: RwLock::new(Definitions::default()),
         supervisor: cfg.supervisor.clone(),
         state_dir: cfg.state_dir.clone(),
@@ -540,6 +541,13 @@ async fn activate(
     reconcile(&state)
         .await
         .map_err(|e| anyhow::anyhow!("reconcile failed: {e}"))?;
+    // Reporting reconciliation must finish before new cleanup requests can
+    // arrive. Never race startup recovery against a live dispatch.
+    state
+        .db
+        .write_full("system", store::run_cleanup::recover)
+        .await
+        .map_err(|e| anyhow::anyhow!("cleanup reporting recovery failed: {e}"))?;
 
     warn_direct_push_deny(&state).await;
     tasks.push(spawn_prune_timer(state.clone()));

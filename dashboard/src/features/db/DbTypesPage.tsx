@@ -14,17 +14,25 @@ import { typeHref } from "./model";
 import { SchemaEditor } from "./SchemaEditor";
 
 export default function DbTypesPage() {
-  const { api, events } = useInstance();
   const params = useParams<{ project: string }>();
+  return <DbTypesPanel project={params.project} />;
+}
+
+export function DbTypesPanel(props: { project: string }) {
+  return <Show when={props.project} keyed>{(project) => <DbTypesContent project={project} />}</Show>;
+}
+
+function DbTypesContent(props: { project: string }) {
+  const { api, events } = useInstance();
   const navigate = useNavigate();
-  const [typesRes, { refetch }] = createResource(() => params.project, (p) => api.db.types(p));
+  const [typesRes, { refetch }] = createResource(() => props.project, (p) => api.db.types(p));
   // A resource in error throws when read: read it only without an error.
   const types = () => (typesRes.error ? undefined : typesRes());
   const [creating, setCreating] = createSignal(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
   // Live: a type or a record of this project changed.
   const off = events.on((e) => {
-    if ((e.kind === "db.type" || e.kind === "db.record") && e.project === params.project) {
+    if ((e.kind === "db.type" || e.kind === "db.record") && e.project === props.project) {
       clearTimeout(timer);
       timer = setTimeout(() => void refetch(), 300);
     }
@@ -61,9 +69,9 @@ export default function DbTypesPage() {
               <tbody>
                 <For each={types()}>
                   {(t) => (
-                    <tr class="clickable" onClick={() => navigate(typeHref(params.project, t.name))}>
+                    <tr class="clickable" onClick={() => navigate(typeHref(props.project, t.name))}>
                       <td>
-                        <A href={typeHref(params.project, t.name)} class="mono" onClick={(e) => e.stopPropagation()}>
+                        <A href={typeHref(props.project, t.name)} class="mono" onClick={(e) => e.stopPropagation()}>
                           {t.name}
                         </A>
                       </td>
@@ -81,13 +89,13 @@ export default function DbTypesPage() {
       </Show>
       <Show when={creating()}>
         <SchemaEditor
-          project={params.project}
+          project={props.project}
           typeNames={(types() ?? []).map((t) => t.name)}
           onClose={() => setCreating(false)}
           onSaved={(t) => {
             setCreating(false);
             void refetch();
-            navigate(typeHref(params.project, t.name));
+            navigate(typeHref(props.project, t.name));
           }}
         />
       </Show>

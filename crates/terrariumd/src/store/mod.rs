@@ -37,6 +37,7 @@ pub mod remotes;
 pub mod repos;
 pub mod reservations;
 pub mod rules;
+pub mod run_cleanup;
 pub mod schedules;
 pub mod session_refs;
 pub mod spawns;

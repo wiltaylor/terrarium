@@ -16,22 +16,66 @@ import { projectBase } from "../../lib/url";
 import { RecordModal } from "./RecordModal";
 import { SchemaEditor } from "./SchemaEditor";
 
+type RecordSearch = { q?: string; id?: string };
+
 export default function DbRecordsPage() {
-  const { api, events } = useInstance();
   const params = useParams<{ project: string; type: string }>();
-  const [search, setSearch] = useSearchParams<{ q?: string; id?: string }>();
+  const [search, setSearch] = useSearchParams<RecordSearch>();
   const navigate = useNavigate();
-  const typeName = () => decodeURIComponent(params.type);
-  const [typeRes, { refetch: refetchType, mutate: setType }] = createResource(() => ({ p: params.project, t: typeName() }), (k) => api.db.type(k.p, k.t));
+  return <DbRecordsContent project={params.project} typeName={decodeURIComponent(params.type)} search={search} onSearch={setSearch} onBack={() => navigate(`${projectBase(params.project)}/knowledge/db`)} />;
+}
+
+/** The `type:` term of a configured query, the type it selects. */
+export const queryType = (q: string | undefined) => splitTerms(q ?? "").find((t) => t.startsWith("type:"))?.slice(5) ?? "";
+
+/** `search` is a DB query: its `type:` term selects a local type, the rest seeds the query box. */
+export function DbRecordsPanel(props: { project: string; search?: string }) {
+  return <Show when={props.project} keyed>{(project) => <RecordsSelector project={project} search={props.search} />}</Show>;
+}
+
+function RecordsSelector(props: { project: string; search?: string }) {
+  const { api } = useInstance();
+  const [types] = createResource(() => props.project, (p) => api.db.types(p));
+  const [name, setName] = createSignal(queryType(props.search));
+  createEffect(on(() => props.search, (search, old) => { if (search !== old) setName(queryType(search)); }, { defer: true }));
+  const selected = () => types.error ? undefined : types()?.find((t) => t.name === name())?.name;
+  return (
+    <>
+      <label class="row">Record type
+        <select aria-label="Record type" value={name()} onChange={(e) => setName(e.currentTarget.value)}>
+          <option value="">Choose a type</option>
+          <For each={types.error ? [] : types()}>{(t) => <option value={t.name}>{t.name}</option>}</For>
+        </select>
+      </label>
+      <ErrorBanner error={types.error} />
+      <Show when={selected()} keyed fallback={<Empty>{types.loading ? "Loading…" : name() ? "Not Found" : "Choose a type."}</Empty>}>
+        {(typeName) => <LocalRecords project={props.project} typeName={typeName} search={queryType(props.search) === typeName ? props.search : undefined} onBack={() => setName("")} />}
+      </Show>
+    </>
+  );
+}
+
+function LocalRecords(props: { project: string; typeName: string; search?: string; onBack: () => void }) {
+  const [search, setSearch] = createSignal<RecordSearch>(props.search ? { q: props.search } : {});
+  createEffect(on(() => props.search, (q, old) => { if (q !== old) setSearch((s) => ({ ...s, q })); }, { defer: true }));
+  return <DbRecordsContent project={props.project} typeName={props.typeName} search={search()} onSearch={(patch) => setSearch((old) => ({ ...old, ...patch }))} onBack={props.onBack} />;
+}
+
+function DbRecordsContent(props: { project: string; typeName: string; search: RecordSearch; onSearch: (patch: RecordSearch) => void; onBack: () => void }) {
+  const { api, events } = useInstance();
+  const typeName = () => props.typeName;
+  const [typeRes, { refetch: refetchType, mutate: setType }] = createResource(() => ({ p: props.project, t: typeName() }), (k) => api.db.type(k.p, k.t));
   // A resource in error throws when read: read it only without an error.
   const type = () => (typeRes.error ? undefined : typeRes());
-  const [types, { refetch: refetchTypes }] = createResource(() => params.project, (p) => api.db.types(p).catch(() => []));
+  const [types, { refetch: refetchTypes }] = createResource(() => props.project, (p) => api.db.types(p).catch(() => []));
 
-  const initial = () => (search.q ? withType(search.q, typeName()) : `type:${typeName()}`);
+  // Local selection replaces search objects. Only a changed q resets query/draft.
+  const searchQuery = createMemo(() => props.search.q);
+  const initial = () => (searchQuery() ? withType(searchQuery()!, typeName()) : `type:${typeName()}`);
   const [query, setQuery] = createSignal(initial());
   const [draft, setDraft] = createSignal(initial());
   createEffect(
-    on([() => params.type, () => search.q], () => {
+    on([() => props.typeName, searchQuery], () => {
       setQuery(initial());
       setDraft(initial());
     }, { defer: true }),
@@ -48,7 +92,7 @@ export default function DbRecordsPage() {
     setLoading(true);
     try {
       const cursor = more ? pages().at(-1)?.next_cursor : undefined;
-      const r = await api.db.query(params.project, q, { cursor });
+      const r = await api.db.query(props.project, q, { cursor });
       if (mine !== token) return;
       setPages((p) => (more ? [...p, r] : [r]));
       setQueryError(null);
@@ -60,10 +104,11 @@ export default function DbRecordsPage() {
       if (mine === token) setLoading(false);
     }
   };
-  createEffect(on([query, () => params.project], () => void load()));
+  createEffect(on([query, () => props.project], () => void load()));
 
   const first = () => pages()[0];
   const records = createMemo(() => pages().flatMap((p) => p.records));
+  const recordsById = createMemo(() => new Map(records().map((record) => [record.id, record])));
   const labels = createMemo(() => Object.assign({}, ...pages().map((p) => p.labels)) as Record<string, string>);
   const hasFields = () => splitTerms(query()).some((t) => t.startsWith("fields:"));
 
@@ -87,30 +132,31 @@ export default function DbRecordsPage() {
   // The record dialog: `?id=` opens a record; "new" a new one.
   const [creating, setCreating] = createSignal(false);
   const [open] = createResource(
-    () => (search.id ? { p: params.project, id: search.id } : undefined),
+    () => (props.search.id ? { p: props.project, id: props.search.id } : undefined),
     (k) => api.db.record(k.p, k.id).catch(() => null),
   );
   // A resource keeps its last value when its source goes: read it only while `?id=` is set.
-  const openRecord = () => (search.id ? (open() ?? undefined) : undefined);
-  const closeRecord = () => setSearch({ id: undefined });
+  const openRecord = () => (props.search.id ? (open() ?? undefined) : undefined);
+  const closeRecord = () => props.onSearch({ id: undefined });
   const [schema, setSchema] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
 
   // Live: a change of this type reloads the page and the type.
   let timer: ReturnType<typeof setTimeout> | undefined;
   const off = events.on((e) => {
-    if (e.project !== params.project || (e.kind !== "db.record" && e.kind !== "db.type")) return;
+    if (e.project !== props.project || (e.kind !== "db.record" && e.kind !== "db.type")) return;
     if (e.data.type !== typeName()) return;
     clearTimeout(timer);
     timer = setTimeout(() => {
       void load();
       if (e.kind === "db.type") {
-        if (e.data.change === "deleted") navigate(`${projectBase(params.project)}/knowledge/db`);
+        if (e.data.change === "deleted") props.onBack();
         else void refetchType();
       }
     }, 300);
   });
   onCleanup(() => {
+    token++;
     off();
     clearTimeout(timer);
   });
@@ -126,8 +172,8 @@ export default function DbRecordsPage() {
     const t = type();
     if (!t) return;
     try {
-      await api.db.removeType(params.project, t.name, t.records > 0 ? "records" : "true");
-      navigate(`${projectBase(params.project)}/knowledge/db`);
+      await api.db.removeType(props.project, t.name, t.records > 0 ? "records" : "true");
+      props.onBack();
     } catch (e) {
       setError(e);
     }
@@ -140,7 +186,7 @@ export default function DbRecordsPage() {
       <PageHead
         title={
           <span>
-            <A href={`${projectBase(params.project)}/knowledge/db`}>DB</A> / <span class="mono">{typeName()}</span>
+            <A href={`${projectBase(props.project)}/knowledge/db`}>DB</A> / <span class="mono">{typeName()}</span>
           </span>
         }
         level={2}
@@ -268,12 +314,15 @@ export default function DbRecordsPage() {
                           </tr>
                         </thead>
                         <tbody>
-                          <For each={records()}>
-                            {(rec: DbRecord) => (
-                              <tr class="clickable" tabIndex={0} onClick={() => setSearch({ id: rec.id })} onKeyDown={(e) => e.key === "Enter" && setSearch({ id: rec.id })}>
-                                <For each={columns()}>{(c) => <td class={`db-cell db-cell-${c.kind}`}>{cellText(c, columnValue(c, rec), labels())}</td>}</For>
+                          <For each={records().map((record) => record.id)}>
+                            {(id) => {
+                              const rec = (): DbRecord => recordsById().get(id)!;
+                              return (
+                              <tr class="clickable" tabIndex={0} onClick={() => props.onSearch({ id })} onKeyDown={(e) => e.key === "Enter" && props.onSearch({ id })}>
+                                <For each={columns()}>{(c) => <td class={`db-cell db-cell-${c.kind}`}>{cellText(c, columnValue(c, rec()), labels())}</td>}</For>
                               </tr>
-                            )}
+                              );
+                            }}
                           </For>
                         </tbody>
                       </table>
@@ -318,11 +367,11 @@ export default function DbRecordsPage() {
 
       {/* Keyed: another record makes a new dialog with its own form. */}
       <Show when={type() ? (creating() ? "new" : openRecord()?.id) : undefined} keyed>
-        {(k) => <RecordModal project={params.project} type={type()!} record={k === "new" ? undefined : openRecord()} onClose={() => (setCreating(false), closeRecord())} onSaved={afterSave} onDeleted={afterSave} />}
+        {(k) => <RecordModal project={props.project} type={type()!} record={k === "new" ? undefined : openRecord()} onClose={() => (setCreating(false), closeRecord())} onSaved={afterSave} onDeleted={afterSave} />}
       </Show>
       <Show when={schema() && type()}>
         <SchemaEditor
-          project={params.project}
+          project={props.project}
           type={type()!}
           typeNames={(types() ?? []).map((t) => t.name)}
           onClose={() => setSchema(false)}
@@ -337,7 +386,7 @@ export default function DbRecordsPage() {
       </Show>
       <Show when={!type() && !typeRes.loading && !typeRes.error}>
         <Empty>
-          No type <span class="mono">{typeName()}</span>. <A href={`${projectBase(params.project)}/knowledge/db`}>All types</A>
+          No type <span class="mono">{typeName()}</span>. <A href={`${projectBase(props.project)}/knowledge/db`}>All types</A>
         </Empty>
       </Show>
     </>

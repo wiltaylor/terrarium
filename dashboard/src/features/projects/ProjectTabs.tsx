@@ -8,6 +8,9 @@ import { useInstance } from "../../instance";
 import { ErrorBanner } from "../../components/ui";
 import { PROJECT_TABS } from "../../app/nav";
 import type { TabBadge } from "./tabCounts";
+import { combineWidgetBadges } from "../pages/widgetBadges";
+import { widgetBadgeSources } from "../pages/widgetRegistry";
+import { projectPagesEnabled } from "../pages/pageCapability";
 
 /**
  * `base` is the encoded project URL, `/p/<name>`. `active` says which tab path is selected.
@@ -15,10 +18,13 @@ import type { TabBadge } from "./tabCounts";
  */
 export function ProjectTabs(props: { base: string; active: (path: string) => boolean; badge?: (path: string) => TabBadge | null }) {
   const location = useLocation();
-  const { api, events } = useInstance();
+  const { api, events, key: instanceKey } = useInstance();
   const navigate = useNavigate();
   const project = () => decodeURIComponent(props.base.split("/").pop()!);
-  const [pages, { refetch }] = createResource(project, p => api.pages.list(p));
+  const scope = () => `${instanceKey}/${project()}`;
+  const [scopedPages, { refetch }] = createResource(scope, async current => ({ scope: current, value: await api.pages.list(project()) }));
+  const pages = { get latest() { return !scopedPages.error && scopedPages.latest?.scope === scope() ? scopedPages.latest.value : undefined; }, get error() { return scopedPages.error; } };
+  const enabled = () => projectPagesEnabled(scopedPages.latest, scope(), scopedPages.error);
   const [adding, setAdding] = createSignal(false);
   const [slug, setSlug] = createSignal("");
   const [title, setTitle] = createSignal("");
@@ -55,7 +61,15 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
     // Route links, not an ARIA tablist: every tab is a page.
     <nav ref={tabs} class="tabs project-tabs" aria-label="Project">
       <For each={pages.latest?.items}>{page => {
-        const badge = () => page.slug === (pages.latest?.dashboard_slug ?? "dashboard") ? props.badge?.("dashboard") : null;
+        // No question-bearing v2 part is defined yet. C7 must preserve this
+        // alias fallback until explicit question metadata replaces it.
+        const badge = () => {
+          const alias = page.slug === (enabled() ? pages.latest?.dashboard_slug : pages.latest?.dashboard_slug ?? "dashboard");
+          if (!enabled()) return alias ? props.badge?.("dashboard") : null;
+          return combineWidgetBadges([
+            ...widgetBadgeSources(page.widgets), ...(alias ? ["dashboard" as const] : []),
+          ], source => props.badge?.(source) ?? null);
+        };
         return <A href={`${props.base}/pages/${page.slug}`} class={props.active(`pages/${page.slug}`) ? "active" : undefined} activeClass="" inactiveClass="" title={badge()?.text}>
           {page.title}<Show when={badge()}>{b => <><span class={b().cls} aria-hidden="true">{b().n}</span><span class="sr-only">, {b().text}</span></>}</Show>
         </A>;

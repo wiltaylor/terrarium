@@ -57,6 +57,10 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Read-only native acceptance probe, run through an ordinary exec session.
+    #[cfg(windows)]
+    #[command(hide = true)]
+    IdentityProbe,
     /// Run under the Windows Service Control Manager as LocalSystem.
     #[cfg(windows)]
     Service,
@@ -211,6 +215,8 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
     let mut caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
     let paths = cfg.paths();
     caps.no_workspaces = !terrarium_host::workspace::available(&paths.work_dir);
+    caps.windows_run_as = cfg!(windows) && cfg.windows_run_as.enabled;
+    caps.no_workspaces |= cfg!(windows);
     if cfg.native_gpu.enabled {
         caps.native_gpu = Some(terrarium_host::native::capability(&cfg.native_gpu.socket).await);
     }
@@ -390,6 +396,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let token = cfg.resolve_token()?;
     let name = cfg.resolve_name();
     let mut caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
+    caps.windows_run_as = cfg!(windows) && cfg.windows_run_as.enabled;
     caps.no_workspaces =
         cfg!(windows) || !terrarium_host::workspace::available(&cfg.paths().work_dir);
     if caps.no_workspaces {
@@ -448,6 +455,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         });
     }
     let mut opts = ClientOptions::new(url, token, name);
+    opts.windows_run_as = cfg.windows_run_as.clone();
     opts.native = opts_native;
     opts.capabilities = caps;
     opts.max_sessions = cfg.max_sessions;
@@ -542,6 +550,27 @@ fn main() -> anyhow::Result<()> {
         return windows_service_host::dispatch();
     }
     match &args.command {
+        #[cfg(windows)]
+        Some(Cmd::IdentityProbe) => {
+            let token = terrarium_winapi::current_token_snapshot()?;
+            let environment: std::collections::BTreeMap<_, _> =
+                ["USERPROFILE", "USERNAME", "USERDOMAIN", "TEMP"]
+                    .into_iter()
+                    .map(|key| (key, std::env::var(key).ok()))
+                    .collect();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "user_sid": token.user_sid,
+                    "elevation_type": token.elevation_type,
+                    "elevated": token.elevated,
+                    "administrators_enabled": token.administrators_enabled,
+                    "administrators_deny_only": token.administrators_deny_only,
+                    "environment": environment,
+                })
+            );
+            return Ok(());
+        }
         Some(Cmd::TokenFile { path }) => return write_token_file(path),
         Some(Cmd::Cert { names, out, force }) => return write_cert(names, out, *force),
         Some(Cmd::Fingerprint { cert }) => return fingerprint(cert),
@@ -565,7 +594,7 @@ fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new().context("start the runtime")?;
     match args.command {
         #[cfg(windows)]
-        Some(Cmd::Service) => unreachable!("handled by the service dispatcher"),
+        Some(Cmd::Service | Cmd::IdentityProbe) => unreachable!("handled before config loading"),
         Some(Cmd::Check { json, probe }) => rt.block_on(check(&cfg, json, probe)),
         Some(Cmd::Run) | None => rt.block_on(run(cfg)),
         Some(

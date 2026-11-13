@@ -2575,6 +2575,7 @@ impl Drop for DatabaseScope {
 /// run on the blocking pool. Synchronous journal calls document their locks.
 #[derive(Clone)]
 pub struct Db {
+    project_pages_v2: bool,
     conn: Arc<Mutex<Connection>>,
     hub: EventHub,
     /// The redaction matcher (PLAN §16b.6). Each write transaction takes a
@@ -2593,11 +2594,18 @@ pub struct Db {
 impl Db {
     pub fn new(conn: Connection, hub: EventHub) -> Self {
         Self {
+            project_pages_v2: false,
             conn: Arc::new(Mutex::new(conn)),
             hub,
             redactor: RedactorHandle::default(),
             host_pins: Arc::default(),
         }
+    }
+
+    /// Carry the server capability into every compatibility writer.
+    pub fn with_project_pages_v2(mut self, enabled: bool) -> Self {
+        self.project_pages_v2 = enabled;
+        self
     }
 
     /// The lock of [`crate::jobs::prepare_hosts`] on this database.
@@ -2749,6 +2757,7 @@ impl Db {
     {
         let conn = self.conn.clone();
         let actor = actor.into();
+        let project_pages_v2 = self.project_pages_v2;
         // The link of the request (TER-61 review round 5, F9): the
         // task-local is gone inside the blocking task, so take it here. An
         // actor label `link:<id>` counts too.
@@ -2790,6 +2799,7 @@ impl Db {
                     // its first write; SQLite does not wait in that case.
                     let tx = guard.transaction_with_behavior(TransactionBehavior::Immediate)?;
                     let mut t = Tx {
+                        project_pages_v2,
                         tx,
                         actor,
                         link,
@@ -2862,6 +2872,7 @@ impl Db {
 
 /// A write transaction with the actor and the events and audit rows it made.
 pub struct Tx<'c> {
+    pub project_pages_v2: bool,
     tx: rusqlite::Transaction<'c>,
     /// `operator`, `agent:<ulid>`, `system`, or `schedule:<ulid>` (the
     /// writes of a trigger run).
@@ -2960,6 +2971,7 @@ impl<'c> Tx<'c> {
     #[cfg(test)]
     pub fn for_test(tx: rusqlite::Transaction<'c>, actor: &str) -> Self {
         Self {
+            project_pages_v2: false,
             tx,
             actor: actor.to_owned(),
             link: actor.strip_prefix("link:").map(str::to_owned),
@@ -4794,6 +4806,41 @@ mod tests {
             conn.execute("UPDATE waits SET kind = 'bogus' WHERE id = 'W1'", [])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn run_cleanup_migration_never_backfills_legacy_success() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
+        let before: Vec<_> = NAMED_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|(name, _)| *name != "ter-1059-run-cleanup.sql")
+            .collect();
+        migrate_named(&mut conn, &before).unwrap();
+        conn.execute("INSERT INTO waits (id,agent,project,kind,spec,summary,state,result,created_by,created_at) VALUES ('legacy','owner','p','process','{}','old run','cancelled','{\"outcome\":\"cancelled\"}','operator','old')", []).unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), 1);
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM run_cleanup", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(migrate(&mut conn).unwrap(), 0);
+        let result: String = conn
+            .query_row("SELECT result FROM waits WHERE id='legacy'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(result, "{\"outcome\":\"cancelled\"}");
+        conn.execute("INSERT INTO run_cleanup (operation_id,wait_id,project,owner,requester,schema_version,requested_at,updated_at,phase,status,reason) VALUES ('op','legacy','p','owner','operator',1,'t','t','queued','pending','intent_recorded')", []).unwrap();
+        assert!(
+            conn.execute("UPDATE run_cleanup SET status='verified_terminated'", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute("UPDATE run_cleanup SET phase='replayed'", [])
+                .is_err()
+        );
+        assert!(conn.execute("INSERT INTO run_cleanup SELECT 'duplicate',wait_id,project,owner,requester,session,target,schema_version,requested_at,updated_at,phase,status,reason,diagnostic FROM run_cleanup", []).is_err());
     }
 
     #[test]

@@ -20,6 +20,38 @@ fn plan(script: &str) -> ExecPlan {
     }
 }
 
+#[tokio::test]
+async fn disabled_run_as_never_attempts_password_logon() {
+    let error = terrarium_host::windows_run_as::logon(
+        Some(terrarium_host::protocol::WindowsRunAs {
+            account: "INVALID\\unprovisioned".into(),
+            password: "non-secret-fixture".into(),
+        }),
+        &Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.message.contains("disabled"));
+    assert!(!error.message.contains("non-secret-fixture"));
+}
+
+#[tokio::test]
+async fn windows_copy_worker_commits_and_aborts_temporary_files() {
+    use terrarium_host::transfer::{PushFile, sha256_hex};
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("output.bin");
+    let mut file = PushFile::open(&destination, None, false, 1).await.unwrap();
+    file.write(b"binary\0fixture").await.unwrap();
+    let expected = sha256_hex(b"binary\0fixture");
+    assert_eq!(file.finish(14, &expected).await.unwrap(), (14, expected));
+    assert_eq!(std::fs::read(&destination).unwrap(), b"binary\0fixture");
+    let mut partial = PushFile::open(&destination, None, false, 2).await.unwrap();
+    partial.write(b"partial").await.unwrap();
+    partial.abort().await;
+    assert_eq!(std::fs::read(&destination).unwrap(), b"binary\0fixture");
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
 #[test]
 fn linux_update_offer_is_refused_before_staging() {
     use terrarium_host::protocol::UpdateOffer;

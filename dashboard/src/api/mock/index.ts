@@ -2196,6 +2196,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const pageWrite = (p: string) => { pageRead(p); if (!pageCanEdit(p)) fail(403, "forbidden", "editing project pages needs project_admin"); };
   const api: Api & { world: MockWorld } = {
     pages: {
+      layout: (project) => reply(() => { pageRead(project); return fail(403, "forbidden", "project pages v2 is disabled"); }),
+      saveLayout: (project) => reply(() => { pageWrite(project); return fail(403, "forbidden", "project pages v2 is disabled"); }),
+      resetLayout: (project) => reply(() => { pageWrite(project); return fail(403, "forbidden", "project pages v2 is disabled"); }),
+      copyLayout: (project) => reply(() => { pageWrite(project); return fail(403, "forbidden", "project pages v2 is disabled"); }),
       list: (project) => reply(() => { pageRead(project); return { items: structuredClone([...customPages.values()].filter(p => p.project === project).sort((a, b) => a.position - b.position || a.slug.localeCompare(b.slug))), can_edit: pageCanEdit(project) }; }),
       get: (project, slug) => reply(() => {
         pageRead(project);
@@ -2209,6 +2213,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         if (!customPages.has(`${project}/${slug}`) && [...customPages.values()].filter(p => p.project === project).length >= 10) fail(422, "invalid", "at most 10 pages");
         if (body.widgets.length > 100) fail(422, "invalid", "at most 100 widgets");
         for (const widget of body.widgets) {
+          if (!["markdown", "wiki", "stat", "status", "chart", "text", "table", "actions", "monitor_summary", "job_queue", "eta_accuracy"].includes(widget.kind) ||
+            (widget.frame !== undefined && widget.frame !== "grid") || Object.keys(widget.options ?? {}).some(key => !["range", "sparkline", "decimals"].includes(key))) {
+            fail(403, "forbidden", "project pages v2 is disabled");
+          }
           if (widget.x < 0 || widget.x + widget.w > 12 || widget.y < 0 || widget.y + widget.h > 10000 || widget.w < 1 || widget.h < 1) fail(422, "invalid", "widget exceeds grid bounds (12 columns, 10000 rows)");
           if (widget.kind === "markdown" && new TextEncoder().encode(widget.text ?? "").length > 16384) fail(422, "invalid", "Markdown exceeds 16384 bytes");
           if (widget.kind === "wiki" && !/^[a-z0-9_.-]+(?:\/[a-z0-9_.-]+)*$/.test(widget.wiki ?? "")) fail(422, "invalid", "invalid wiki path");
@@ -3516,7 +3524,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         s.cloud = { ...input };
         return subView(s);
       }),
-      list: () => reply(() => w.subscriptions.map(subView)),
+      list: () => reply(() => w.subscriptions.map((s) => ({
+        ...subView(s),
+        assigned_agent_count: w.agents.filter((a) => (a.subscription ?? (a.harness !== "pi" ? w.subscriptions.find((d) => d.default && d.account?.harness === a.harness)?.name : undefined)) === s.name).length,
+        assigned_agent_count_scope: "all_projects" as const,
+      }))),
       get: (name) => reply(() => subView(sub(name))),
       create: (def) =>
         reply(() => {

@@ -45,6 +45,9 @@ pub struct ExecPlan {
     /// Shared Windows holder budget. Each session also gets its own child job.
     #[cfg(windows)]
     pub windows_holder: Option<Arc<terrarium_winapi::Job>>,
+    /// A completed logon, never the delivered password.
+    #[cfg(windows)]
+    pub windows_identity: Option<Arc<terrarium_winapi::Identity>>,
     pub program: String,
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
@@ -282,7 +285,14 @@ fn check_cwd(plan: &ExecPlan) -> Result<(), SpawnError> {
         path: path.clone(),
         source,
     };
-    match std::fs::metadata(path) {
+    #[cfg(windows)]
+    let metadata = match plan.windows_identity.as_deref() {
+        Some(identity) => identity.with_impersonation(|| std::fs::metadata(path)),
+        None => std::fs::metadata(path),
+    };
+    #[cfg(unix)]
+    let metadata = std::fs::metadata(path);
+    match metadata {
         Ok(m) if m.is_dir() => Ok(()),
         Ok(_) => Err(err(std::io::Error::from(std::io::ErrorKind::NotADirectory))),
         Err(e) => Err(err(e)),

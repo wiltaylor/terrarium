@@ -97,7 +97,7 @@ pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
         stdin,
         stdout,
         stderr,
-    } = terrarium_winapi::spawn_in_holder(
+    } = terrarium_winapi::spawn_with_context(
         std::path::Path::new(&plan.program),
         &plan.args,
         plan.cwd.as_deref(),
@@ -107,7 +107,10 @@ pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
             rows: p.rows,
         }),
         Limits::default(),
-        plan.windows_holder.as_deref(),
+        terrarium_winapi::SpawnContext {
+            holder: plan.windows_holder.as_deref(),
+            identity: plan.windows_identity.as_ref(),
+        },
     )
     .map_err(|source| SpawnError::Io {
         program: plan.program.clone(),

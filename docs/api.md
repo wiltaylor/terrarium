@@ -351,6 +351,7 @@ gives them to the routers and the mail code.
 | `TERRARIUM_ARTIFACT_LISTEN` | `--artifact-listen` | `0.0.0.0:8081` | The artifact origin listener. Empty: none, and the dashboard port serves `/a/...`. |
 | `TERRARIUM_ARTIFACT_PUBLIC_URL` | `--artifact-public-url` | unset | The artifact origin in signed URLs and the CSP. |
 | `TERRARIUM_WS_QUERY_TOKEN` | `--ws-query-token` | `0` | `1`: take `?token=` on an upgrade. |
+| `TERRARIUM_PROJECT_PAGES_V2` | `--project-pages-v2` | `0` | Staged project-page layout capability. Strict switch parser. Deployment activation and explicit default initialization belong to C7 (TER-1077). |
 | `TERRARIUM_SESSION_TTL` | `--session-ttl` | `30d` | The life of a session cookie. The daemon renews it past half its life. |
 | `TERRARIUM_CLI_SESSION_TTL` | `--cli-session-ttl` | `90d` | The life of a CLI session token (`terrarium login`). |
 | `TERRARIUM_SESSION_MAX_AGE` | `--session-max-age` | `90d` | The longest life of a dashboard session through its renewals, from the login. |
@@ -3190,8 +3191,44 @@ redacted from the output, the log, and the tail, and writes a
 | `POST /api/agents/{id}/waits` | below | `201` the wait | the agent itself, the operator |
 | `POST /api/agents/{id}/run` | `{"target", "cmd": [..], "name"?, "cwd"?, "env"?, "timeout"?, "reason"?, "agent"?}` | `201 {"wait", "session_id", "target"}` | the agent itself, the operator; the run uses the agent's rights |
 | `GET /api/waits/{id}` | | `200` the wait | as for the list; else `404` |
-| `DELETE /api/waits/{id}` | `?kill=true` also ends the run of a `process` wait: on a `host`, `docker`, or `ssh` target each process of the process group and session of the run gets `TERM`, then `KILL` after 5 s | `200` the cancelled wait; with a kill on such a target also `kill`: `{pid, term, kill, left}` (the PIDs on the target that got `TERM`, needed `KILL`, and still run), with `pid_dir_refused` (the path) when the private PID directory `/tmp/terrarium-run-<uid>` was refused as a symlink or another user's, so the run had no PID file, or `{error}`; a wait that is not open is `409 conflict` | as for the list |
+| `DELETE /api/waits/{id}` | `?kill=true` requests one cleanup attempt for a `process` wait; other kinds are rejected before mutation | `200` wait plus `cleanup` for kill requests. HTTP success means accepted/retrieved, not termination. Ordinary cancel still returns `409` for a terminal wait. | as for the list |
 | `GET /api/waits/{id}/log` | `?max=` bytes (at most 65536) | `200 {"wait_id", "session_id", "target", "running", "output", "end"?}` | as for the list; a wait that is not `process` is `422` |
+
+Cleanup reporting (TER-1059):
+
+- `wait.state` describes notification/cancellation, not whether processes or
+  inherited resource locks survive. `GET /api/waits/{id}` exposes the same
+  persisted `cleanup` after the wait becomes terminal.
+- `cleanup` contains `operation_id`, `status`, `reason`, `requested_at`,
+  `updated_at`, `evidence_kind`, and optional bounded `diagnostic` counts.
+  Counts from legacy reports are untrusted diagnostics, not owned identities.
+  Raw errors, paths and PIDs are not stored in cleanup diagnostics.
+- Current statuses are `pending`, `unknown`, and `unavailable`. No legacy
+  report, including an empty list, can produce `remaining` or
+  `verified_terminated`. Missing, null, malformed or error reports cannot
+  prove cleanup. Ordinary cancellation with no intent is `not_requested` on
+  GET. A kill retry without recorded intent is `unavailable/no_recorded_intent`
+  with a null operation ID.
+- The open-to-cancelled CAS and unique intent insert commit together before
+  control. The daemon claims a live owned control route, durably records
+  dispatch with status `unknown`, and attempts control at most once. Report collection has a 12-second
+  deadline and survives an HTTP disconnect. A live owned route without a report
+  recipe still receives one control request and reports `unknown/control_sent_no_report`,
+  never verified termination. A failed dispatch/receipt write
+  leaves conservative durable state. Startup marks orphaned queued operations
+  unavailable and dispatched ones unknown. It never replays a kill.
+- Concurrent or terminal kill retries read the same operation. Legacy terminal
+  waits and ordinary cancelled waits never acquire fresh kill authority. Each
+  request uses the wait's existing authorization, including project-admin
+  delegation. The operation ID is not a bearer capability. Project, owner,
+  logical session and target snapshots cannot be rebound and are attribution,
+  not physical kill selectors.
+- `terrarium run kill` prints wait and cleanup status separately and emits JSON
+  before returning nonzero unless termination is actually verified. The current
+  legacy route cannot provide that proof. Missing/old-server cleanup is also
+  nonzero. Inspect the same wait operation rather than starting a fresh kill.
+  Ordinary wait cancellation retains its success semantics. Persisted physical
+  identities, trusted termination receipts and host update lifetime are TER-1060.
 
 The create body:
 
@@ -5873,6 +5910,8 @@ A subscription:
 | `held_agents` | Agents whose turns wait after a usage-limit error on this subscription (cause `limit:<subscription>`, §16.6). |
 | `account` | The plan account of the subscription (PLAN §16.3), when it has one: `harness` (whose login it holds), `has_login` (the credential file is there), `login` (the Copilot login name, or the email of a Claude login), `source` (`migration`: the shared login moved here at a daemon start; `login`: the login wizard), `created_at`, `updated_at`. Never a secret. |
 | `agents` | The agents whose current `subscription` this is: `[{id, name, project}]`. Always present. |
+| `assigned_agent_count` | List responses only: effective stored assignments among actor-readable agents, all statuses and extant ephemeral agents. Explicit subscription wins, otherwise Claude, Codex and Copilot inherit their harness default. Pi does not inherit. Disabled subscriptions retain assignments. Known zero is `0`; absent means unavailable, not zero. |
+| `assigned_agent_count_scope` | With the count: `all_projects` for the operator and existing all-project readers, otherwise `project`, with `assigned_agent_count_project` naming the reader's project. Not a running-agent count or pool membership count. Single-item and mutation responses omit these fields. |
 | `session_period` | `{since, until}` in RFC 3339 UTC. The longest active probe window (`monthly`, `<n>h` or `<n>d`), otherwise the current UTC calendar month. The start is inclusive and the end exclusive. |
 | `sessions` | Newest-first sessions overlapping `session_period`, including retained sessions of removed ephemeral agents. Each has `id`, `agent_id`, `agent` (name), `project`, `harness`, `started_at`, optional `ended_at`, `removed`, and nullable `model`, `card`, `input_tokens`, `output_tokens`. Token totals count only usage within the period. Usage samples attribute historical subscriptions, otherwise the live agent's current subscription is used. Model and card are representative values when several occur. Cost is not available. The dashboard and CLI subscription show consume this same list. Earlier-period navigation is not provided. |
 | `default` | `true` when the plan account is the default account of its harness (PLAN §16.3): a Claude Code, Codex, or Copilot agent with no subscription runs on it. Each harness has one default or none. Always present. |
@@ -11395,6 +11434,99 @@ to project Settings, Monitors. GET/PUT `/api/projects/{name}/dashboard`
 and the dashboard CLI remain compatibility aliases for at least one release.
 The alias reads an empty layout if the mapped page was deleted. Saving it
 replaces monitor/Markdown widgets and preserves system and wiki widgets.
+
+#### Project page layout v2 (staged, default OFF)
+
+`GET /api/projects/{name}/pages` additionally returns
+`capabilities: {project_pages_v2: boolean}`. Only exact `true` from the
+current project's current instance enables the v2 UI. Missing, failed or
+stale responses are OFF. `can_edit` remains independent. OFF retains the
+shipped custom-page CRUD, limits and navigation, rejects new widget kinds,
+options and frames, and returns 404 for authorized v2 calls. Write rights
+are checked first, so unauthorized writers receive 403 even while OFF.
+There is no frontend flag or GET-triggered initialization.
+
+The new collection URL deliberately differs from `/pages/{slug}` so an
+existing custom page named `layout` remains accessible:
+
+| Method and path under `/api/projects/{name}` | Body / result |
+|---|---|
+| GET `/page-layout` | `{revision,pages}` snapshot |
+| PUT `/page-layout` | `{base_revision,pages}` replaces the whole layout |
+| POST `/page-layout/reset` | `{base_revision,builtin}` resets or re-adds one built-in |
+| POST `/page-layout/copy` | `{base_revision,source_project,confirm:true}` replaces target with source layout |
+
+All writes return the canonical snapshot. Input pages contain exactly
+`{slug,title,position,widgets,builtin?}`. `position` must equal the array
+index. At most 30 pages, unique slugs and unique non-null built-in identities
+are allowed. Response pages retain `project`, `updated_at`, `updated_by`
+and optional `builtin`. Built-in identity is independent of the slug:
+`board`, `tests`, `schedules`, `rules`, `agents`, `repos`, `knowledge`,
+`pipelines`, `calendar`, `logs`. Settings is excluded.
+
+The required nonnegative `base_revision` is compared under the same
+IMMEDIATE transaction as validation and replacement. A stale base returns
+409 `conflict`, with `error.details.revision` containing the current revision.
+Clients retain their draft and can GET the current snapshot. Validation or
+conflict changes no rows, revision, audit or events. Successful bulk writes
+increment once and emit one `page.layout` audit and one `page.updated` event
+with `{project,revision,operation}`. Operation is `replace`, `copy`, `reset`
+or `initialize`. Enabled legacy slug saves/deletes, dashboard-alias saves
+and dashboard monitor removal also increment the revision and add
+`revision` and `operation` to their existing event payloads.
+
+V2 widgets retain stable IDs and all existing grid/content bounds. Optional
+`frame` is `grid`, `full_width` or `viewport`. Absent means legacy grid.
+The latter two require `x=0,w=12`. The client owns viewport sizing, document
+scrolling and phone stacking, without changing saved cells. Duplicate kinds
+are valid independent instances with distinct IDs and options.
+
+Existing kinds retain only `range`, `sparkline`, `decimals` options.
+New kinds have no `text`, `wiki` or `monitor` source and accept only optional
+`search` (at most 256 UTF-8 bytes) and `view` from this table. Absent `view`
+means the first listed value. Unknown fields/values and project overrides
+are rejected. Options are validated per kind, never arbitrary JSON.
+
+| Kind | Allowed view values |
+|---|---|
+| `board` | `lanes`, `done`, `columns` |
+| `tests` | `runs` |
+| `schedules` | `schedules`, `triggers`, `event_sources` |
+| `rules` | `flow`, `lint`, `table`, `last_runs` |
+| `agents` | `agents`, `card_agents` |
+| `repos` | `list`, `files` |
+| `wiki_index` | `browser` |
+| `memory` | `list`, `graph` |
+| `db` | `types`, `records` |
+| `pipelines` | `state`, `runs` |
+| `calendar` | `month`, `week`, `agenda` |
+| `mail` | `messages` |
+| `events` | `events` |
+
+The explicit idempotent initializer appends exactly ten built-in pages after
+existing custom pages and the migrated Dashboard, preserving their content,
+metadata and order. It uses the first free `name`, `name-1`, `name-2`, … slug.
+Each view above is a separate default widget, except Calendar defaults to
+month. Knowledge contains wiki browser, memory list/graph and DB types/records.
+Logs contains mail and events. Reset uses the same definitions and affects
+only the selected built-in. A stored initialized marker prevents restart
+from restoring deleted built-ins. Schema migrations add only empty metadata.
+C7 owns calling the initializer before enabled responses and during enabled
+new-project creation. This implementation does not call it automatically.
+
+Copy requires source read plus target administration rights and confirmation.
+It copies neither grants nor source audit actor metadata. References remain
+target-local, including missing wiki paths/monitor IDs. A foreign monitor ID
+is treated as missing in the target, not as permission to read source data.
+Renderers must resolve IDs against the target project's monitor inventory,
+not fetch a global ID because the caller also has source-project rights.
+Existing resource endpoints retain their authorization checks. Compatible
+existing local monitor references are validated normally.
+
+CLI: `page layout`, `page save-layout --from-file FILE`,
+`page reset BUILTIN --base-revision N`, and
+`page copy SOURCE --base-revision N --confirm`. Save accepts `-` for stdin.
+No CLI command enables the capability or initializes defaults.
 
 ### 30.1 Rights
 

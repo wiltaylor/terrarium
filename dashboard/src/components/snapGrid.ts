@@ -6,6 +6,7 @@ export interface GridWidget {
   w: number;
   h: number;
   auto_height?: boolean;
+  frame?: "grid" | "full_width" | "viewport";
 }
 
 export const ROW_HEIGHT = 64;

@@ -622,8 +622,26 @@ async fn show(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
-) -> ApiResult<Json<Wait>> {
-    Ok(Json(find_wait(&state, &actor, id).await?))
+) -> ApiResult<Json<Value>> {
+    let w = find_wait(&state, &actor, id).await?;
+    Ok(Json(cleanup_view(&state, w, false).await?))
+}
+
+async fn cleanup_view(state: &Shared, w: Wait, kill: bool) -> ApiResult<Value> {
+    let snapshot = w.clone();
+    let op = state
+        .db
+        .read(move |c| crate::store::run_cleanup::get(c, &snapshot))
+        .await?;
+    let mut v = serde_json::to_value(w).map_err(|e| ApiError::internal(e.to_string()))?;
+    v["cleanup"] = match op {
+        Some(op) => serde_json::to_value(op).map_err(|e| ApiError::internal(e.to_string()))?,
+        None if kill => {
+            json!({"operation_id":null,"status":"unavailable","reason":"no_recorded_intent","evidence_kind":"none"})
+        }
+        None => json!({"operation_id":null,"status":"not_requested","evidence_kind":"none"}),
+    };
+    Ok(v)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -632,11 +650,8 @@ struct CancelQuery {
     kill: Option<bool>,
 }
 
-/// `DELETE /api/waits/{id}[?kill=true]`: cancel an open wait. `kill` also
-/// ends the run of a `process` wait; without it, the run goes on. A kill
-/// ends the process group and session of the run on the target (`TERM`,
-/// then `KILL` after a grace time), and the answer has the report as
-/// `kill`: `{pid, term, kill, left}` (TER-99).
+/// `DELETE /api/waits/{id}[?kill=true]`: cancel a wait, optionally recording
+/// one cleanup attempt. Acceptance is not proof of process termination.
 async fn cancel(
     State(state): State<Shared>,
     actor: Actor,
@@ -645,6 +660,35 @@ async fn cancel(
 ) -> ApiResult<Json<Value>> {
     let w = find_wait(&state, &actor, id).await?;
     policy::manage_waits(&actor, &w.agent, &w.project, "cancelling a wait")?;
+    if q.kill.unwrap_or(false) {
+        if w.kind != WaitKind::Process {
+            return Err(ApiError::invalid("kill requires a process wait"));
+        }
+        let by_waiter = actor.agent().is_some_and(|a| a.id == w.agent);
+        let requester = actor.label();
+        // Spawn BEFORE the first durable write. Dropping the HTTP request
+        // cannot strand a committed intent without its bounded collector.
+        return tokio::spawn(async move {
+            let snapshot = w.clone();
+            let (op, created) = state
+                .db
+                .write_full(requester.clone(), move |t| {
+                    crate::store::run_cleanup::cancel(t, &snapshot, &requester, !by_waiter)
+                })
+                .await?;
+            if created
+                && let Some(op) = op
+                && let Err(e) = rt::collect_cleanup(&state, &w, op.operation_id).await
+            {
+                tracing::warn!("cleanup collector could not persist its outcome: {e}");
+            }
+            let id = w.id;
+            let current = state.db.read(move |c| waits::get(c, &id)).await?;
+            Ok(Json(cleanup_view(&state, current, true).await?))
+        })
+        .await
+        .map_err(|e| ApiError::internal(format!("cleanup task failed: {e}")))?;
+    }
     if w.state != WaitState::Open {
         return Err(ApiError::conflict(format!(
             "wait {} is {} already",
@@ -667,21 +711,11 @@ async fn cancel(
             )
         })
         .await?;
-    let report = if q.kill.unwrap_or(false) && w.kind == WaitKind::Process {
-        rt::kill_run_report(&state, &w).await
-    } else {
-        None
-    };
     let id = w.id.clone();
     match done {
         Some(_) => {
             let wait = state.db.read(move |c| waits::get(c, &id)).await?;
-            let mut v = serde_json::to_value(wait)
-                .map_err(|e| ApiError::internal(format!("cannot encode the wait: {e}")))?;
-            if let (Some(r), Value::Object(m)) = (report, &mut v) {
-                m.insert("kill".into(), r);
-            }
-            Ok(Json(v))
+            Ok(Json(cleanup_view(&state, wait, false).await?))
         }
         None => Err(ApiError::conflict(format!("wait {} ended meanwhile", w.id))),
     }
@@ -868,4 +902,223 @@ pub async fn open_waits(state: &Shared, agent: String) -> ApiResult<Vec<Value>> 
         .into_iter()
         .filter_map(|w| serde_json::to_value(w).ok())
         .collect())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod cleanup_tests {
+    use super::*;
+    use crate::executor::Control;
+    use tokio::sync::{mpsc, watch};
+
+    async fn fixture(
+        wrapped: bool,
+        done: bool,
+    ) -> (
+        Shared,
+        Wait,
+        watch::Sender<Option<Value>>,
+        mpsc::UnboundedReceiver<Control>,
+    ) {
+        let state = crate::api::tests::state();
+        let owner = ulid::Ulid::new().to_string();
+        let (report, rx) = watch::channel(None);
+        let (session, controls) =
+            state
+                .executor
+                .fake_cleanup_session(owner.clone(), wrapped.then_some(rx), done);
+        let w = state.db.write("operator", move |t| {
+            t.execute("INSERT INTO projects (name,created_at,updated_at) VALUES ('p','t','t')", [])?;
+            t.execute("INSERT INTO agents (id,name,project,harness,workspace,created_at,updated_at) VALUES (?1,'owner','p','codex','/fake','t','t')", [&owner])?;
+            waits::create(t, NewWait {
+                agent: owner, kind: WaitKind::Process,
+                spec: json!({"session":session.id,"target":"fake-target"}),
+                summary:"fake run".into(), target_agent:None, reason:None,
+                timeout_at:None, due_at:None,
+            })
+        }).await.unwrap();
+        (state, w, report, controls)
+    }
+
+    async fn request(state: Shared, id: String) -> ApiResult<Json<Value>> {
+        cancel(
+            State(state),
+            Actor::Operator,
+            Path(id),
+            ApiQuery(CancelQuery { kill: Some(true) }),
+        )
+        .await
+    }
+
+    async fn view(state: &Shared, id: &str) -> Value {
+        show(State(state.clone()), Actor::Operator, Path(id.to_owned()))
+            .await
+            .unwrap()
+            .0
+    }
+
+    #[tokio::test]
+    async fn aborting_http_handler_does_not_abort_collector_or_lose_terminal_receipt() {
+        let (state, w, report, mut controls) = fixture(true, false).await;
+        let handler = tokio::spawn(request(state.clone(), w.id.clone()));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), controls.recv())
+                .await
+                .unwrap(),
+            Some(Control::Kill)
+        ));
+        let dispatched = view(&state, &w.id).await;
+        assert_eq!(dispatched["state"], "cancelled");
+        assert_eq!(dispatched["cleanup"]["status"], "unknown");
+        assert_eq!(
+            dispatched["cleanup"]["reason"],
+            "dispatch_started_effect_unknown"
+        );
+        let operation = dispatched["cleanup"]["operation_id"].clone();
+        handler.abort();
+        assert!(handler.await.unwrap_err().is_cancelled());
+        let duplicate = request(state.clone(), w.id.clone()).await.unwrap().0;
+        assert_eq!(duplicate["cleanup"]["operation_id"], operation);
+        assert!(controls.try_recv().is_err());
+        report
+            .send(Some(json!({"pid":1,"term":[],"kill":[],"left":[]})))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let stored = view(&state, &w.id).await;
+                if stored["cleanup"]["reason"] == "legacy_report_not_identity_bound" {
+                    assert_eq!(stored["state"], "cancelled");
+                    assert_eq!(stored["cleanup"]["status"], "unknown");
+                    assert_eq!(stored["cleanup"]["operation_id"], operation);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(controls.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn unavailable_routes_send_nothing_and_failed_send_stays_unknown() {
+        for wrapped in [false, true] {
+            let (state, w, _report, mut controls) = fixture(wrapped, true).await;
+            let response = request(state, w.id).await.unwrap().0;
+            assert_eq!(response["cleanup"]["status"], "unavailable");
+            assert!(controls.try_recv().is_err());
+        }
+        for wrapped in [false, true] {
+            let (state, w, _report, controls) = fixture(wrapped, false).await;
+            drop(controls);
+            let response = request(state.clone(), w.id.clone()).await.unwrap().0;
+            assert_eq!(response["cleanup"]["status"], "unknown");
+            assert_eq!(response["cleanup"]["reason"], "control_delivery_unknown");
+            assert_eq!(
+                request(state, w.id).await.unwrap().0["cleanup"],
+                response["cleanup"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn live_restored_session_without_recipe_dispatches_once_and_remains_unknown() {
+        // Restored/Vmlab/native Windows routes may lack a report recipe, but
+        // retain an owned logical control channel. Absence of proof must not
+        // remove their existing kill effect.
+        let (state, w, _report, mut controls) = fixture(false, false).await;
+        let (a, b) = tokio::join!(
+            request(state.clone(), w.id.clone()),
+            request(state.clone(), w.id.clone())
+        );
+        let first = a.unwrap().0;
+        let response = view(&state, &w.id).await;
+        assert_eq!(response["state"], "cancelled");
+        assert_eq!(response["cleanup"]["status"], "unknown");
+        assert_eq!(response["cleanup"]["reason"], "control_sent_no_report");
+        assert_eq!(
+            first["cleanup"]["operation_id"],
+            response["cleanup"]["operation_id"]
+        );
+        assert_eq!(
+            b.unwrap().0["cleanup"]["operation_id"],
+            response["cleanup"]["operation_id"]
+        );
+        assert!(matches!(controls.try_recv(), Ok(Control::Kill)));
+        assert!(controls.try_recv().is_err());
+        assert_eq!(
+            request(state.clone(), w.id.clone()).await.unwrap().0["cleanup"],
+            response["cleanup"]
+        );
+        state
+            .db
+            .write_full("system", crate::store::run_cleanup::recover)
+            .await
+            .unwrap();
+        assert_eq!(
+            request(state, w.id).await.unwrap().0["cleanup"],
+            response["cleanup"]
+        );
+        assert!(controls.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn no_recipe_does_not_relax_owned_route_attribution() {
+        for mismatch in ["owner", "target"] {
+            let (state, w, _report, mut controls) = fixture(false, false).await;
+            let (foreign, mut foreign_controls) =
+                state
+                    .executor
+                    .fake_cleanup_session("foreign-owner".into(), None, false);
+            let id = w.id.clone();
+            let session = w.session().map(str::to_owned);
+            state
+                .db
+                .write("operator", move |t| {
+                    let spec = if mismatch == "owner" {
+                        json!({"session":foreign.id,"target":"fake-target"})
+                    } else {
+                        json!({"session":session,"target":"foreign-target"})
+                    };
+                    t.execute(
+                        "UPDATE waits SET spec=?2 WHERE id=?1",
+                        rusqlite::params![id, spec.to_string()],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let response = request(state, w.id).await.unwrap().0;
+            assert_eq!(response["cleanup"]["status"], "unavailable");
+            assert!(controls.try_recv().is_err());
+            assert!(foreign_controls.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_after_send_never_replays_and_late_completion_cannot_overwrite() {
+        let (state, w, report, mut controls) = fixture(true, false).await;
+        let handler = tokio::spawn(request(state.clone(), w.id.clone()));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), controls.recv())
+                .await
+                .unwrap(),
+            Some(Control::Kill)
+        ));
+        state
+            .db
+            .write_full("system", crate::store::run_cleanup::recover)
+            .await
+            .unwrap();
+        let recovered = view(&state, &w.id).await;
+        assert_eq!(recovered["cleanup"]["reason"], "daemon_restart_no_replay");
+        report.send(Some(json!({"left":[123]}))).unwrap();
+        let completed = handler.await.unwrap().unwrap().0;
+        assert_eq!(completed["cleanup"], recovered["cleanup"]);
+        assert_eq!(
+            request(state, w.id).await.unwrap().0["cleanup"],
+            recovered["cleanup"]
+        );
+        assert!(controls.try_recv().is_err());
+    }
 }

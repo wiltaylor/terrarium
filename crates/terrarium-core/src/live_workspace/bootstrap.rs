@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use ulid::Ulid;
 
+/// Durable bootstrap format, independent of the transport protocol version.
+pub const JOURNAL_VERSION: u32 = 2;
+
 /// No administrative paths or caller-selected Docker options are accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +70,7 @@ pub enum Step {
     ScaffoldVerified(Scaffold),
     CreatePending,
     ContainerBound(String),
+    StartPending(String),
     ReceiverVerified(RuntimeIdentity),
     Committed,
 }
@@ -76,6 +80,8 @@ pub enum Step {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Journal {
+    #[serde(deserialize_with = "journal_version")]
+    journal_version: u32,
     original: Request,
     original_hash: [u8; 32],
     steps: Vec<Step>,
@@ -83,7 +89,20 @@ pub struct Journal {
 }
 
 fn container_id(id: &str) -> bool {
-    id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
+    id.len() == 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn journal_version<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let version = u32::deserialize(d)?;
+    if version != JOURNAL_VERSION {
+        return Err(serde::de::Error::custom(
+            "unsupported bootstrap journal version",
+        ));
+    }
+    Ok(version)
 }
 
 impl Journal {
@@ -93,6 +112,7 @@ impl Journal {
         }
         let original_hash = original.hash().map_err(|_| Reply::Failed)?;
         Ok(Self {
+            journal_version: JOURNAL_VERSION,
             original,
             original_hash,
             steps: vec![Step::Intent],
@@ -147,7 +167,7 @@ impl Journal {
         {
             return Err(Reply::Quarantined);
         }
-        match (self.steps.get(1), self.steps.get(4)) {
+        match (self.steps.get(1), self.steps.get(5)) {
             (Some(Step::ScaffoldVerified(scaffold)), Some(Step::ReceiverVerified(runtime)))
                 if runtime == &journal.runtime =>
             {
@@ -158,10 +178,11 @@ impl Journal {
     }
 
     fn valid(&self) -> bool {
-        if !self.original.valid()
+        if self.journal_version != JOURNAL_VERSION
+            || !self.original.valid()
             || self.original.hash().ok() != Some(self.original_hash)
             || self.steps.first() != Some(&Step::Intent)
-            || self.steps.len() > 6
+            || self.steps.len() > 7
         {
             return false;
         }
@@ -176,7 +197,8 @@ impl Journal {
             (Step::ScaffoldVerified(_), Step::CreatePending)
             | (Step::ReceiverVerified(_), Step::Committed) => true,
             (Step::CreatePending, Step::ContainerBound(id)) => container_id(id),
-            (Step::ContainerBound(id), Step::ReceiverVerified(runtime)) => {
+            (Step::ContainerBound(id), Step::StartPending(start)) => id == start,
+            (Step::StartPending(id), Step::ReceiverVerified(runtime)) => {
                 runtime.registration == self.original.registration
                     && runtime.incarnation == self.original.incarnation
                     && runtime.container_id == *id
@@ -201,6 +223,7 @@ impl Journal {
     }
 
     /// Exact committed retries return a stored result, never a new create.
+    /// This reports historical completion only, not fresh runtime admission.
     /// In-flight retries require explicit reconciliation, not another action.
     pub fn retry(&self, request: &Request) -> Result<(), Reply> {
         if request != &self.original || request.hash().ok() != Some(self.original_hash) {
