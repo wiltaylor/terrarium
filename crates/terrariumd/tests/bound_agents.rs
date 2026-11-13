@@ -627,20 +627,25 @@ async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
 
     // These are ordinary non-wait moves: the legacy unpark runs, but the
     // bound agent is not parked, so every run is a no-op.
-    for to in ["ready", "in_progress"].into_iter().cycle().take(10) {
+    for (n, to) in ["ready", "in_progress"]
+        .into_iter()
+        .cycle()
+        .take(10)
+        .enumerate()
+    {
         mv(&td, &c, to, None).await;
+        until(&format!("legacy no-op run {}", n + 1), || async {
+            let runs = td
+                .get("/api/projects/p/rules/runs?rule=agent-unpark&limit=500")
+                .await
+                .ok()["runs"]
+                .as_array()
+                .unwrap()
+                .clone();
+            runs.len() == n + 1 && runs.iter().all(|r| r["state"] == "done")
+        })
+        .await;
     }
-    until("ten legacy no-op runs", || async {
-        let runs = td
-            .get("/api/projects/p/rules/runs?rule=agent-unpark&limit=500")
-            .await
-            .ok()["runs"]
-            .as_array()
-            .unwrap()
-            .clone();
-        runs.len() == 10 && runs.iter().all(|r| r["state"] == "done")
-    })
-    .await;
     td.post_empty("/api/reload").await.ok();
 
     mv(&td, &c, "review", None).await;
@@ -652,6 +657,15 @@ async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
     })
     .await;
     assert!(spawn_row(&td, &eph).await["parked_at"].is_null());
+    let runs = td
+        .get("/api/projects/p/rules/runs?rule=agent-unpark&limit=500")
+        .await
+        .ok()["runs"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(runs.len(), 11, "{runs:?}");
+    assert!(runs.iter().all(|r| r["state"] == "done"), "{runs:?}");
     let after = sessions(&td, &eph).await;
     assert_eq!(after.len(), 1, "{after:?}");
     assert_eq!(after[0]["id"], session);
@@ -664,7 +678,10 @@ async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
     assert_eq!(unparked.as_array().unwrap().len(), 1, "{unparked}");
     mv(&td, &c, "in_progress", None).await;
     let r = td
-        .post(&format!("/api/cards/{c}/assign"), json!({"assignee": eph}))
+        .post(
+            &format!("/api/cards/{c}/assign"),
+            json!({"assignee": eph.clone()}),
+        )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
 

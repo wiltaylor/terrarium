@@ -624,6 +624,10 @@ async fn a_reload_retires_old_wait_overrides() {
         .patch("/api/projects/p/board", json!({"columns": cols}))
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
+    let r = td
+        .patch("/api/projects/p", json!({"board_flow": "rules"}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
     // The text of a migration before TER-222 for this board.
     let columns = state(&td)
         .db
@@ -659,7 +663,12 @@ async fn a_reload_retires_old_wait_overrides() {
             .find(|r| r["name"] == name)
             .unwrap();
         assert_eq!(rule["origin"], "pack");
-        assert!(rule["wcl"].as_str().unwrap().contains("data.from_role") || name == "agent-park");
+        let role_condition = if name == "agent-park" {
+            "data.to_role"
+        } else {
+            "data.from_role"
+        };
+        assert!(rule["wcl"].as_str().unwrap().contains(role_condition));
     }
     let puts = audit_rows(&td, "rules.put").await;
     assert_eq!(puts.len(), 2, "{puts:?}");
