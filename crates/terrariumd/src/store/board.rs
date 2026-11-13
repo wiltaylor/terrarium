@@ -1983,6 +1983,8 @@ fn apply_move(
     )?;
     if queued {
         queues::enqueue(t, &card.id, to.id)?;
+    } else if !same {
+        queues::landed(t, &card.id, to.id)?;
     }
     let author = author_of(t, actor);
     if let Some(c) = comment {

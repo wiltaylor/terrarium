@@ -202,6 +202,25 @@ pub(super) fn enqueue(t: &mut Tx<'_>, card: &str, column_id: i64) -> ApiResult<(
     Ok(())
 }
 
+/// Card `card` moved straight into column `column_id` (no wait): under the
+/// release `job` it takes the free job slot, as an admitted card does.
+pub(super) fn landed(t: &mut Tx<'_>, card: &str, column_id: i64) -> ApiResult<()> {
+    let Some(s) = settings(t, column_id)? else {
+        return Ok(());
+    };
+    if s.release != QueueRelease::Job || !active(t, &s.project)? {
+        return Ok(());
+    }
+    let at = now();
+    t.execute(
+        "INSERT OR REPLACE INTO card_queue (card, column_id, seq, queued_at, admitted_at)
+         VALUES (?1, ?2, (SELECT coalesce(max(seq), 0) + 1 FROM card_queue WHERE column_id = ?2),
+                 ?3, ?3)",
+        params![card, column_id, at],
+    )?;
+    Ok(())
+}
+
 /// Take card `card` out of any queue (it leaves its column or is
 /// archived). Returns whether it was waiting (not admitted).
 pub(super) fn leave(t: &mut Tx<'_>, card: &str) -> ApiResult<bool> {
