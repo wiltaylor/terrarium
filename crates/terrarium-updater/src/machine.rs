@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 
-use crate::engine::{Container, Engine, Health, Registry, Res, Verifier};
+use crate::engine::{Container, Engine, ExecOut, Health, Registry, Res, Verifier};
 use crate::protocol::{Image, Outcome, Request, Response, Run, RunKind, Status, Step, StepState};
 use crate::store::{Previous, Store};
 
@@ -179,6 +179,82 @@ pub fn restore_argv(path: &str) -> Vec<String> {
         path.into(),
         "--json".into(),
     ]
+}
+
+/// The command that prints the environment keys of the release's
+/// compose.yaml, run in a one-off container of the new image (TER-1209).
+pub fn release_env_argv() -> Vec<String> {
+    ["/opt/terrarium/bundled/bin/terrariumd", "release-env-keys"]
+        .map(String::from)
+        .to_vec()
+}
+
+const ENV_KEYS_FIX: &str =
+    "add them to the deployed compose.yaml or its .env, then run the update again";
+
+/// Compare the environment key names of the release (the output of
+/// [`release_env_argv`]) with the resolved deployment environment
+/// (`compose_env` of the prepared spec: `KEY=value` strings). Only key
+/// names reach the result, never values. `Ok("")`: nothing to report.
+/// `Ok(note)`: a warning or a skipped check. `Err`: the deployment lacks a
+/// key that the release marks as required (`# update:required`).
+pub fn env_key_check(release: &ExecOut, prepared: &serde_json::Value) -> Res<String> {
+    let parsed = (release.code == 0)
+        .then(|| {
+            release
+                .stdout
+                .lines()
+                .rev()
+                .find_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+                .filter(|v| v["keys"].is_array())
+        })
+        .flatten();
+    let Some(parsed) = parsed else {
+        return Ok("compose key check skipped: the release lists no environment keys".into());
+    };
+    let Some(deployed) = prepared["compose_env"].as_array() else {
+        return Ok("compose key check skipped: the deployment environment is unknown".into());
+    };
+    let deployed: std::collections::BTreeSet<&str> = deployed
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(|kv| kv.split_once('=').map_or(kv, |(k, _)| k))
+        .collect();
+    let names = |field: &str| -> Vec<String> {
+        parsed[field]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .filter(|k| !deployed.contains(k))
+            .map(str::to_owned)
+            .collect()
+    };
+    let missing = names("keys");
+    let required = names("required");
+    let optional: Vec<_> = missing
+        .iter()
+        .filter(|k| !required.contains(k))
+        .cloned()
+        .collect();
+    if !required.is_empty() {
+        let also = if optional.is_empty() {
+            String::new()
+        } else {
+            format!("; also missing: {}", optional.join(", "))
+        };
+        return Err(format!(
+            "the deployed compose lacks environment keys that the release marks as required: {}{also} (values hidden); {ENV_KEYS_FIX}",
+            required.join(", ")
+        ));
+    }
+    if missing.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(format!(
+        "WARNING: the deployed compose lacks environment keys of the release: {} (values hidden); {ENV_KEYS_FIX}",
+        missing.join(", ")
+    ))
 }
 
 /// The command that checks the daemon after the start.
@@ -940,14 +1016,14 @@ impl Updater {
         };
         self.with_run(|r| r.to = Some(to.clone()));
 
-        let (prepared, _) = self
+        let (prepared, _, _) = self
             .step(
                 "environment",
                 async {
                     if let Some(spec) = recorded {
                         let mut saved = cur.clone();
                         saved.spec = spec;
-                        Ok((saved, String::new()))
+                        Ok((saved, String::new(), String::new()))
                     } else {
                         let prepared = self.engine.prepare(&cur, &to).await?;
                         let out = self.engine.run_once(
@@ -961,16 +1037,31 @@ impl Updater {
                                 out.code, out.stdout.trim(), out.stderr.trim()
                             ));
                         }
-                        Ok((prepared, out.stdout.trim().to_owned()))
+                        let release = self
+                            .engine
+                            .run_once(&prepared, &to, release_env_argv())
+                            .await?;
+                        let keys = env_key_check(&release, &prepared.spec)?;
+                        if !keys.is_empty() {
+                            tracing::warn!("{keys}");
+                        }
+                        Ok((prepared, out.stdout.trim().to_owned(), keys))
                     }
                 },
-                |(c, templates)| {
+                |(c, templates, env_keys)| {
                     if kind == RunKind::Rollback {
                         return "using recorded container environment (values hidden)".into();
                     }
                     let keys = c.spec["changed_env_keys"].as_array();
+                    // The key check goes last: `admin update status` prints
+                    // the text after `WARNING: ` as a warning line.
+                    let env_keys = if env_keys.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; {env_keys}")
+                    };
                     format!(
-                        "{templates}; resolved deployment environment; changed keys (values hidden): {}",
+                        "{templates}; resolved deployment environment; changed keys (values hidden): {}{env_keys}",
                         keys.map(|a| a
                             .iter()
                             .filter_map(|v| v.as_str())

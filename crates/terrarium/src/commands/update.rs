@@ -142,6 +142,13 @@ fn print_status(c: &Ctx, v: &Value) {
             ));
         }
     }
+    // TER-1209: the updater ends a step detail with `WARNING: ...` when
+    // the deployed compose lacks environment keys of the release.
+    for s in v["last_result"]["steps"].as_array().into_iter().flatten() {
+        if let Some((_, warning)) = s["detail"].as_str().and_then(|d| d.split_once("WARNING: ")) {
+            c.line(format!("WARNING: {warning}"));
+        }
+    }
     c.line(format!(
         "running:   {}{}",
         field(cur, "version"),
@@ -237,5 +244,48 @@ fn print_status(c: &Ctx, v: &Value) {
                 field(s, "detail")
             ));
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use crate::ctx::Ctx;
+    use crate::transport::mock::MockTransport;
+
+    fn status_with(detail: &str) -> String {
+        let ctx = Ctx::for_test(Arc::new(MockTransport::new()), None);
+        super::print_status(
+            &ctx,
+            &json!({
+                "current": {"version": "0.70.0"},
+                "updater": {"reachable": false, "error": "x"},
+                "last_result": {
+                    "kind": "update", "target": "latest", "outcome": "succeeded",
+                    "to": null,
+                    "steps": [{"name": "environment", "state": "ok", "detail": detail}],
+                },
+            }),
+        );
+        ctx.out.captured()
+    }
+
+    #[test]
+    fn status_shows_missing_release_env_keys_as_a_warning() {
+        let out = status_with(
+            "templates ok; resolved deployment environment; changed keys (values hidden): ; \
+             WARNING: the deployed compose lacks environment keys of the release: A, B (values hidden)",
+        );
+        let first = out.lines().next().unwrap();
+        assert_eq!(
+            first,
+            "WARNING: the deployed compose lacks environment keys of the release: A, B (values hidden)"
+        );
+        let out = status_with("templates ok; resolved deployment environment");
+        assert!(!out.contains("WARNING"), "{out}");
     }
 }

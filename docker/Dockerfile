@@ -60,6 +60,9 @@ COPY Cargo.toml Cargo.lock harnesses.toml ./
 COPY crates ./crates
 # terrariumd embeds the host installer (GET /install/host.sh).
 COPY scripts/install-host.sh ./scripts/install-host.sh
+# terrariumd embeds compose.yaml: `terrariumd release-env-keys` lists its
+# environment keys for the updater (TER-1209).
+COPY compose.yaml ./compose.yaml
 COPY --from=dashboard /src/dashboard/dist ./dashboard/dist
 # The git dependency wcl_lang (Cargo.toml) fetches from GitHub at the
 # commit that Cargo.lock pins (`--locked`); its checkout is cached as the

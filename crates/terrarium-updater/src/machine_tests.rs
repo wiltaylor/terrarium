@@ -40,6 +40,11 @@ struct State {
     pending_helper_termination: Option<&'static str>,
     recovery_stop_delay: Duration,
     staged: Option<Image>,
+    /// The stdout of `terrariumd release-env-keys` in the new image;
+    /// `None`: the release has no such command (exit 2).
+    release_env: Option<String>,
+    /// The resolved deployment environment (`compose_env`), `KEY=value`.
+    deployed_env: Option<Vec<String>>,
     /// The containers by name.
     containers: HashMap<String, Container>,
     images: HashMap<String, Image>,
@@ -138,6 +143,9 @@ impl Engine for Fake {
             }
             let mut prepared = spec.clone();
             prepared.spec["prepared"] = serde_json::json!(true);
+            if let Some(env) = &self.0.lock().unwrap().deployed_env {
+                prepared.spec["compose_env"] = serde_json::json!(env);
+            }
             Ok(prepared)
         })
     }
@@ -425,6 +433,20 @@ impl Engine for Fake {
             } else {
                 argv
             };
+            if argv.get(1).is_some_and(|s| s == "release-env-keys") {
+                return Ok(match self.0.lock().unwrap().release_env.clone() {
+                    Some(stdout) => ExecOut {
+                        code: 0,
+                        stdout,
+                        ..Default::default()
+                    },
+                    None => ExecOut {
+                        code: 2,
+                        stderr: "error: unrecognized subcommand 'release-env-keys'".into(),
+                        ..Default::default()
+                    },
+                });
+            }
             if argv.get(1).is_some_and(|s| s == "required-templates-check") {
                 let failed = self.0.lock().unwrap().fail.contains("required-templates");
                 return Ok(ExecOut {
@@ -2207,6 +2229,149 @@ async fn missing_required_template_warns_and_update_proceeds() {
             .contains("warning: required daemon template global:request is missing")
     );
     assert!(steps(&run).contains(&"drain".to_string()));
+}
+
+/// TER-1209: a rig whose deployment resolves `deployed` and whose new
+/// image lists `release` (the JSON line of `terrariumd release-env-keys`).
+fn env_rig(deployed: &[&str], release: Option<&str>) -> Rig {
+    let r = rig();
+    {
+        let mut s = r.fake.0.lock().unwrap();
+        s.deployed_env = Some(deployed.iter().map(|k| (*k).to_owned()).collect());
+        s.release_env = release.map(str::to_owned);
+    }
+    r
+}
+
+const DEPLOYED: &[&str] = &[
+    "TERRARIUM_TOKEN=secret-sentinel-token",
+    "RUST_LOG=secret-sentinel-log",
+];
+
+fn env_detail(run: &Run) -> String {
+    run.steps
+        .iter()
+        .find(|s| s.name == "environment")
+        .unwrap()
+        .detail
+        .clone()
+}
+
+fn assert_no_values(run: &Run) {
+    let all = serde_json::to_string(run).unwrap();
+    assert!(!all.contains("secret-sentinel"), "a value leaked: {all}");
+}
+
+#[tokio::test]
+async fn a_release_env_key_missing_from_the_deployment_warns_and_the_update_goes_on() {
+    let r = env_rig(
+        DEPLOYED,
+        Some(
+            r#"{"service":"terrarium","keys":["TERRARIUM_TOKEN","RUST_LOG","TERRARIUM_PROJECT_PAGES_V2","TERRARIUM_EXTRA"],"required":[]}"#,
+        ),
+    );
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Succeeded, "{:?}", run.error);
+    let detail = env_detail(&run);
+    assert!(
+        detail.contains(
+            "WARNING: the deployed compose lacks environment keys of the release: \
+             TERRARIUM_PROJECT_PAGES_V2, TERRARIUM_EXTRA (values hidden)"
+        ),
+        "{detail}"
+    );
+    assert!(detail.contains("add them to the deployed compose.yaml or its .env"));
+    assert!(steps(&run).contains(&"drain".to_string()));
+    assert_no_values(&run);
+}
+
+#[tokio::test]
+async fn a_missing_required_env_key_refuses_the_update_before_the_drain() {
+    let r = env_rig(
+        DEPLOYED,
+        Some(
+            r#"{"service":"terrarium","keys":["TERRARIUM_TOKEN","TERRARIUM_NEW","TERRARIUM_EXTRA"],"required":["TERRARIUM_NEW"]}"#,
+        ),
+    );
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Failed);
+    assert_eq!(
+        steps(&run),
+        ["inspect", "resolve", "verify", "pull", "!environment"]
+    );
+    let error = run.error.clone().unwrap();
+    assert!(
+        error.contains(
+            "the deployed compose lacks environment keys that the release marks as required: \
+             TERRARIUM_NEW; also missing: TERRARIUM_EXTRA (values hidden)"
+        ),
+        "{error}"
+    );
+    assert!(error.contains("then run the update again"));
+    assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
+    assert!(r.fake.calls().iter().all(|c| c.starts_with("pull")));
+    assert_no_values(&run);
+}
+
+#[tokio::test]
+async fn no_env_key_difference_reports_nothing() {
+    // A deployed key that the release dropped is no finding either.
+    let r = env_rig(
+        &[
+            "TERRARIUM_TOKEN=secret-sentinel-token",
+            "RUST_LOG=secret-sentinel-log",
+            "TERRARIUM_LOCAL_ONLY=secret-sentinel-local",
+        ],
+        Some(
+            r#"{"service":"terrarium","keys":["TERRARIUM_TOKEN","RUST_LOG"],"required":["TERRARIUM_TOKEN"]}"#,
+        ),
+    );
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Succeeded, "{:?}", run.error);
+    let detail = env_detail(&run);
+    assert!(!detail.contains("WARNING"), "{detail}");
+    assert!(!detail.contains("compose key check"), "{detail}");
+    assert!(!detail.contains("lacks"), "{detail}");
+    assert_no_values(&run);
+}
+
+#[tokio::test]
+async fn a_release_without_the_key_list_skips_the_check() {
+    let r = env_rig(DEPLOYED, None);
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Succeeded, "{:?}", run.error);
+    assert!(
+        env_detail(&run)
+            .contains("compose key check skipped: the release lists no environment keys")
+    );
+    assert_no_values(&run);
+}
+
+#[test]
+fn the_env_key_check_reads_the_last_json_line_and_names_keys_only() {
+    let prepared = serde_json::json!({"compose_env": ["A=secret-sentinel", "B"]});
+    let out = ExecOut {
+        code: 0,
+        stdout: "a log line\n{\"keys\":[\"A\",\"B\",\"C\"],\"required\":[]}\n".into(),
+        ..Default::default()
+    };
+    let note = env_key_check(&out, &prepared).unwrap();
+    assert!(note.contains("of the release: C (values hidden)"), "{note}");
+    assert!(!note.contains("secret-sentinel"));
+    let unknown = env_key_check(&out, &serde_json::json!({})).unwrap();
+    assert!(unknown.contains("deployment environment is unknown"));
 }
 
 #[tokio::test]

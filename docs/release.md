@@ -202,6 +202,34 @@ checks the release hash ([host-protocol.md, "Self-update"](host-protocol.md#self
 The host agent does not verify the attestation itself: the image that
 holds the binary is the item to verify.
 
+## New environment keys
+
+The self-updater moves the container to the new image. It does not change
+the deployed `compose.yaml` or its `.env`. A key that a release adds to the
+`environment` of the `terrarium` service in `compose.yaml` reaches the
+container only when the deployed compose file has it.
+
+Before each update, the `environment` step of the updater compares the key
+names of the release's `compose.yaml` (`terrariumd release-env-keys` in the
+new image; terrariumd embeds the file) with the resolved deployed
+environment ([api.md](api.md) §34.3). Only key names are compared and
+shown, never values.
+
+- A key that the deployment lacks is a warning: the step lists it after
+  `WARNING:`, and `terrarium admin update status` prints that line first.
+  The update goes on, and the daemon runs with the key unset.
+- A key that the release marks as required stops the update before the
+  drain, and nothing changes. A release marks a key as required with the
+  end-of-line comment `# update:required` on the key's line in
+  `compose.yaml`, for example
+  `TERRARIUM_EXAMPLE: ${TERRARIUM_EXAMPLE:-on}  # update:required`. Mark a
+  key only when the new daemon cannot run correctly without it.
+- An older release without `release-env-keys` skips the check and says so.
+
+The manual step for either case: add the missing keys to the deployed
+`compose.yaml` (copy the lines from the release's `compose.yaml`) or to its
+`.env`, then run the update again.
+
 ## The full suite at the version cut
 
 Merge jobs run no tests: the full suite runs once at the version cut, on
