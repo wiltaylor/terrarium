@@ -3758,11 +3758,12 @@ or the operator may spawn for an owner. The checks, in order:
 `like` (CLI `--like <agent>`) copies a same-project agent's policy targets,
 agent-level secret grant references (never values), skills settings, subscription
 and pool: the copied subscription and pool replace the template's and the
-owner's, and subscription selection uses the copied pool's headroom. The
-template still supplies the harness and other settings. The source must use
-the same harness; a mismatch is `422 invalid` and names the template, also
-when it is the alternative picked for headroom. Each copied target and grant
-is checked against the owner through the normal spawn-rights checks, and a
+owner's, and subscription selection ranks the copied pool by estimated usage.
+The template still supplies the harness and other settings. The source must
+use the same harness; a mismatch is `422 invalid` and names the template,
+also when it is the alternative selected after an eligibility refusal. Each
+copied target and grant is checked against the owner through the normal
+spawn-rights checks, and a
 copied target that the body's `targets` also names is granted once. A missing
 right is `403`. A copied target is named. A copied grant is named (secret
 and level) only when the owner may already read the secret's name (a grant of
@@ -6593,11 +6594,11 @@ A cloud subscription is never in the automatic account choice: the
 auto-swap after a usage limit (§16.6) never moves an agent to one, the
 spawn pick takes one only when the template or the agent names it as
 `subscription`, never from `subscription_pool`, and the `<template>-alt`
-fallback of a spawn without headroom never takes one, also when the alt
-template names it. The spawn pick counts a cloud subscription as full at
-100 percent of its budget window, not at 80. A swap that names it is
-allowed (`POST /api/agents/{id}/subscription`, §6.2, with the rules of a
-swap).
+fallback after an eligibility refusal never takes one, also when the alt
+template names it. Estimated usage, including the cloud budget window,
+ranks otherwise eligible accounts but never refuses a spawn at 80, 100, or
+a higher percentage. A swap that names a cloud subscription is allowed
+(`POST /api/agents/{id}/subscription`, §6.2, with the rules of a swap).
 
 **The monthly budget.** With `budget_usd`, the daemon keeps the spend of
 the UTC month: the sum of the `costUSD` running totals of the Claude Code

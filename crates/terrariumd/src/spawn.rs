@@ -484,7 +484,7 @@ pub async fn spawn_with(
                 return Ok((alt, sub));
             }
             Err(ApiError::conflict(format!(
-                "template `{}` and its allowed alternative have no subscription headroom: {}",
+                "template `{}` and its allowed alternative have no eligible subscription: {}",
                 first.use_key(),
                 refusals.join("; ")
             )))
