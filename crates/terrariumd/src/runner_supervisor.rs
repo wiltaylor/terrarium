@@ -10836,6 +10836,8 @@ mod tests {
         let plan = sup
             .kick_plan(id, epoch, rest, queue, at(301))
             .expect("the restart is claimed");
+        // TER-1185: the turn took a pointer of the episode.
+        lock(&sup.inner.slots).get_mut(&id).unwrap().kick_pointer = true;
         pass_status(&sup, id, AgentStatus::Blocked, AgentStatus::Working, None);
         pass_status(&sup, id, AgentStatus::Working, AgentStatus::Idle, None);
         assert_eq!(kick_step(&sup, id), None, "the turn ended the episode");
