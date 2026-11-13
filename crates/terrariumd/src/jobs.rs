@@ -1391,7 +1391,7 @@ pub async fn finish_for_test(state: &Shared, id: &str, end: JobEnd) {
     finish_job(state, id, end).await;
 }
 
-pub(crate) type HostRetries =std::collections::HashMap<String, (Instant, Duration)>;
+pub(crate) type HostRetries = std::collections::HashMap<String, (Instant, Duration)>;
 
 /// Resolve new names outside DB closures. API calls neither retry failed pins
 /// nor wait behind scheduler DNS work. Successful pins stay fixed. The scheduler

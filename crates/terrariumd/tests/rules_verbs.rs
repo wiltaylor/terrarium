@@ -4828,7 +4828,6 @@ async fn column_rules_run_a_merge_group_and_a_version_cut_without_the_pack() {
     assert!(runs(&td, "p").await.iter().all(|r| r["column"].is_string()));
 }
 
-
 // ---------------------------------- merge and version groups, columns only
 //
 // TER-1215 (kanban rework C4c): on a `columns` board the merge batch, the
@@ -4988,7 +4987,9 @@ async fn card_writes(td: &TestDaemon, id: &str) -> Vec<(String, String)> {
                    FROM events WHERE kind = 'card' AND card = ?1 ORDER BY seq",
             )?;
             let v = st
-                .query_map([&id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .query_map([&id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(v)
         })
@@ -5090,7 +5091,11 @@ async fn column_rules_merge_a_batch_cut_a_version_and_build_it() {
         assert_eq!(x["column"], "accepted", "{x}");
         assert_eq!(x["labels"], json!(["version:vnext"]), "{x}");
         // One queue comment and one end comment, from the rules only.
-        assert_eq!(comment_kinds(&td, id).await, vec!["queued", "passed"], "{x}");
+        assert_eq!(
+            comment_kinds(&td, id).await,
+            vec!["queued", "passed"],
+            "{x}"
+        );
     }
     assert_eq!(card(&td, &merge_group).await["archived"], true);
     let pass = runs_of(&td, "p", "merge_queue/merge-pass").await;
@@ -5219,9 +5224,11 @@ async fn column_rules_fix_then_split_a_red_merge_batch() {
     for id in [&f3, &f2] {
         assert_eq!(column_of(&td, id).await, "accepted");
     }
-    assert!(card(&td, &f3).await["group"]["key"]
-        .as_str()
-        .is_some_and(|k| k.starts_with("merge:")));
+    assert!(
+        card(&td, &f3).await["group"]["key"]
+            .as_str()
+            .is_some_and(|k| k.starts_with("merge:"))
+    );
 
     // The right half is red: it had 3 fix cards, so it splits again.
     end_job(&td, &right, false).await;
