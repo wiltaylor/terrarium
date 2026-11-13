@@ -142,7 +142,10 @@ def resolve(root, card, token, mode, fallback, target):
 
 def main():
     root, owner, card, token, mode, script, fallback, target = sys.argv[1:]
-    os.umask(0o077)
+    # The spool is private. The user command gets the login umask back in its
+    # command group (TER-1150), the same as a plain ssh command.
+    login = os.umask(0o077)
+    os.environ['TERRARIUM_LOGIN_UMASK'] = '%04o' % login
     fd = resolve(root, card, token, mode, fallback, target)
     if card == '1':
         marker(fd, owner)

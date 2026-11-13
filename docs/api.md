@@ -7677,6 +7677,11 @@ foreign ownership and group/other writable components. Python 3 is required
 for these checks; missing tools are terminal errors, never installed. The spool
 retains the first 64 MiB per stream, and is removed after 24 hours of result
 retention (at most the command timeout plus 24 hours and two minutes).
+The command, an agent `run` or a queue recipe, runs under the login umask
+of the remote user (often `0022` or `0002`), as a plain ssh command does. The
+spool, its markers and logs stay owner-only (`0700`/`0600`). Before TER-1150
+the command inherited the spool's `077`, so the files that it made were
+`700`/`600`: run `chmod -R go+rX` on such output.
 The remote lifetime is at most seven days, measured from the original
 checkpoint even if first launch is delayed. Recovery refuses a changed
 target incarnation, SSH host key or exe.dev VM ID with `interrupted (target
