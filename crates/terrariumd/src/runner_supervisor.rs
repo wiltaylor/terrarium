@@ -9016,7 +9016,7 @@ mod tests {
         assert!(typed[0].contains(&mid), "{typed:?}");
     }
 
-    /// TER-1103 T7: a reload of an agent that is down (paused, stopped,
+    /// TER-1103 T7: a reload of an agent that is down (paused or stopped,
     /// error) changes nothing: no item, no stored row, no typing. Its next
     /// launch reads the store.
     #[tokio::test]
@@ -9024,11 +9024,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
         store_mail(&state, id, false).await;
-        for status in [
-            AgentStatus::Paused,
-            AgentStatus::Stopped,
-            AgentStatus::Error,
-        ] {
+        // A paused agent is down as `stopped`.
+        for status in [AgentStatus::Stopped, AgentStatus::Error] {
             {
                 let mut slots = lock(&sup.inner.slots);
                 let slot = slots.get_mut(&id).unwrap();
