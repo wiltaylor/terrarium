@@ -888,11 +888,10 @@ mod tests {
         server.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn repro_ter1165() {
+    async fn repro_ter1165_case(close: bool, delay_ms: u64, iters: usize) -> usize {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut hangs = 0;
-        for iter in 0..300 {
+        for iter in 0..iters {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
@@ -925,7 +924,17 @@ mod tests {
                         b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nbundle".to_vec()
                     };
                     served.push(first);
+                    let mut response = response;
+                    if close {
+                        let s = String::from_utf8_lossy(&response).to_string();
+                        if let Some(i) = s.find("\r\n") {
+                            response.splice(i + 2..i + 2, b"Connection: close\r\n".iter().copied());
+                        }
+                    }
                     let _ = socket.write_all(&response).await;
+                    // Hold the socket after the response: the client sees the
+                    // close late, as with a late FIN on a loaded host.
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
                 served
             });
@@ -941,10 +950,18 @@ mod tests {
             let served = server.await.unwrap();
             if served.len() != 4 {
                 hangs += 1;
-                eprintln!("REPRO iter {iter}: served {} {:?} errors {:?} valid {:?}", served.len(), served, errors, valid.err().map(|e| format!("{e:#}")));
+                if hangs <= 2 { eprintln!("REPRO close={close} iter {iter}: served {} {:?} errors {:?} valid {:?}", served.len(), served, errors, valid.err().map(|e| format!("{e:#}"))); }
             }
         }
-        eprintln!("REPRO hangs {hangs}/300");
+        eprintln!("REPRO close={close} delay={delay_ms}ms: {hangs}/{iters} iterations served fewer than 4 connections");
+        hangs
+    }
+
+    #[tokio::test]
+    async fn repro_ter1165() {
+        repro_ter1165_case(false, 0, 300).await;
+        repro_ter1165_case(false, 50, 20).await;
+        repro_ter1165_case(true, 50, 20).await;
     }
 
     #[test]
