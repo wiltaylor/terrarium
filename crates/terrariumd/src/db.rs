@@ -4080,7 +4080,13 @@ mod tests {
         let insert = "INSERT INTO pending_pointers (id, agent, kind, key, line, data, created_at)
                       VALUES (?1, 'a1', ?2, ?3, ?4, ?5, 't')";
         let rows = [
-            (1_i64, "card", "C-1/assigned", "card line", "{\"card\":\"C-1\"}"),
+            (
+                1_i64,
+                "card",
+                "C-1/assigned",
+                "card line",
+                "{\"card\":\"C-1\"}",
+            ),
             (2, "lead", "C-1/review", "lead line", "{\"card\":\"C-1\"}"),
             (3, "lease", "t1", "lease line", "{\"target\":\"t1\"}"),
         ];
@@ -4104,14 +4110,22 @@ mod tests {
         let kept: Vec<(i64, String, String, String, String)> = conn
             .prepare("SELECT id, kind, key, line, data FROM pending_pointers ORDER BY id")
             .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
         let want: Vec<_> = rows
             .iter()
             .map(|(id, kind, key, line, data)| {
-                (*id, kind.to_string(), key.to_string(), line.to_string(), data.to_string())
+                (
+                    *id,
+                    kind.to_string(),
+                    key.to_string(),
+                    line.to_string(),
+                    data.to_string(),
+                )
             })
             .collect();
         assert_eq!(kept, want);

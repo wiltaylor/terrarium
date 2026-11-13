@@ -2970,7 +2970,10 @@ async fn a_parked_reservation_pointer_survives_a_daemon_restart() {
     // The supervisor writes the row in a task of its own.
     let deadline = Instant::now() + Duration::from_secs(30);
     while reservation_rows(&td).await == 0 {
-        assert!(Instant::now() < deadline, "the reservation row was not stored");
+        assert!(
+            Instant::now() < deadline,
+            "the reservation row was not stored"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     td.restart_daemon().await;
