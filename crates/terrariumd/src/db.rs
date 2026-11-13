@@ -4061,6 +4061,86 @@ mod tests {
         assert_eq!(migrate(&mut conn).unwrap(), 0);
     }
 
+    /// TER-1123: the rebuild of `pending_pointers` keeps the card, lead,
+    /// and lease rows and the one-row-per-key rule, and takes a
+    /// `reservation` row, which the CHECK of migration 15 refused.
+    #[test]
+    fn pending_pointers_rebuild_keeps_rows_and_takes_reservations() {
+        const NAME: &str = "ter-1123-reservation-pointers.sql";
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
+        let before: Vec<_> = NAMED_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|(name, _)| *name != NAME)
+            .collect();
+        assert_eq!(before.len() + 1, NAMED_MIGRATIONS.len());
+        migrate_named(&mut conn, &before).unwrap();
+        let insert = "INSERT INTO pending_pointers (id, agent, kind, key, line, data, created_at)
+                      VALUES (?1, 'a1', ?2, ?3, ?4, ?5, 't')";
+        let rows = [
+            (1_i64, "card", "C-1/assigned", "card line", "{\"card\":\"C-1\"}"),
+            (2, "lead", "C-1/review", "lead line", "{\"card\":\"C-1\"}"),
+            (3, "lease", "t1", "lease line", "{\"target\":\"t1\"}"),
+        ];
+        for (id, kind, key, line, data) in rows {
+            conn.execute(insert, rusqlite::params![id, kind, key, line, data])
+                .unwrap();
+        }
+        let refused = conn.execute(
+            insert,
+            rusqlite::params![4, "reservation", "R-1", "r", "{}"],
+        );
+        assert!(
+            refused
+                .unwrap_err()
+                .to_string()
+                .contains("CHECK constraint failed"),
+            "migration 15 refuses a reservation row"
+        );
+
+        assert_eq!(migrate(&mut conn).unwrap(), 1);
+        let kept: Vec<(i64, String, String, String, String)> = conn
+            .prepare("SELECT id, kind, key, line, data FROM pending_pointers ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let want: Vec<_> = rows
+            .iter()
+            .map(|(id, kind, key, line, data)| {
+                (*id, kind.to_string(), key.to_string(), line.to_string(), data.to_string())
+            })
+            .collect();
+        assert_eq!(kept, want);
+        conn.execute(
+            insert,
+            rusqlite::params![4, "reservation", "R-1", "r", "{\"id\":\"R-1\"}"],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(insert, rusqlite::params![5, "lease", "t1", "again", "{}"])
+                .is_err(),
+            "one row for each agent, kind, and key"
+        );
+        assert!(
+            conn.execute(insert, rusqlite::params![6, "mail", "m", "m", "{}"])
+                .is_err(),
+            "other kinds stay refused"
+        );
+        let leftover: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'pending_pointers_v1123'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftover, 0);
+        assert_eq!(migrate(&mut conn).unwrap(), 0);
+    }
+
     #[test]
     fn named_migrations_roll_back_failed_schema_and_record() {
         let mut conn = Connection::open_in_memory().unwrap();

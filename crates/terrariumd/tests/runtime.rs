@@ -2937,6 +2937,82 @@ async fn a_parked_pointer_survives_a_daemon_restart() {
     assert_eq!(all.len(), 1, "{all:#?}");
 }
 
+/// A parked reservation pointer lives through a daemon restart (TER-1123):
+/// `pending_pointers` keeps its `reservation` row, and the next start
+/// types the line once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parked_reservation_pointer_survives_a_daemon_restart() {
+    let mut td = Td::start().await;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+    let line = "Reservation R-1123 on gpu-host ended. State: ended.";
+    let agent = id.clone();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("test", move |t| {
+            t.emit(
+                terrariumd::events::EventDraft::new(
+                    "reservation_pointer",
+                    line,
+                    json!({"reservation_id": "R-1123", "line": line}),
+                )
+                .agent(agent, "bob")
+                .project("demo"),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // The supervisor writes the row in a task of its own.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while reservation_rows(&td).await == 0 {
+        assert!(Instant::now() < deadline, "the reservation row was not stored");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    td.restart_daemon().await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
+    let prompt = starts[0]["data"]["prompt"].as_str().unwrap();
+    assert!(prompt.contains(line), "{prompt}");
+    td.wait_status(&id, "idle").await;
+    // Typed: the row is gone, and a stop, a restart, and a start type
+    // nothing more.
+    assert_eq!(reservation_rows(&td).await, 0);
+    let sessions = td.events(&id, "session_started").await.len();
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+    td.restart_daemon().await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_events(&id, "session_started", |e| e.len() > sessions)
+        .await;
+    td.wait_status(&id, "idle").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let all = prompts(&td, &id).await;
+    assert_eq!(all.len(), 1, "{all:#?}");
+}
+
+/// The stored `reservation` rows of R-1123.
+async fn reservation_rows(td: &Td) -> i64 {
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM pending_pointers WHERE kind = 'reservation' AND key = 'R-1123'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
 /// The "Card ... was assigned to you" pointer goes out only when the
 /// assignee has not claimed, moved, or commented on the card since the
 /// assignment (a worker that found the card with `card ls --mine` in an
