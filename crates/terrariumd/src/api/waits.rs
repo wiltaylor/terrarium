@@ -1035,12 +1035,25 @@ mod cleanup_tests {
         assert_eq!(response["state"], "cancelled");
         assert_eq!(response["cleanup"]["status"], "unknown");
         assert_eq!(response["cleanup"]["reason"], "control_sent_no_report");
-        assert_eq!(b.unwrap().0["cleanup"]["operation_id"], response["cleanup"]["operation_id"]);
+        assert_eq!(
+            b.unwrap().0["cleanup"]["operation_id"],
+            response["cleanup"]["operation_id"]
+        );
         assert!(matches!(controls.try_recv(), Ok(Control::Kill)));
         assert!(controls.try_recv().is_err());
-        assert_eq!(request(state.clone(), w.id.clone()).await.unwrap().0["cleanup"], response["cleanup"]);
-        state.db.write_full("system", crate::store::run_cleanup::recover).await.unwrap();
-        assert_eq!(request(state, w.id).await.unwrap().0["cleanup"], response["cleanup"]);
+        assert_eq!(
+            request(state.clone(), w.id.clone()).await.unwrap().0["cleanup"],
+            response["cleanup"]
+        );
+        state
+            .db
+            .write_full("system", crate::store::run_cleanup::recover)
+            .await
+            .unwrap();
+        assert_eq!(
+            request(state, w.id).await.unwrap().0["cleanup"],
+            response["cleanup"]
+        );
         assert!(controls.try_recv().is_err());
     }
 
@@ -1048,18 +1061,28 @@ mod cleanup_tests {
     async fn no_recipe_does_not_relax_owned_route_attribution() {
         for mismatch in ["owner", "target"] {
             let (state, w, _report, mut controls) = fixture(false, false).await;
-            let (foreign, mut foreign_controls) = state.executor.fake_cleanup_session("foreign-owner".into(), None, false);
+            let (foreign, mut foreign_controls) =
+                state
+                    .executor
+                    .fake_cleanup_session("foreign-owner".into(), None, false);
             let id = w.id.clone();
             let session = w.session().map(str::to_owned);
-            state.db.write("operator", move |t| {
-                let spec = if mismatch == "owner" {
-                    json!({"session":foreign.id,"target":"fake-target"})
-                } else {
-                    json!({"session":session,"target":"foreign-target"})
-                };
-                t.execute("UPDATE waits SET spec=?2 WHERE id=?1", rusqlite::params![id,spec.to_string()])?;
-                Ok(())
-            }).await.unwrap();
+            state
+                .db
+                .write("operator", move |t| {
+                    let spec = if mismatch == "owner" {
+                        json!({"session":foreign.id,"target":"fake-target"})
+                    } else {
+                        json!({"session":session,"target":"foreign-target"})
+                    };
+                    t.execute(
+                        "UPDATE waits SET spec=?2 WHERE id=?1",
+                        rusqlite::params![id, spec.to_string()],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
             let response = request(state, w.id).await.unwrap().0;
             assert_eq!(response["cleanup"]["status"], "unavailable");
             assert!(controls.try_recv().is_err());
