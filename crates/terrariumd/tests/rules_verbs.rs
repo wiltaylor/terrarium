@@ -4671,3 +4671,130 @@ async fn an_error_in_one_project_does_not_stop_the_timers_of_another() {
     assert_eq!(jobs_q[0].card, z);
     assert!(open_jobs(&td).await.is_empty(), "no job in p");
 }
+
+/// The pack rule `name` as a column rule, as the C5 conversion places it
+/// (TER-1113): `on = ["job"]` becomes every job event, `on =
+/// ["job.verdict"]` the verdict; the `when`, conditions, cap, and actions
+/// stay.
+fn pack_as_column_rule(name: &str) -> Value {
+    let r = terrarium_core::rules_file::default_pack()
+        .rules
+        .iter()
+        .find(|r| r.name == name)
+        .unwrap_or_else(|| panic!("no pack rule {name}"));
+    let trigger = if r.on.iter().any(|k| k == "job.verdict") {
+        json!({"kind": "job_result", "events": ["verdict"]})
+    } else {
+        assert_eq!(r.on, vec!["job".to_owned()], "{name}");
+        json!({"kind": "job_result",
+               "events": ["queued", "started", "requeued", "cancelled", "ended"]})
+    };
+    json!({"name": r.name, "trigger": trigger, "when": r.when, "if_card": r.if_card,
+           "if_job": r.if_job, "max_per_hour": r.max_per_hour, "actions": r.actions})
+}
+
+async fn put_column_rules(td: &TestDaemon, column: &str, rules: Value) {
+    let path = format!("/api/projects/p/board/columns/{column}/options");
+    let o = td.get(&path).await.ok().clone();
+    let r = td
+        .put(
+            &path,
+            json!({"base_version": o["version"], "checks": o["checks"], "queue": o["queue"],
+                   "rules": rules}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
+#[tokio::test]
+async fn column_rules_run_a_merge_group_and_a_version_cut_without_the_pack() {
+    let td = queue_lab().await;
+    put_column_rules(
+        &td,
+        "review",
+        json!([
+            pack_as_column_rule("merge-queued"),
+            pack_as_column_rule("merge-group-started"),
+            pack_as_column_rule("merge-pass"),
+        ]),
+    )
+    .await;
+    put_column_rules(
+        &td,
+        "accepted",
+        json!([{"name": "version-cut", "trigger": {"kind": "lands"}, "max_per_hour": 600,
+                "actions": [{"verb": "version.cut",
+                             "args": {"min_cards": 2, "max_wait_minutes": 240}}]}]),
+    )
+    .await;
+    state(&td)
+        .db
+        .write("operator", |t| {
+            terrariumd::store::projects::set_columns_flow(t, "p")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app", "labels":["version:vnext"]}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b", "column":"review", "repo":"app", "labels":["version:vnext"]}),
+    )
+    .await;
+    let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    settle(&td).await;
+    let g = card(&td, &a).await["group"].clone();
+    assert!(
+        !g.is_null(),
+        "{:?}",
+        runs_of(&td, "p", "review/merge-queued").await
+    );
+    let gid = g["id"].as_str().unwrap().to_owned();
+    assert_eq!(g["members"], json!([a, b]));
+
+    let id = job.id.clone();
+    let passed = state(&td)
+        .db
+        .write("system", move |t| {
+            jobs::start(t, &id, "machine", None)?;
+            Ok(jobs::finish(
+                t,
+                &id,
+                &JobEnd {
+                    passed: true,
+                    exit_code: Some(0),
+                    ..JobEnd::default()
+                },
+            )?
+            .unwrap())
+        })
+        .await
+        .unwrap();
+    settle(&td).await;
+    verdict(&td, &passed, &a, "passed").await;
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["column"], "accepted");
+    verdict(&td, &passed, &b, "passed").await;
+    settle(&td).await;
+    assert_eq!(card(&td, &b).await["column"], "accepted");
+    assert_eq!(card(&td, &gid).await["archived"], true);
+    let pass = runs_of(&td, "p", "review/merge-pass").await;
+    assert!(pass.iter().all(|r| r["state"] != "failed"), "{pass:?}");
+    assert!(pass.iter().all(|r| r["column"] == "review"), "{pass:?}");
+    // Two accepted cards: the `lands` rule of `accepted` froze them into a
+    // version group.
+    let v = card(&td, &a).await["group"].clone();
+    assert!(
+        v["key"].as_str().is_some_and(|k| k.starts_with("version:")),
+        "{v} {:?}",
+        runs_of(&td, "p", "accepted/version-cut").await
+    );
+    // Nothing ran from the pack.
+    assert!(runs(&td, "p").await.iter().all(|r| r["column"].is_string()));
+}

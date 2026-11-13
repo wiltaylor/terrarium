@@ -1,5 +1,5 @@
 //! The column rules in the engine (TER-1113, kanban rework C2a, D2 of the
-//! handoff in TER-1113, docs/api.md §19.12).
+//! handoff in TER-1113, docs/api.md §19.13).
 //!
 //! A project with `board_flow = columns` runs only the rules of its board
 //! columns (`board_column_rules`, TER-1120): no built-in pack and no
