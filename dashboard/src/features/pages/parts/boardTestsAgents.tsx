@@ -4,25 +4,47 @@
 // the route page and keeps its query state in the widget instance, not in the
 // URL, so duplicate widgets stay independent. The route pages are unchanged.
 //
+// Rights: the dashboard has no caller-role snapshot, so each write entry point
+// needs a resource-domain grant from the host. A missing grant is read-only.
+// Page layout `can_edit` is not a grant here. The server stays authoritative
+// for every write. A read-only board opens a card on its board detail route.
+// Tests runs and card agents have no write entry points.
+//
 // CustomPage does not dispatch to these maps yet. TER-1077 (C7) composes them
 // into the host and turns the project_pages_v2 capability on. Until then
 // nothing here is visible.
 
-import { type Component, createEffect, createResource, createSignal, on, onCleanup, Show } from "solid-js";
+import { type Component, createEffect, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import type { Board, Column, PageWidget, ProjectWidgetKind, ProjectWidgetViews } from "../../../api/types";
-import { ErrorBanner } from "../../../components/ui";
+import { Empty, ErrorBanner } from "../../../components/ui";
 import { useInstance } from "../../../instance";
 import { AgentsPanel, CardAgentsPanel } from "../../agents/AgentsPanel";
 import { BoardPanel, type BoardQuery } from "../../board/BoardPanel";
 import { ColumnsEditorFields } from "../../board/ColumnsEditor";
+import { columnTitle } from "../../board/columns";
 import { TestRunsPanel, type TestRunsQuery } from "../../tests/TestRunsPanel";
 import { patchQuery, widgetSearch, widgetView } from "./localQuery";
 
-/** The props of one widget part. `widget` is read reactively, so a saved option change applies in place. */
+/** Resource-domain grants. Each field matches one server right of the project. Absent means no right. */
+export interface BoardTestsAgentsGrants {
+  /** Card writes on the board: New card, move, and the card drawer (edit, comment, files, questions, archive). */
+  writeCards?: boolean;
+  /** `PATCH board` (project_admin): Edit columns and the columns editor. */
+  editColumns?: boolean;
+  /** `POST /api/agents` (project_admin of the project): New agent. */
+  createAgent?: boolean;
+  /** The caller's own agent pins (docs/api.md §6.11). */
+  pinAgents?: boolean;
+}
+
+/** The props of one widget part. `widget` and `grants` are read reactively, so a change applies in place. */
 export interface FeaturePartProps<K extends ProjectWidgetKind> {
+  /** The project of the page. A widget never reads another project. */
   project: string;
   widget: Pick<PageWidget, "id" | "options"> & { kind: K };
+  grants?: BoardTestsAgentsGrants;
 }
+const granted = (props: { grants?: BoardTestsAgentsGrants }, key: keyof BoardTestsAgentsGrants) => props.grants?.[key] === true;
 /** One renderer for each view of a kind. */
 export type FeaturePartMap<K extends ProjectWidgetKind> = { readonly [V in ProjectWidgetViews[K]]: Component<FeaturePartProps<K>> };
 
@@ -32,7 +54,10 @@ function BoardCards(props: FeaturePartProps<"board"> & { done: boolean }) {
   const [done, setDone] = createSignal(props.done);
   // A saved view change (lanes or done) and a project change start from a clean query.
   createEffect(on(() => [props.project, props.done] as const, ([, saved]) => { setQuery({}); setDone(saved); }, { defer: true }));
+  // A revoked card grant closes an open drawer: the read-only board has no card in its query.
+  createEffect(on(() => granted(props, "writeCards"), write => { if (!write) setQuery(q => patchQuery(q, { card: undefined })); }, { defer: true }));
   return <BoardPanel project={props.project} done={done()} query={query()}
+    canWriteCards={granted(props, "writeCards")} canEditColumns={granted(props, "editColumns")}
     onQueryChange={patch => setQuery(q => patchQuery(q, patch))}
     onToggleDone={() => { setQuery(q => patchQuery(q, { card: undefined, col: undefined })); setDone(d => !d); }} />;
 }
@@ -42,15 +67,17 @@ const COLUMNS_RELOAD_MS = 300;
 const sameColumns = (a: Column[] | undefined, b: Column[] | undefined) => JSON.stringify(a) === JSON.stringify(b);
 
 function BoardColumns(props: FeaturePartProps<"board">) {
-  return <Show when={props.project} keyed>{project => <BoardColumnsContent project={project} />}</Show>;
+  return <Show when={props.project} keyed>{project => <BoardColumnsContent project={project} canEdit={granted(props, "editColumns")} />}</Show>;
 }
-function BoardColumnsContent(props: { project: string }) {
+function BoardColumnsContent(props: { project: string; canEdit: boolean }) {
   const { api, events } = useInstance();
   const [board, { refetch, mutate }] = createResource(() => props.project, p => api.board.get(p));
   // The columns that the open editor started from. A new value remounts the editor.
   const [base, setBase] = createSignal<Column[]>();
   createEffect(on(() => board.latest, b => { if (b && !base()) setBase(b.columns); }));
   const reset = () => setBase(board.latest?.columns);
+  // A new grant starts the editor from the current server columns.
+  createEffect(on(() => props.canEdit, () => reset(), { defer: true }));
   let timer: ReturnType<typeof setTimeout> | undefined;
   const off = events.on(e => {
     if (e.project !== props.project || (e.kind !== "board" && e.kind !== "card")) return;
@@ -61,15 +88,32 @@ function BoardColumnsContent(props: { project: string }) {
   const stale = () => !!base() && !!board.latest && !sameColumns(base(), board.latest.columns);
   return <div class="columns-editor-widget">
     <ErrorBanner error={board.error} />
-    <Show when={stale()}><p class="muted small" role="status">The columns changed on the server. Cancel to load them.</p></Show>
-    <Show when={base()} keyed fallback={<p class="muted">{board.loading ? "Loading…" : ""}</p>}>
-      {columns => <ColumnsEditorFields columns={columns} onClose={reset} onSave={async (edits): Promise<Board> => {
-        const saved = await api.board.update(props.project, edits);
-        mutate(saved);
-        return saved;
-      }} />}
+    <Show when={props.canEdit} fallback={<ColumnsTable columns={board.latest?.columns} loading={board.loading} />}>
+      <Show when={stale()}><p class="muted small" role="status">The columns changed on the server. Cancel to load them.</p></Show>
+      <Show when={base()} keyed fallback={<p class="muted">{board.loading ? "Loading…" : ""}</p>}>
+        {columns => <ColumnsEditorFields columns={columns} onClose={reset} onSave={async (edits): Promise<Board> => {
+          if (!props.canEdit) throw new Error("No right to edit the columns.");
+          const saved = await api.board.update(props.project, edits);
+          mutate(saved);
+          return saved;
+        }} />}
+      </Show>
     </Show>
   </div>;
+}
+
+/** The read-only columns: the live server list, without an editor. */
+function ColumnsTable(props: { columns: Column[] | undefined; loading: boolean }) {
+  return <Show when={props.columns} fallback={<p class="muted">{props.loading ? "Loading…" : ""}</p>}>
+    {columns => <Show when={columns().length} fallback={<Empty>No columns.</Empty>}>
+      <table class="columns-table" aria-label="Columns">
+        <thead><tr><th>Column</th><th>Name</th><th>Role</th><th>WIP limit</th><th>Cards</th></tr></thead>
+        <tbody><For each={columns()}>{c => <tr data-column-row={c.name}>
+          <td>{columnTitle(c)}</td><td class="mono">{c.name}</td><td>{c.role ?? "—"}</td><td>{c.wip_limit ?? "—"}</td><td>{c.count ?? "—"}</td>
+        </tr>}</For></tbody>
+      </table>
+    </Show>}
+  </Show>;
 }
 
 export const BOARD_PARTS: FeaturePartMap<"board"> = {
@@ -89,7 +133,7 @@ function TestRuns(props: FeaturePartProps<"tests">) {
 export const TESTS_PARTS: FeaturePartMap<"tests"> = { runs: TestRuns };
 
 export const AGENTS_PARTS: FeaturePartMap<"agents"> = {
-  agents: props => <AgentsPanel project={props.project} />,
+  agents: props => <AgentsPanel project={props.project} canCreate={granted(props, "createAgent")} canPin={granted(props, "pinAgents")} />,
   card_agents: props => <CardAgentsPanel project={props.project} empty="No card agents." />,
 };
 

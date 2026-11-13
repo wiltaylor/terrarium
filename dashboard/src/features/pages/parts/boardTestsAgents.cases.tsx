@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { type JSX } from "solid-js";
+import { createSignal, type JSX } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createMockApi } from "../../../api/mock";
@@ -15,7 +15,8 @@ const agent = (id: string, extra: Partial<Agent> = {}): Agent => ({
   workspace: "/workspace", created_at: "2026-11-12T00:00:00Z",
 });
 const ordinary = [agent("paused", { paused: true }), agent("working", { status: "working" })];
-vi.mock("../../../instance/navigation", () => ({ A: (p: JSX.AnchorHTMLAttributes<HTMLAnchorElement>) => <a {...p} />, useNavigate: () => vi.fn() }));
+const { navigate } = vi.hoisted(() => ({ navigate: vi.fn() }));
+vi.mock("../../../instance/navigation", () => ({ A: (p: JSX.AnchorHTMLAttributes<HTMLAnchorElement>) => <a {...p} />, useNavigate: () => navigate }));
 vi.mock("../../../components/Leases", () => ({ LeaseChips: () => null }));
 vi.mock("../../../components/HoldBadge", () => ({ HoldBadge: () => null }));
 vi.mock("../../../stores", async () => {
@@ -33,7 +34,9 @@ const { AGENTS_PARTS, BOARD_PARTS, BOARD_TESTS_AGENTS_PARTS, TESTS_PARTS, boardT
 let dispose: (() => void) | undefined;
 const startUrl = "/p/terrarium/board?card=TER-1&col=review";
 beforeEach(() => window.history.replaceState(null, "", startUrl));
-afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.restoreAllMocks(); vi.useRealTimers(); listeners.clear(); });
+afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.restoreAllMocks(); vi.useRealTimers(); listeners.clear(); navigate.mockClear(); });
+const admin = { writeCards: true, editColumns: true, createAgent: true, pinAgents: true };
+const buttonText = (el: Element, text: string) => [...el.querySelectorAll("button")].find(b => b.textContent?.trim() === text);
 function host() { const el = document.createElement("div"); document.body.append(el); return el; }
 const widget = <K extends PageWidget["kind"]>(id: string, kind: K, options?: PageWidget["options"]) => ({ id, kind, options });
 const emit = (event: Partial<AgentEvent>) => listeners.forEach(fn => fn({ data: {}, ...event } as AgentEvent));
@@ -75,7 +78,7 @@ it("keeps duplicate lanes widgets independent of each other and of the URL, also
   await waitFor(() => expect(pressed(a!)).toEqual([target.dataset.column]));
   expect(pressed(b!)).toEqual(before);
   expect(new Set([...el.querySelectorAll(".board-filters")].map(e => e.id)).size).toBe(2);
-  expect(el.querySelector(".drawer")).toBeNull();
+  expect(document.querySelector(".drawer")).toBeNull();
   expect(window.location.pathname + window.location.search).toBe(startUrl);
   dispose(); dispose = undefined;
   await new Promise(r => setTimeout(r, 20));
@@ -99,7 +102,7 @@ it("keeps the columns draft over remote board events, ignores other projects and
   const get = vi.spyOn(api.board, "get").mockResolvedValueOnce(board).mockResolvedValue(changed);
   const el = host();
   const Columns = BOARD_PARTS.columns;
-  dispose = render(() => <Columns project="terrarium" widget={widget("c", "board", { view: "columns" })} />, el);
+  dispose = render(() => <Columns project="terrarium" widget={widget("c", "board", { view: "columns" })} grants={admin} />, el);
   await waitFor(() => expect(el.querySelectorAll(".columns-editor-row").length).toBe(board.columns.length));
   expect(el.querySelector(".modal")).toBeNull();
   const title = el.querySelectorAll<HTMLInputElement>(".columns-editor-row")[1]!.querySelectorAll("input")[1]!;
@@ -133,7 +136,7 @@ it("shows a refused columns save and keeps the draft, and remounts after a saved
   const update = vi.spyOn(api.board, "update").mockRejectedValueOnce(new ApiError(403, "project_admin required", undefined, "forbidden"));
   const el = host();
   const Columns = BOARD_PARTS.columns;
-  dispose = render(() => <Columns project="terrarium" widget={widget("c", "board", { view: "columns" })} />, el);
+  dispose = render(() => <Columns project="terrarium" widget={widget("c", "board", { view: "columns" })} grants={admin} />, el);
   await waitFor(() => expect(el.querySelectorAll(".columns-editor-row").length).toBe(board.columns.length));
   const titleInput = () => el.querySelectorAll<HTMLInputElement>(".columns-editor-row")[1]!.querySelectorAll("input")[1]!;
   change(titleInput(), "Draft title", "input");
@@ -190,4 +193,80 @@ it("renders the agents and card agents parts with local filters and an empty sta
   expect(b!.querySelectorAll(".agent-card")).toHaveLength(2);
   await waitFor(() => expect(c!.textContent).toContain("No card agents."));
   expect(api.agents.list).toHaveBeenCalledWith("terrarium", { card: true });
+});
+
+it("defaults a board widget to read-only and opens a card on its detail route", async () => {
+  const get = vi.spyOn(api.cards, "get");
+  const update = vi.spyOn(api.cards, "update");
+  const el = host();
+  const Lanes = BOARD_PARTS.lanes;
+  dispose = render(() => <Lanes project="terrarium" widget={widget("r", "board")} />, el);
+  await waitFor(() => expect(el.querySelector("[data-card]")).not.toBeNull());
+  expect(el.querySelector(".column-add")).toBeNull();
+  expect(buttonText(el, "Edit columns")).toBeUndefined();
+  expect([...el.querySelectorAll<HTMLElement>("[data-card]")].every(c => c.getAttribute("draggable") !== "true")).toBe(true);
+  const card = el.querySelector<HTMLElement>("[data-card]")!;
+  card.click();
+  expect(navigate).toHaveBeenCalledWith(`/p/terrarium/board?card=${encodeURIComponent(card.dataset.card!)}`);
+  await new Promise(r => setTimeout(r, 20));
+  expect(document.querySelector(".drawer")).toBeNull();
+  expect(get).not.toHaveBeenCalled();
+  expect(update).not.toHaveBeenCalled();
+});
+
+it("shows board writes only with the grants, and a revoked grant removes them and closes the drawer", async () => {
+  const el = host();
+  const Lanes = BOARD_PARTS.lanes;
+  const [grants, setGrants] = createSignal<typeof admin | { writeCards?: boolean; editColumns?: boolean }>({ writeCards: true });
+  dispose = render(() => <Lanes project="terrarium" widget={widget("g", "board")} grants={grants()} />, el);
+  await waitFor(() => expect(el.querySelector(".column-add")).not.toBeNull());
+  expect(buttonText(el, "Edit columns")).toBeUndefined();
+  expect(el.querySelector<HTMLElement>("[data-card][draggable=true]")).not.toBeNull();
+  setGrants(admin);
+  expect(buttonText(el, "Edit columns")).not.toBeUndefined();
+  el.querySelector<HTMLElement>("[data-card]")!.click();
+  await waitFor(() => expect(document.querySelector(".drawer")).not.toBeNull());
+  expect(navigate).not.toHaveBeenCalled();
+  setGrants({});
+  await waitFor(() => expect(document.querySelector(".drawer")).toBeNull());
+  expect(el.querySelector(".column-add")).toBeNull();
+  expect(buttonText(el, "Edit columns")).toBeUndefined();
+  expect(el.querySelector<HTMLElement>("[data-card][draggable=true]")).toBeNull();
+});
+
+it("shows read-only columns without a grant and the editor with one", async () => {
+  const board = await api.board.get("terrarium");
+  vi.spyOn(api.board, "get").mockResolvedValue(board);
+  const update = vi.spyOn(api.board, "update");
+  const el = host();
+  const Columns = BOARD_PARTS.columns;
+  const [grants, setGrants] = createSignal<{ editColumns?: boolean } | undefined>(undefined);
+  dispose = render(() => <Columns project="terrarium" widget={widget("c", "board", { view: "columns" })} grants={grants()} />, el);
+  await waitFor(() => expect(el.querySelectorAll("table [data-column-row]").length).toBe(board.columns.length));
+  expect(el.querySelector("form, input, select, textarea")).toBeNull();
+  expect(el.querySelector("button")).toBeNull();
+  // A write right of another domain is not a columns grant.
+  setGrants({ editColumns: false });
+  expect(el.querySelector("form")).toBeNull();
+  setGrants({ editColumns: true });
+  await waitFor(() => expect(el.querySelectorAll(".columns-editor-row").length).toBe(board.columns.length));
+  setGrants(undefined);
+  expect(el.querySelector("form")).toBeNull();
+  expect(update).not.toHaveBeenCalled();
+});
+
+it("hides New agent and pins without grants and shows them with grants", () => {
+  const el = host();
+  const Agents = AGENTS_PARTS.agents;
+  const [grants, setGrants] = createSignal<{ createAgent?: boolean; pinAgents?: boolean } | undefined>(undefined);
+  dispose = render(() => <Agents project="terrarium" widget={widget("a", "agents")} grants={grants()} />, el);
+  expect(el.querySelectorAll(".agent-card")).toHaveLength(2);
+  expect(buttonText(el, "New agent")).toBeUndefined();
+  expect(buttonText(el, "Pin")).toBeUndefined();
+  setGrants({ createAgent: true });
+  expect(buttonText(el, "New agent")).not.toBeUndefined();
+  expect(buttonText(el, "Pin")).toBeUndefined();
+  setGrants({ pinAgents: true });
+  expect(buttonText(el, "New agent")).toBeUndefined();
+  expect(el.querySelectorAll("button[aria-pressed]")).toHaveLength(2);
 });
