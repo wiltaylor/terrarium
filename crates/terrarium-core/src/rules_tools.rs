@@ -1585,7 +1585,10 @@ rule "to-blocked" {
         let park = to_wcl(&rule_of(&marked, "agent-park"));
         let one = marked.replacen(&park, &park.replace(", \"queue\"] }", "] }"), 1);
         assert_ne!(one, marked);
-        assert_eq!(rule_of(&one, "agent-unpark"), rule_of(&marked, "agent-unpark"));
+        assert_eq!(
+            rule_of(&one, "agent-unpark"),
+            rule_of(&marked, "agent-unpark")
+        );
         assert_eq!(retire(&one, &board), None);
     }
 
