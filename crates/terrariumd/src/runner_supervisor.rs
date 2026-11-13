@@ -1381,10 +1381,11 @@ impl Slot {
         }
         if status == AgentStatus::Working {
             self.in_turn = true;
-        } else if status.is_resting() && std::mem::take(&mut self.in_turn) {
-            if std::mem::take(&mut self.kick_pointer) {
-                self.kick = None;
-            }
+        } else if status.is_resting()
+            && std::mem::take(&mut self.in_turn)
+            && std::mem::take(&mut self.kick_pointer)
+        {
+            self.kick = None;
         }
     }
 
