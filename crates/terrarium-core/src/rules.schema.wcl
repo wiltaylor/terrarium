@@ -56,6 +56,7 @@ type Rule {
   @children("card_label") card_label: list<CardLabel>
   @children("card_comment") card_comment: list<CardComment>
   @children("card_assign") card_assign: list<CardAssign>
+  @children("review_start") review_start: list<ReviewStart>
   @children("card_prepend") card_prepend: list<CardPrepend>
   @children("mail") mail: list<Mail>
   @children("card_blocked_mail") card_blocked_mail: list<CardBlockedMail>
@@ -203,6 +204,22 @@ type CardAssign {
   owner: utf8?
   from: utf8?
   limit: i64?
+}
+
+// A review agent for a card in the review column (TER-1214): a new bound
+// agent from `template` (default `card-review`) reviews the card and posts
+// `Review verdict: accept` or `Review verdict: changes`, which moves it
+// to `merge_queue` or `ready`. `owner` is the project admin whose spawn
+// rights and caps are used. `max_rounds` (default 3, at most 10): after
+// that many rounds the card stays in review and the owner gets one mail.
+// `from`: the review column, for a rule with no card (a timer); else the
+// run's card.
+@block("review_start")
+type ReviewStart {
+  template: utf8?
+  owner: utf8
+  max_rounds: i64?
+  from: utf8?
 }
 
 // Put text at the top of the card body.

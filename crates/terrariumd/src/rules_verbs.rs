@@ -41,6 +41,7 @@ use crate::card_dispatcher::{self, Pick, Templates};
 use crate::db::Tx;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::policy;
+use crate::review_dispatcher;
 use crate::rules_engine::{Done, RunCtx, lookup};
 use crate::store::accepted_heads;
 use crate::store::board::{self, Card, CardPatch, NewCard, NewLink};
@@ -95,6 +96,13 @@ pub enum Effect {
         pick: Pick,
         limit: i64,
     },
+    /// Start the review agent of a card (`review.start`, TER-1214) as the
+    /// agent `owner`.
+    Review {
+        project: String,
+        owner: String,
+        pick: review_dispatcher::Pick,
+    },
 }
 
 /// Run the effects of an action, in order, after its commit.
@@ -125,7 +133,34 @@ pub async fn apply(state: &Shared, effects: Vec<Effect>) {
                 pick,
                 limit,
             } => dispatch(state, &project, &owner, &pick, limit).await,
+            Effect::Review {
+                project,
+                owner,
+                pick,
+            } => review(state, &project, &owner, pick).await,
         }
+    }
+}
+
+/// The spawn of a `review.start`, after the commit. The owner and the
+/// selection are read again; the spawn rechecks them in its transaction.
+async fn review(state: &Shared, project: &str, owner: &str, pick: review_dispatcher::Pick) {
+    let (p, o) = (project.to_owned(), owner.to_owned());
+    let who = state
+        .db
+        .read(move |c| card_dispatcher::named_owner(c, &p, &o, "review.start owner"))
+        .await;
+    let who = match who {
+        Ok(Some(who)) => who,
+        Ok(None) => return,
+        Err(e) => {
+            warn!(%project, %owner, "review.start cannot start an agent: {e}");
+            return;
+        }
+    };
+    let source = review_dispatcher::Owner::Named(owner.to_owned());
+    if let Err(e) = review_dispatcher::run(state, project, who, pick, source).await {
+        tracing::debug!(%project, error = %e.message, "review.start spawn deferred");
     }
 }
 
@@ -376,6 +411,7 @@ pub fn perform(
             changed(json!({"card": card.id, "text": body}))
         }
         "card.assign" => card_assign(t, actor, ctx, &a, &mut effects)?,
+        "review.start" => review_start(t, actor, ctx, &a, &mut effects)?,
         "card.prepend" => card_prepend(t, actor, ctx, &a)?,
         "mail" => send_mail(t, actor, ctx, &a)?,
         "card.blocked_mail" | "card.done_mail" => move_mail(t, actor, ctx, verb)?,
@@ -698,6 +734,106 @@ fn assign_new(
             Ok(changed(detail))
         }
     }
+}
+
+/// `review.start` (TER-1214, D23): a review agent from a template for a
+/// card in the review column, as the `review_dispatcher` setting starts
+/// one. The owner's spawn rights and caps are used. This write selects the
+/// card (or, at the round limit, marks it and mails the owner once); the
+/// spawn runs after the commit ([`Effect::Review`]). A card outside the
+/// review column, no eligible card, a paused owner, or an owner at a spawn
+/// cap is a no-op with the reason.
+fn review_start(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    ctx: &RunCtx,
+    a: &Args<'_>,
+    effects: &mut Vec<Effect>,
+) -> ApiResult<Done> {
+    policy::admin_project(
+        actor,
+        &ctx.project,
+        "starting a review agent for a card of the project",
+    )?;
+    // The rule checks refuse the verb outside a columns board; a board
+    // switched back after the rule was saved fails here (rev-1214).
+    if crate::store::projects::board_flow(t, &ctx.project)?
+        != terrarium_core::config::BoardFlow::Columns
+    {
+        return Err(ApiError::invalid(format!(
+            "review.start runs only on a project on board_flow = columns; `{}` keeps the \
+             review_dispatcher setting",
+            ctx.project
+        )));
+    }
+    let owner = a.text("owner").unwrap_or_default().trim().to_owned();
+    if owner.is_empty() {
+        return Err(ApiError::invalid("review.start needs `owner`"));
+    }
+    let template = match a.text("template").map(|t| t.trim().to_owned()) {
+        None => review_dispatcher::DEFAULT_TEMPLATE.to_owned(),
+        Some(t) if !t.is_empty() => t,
+        Some(_) => return Err(ApiError::invalid("review.start: `template` is empty")),
+    };
+    let max_rounds = a
+        .count("max_rounds")
+        .map_or(review_dispatcher::DEFAULT_MAX_ROUNDS, |n| {
+            n.clamp(1, rules_file::MAX_REVIEW_ROUNDS) as u32
+        });
+    // The verdict and the end of the round read the card in the review
+    // column, so a review starts only there.
+    let review = rules_file::review_column(&ctx.columns)
+        .map(|c| c.name.clone())
+        .ok_or_else(|| ApiError::invalid("review.start: the board has no review column"))?;
+    let (from, card) = match a.raw("from") {
+        Some(r) => (column_name(ctx, r)?, None),
+        None => {
+            let c = the_card(ctx, "review.start")?;
+            (c.column.clone(), Some(c.id.clone()))
+        }
+    };
+    if from != review {
+        return Ok(noop(json!({"from": from, "card": card,
+            "reason": format!("not in the review column `{review}`")})));
+    }
+    let Some(who) = card_dispatcher::named_owner(t, &ctx.project, &owner, "review.start owner")?
+    else {
+        return Ok(noop(
+            json!({"owner": owner, "reason": "the owner is paused"}),
+        ));
+    };
+    let pick = review_dispatcher::Pick {
+        from,
+        card,
+        template,
+        max_rounds,
+    };
+    let Some(id) = review_dispatcher::candidate(t, &ctx.project, &pick)? else {
+        return Ok(noop(
+            json!({"from": pick.from, "card": pick.card, "reason": "no eligible card"}),
+        ));
+    };
+    if review_dispatcher::cap(t, &who, &id, max_rounds)? {
+        return Ok(changed(json!({"card": id, "owner": owner,
+            "reason": format!("review round limit ({max_rounds}) reached")})));
+    }
+    if let Some(reason) = card_dispatcher::project_limit(t, &who)? {
+        return Ok(noop(json!({"owner": owner, "reason": reason})));
+    }
+    let detail = json!({"card": id, "template": pick.template, "owner": owner,
+                        "round": review_dispatcher::round(t, &id)? + 1,
+                        "max_rounds": max_rounds, "spawn": "after the commit"});
+    // The spawn takes the card that this run picked and reports, or none
+    // when it is no longer eligible (rev-1214): never another card.
+    effects.push(Effect::Review {
+        project: ctx.project.clone(),
+        owner,
+        pick: review_dispatcher::Pick {
+            card: Some(id),
+            ..pick
+        },
+    });
+    Ok(changed(detail))
 }
 
 fn card_prepend(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
