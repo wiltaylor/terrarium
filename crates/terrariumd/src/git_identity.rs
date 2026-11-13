@@ -695,8 +695,8 @@ mod tests {
         )
         .unwrap();
         cmd.argv[8] = "managed-required".into();
-        let push_hook = base64::engine::general_purpose::STANDARD
-            .encode(crate::git::push_deny_hook(&[]));
+        let push_hook =
+            base64::engine::general_purpose::STANDARD.encode(crate::git::push_deny_hook(&[]));
         let run = || {
             let out = Command::new(&cmd.argv[0])
                 .args(&cmd.argv[1..])

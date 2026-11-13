@@ -1035,7 +1035,10 @@ mod tests {
         assert!(!plan.exec.args.iter().any(|arg| arg.contains(&value)));
         assert_eq!(file_env(&plan)[key], value);
         let file = plan.exec.private_file.as_ref().unwrap().path().to_owned();
-        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         drop(plan);
         assert!(!file.exists());
         let fits = "A".repeat(ENV_FILE_LINE_MAX - key.len() - 1);
@@ -1045,7 +1048,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = super::plan_exec(
             &exec_req(json!({key: value, "TERRARIUM_Z": "raw\nhook"})),
-            "docker", dir.path(),
+            "docker",
+            dir.path(),
         );
         assert!(result.is_err());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
