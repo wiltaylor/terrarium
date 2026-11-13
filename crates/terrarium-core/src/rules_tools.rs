@@ -1150,6 +1150,7 @@ mod tests {
         Context {
             columns: Some(columns.to_vec()),
             max_rules: 50,
+            columns_flow: false,
         }
     }
 

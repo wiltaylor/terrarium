@@ -755,6 +755,17 @@ fn review_start(
         &ctx.project,
         "starting a review agent for a card of the project",
     )?;
+    // The rule checks refuse the verb outside a columns board; a board
+    // switched back after the rule was saved fails here (rev-1214).
+    if crate::store::projects::board_flow(t, &ctx.project)?
+        != terrarium_core::config::BoardFlow::Columns
+    {
+        return Err(ApiError::invalid(format!(
+            "review.start runs only on a project on board_flow = columns; `{}` keeps the \
+             review_dispatcher setting",
+            ctx.project
+        )));
+    }
     let owner = a.text("owner").unwrap_or_default().trim().to_owned();
     if owner.is_empty() {
         return Err(ApiError::invalid("review.start needs `owner`"));
@@ -812,10 +823,15 @@ fn review_start(
     let detail = json!({"card": id, "template": pick.template, "owner": owner,
                         "round": review_dispatcher::round(t, &id)? + 1,
                         "max_rounds": max_rounds, "spawn": "after the commit"});
+    // The spawn takes the card that this run picked and reports, or none
+    // when it is no longer eligible (rev-1214): never another card.
     effects.push(Effect::Review {
         project: ctx.project.clone(),
         owner,
-        pick,
+        pick: review_dispatcher::Pick {
+            card: Some(id),
+            ..pick
+        },
     });
     Ok(changed(detail))
 }

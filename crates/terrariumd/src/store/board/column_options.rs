@@ -306,6 +306,10 @@ fn check_rules(
     let ctx = Context {
         columns: Some(columns),
         max_rules: board_rules::MAX_RULES_PER_COLUMN,
+        // The column-only verbs (`review.start`) only on a columns board,
+        // where the settings they replace are off (TER-1214).
+        columns_flow: crate::store::projects::board_flow(t, project)?
+            == terrarium_core::config::BoardFlow::Columns,
     };
     let rules = board_rules::read_rules(&ctx, values).map_err(rule_problems)?;
     let mut problems = Vec::new();

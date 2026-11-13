@@ -419,3 +419,203 @@ async fn the_review_dispatcher_setting_is_refused_on_a_columns_board() {
         .unwrap();
     assert_eq!(got, (None, Some("lead".to_owned())));
 }
+
+async fn lead_id(td: &TestDaemon) -> String {
+    state(td)
+        .db
+        .read(|c| {
+            Ok(terrariumd::store::agents::find(c, "lead", Some("p"))?
+                .agent
+                .id
+                .to_string())
+        })
+        .await
+        .unwrap()
+}
+
+/// A card in review with round 1 open, from a `lands` rule; the reviewer.
+async fn one_round(td: &TestDaemon) -> (String, String) {
+    set_rules(td, "review", review_rule(json!({"owner": "lead"}))).await;
+    let id = new_card(td, "ready").await;
+    move_to(td, &id, "review").await;
+    settle(td).await;
+    let agent = wait_round(td, &id, 1).await;
+    (id, agent)
+}
+
+async fn applied(td: &TestDaemon, id: &str) -> i64 {
+    let id = id.to_owned();
+    state(td)
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT applied FROM card_reviews WHERE card = ?1",
+                [&id],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+fn has_comment(c: &Value, needle: &str) -> bool {
+    c["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x["body"].as_str().unwrap_or_default().contains(needle))
+}
+
+/// A changes verdict on a columns board moves the card to the top of
+/// ready as the round's owner, with the findings.
+#[tokio::test]
+async fn a_changes_verdict_moves_the_card_to_the_top_of_ready() {
+    let td = setup().await;
+    let first = new_card(&td, "ready").await;
+    let (id, agent) = one_round(&td).await;
+    let body = "Review verdict: changes\nF1: Fix the thing.";
+    td.post_as(
+        &agent,
+        &format!("/api/cards/{id}/comments"),
+        json!({"body": body}),
+    )
+    .await
+    .ok();
+    let c = card(&td, &id).await;
+    assert_eq!(c["column"], "ready", "{c}");
+    assert!(has_comment(&c, "F1: Fix the thing."), "{c}");
+    assert_eq!(applied(&td, &id).await, 2);
+    let other = card(&td, &first).await;
+    assert_eq!(other["column"], "ready");
+    assert!(
+        c["position"].as_i64().unwrap() < other["position"].as_i64().unwrap(),
+        "{c} {other}"
+    );
+}
+
+/// The round's owner decides a verdict on a columns board: paused, the
+/// verdict waits silently (round open); not a project admin any more, or
+/// gone, the verdict stays on the card with the reason, and the card stays
+/// in review with the round open.
+#[tokio::test]
+async fn an_unusable_round_owner_keeps_the_verdict_on_the_card() {
+    for broken in ["paused", "demoted", "gone"] {
+        let td = setup().await;
+        let (id, agent) = one_round(&td).await;
+        let lead = lead_id(&td).await;
+        match broken {
+            "paused" => {
+                td.post_empty(&format!("/api/agents/{lead}/pause"))
+                    .await
+                    .ok();
+            }
+            "demoted" => {
+                td.put(&format!("/api/agents/{lead}/roles"), json!({"roles": []}))
+                    .await
+                    .ok();
+            }
+            _ => {
+                let a = agent.clone();
+                state(&td)
+                    .db
+                    .write("operator", move |t| {
+                        t.execute("UPDATE spawns SET owner = 'ghost' WHERE id = ?1", [&a])?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+        let body = "Review verdict: accept\nF1: Kept findings.";
+        td.post_as(
+            &agent,
+            &format!("/api/cards/{id}/comments"),
+            json!({"body": body}),
+        )
+        .await
+        .ok();
+        let c = card(&td, &id).await;
+        assert_eq!(c["column"], "review", "{broken}: {c}");
+        assert!(has_comment(&c, "F1: Kept findings."), "{broken}: {c}");
+        let reason = has_comment(&c, "owner is no longer valid");
+        assert_eq!(reason, broken != "paused", "{broken}: {c}");
+        assert_eq!(applied(&td, &id).await, 0, "{broken}");
+    }
+}
+
+/// `review.start` is a column rule of a columns board only: rules.wcl and
+/// the column rules of a rules-flow or code-flow board refuse it (422).
+#[tokio::test]
+async fn review_start_is_refused_outside_a_columns_board() {
+    let td = TestDaemon::start().await;
+    for (project, flow) in [("r", Some("rules")), ("c", None)] {
+        td.project(project).await;
+        if let Some(flow) = flow {
+            td.patch(
+                &format!("/api/projects/{project}"),
+                json!({"board_flow": flow}),
+            )
+            .await
+            .ok();
+        }
+        let path = format!("/api/projects/{project}/board/columns/review/options");
+        let o = td.get(&path).await.ok().clone();
+        let r = td
+            .put(
+                &path,
+                json!({"base_version": o["version"], "checks": o["checks"],
+                       "queue": o["queue"],
+                       "rules": review_rule(json!({"owner": "lead"}))}),
+            )
+            .await;
+        assert_eq!(r.status.as_u16(), 422, "{project}: {}", r.body);
+        assert!(
+            r.body.to_string().contains("board_flow = columns only"),
+            "{project}: {}",
+            r.body
+        );
+    }
+    let text = "rule \"r\" {\n  on = [\"card\"]\n  review_start { owner = \"lead\" }\n}\n";
+    let r = td
+        .put("/api/projects/r/rules", json!({"text": text}))
+        .await;
+    assert_eq!(r.status.as_u16(), 422, "{}", r.body);
+    assert!(
+        r.body.to_string().contains("board_flow = columns only"),
+        "{}",
+        r.body
+    );
+}
+
+/// The GitHub author gate: a held card that lands in review gets no
+/// review agent (the run fails with the gate's reason).
+#[tokio::test]
+async fn a_held_card_gets_no_review() {
+    let td = setup().await;
+    set_rules(&td, "review", review_rule(json!({"owner": "lead"}))).await;
+    let id = td
+        .post(
+            "/api/projects/p/cards",
+            json!({"title": "From GitHub", "column": "review", "labels": ["github", "hold"]}),
+        )
+        .await
+        .ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    settle(&td).await;
+    let r = runs(&td).await;
+    let run = r
+        .iter()
+        .find(|r| r["rule"] == "review/review" && r["card"] == id.as_str())
+        .expect("the rule ran");
+    assert_eq!(run["state"], "failed", "{run}");
+    assert!(
+        run["reason"]
+            .as_str()
+            .unwrap()
+            .contains("held by the GitHub author gate"),
+        "{run}"
+    );
+    assert_eq!(card(&td, &id).await["review_round"], 0);
+}

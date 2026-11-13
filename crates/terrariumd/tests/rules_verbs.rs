@@ -2824,10 +2824,6 @@ rule "h-assign" {
   on = ["test.ping"]
   card_assign { who = "none" }
 }
-rule "h-review" {
-  on = ["test.ping"]
-  review_start { owner = "lead" }
-}
 rule "h-prepend" {
   on = ["test.ping"]
   card_prepend { text = "x" }
@@ -2940,7 +2936,13 @@ async fn every_verb_refuses_a_held_card() {
         .iter()
         .map(|r| r["steps"][0]["verb"].as_str().unwrap())
         .collect();
-    let mut want: Vec<&str> = VERBS.iter().map(|v| v.name).collect();
+    // The column-only verbs are refused in rules.wcl (TER-1214);
+    // `rule_review::a_held_card_gets_no_review` covers the gate for them.
+    let mut want: Vec<&str> = VERBS
+        .iter()
+        .map(|v| v.name)
+        .filter(|v| !terrarium_core::rules_file::COLUMNS_ONLY.contains(v))
+        .collect();
     let mut got = verbs.clone();
     want.sort_unstable();
     got.sort_unstable();

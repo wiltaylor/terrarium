@@ -668,6 +668,7 @@ mod tests {
                 col("done", None),
             ]),
             max_rules: MAX_RULES_PER_COLUMN,
+            columns_flow: false,
         }
     }
 

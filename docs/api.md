@@ -9501,8 +9501,7 @@ any number of `if_card` and `if_job` conditions on the current state
 (§19.9), and at least one verb. The verbs run in the order of the file:
 `card_move` (`to`, `from?`, `comment?`, `position?` `top` or `bottom`),
 `card_label` (`add?`, `remove?`), `card_comment` (`text`), `card_assign`
-(`who`), `review_start` (`owner`, `template?`, `max_rounds?`, `from?`),
-`card_prepend` (`text`), `mail` (`to`, `subject`, `body?`),
+(`who`), `card_prepend` (`text`), `mail` (`to`, `subject`, `body?`),
 `card_blocked_mail`, `card_done_mail`, `job_queue` (`kind` `validate`, `merge`, or `batch`; `from`, `limit?`,
 `min_cards?`, and `max_wait_minutes?` for a batch only;
 `max_wait_minutes` needs `min_cards`, and `min_cards` is at most
@@ -9777,8 +9776,12 @@ expression. No manual close endpoint exists.
     the card again. No room, no eligible card, a paused owner, or an owner
     at a spawn cap: a no-op with the reason. A failed spawn gives the card
     the dispatcher's cooldown, comment and owner mail.
-- `review_start` (`review.start`, TER-1214, kanban rework C4b): start a
-  review agent for a card in the review column (the column with the role
+- `review_start` (`review.start`, TER-1214, kanban rework C4b): only in
+  the column rules of a project on `board_flow = columns`. `rules.wcl`,
+  the column rules of a rules or code board, and the output of a script
+  step refuse it (422); other boards keep the `review_dispatcher` setting
+  until the conversion (C5). It starts a review agent for a card in the
+  review column (the column with the role
   `review`, else the one named `review`), as the review dispatcher does
   (§5). `owner` (required) is a non-ephemeral project admin of the
   project: its spawn rights and caps are used, pausing it pauses the
@@ -9794,7 +9797,12 @@ expression. No manual close endpoint exists.
   the commit and checks the owner, the round and the card again. A card
   outside the review column, no eligible card, a paused owner, or an owner
   at a spawn cap: a no-op with the reason. A failed spawn gives the card
-  the dispatcher's cooldown, comment and owner mail. The verdict works as
+  the dispatcher's cooldown, comment and owner mail. The spawn takes the
+  card that the run reported, or none when it is no longer eligible. The
+  action does not retry by itself: a retry after the cooldown, or after a
+  reviewer that ended with no verdict, needs a rule that runs again, such
+  as a `timer` rule on the review column with `from: "@review"` (the
+  setting's timer did this on each tick). The verdict works as
   in §5: accept moves the card to `merge_queue`, changes to the top of
   `ready`, and `review:lead` keeps it for the lead.
 - `card_prepend`: put `text` at the top of the card body. A body that

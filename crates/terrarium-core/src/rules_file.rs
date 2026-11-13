@@ -504,6 +504,11 @@ pub struct Context {
     pub columns: Option<Vec<BoardColumn>>,
     /// The most rules in the file.
     pub max_rules: usize,
+    /// The rules are column rules of a project on `board_flow = columns`.
+    /// Only those may use the column-only verbs ([`COLUMNS_ONLY`],
+    /// TER-1214): `rules.wcl`, the pack, a script's output and the column
+    /// rules of another board refuse them.
+    pub columns_flow: bool,
 }
 
 impl Default for Context {
@@ -511,9 +516,14 @@ impl Default for Context {
         Self {
             columns: None,
             max_rules: DEFAULT_MAX_RULES,
+            columns_flow: false,
         }
     }
 }
+
+/// The verbs that run only as column rules of a `board_flow = columns`
+/// project (TER-1214): the setting they replace still acts on other boards.
+pub const COLUMNS_ONLY: &[&str] = &["review.start"];
 
 /// One verb of a rule, with its arguments as JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -615,6 +625,7 @@ pub fn default_pack() -> &'static RuleSet {
         let ctx = Context {
             columns: None,
             max_rules: usize::MAX,
+            columns_flow: false,
         };
         parse(DEFAULT_PACK, PACK_FILE, &ctx).unwrap_or_default()
     })
@@ -984,12 +995,20 @@ pub fn review_column(columns: &[BoardColumn]) -> Option<&BoardColumn> {
         .or_else(|| columns.iter().find(|c| c.name == "review"))
 }
 
-/// The checks of `review.start` across its arguments (TER-1214):
+/// The checks of `review.start` across its arguments (TER-1214): only in
+/// the column rules of a columns board ([`Context::columns_flow`]);
 /// `max_rounds` is 1 to [`MAX_REVIEW_ROUNDS`], `template` is a plain name,
 /// and `from` is the review column of the board ([`review_column`]): the
 /// verdict and the end of the round read the card there.
 fn check_review_args(ctx: &Context, args: &Map<String, Value>) -> Vec<String> {
     let mut out = Vec::new();
+    if !ctx.columns_flow {
+        out.push(
+            "review_start is a column rule of a project on board_flow = columns only; \
+             other boards keep the review_dispatcher setting"
+                .to_owned(),
+        );
+    }
     if let Some(n) = args.get("max_rounds").and_then(Value::as_i64)
         && !(1..=MAX_REVIEW_ROUNDS).contains(&n)
     {
@@ -1756,6 +1775,7 @@ pub fn script_actions(output: &str, ctx: &Context) -> Result<Vec<Action>, String
     let ctx = Context {
         columns: ctx.columns.clone(),
         max_rules: 1,
+        columns_flow: ctx.columns_flow,
     };
     let lines = SCRIPT_WRAP.matches('\n').count();
     let set = parse(&text, "script output", &ctx).map_err(|e| {
@@ -1834,6 +1854,7 @@ mod tests {
                     .collect(),
             ),
             max_rules: DEFAULT_MAX_RULES,
+            columns_flow: false,
         }
     }
 
@@ -2175,6 +2196,7 @@ rule "validate-pass" {
         let ctx = Context {
             columns: None,
             max_rules: 2,
+            columns_flow: false,
         };
         let e = parse(&text, "rules.wcl", &ctx).unwrap_err().to_string();
         assert!(e.contains("at most 2"), "{e}");
@@ -2269,14 +2291,23 @@ rule "validate-pass" {
   }
 }
 "#;
-        let set = parse(text, "rules.wcl", &board()).unwrap();
+        // rules.wcl and the column rules of another board refuse the verb.
+        let e = errors(text);
+        assert!(e.contains("board_flow = columns only"), "{e}");
+        let columns = Context {
+            columns_flow: true,
+            ..board()
+        };
+        let set = parse(text, "rules.wcl", &columns).unwrap();
         let a = &set.rules[0].actions[0];
         assert_eq!(a.verb, "review.start");
         assert_eq!(a.args["max_rounds"], 2);
         let bad = |action: &str| {
-            errors(&format!(
-                "rule \"r\" {{\n  on = [\"card\"]\n  {action}\n}}\n"
-            ))
+            let text = format!("rule \"r\" {{\n  on = [\"card\"]\n  {action}\n}}\n");
+            match parse(&text, "rules.wcl", &columns) {
+                Ok(_) => String::new(),
+                Err(e) => e.to_string(),
+            }
         };
         let e = bad("review_start {}");
         assert!(e.contains("review_start needs `owner`"), "{e}");
@@ -2287,8 +2318,8 @@ rule "validate-pass" {
         let e = bad(r#"review_start { owner = "lead" template = "{{card.id}}" }"#);
         assert!(e.contains("is not a template name"), "{e}");
         let ok = "rule \"r\" {\n  on = [\"card\"]\n  review_start { owner = \"lead\" }\n}\n";
-        assert!(parse(ok, "rules.wcl", &board()).is_ok());
-        let ctx = board();
+        assert!(parse(ok, "rules.wcl", &columns).is_ok());
+        let ctx = columns.clone();
         let cols = ctx.columns.as_deref().unwrap();
         assert_eq!(review_column(cols).unwrap().name, "review");
         let action = Action {
@@ -2300,6 +2331,12 @@ rule "validate-pass" {
         assert!(
             p.iter()
                 .any(|(_, m)| m.contains("is not the review column")),
+            "{p:?}"
+        );
+        let p = check_action(&board(), &action);
+        assert!(
+            p.iter()
+                .any(|(_, m)| m.contains("board_flow = columns only")),
             "{p:?}"
         );
     }
@@ -2435,6 +2472,7 @@ rule "validate-pass" {
                     .collect(),
             ),
             max_rules: DEFAULT_MAX_RULES,
+            columns_flow: false,
         }
     }
 
