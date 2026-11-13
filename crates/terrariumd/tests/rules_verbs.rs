@@ -5273,7 +5273,11 @@ async fn column_rules_fix_then_split_a_red_merge_batch() {
         assert_eq!(x["group"]["id"], json!(merge_group), "{x}");
     }
     let g = card(&td, &a).await["group"].clone();
-    assert_eq!((g["done"].clone(), g["total"].clone()), (json!(4), json!(5)), "{g}");
+    assert_eq!(
+        (g["done"].clone(), g["total"].clone()),
+        (json!(4), json!(5)),
+        "{g}"
+    );
 
     // The fix card is fixed and goes through review to the merge queue.
     // The last batch has left, so it waits for a batch of 2 or for the
