@@ -234,7 +234,7 @@ mod tests {
             Duration::from_millis(500),
             lock.clone().lock_owned(ResourceOperation::Command),
         );
-        let mut timed = pin!(timed);
+        let mut timed = Box::pin(timed);
         assert!(poll!(&mut timed).is_pending());
         tokio::time::advance(Duration::from_millis(501)).await;
         assert!(timed.await.is_err());
