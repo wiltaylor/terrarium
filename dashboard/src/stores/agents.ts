@@ -8,6 +8,9 @@ import type { EventsStore } from "./events";
 /** The lifecycle events after which the list is read again (the queued count, `reset_pending`). */
 const LIFECYCLE = new Set<AgentEvent["kind"]>(["agent.paused", "agent.unpaused", "agent.woken", "agent.reset"]);
 
+/** A mail event that holds a message for its recipient agent, or releases one (TER-1154). */
+export const isHeldMail = (e: AgentEvent): boolean => e.kind === "mail" && (e.data?.held === true || e.data?.released === true);
+
 const isStatus = (s: unknown): s is AgentStatus => AGENT_STATUSES.includes(s as AgentStatus);
 
 /** The agent ULID of an event: `agent_id`, or `data.agent_id`. */
@@ -169,6 +172,8 @@ export function createAgentsStore(api: Pick<Api, "agents">, events?: Pick<Events
     }
     // No event carries the queued count: a wake, a pause, an unpause, or a stop changes it.
     if (known && (LIFECYCLE.has(e.kind) || (e.kind === "status" && e.data?.status === "stopped"))) refreshSoon();
+    // A held or released message changes `held_mail` (TER-1154). The list read applies the daemon's rights rule: who may not see the count gets none.
+    if (known && isHeldMail(e)) refreshSoon();
   });
 
   return {
@@ -184,7 +189,8 @@ export function createAgentsStore(api: Pick<Api, "agents">, events?: Pick<Events
       // The list has no ephemeral agents (docs/api.md §6.10): their page reads them itself.
       if (i < 0 && agent.ephemeral) return;
       if (i < 0) setState("agents", (list) => [...list, agent]);
-      else setState("agents", i, (old) => ({ ...agent, last_event: old.last_event, self_report: old.self_report, turn_started_at: old.turn_started_at }));
+      // A copy without `held_mail` keeps the old count (TER-1154).
+      else setState("agents", i, (old) => ({ ...agent, held_mail: agent.held_mail ?? old.held_mail, last_event: old.last_event, self_report: old.self_report, turn_started_at: old.turn_started_at }));
     },
     drop(id: string) {
       removed.add(id);
