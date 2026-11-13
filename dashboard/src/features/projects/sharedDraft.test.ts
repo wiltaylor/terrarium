@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // TER-1073: one draft of all tabs, owned by the project shell.
-import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
+import { MemoryRouter, Route, Router, createMemoryHistory } from "@solidjs/router";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
@@ -277,5 +277,54 @@ it("prompts when a link switches to another instance with unsaved changes", asyn
   other.click();
   await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
   expect(host.querySelector<HTMLInputElement>('input[aria-label="Title of a"]')!.value).toBe("Unsaved");
+  expect(api.pages.saveLayout).not.toHaveBeenCalled();
+});
+
+// The browser Router asks beforeLeave with a numeric delta on Back and Forward.
+async function mountBrowser(path: string) {
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  window.history.replaceState(null, "", path);
+  const host = document.createElement("div"); document.body.append(host);
+  const dispose = render(() => createComponent(Router, { get children() { return [
+    createComponent(Route, { path: "/p/:project", component: ProjectScreen, get children() { return [
+      createComponent(Route, { path: "/pages/:slug", component: CustomPage }),
+    ]; } }),
+  ]; } }), host);
+  cleanup = () => { dispose(); host.remove(); window.history.replaceState(null, "", "/"); };
+  await waitFor(() => expect(host.querySelector("nav")?.textContent).toContain("A"));
+  return host;
+}
+
+it("keeps the draft after a confirmed Back between tabs of the same project", async () => {
+  seed();
+  const confirm = vi.fn(() => true);
+  vi.stubGlobal("confirm", confirm);
+  const host = await mountBrowser("/p/demo/pages/a");
+  await startEdit(host);
+  input(host.querySelector<HTMLInputElement>('input[aria-label="Title of a"]')!, "Unsaved");
+  link(host, "/p/demo/pages/b").click();
+  await waitFor(() => expect(window.location.pathname).toBe("/p/demo/pages/b"));
+  expect(confirm).not.toHaveBeenCalled();
+  window.history.back();
+  await waitFor(() => expect(window.location.pathname).toBe("/p/demo/pages/a"));
+  await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+  expect(host.querySelector<HTMLInputElement>('input[aria-label="Title of a"]')!.value).toBe("Unsaved");
+  expect(tabOrder(host)).toEqual(["a", "b"]);
+  expect(has(host, "Save pages")).toBe(true);
+});
+
+it("keeps the draft and offers Retry when a refresh fails while editing", async () => {
+  seed();
+  const { host } = await mount();
+  await startEdit(host);
+  input(host.querySelector<HTMLInputElement>('input[aria-label="Title of a"]')!, "Unsaved");
+  api.pages.list.mockRejectedValueOnce(new ApiError(503, "unavailable"));
+  emit({ project: "demo", revision: 3, operation: "replace" });
+  await waitFor(() => expect(has(host, "Retry")).toBe(true));
+  expect(has(host, "Save pages")).toBe(false);
+  button(host, "Retry").click();
+  await waitFor(() => expect(has(host, "Save pages")).toBe(true));
+  expect(host.querySelector<HTMLInputElement>('input[aria-label="Title of a"]')!.value).toBe("Unsaved");
+  expect(has(host, "Retry")).toBe(false);
   expect(api.pages.saveLayout).not.toHaveBeenCalled();
 });

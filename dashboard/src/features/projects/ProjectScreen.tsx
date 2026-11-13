@@ -24,7 +24,8 @@ export function leavesProject(href: (path: string) => string, base: string, to: 
   return path !== target && !path.startsWith(`${target}/`);
 }
 
-export const LEAVE_DRAFT = "Discard your unsaved page layout changes?";
+// A history step has no known target, so the text must be true inside and outside the project.
+export const LEAVE_DRAFT = "Unsaved page layout changes are lost if you leave this project. Continue?";
 
 export default function ProjectScreen(props: RouteSectionProps) {
   const instance = useInstance();
@@ -42,11 +43,12 @@ export default function ProjectScreen(props: RouteSectionProps) {
   // One layout draft for all tabs of this project in this instance (TER-1073).
   const editor = createLayoutEditor(api, events, instance.key, project);
   // Links, history and instance switches (RemoteScope is a route) all leave
-  // through the router, so one guard covers them.
+  // through the router, so one guard covers them. It never ends the draft:
+  // a confirmed Back inside the project keeps it, and leaving the project
+  // unmounts this screen or changes the scope, which ends it.
   useBeforeLeave(event => {
     if (!editor.dirty() || !leavesProject(instance.href, base(), event.to)) return;
-    if (window.confirm(LEAVE_DRAFT)) editor.cancel();
-    else event.preventDefault();
+    if (!window.confirm(LEAVE_DRAFT)) event.preventDefault();
   });
   const unload = (event: BeforeUnloadEvent) => {
     if (!editor.dirty()) return;
