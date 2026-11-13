@@ -1021,7 +1021,9 @@ impl RuntimeThreads {
     fn cpu(&self) -> Duration {
         let tids = self.0.lock().unwrap().clone();
         tids.iter()
-            .filter_map(|tid| std::fs::read_to_string(format!("/proc/self/task/{tid}/schedstat")).ok())
+            .filter_map(|tid| {
+                std::fs::read_to_string(format!("/proc/self/task/{tid}/schedstat")).ok()
+            })
             .map(|s| Duration::from_nanos(s.split_whitespace().next().unwrap().parse().unwrap()))
             .sum()
     }
