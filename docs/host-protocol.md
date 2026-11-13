@@ -321,8 +321,20 @@ or ran out), `replaced` (a new connection with the same token took over),
 
 Both sides send `{"type":"ping","nonce":N}` every `heartbeat_secs`. The other
 side answers `{"type":"pong","nonce":N}`. Any frame counts as a sign of
-life. When a side receives nothing for 3 × `heartbeat_secs`, it closes the
-connection. The host agent then reconnects.
+life. Each side checks once per `heartbeat_secs` tick:
+
+- The host agent closes the connection at the first tick that finds
+  nothing received for more than 3 × `heartbeat_secs`: 3 to 4 heartbeats
+  after the last frame (45-60 s at the default 15 s).
+- The daemon closes the connection after two overdue ticks. A tick that
+  finds nothing received for more than 3 × `heartbeat_secs` marks the link
+  overdue, and the next tick closes it if still nothing came. A silent link
+  closes 4 to 5 heartbeats after its last frame (60-75 s at the default
+  15 s). The extra tick keeps a daemon that wakes late under load from
+  blaming the host (TER-1132). While the daemon pauses reads for its
+  journal, the link does not count as silent.
+
+The host agent then reconnects.
 
 ## Sessions
 
@@ -1790,8 +1802,8 @@ Each item of the list is done:
 - [x] Send `ack` at least once for each 1 MiB of output, and at the end.
   The daemon acks each 256 KiB that the consumer took.
 - [x] Send `release` after each terminal frame.
-- [x] Send `ping` every `heartbeat_secs`, and close a link that is silent for 3
-  intervals.
+- [x] Send `ping` every `heartbeat_secs`, and close a link after two overdue
+  ticks: 4 to 5 silent intervals ("Heartbeat").
 - [x] Apply the agent's policy before it sends any frame
   (`policy::use_target` in `executor`, before a session opens).
 - [x] Send `limits` only to a host agent whose `capabilities.limits` can
@@ -1815,7 +1827,7 @@ Each item of the list is done:
 | Buffer while disconnected | Up to `buffer_limit_bytes` (default 8 MiB) for each session. Overflow kills the session with `output_overflow`. A session with no link for `resume_grace_secs` (default 600 s) is killed with `detached_timeout`. |
 | Reconnection | Exponential backoff with jitter, 1 s to 60 s. A resume token in `hello`. The daemon says which sessions it takes back and from which byte. |
 | Push over a reconnect | Not resumed. The session ends with `interrupted` and the daemon sends again. Pulls and exec output resume. |
-| Liveness | JSON `ping`/`pong` both ways every `heartbeat_secs`. Dead after 3 silent intervals. |
+| Liveness | JSON `ping`/`pong` both ways every `heartbeat_secs`. The host agent closes after 3 to 4 silent intervals, the daemon after 4 to 5 ("Heartbeat"). |
 | TLS | rustls with ring on both sides: the daemon's listener with `TERRARIUM_HOST_TLS_CERT`/`_KEY`, and the host agent with the system roots, `ca_file`, or a pinned SHA-256. Static musl builds need no OpenSSL. `ws://` only to loopback unless `allow_insecure`. |
 
 ## Verified live

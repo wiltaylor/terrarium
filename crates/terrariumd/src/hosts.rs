@@ -11,8 +11,13 @@
 //!   each host and returns a [`HostSession`]. The consumer reads
 //!   [`SessionEvent`]s from it. Acks follow what the consumer has taken,
 //!   so a slow consumer is backpressure on the host's process.
-//! - The daemon sends `ack` and `release` after each terminal frame, `ping`
-//!   every heartbeat, and closes a link that is silent for 3 heartbeats.
+//! - The daemon sends `ack` and `release` after each terminal frame, and
+//!   `ping` every heartbeat. A link is dead after two overdue ticks: a tick
+//!   that finds no frame for more than 3 heartbeats marks the link overdue,
+//!   and the next tick, one heartbeat later, closes it if still no frame
+//!   came. So a silent link closes 4 to 5 heartbeats after its last frame
+//!   (60-75 s at the default 15 s). A tick while the journal backpressures
+//!   the link counts as a frame (TER-1132).
 //! - A session the daemon started that is missing from a resumed `hello`,
 //!   or that stays without a link for the resume grace, ends with
 //!   [`SessionEvent::Lost`].
@@ -2439,9 +2444,10 @@ async fn drive_link(
             }
             _ = ticker.tick() => {
                 if reg.journal_backpressured(host) {
+                    // Reads are paused on purpose: that is not silence, and
+                    // the waiting frame below must stay unread too.
                     last_rx = Instant::now();
-                }
-                if last_rx.elapsed() > hb * MISSED_HEARTBEATS {
+                } else if last_rx.elapsed() > hb * MISSED_HEARTBEATS {
                     // A late wake-up of this task is not silence from the
                     // host (TER-1132). Under load the ticker and a frame that
                     // arrived meanwhile become ready together, and `select!`
