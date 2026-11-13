@@ -25,7 +25,7 @@ it("keeps duplicate filters and open rows local and retains a reply draft throug
     <section><MailPanel project="terrarium" /></section><section><MailPanel project="terrarium" /></section>
   </>} /></MemoryRouter>, root);
   const sections = root.querySelectorAll("section");
-  const row = () => [...sections[0]!.querySelectorAll<HTMLTableRowElement>("tr.log-row")].find((r) => r.textContent?.includes("Panel retention"))!;
+  const row = () => [...sections[0]!.querySelectorAll<HTMLTableRowElement>("tr.log-row")].find((r) => r.querySelector(".subject")?.textContent === "Panel retention")!;
   await waitFor(() => expect(row()).toBeTruthy());
   expect(root.querySelector('[aria-label="Filter by project"]')).toBeNull();
   expect(root.querySelector(".log-thread")).toBeNull();
