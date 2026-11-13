@@ -652,7 +652,8 @@ async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
     let session = before[0]["id"].clone();
 
     // These are ordinary non-wait moves: the legacy unpark runs, but the
-    // bound agent is not parked, so every run is a no-op.
+    // bound agent is not parked, so every run ends `noop`. Each counts
+    // against the ten-run card budget of an override.
     for (n, to) in ["ready", "in_progress"]
         .into_iter()
         .cycle()
@@ -668,7 +669,7 @@ async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
                 .as_array()
                 .unwrap()
                 .clone();
-            runs.len() == n + 1 && runs.iter().all(|r| r["state"] == "done")
+            runs.len() == n + 1 && runs.iter().all(|r| r["state"] == "noop")
         })
         .await;
     }
@@ -693,7 +694,11 @@ async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
         .unwrap()
         .clone();
     assert_eq!(runs.len(), 11, "{runs:?}");
-    assert!(runs.iter().all(|r| r["state"] == "done"), "{runs:?}");
+    // Ten legacy no-ops, then one built-in run that wakes the owner. None
+    // is skipped by the card budget.
+    let state_count = |s: &str| runs.iter().filter(|r| r["state"] == s).count();
+    assert_eq!(state_count("noop"), 10, "{runs:?}");
+    assert_eq!(state_count("done"), 1, "{runs:?}");
     let after = sessions(&td, &eph).await;
     assert_eq!(after.len(), 1, "{after:?}");
     assert_eq!(after[0]["id"], session);
