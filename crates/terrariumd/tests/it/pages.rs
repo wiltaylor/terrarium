@@ -296,10 +296,20 @@ async fn v2_explicit_initializer_preserves_upgrade_collisions_and_deleted_builti
     );
     // A project that no initializer has seen yet (written past the store).
     // GET does not seed it, and an interrupted initialization leaves nothing.
-    td.daemon.as_ref().unwrap().state.db.write("fixture", |t| {
-        t.execute("INSERT INTO projects(name,created_at,updated_at) VALUES('raw','x','x')", [])?;
-        Ok(())
-    }).await.unwrap();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("fixture", |t| {
+            t.execute(
+                "INSERT INTO projects(name,created_at,updated_at) VALUES('raw','x','x')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let raw = td.get("/api/projects/raw/page-layout").await.body;
     assert_eq!(raw["revision"], 0);
     assert_eq!(raw["pages"].as_array().unwrap().len(), 1);
@@ -327,7 +337,10 @@ async fn v2_explicit_initializer_preserves_upgrade_collisions_and_deleted_builti
     assert_eq!(raw_initialized["revision"], 1);
     assert_eq!(raw_initialized["pages"].as_array().unwrap().len(), 11);
     assert_eq!(layout_counts(&td).await, (counts.0 + 1, counts.1 + 1));
-    assert_eq!(td.get("/api/projects/p/page-layout").await.body, initialized);
+    assert_eq!(
+        td.get("/api/projects/p/page-layout").await.body,
+        initialized
+    );
     assert_eq!(
         td.get("/api/projects/p/pages/board-1").await.ok()["builtin"],
         "board"
@@ -427,7 +440,10 @@ async fn v2_explicit_initializer_preserves_upgrade_collisions_and_deleted_builti
     td.boot(None, None).await;
     let after = td.get("/api/projects/fresh/page-layout").await.body;
     assert_eq!(after["pages"], inventory);
-    assert_eq!(after["pages"].as_array().unwrap().len(), before["pages"].as_array().unwrap().len());
+    assert_eq!(
+        after["pages"].as_array().unwrap().len(),
+        before["pages"].as_array().unwrap().len()
+    );
 }
 
 #[tokio::test]
@@ -812,9 +828,7 @@ async fn page_list_reports_the_existing_domain_rights() {
     let lead = td
         .agent("p", "lead", json!({"roles":["project_admin"]}))
         .await;
-    let architect = td
-        .agent("q", "arch", json!({"roles":["architect"]}))
-        .await;
+    let architect = td.agent("q", "arch", json!({"roles":["architect"]})).await;
     let sys = td.agent("q", "sys", json!({"roles":["sysadmin"]})).await;
     let path = "/api/projects/p/pages";
     let rights = |body: &Value| body["rights"].clone();
@@ -825,15 +839,27 @@ async fn page_list_reports_the_existing_domain_rights() {
             "manage_global":true,"operator":true})
     );
     for (agent, expect) in [
-        (&member, json!({"write_project":true,"admin_project":false,"manage_schedules":false,
-            "manage_global":false,"operator":false})),
-        (&lead, json!({"write_project":true,"admin_project":true,"manage_schedules":true,
-            "manage_global":false,"operator":false})),
+        (
+            &member,
+            json!({"write_project":true,"admin_project":false,"manage_schedules":false,
+            "manage_global":false,"operator":false}),
+        ),
+        (
+            &lead,
+            json!({"write_project":true,"admin_project":true,"manage_schedules":true,
+            "manage_global":false,"operator":false}),
+        ),
         // A cross-project reader reads, but has no write right in `p`.
-        (&architect, json!({"write_project":false,"admin_project":false,"manage_schedules":false,
-            "manage_global":false,"operator":false})),
-        (&sys, json!({"write_project":true,"admin_project":true,"manage_schedules":true,
-            "manage_global":true,"operator":false})),
+        (
+            &architect,
+            json!({"write_project":false,"admin_project":false,"manage_schedules":false,
+            "manage_global":false,"operator":false}),
+        ),
+        (
+            &sys,
+            json!({"write_project":true,"admin_project":true,"manage_schedules":true,
+            "manage_global":true,"operator":false}),
+        ),
     ] {
         let got = td.get_as(agent["id"].as_str().unwrap(), path).await;
         assert_eq!(rights(got.ok()), expect, "{}", agent["name"]);
