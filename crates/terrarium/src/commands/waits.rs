@@ -154,10 +154,17 @@ pub async fn wait(ctx: &Ctx, cmd: &WaitCmd) -> anyhow::Result<()> {
             if *kill {
                 ctx.emit(&v, |c, v| {
                     c.line(format!("wait {}: {}", field(v, "id"), field(v, "state")));
-                    c.line(format!("cleanup: {} (operation {})", cleanup_status(v), field(&v["cleanup"], "operation_id")));
+                    c.line(format!(
+                        "cleanup: {} (operation {})",
+                        cleanup_status(v),
+                        field(&v["cleanup"], "operation_id")
+                    ));
                 })?;
                 if !cleanup_verified(&v) {
-                    anyhow::bail!("termination is not verified (cleanup: {}); inspect the same wait operation, do not start a fresh kill", cleanup_status(&v));
+                    anyhow::bail!(
+                        "termination is not verified (cleanup: {}); inspect the same wait operation, do not start a fresh kill",
+                        cleanup_status(&v)
+                    );
                 }
                 return Ok(());
             }
@@ -256,11 +263,18 @@ pub async fn run(ctx: &Ctx, cmd: Option<&RunCmd>, a: &RunArgs) -> anyhow::Result
                 .await?;
             ctx.emit(&v, |c, v| {
                 c.line(format!("wait {}: {}", field(v, "id"), field(v, "state")));
-                c.line(format!("cleanup: {} (operation {})", cleanup_status(v), field(&v["cleanup"], "operation_id")));
+                c.line(format!(
+                    "cleanup: {} (operation {})",
+                    cleanup_status(v),
+                    field(&v["cleanup"], "operation_id")
+                ));
             })?;
             // Emit JSON first, so callers retain the durable operation ID.
             if !cleanup_verified(&v) {
-                anyhow::bail!("termination is not verified (cleanup: {}); inspect the same wait operation, do not start a fresh kill", cleanup_status(&v));
+                anyhow::bail!(
+                    "termination is not verified (cleanup: {}); inspect the same wait operation, do not start a fresh kill",
+                    cleanup_status(&v)
+                );
             }
             Ok(())
         }
@@ -273,9 +287,13 @@ fn cleanup_status(v: &Value) -> &str {
 
 fn cleanup_verified(v: &Value) -> bool {
     cleanup_status(v) == "verified_terminated"
-        && v["cleanup"]["operation_id"].as_str().is_some_and(|id| !id.is_empty())
+        && v["cleanup"]["operation_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
         && v["cleanup"]["evidence_kind"].as_str() == Some("bound_complete_scope")
-        && v["cleanup"]["observed_at"].as_str().is_some_and(|at| !at.is_empty())
+        && v["cleanup"]["observed_at"]
+            .as_str()
+            .is_some_and(|at| !at.is_empty())
 }
 
 #[cfg(test)]
@@ -284,14 +302,30 @@ mod cleanup_tests {
 
     #[test]
     fn only_complete_bound_evidence_can_allow_success() {
-        for status in ["not_requested", "pending", "unknown", "unavailable", "remaining", "unrecognized", "verified_terminated"] {
-            assert!(!cleanup_verified(&json!({"cleanup":{"operation_id":"same-op","status":status}})));
+        for status in [
+            "not_requested",
+            "pending",
+            "unknown",
+            "unavailable",
+            "remaining",
+            "unrecognized",
+            "verified_terminated",
+        ] {
+            assert!(!cleanup_verified(
+                &json!({"cleanup":{"operation_id":"same-op","status":status}})
+            ));
         }
-        for legacy in [json!({}), json!({"kill":{"pid":null,"left":[]}}), json!({"kill":{"pid":1,"left":[]}})] {
+        for legacy in [
+            json!({}),
+            json!({"kill":{"pid":null,"left":[]}}),
+            json!({"kill":{"pid":1,"left":[]}}),
+        ] {
             assert!(!cleanup_verified(&legacy));
             assert_eq!(cleanup_status(&legacy), "unknown");
         }
-        assert!(cleanup_verified(&json!({"cleanup":{"operation_id":"op","status":"verified_terminated","evidence_kind":"bound_complete_scope","observed_at":"2026-11-12T00:00:00Z"}})));
+        assert!(cleanup_verified(
+            &json!({"cleanup":{"operation_id":"op","status":"verified_terminated","evidence_kind":"bound_complete_scope","observed_at":"2026-11-12T00:00:00Z"}})
+        ));
     }
 }
 

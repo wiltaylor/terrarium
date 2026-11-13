@@ -1160,8 +1160,13 @@ impl ExecSession {
     /// Claim only a live wrapped route. Restored bare sessions are unavailable.
     /// Taking the channel prevents a second reporting attempt from claiming it.
     pub fn claim_cleanup(&self) -> Option<crate::run_kill::Report> {
-        if self.is_done() { return None; }
-        self.kill_report.lock().unwrap_or_else(|e| e.into_inner()).take()
+        if self.is_done() {
+            return None;
+        }
+        self.kill_report
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     /// Called only after a durable dispatch marker. Exactly one control send,
@@ -5795,13 +5800,19 @@ pub async fn checkout_on_target(
 mod tests {
     #[tokio::test(start_paused = true)]
     async fn cleanup_attempt_fakes_never_produce_verified_outcomes() {
-        for value in [json!({}), json!("truncated"), json!({"error":"failed"}),
-            json!({"pid":null,"left":[]}), json!({"pid":1,"left":[]}),
-            json!({"pid":1,"left":[2]}), json!({"left":["bad"]})] {
+        for value in [
+            json!({}),
+            json!("truncated"),
+            json!({"error":"failed"}),
+            json!({"pid":null,"left":[]}),
+            json!({"pid":1,"left":[]}),
+            json!({"pid":1,"left":[2]}),
+            json!({"left":["bad"]}),
+        ] {
             let (s, mut controls) = ExecSession::new("fake", Some("owner".into()), "exec", 1);
             let (_tx, rx) = tokio::sync::watch::channel(Some(value.clone()));
             match s.attempt_cleanup(rx).await {
-                CleanupAttempt::LegacyReport(report) => assert_eq!(report,value),
+                CleanupAttempt::LegacyReport(report) => assert_eq!(report, value),
                 _ => panic!("legacy reports must remain diagnostics"),
             }
             assert!(matches!(controls.try_recv(), Ok(Control::Kill)));
@@ -5810,7 +5821,10 @@ mod tests {
         let (s, mut controls) = ExecSession::new("fake", Some("owner".into()), "exec", 1);
         let (tx, rx) = tokio::sync::watch::channel(None);
         drop(tx);
-        assert!(matches!(s.attempt_cleanup(rx).await,CleanupAttempt::MissingReport));
+        assert!(matches!(
+            s.attempt_cleanup(rx).await,
+            CleanupAttempt::MissingReport
+        ));
         assert!(matches!(controls.try_recv(), Ok(Control::Kill)));
         let (tx, rx) = tokio::sync::watch::channel(None);
         let pending = {
@@ -5819,16 +5833,22 @@ mod tests {
         };
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(13)).await;
-        assert!(matches!(pending.await.unwrap(),CleanupAttempt::Deadline));
+        assert!(matches!(pending.await.unwrap(), CleanupAttempt::Deadline));
         tx.send(Some(json!({"left":[]}))).unwrap_err(); // late collector is gone
         assert!(matches!(controls.try_recv(), Ok(Control::Kill)));
         assert!(controls.try_recv().is_err());
         let (tx, rx) = tokio::sync::watch::channel(Some(Value::Null));
-        assert!(matches!(s.attempt_cleanup(rx).await,CleanupAttempt::MissingReport));
+        assert!(matches!(
+            s.attempt_cleanup(rx).await,
+            CleanupAttempt::MissingReport
+        ));
         drop(tx);
         drop(controls);
         let (_tx, rx) = tokio::sync::watch::channel(None);
-        assert!(matches!(s.attempt_cleanup(rx).await,CleanupAttempt::DeliveryUnknown));
+        assert!(matches!(
+            s.attempt_cleanup(rx).await,
+            CleanupAttempt::DeliveryUnknown
+        ));
     }
 
     #[tokio::test]

@@ -332,28 +332,48 @@ fn run_kill_reports_cleanup_and_keeps_json_before_nonzero_exit() {
     let socket = dir.join("api.sock");
     let app = axum::Router::new().route(
         "/api/waits/{id}",
-        axum::routing::delete(|axum::extract::Path(id): axum::extract::Path<String>| async move {
-            let mut v = json!({"id":id,"state":"cancelled"});
-            if id != "old-server" {
-                v["cleanup"] = json!({"operation_id":"same-operation","status":id,"evidence_kind":"none"});
-            }
-            Json(v)
-        }),
+        axum::routing::delete(
+            |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                let mut v = json!({"id":id,"state":"cancelled"});
+                if id != "old-server" {
+                    v["cleanup"] =
+                        json!({"operation_id":"same-operation","status":id,"evidence_kind":"none"});
+                }
+                Json(v)
+            },
+        ),
     );
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let server = std::thread::spawn(move || {
-        tokio::runtime::Runtime::new().unwrap().block_on(async move {
-            let listener = tokio::net::UnixListener::from_std(listener).unwrap();
-            axum::serve(listener, app).with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap();
-        });
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = stopped.await;
+                    })
+                    .await
+                    .unwrap();
+            });
     });
-    for status in ["pending", "unknown", "unavailable", "remaining", "verified_terminated", "unexpected", "old-server"] {
+    for status in [
+        "pending",
+        "unknown",
+        "unavailable",
+        "remaining",
+        "verified_terminated",
+        "unexpected",
+        "old-server",
+    ] {
         let out = run(&socket, &["--json", "run", "kill", status]);
         assert!(!out.status.success(), "{}", text(&out.stderr));
         let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-        if status != "old-server" { assert_eq!(v["cleanup"]["operation_id"], "same-operation"); }
+        if status != "old-server" {
+            assert_eq!(v["cleanup"]["operation_id"], "same-operation");
+        }
         let out = run(&socket, &["run", "kill", status]);
         assert!(!out.status.success());
         let output = text(&out.stdout);
