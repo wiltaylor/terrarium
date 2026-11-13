@@ -1014,6 +1014,8 @@ mod tests {
             "DBUS_SESSION_BUS_ADDRESS",
             "TERRARIUM_GIT_TRAILERS_FILE",
             "TERRARIUM_X",
+            "TERRARIUM_PUSH_HOOK",
+            "TERRARIUM_PUSH_HOOK_B64",
         ] {
             for v in ["a\nb", "a\rb"] {
                 let err = plan_exec(&exec_req(json!({ k: v })), "docker").unwrap_err();
@@ -1021,6 +1023,36 @@ mod tests {
                 assert!(err.message.contains(k), "{}", err.message);
             }
         }
+    }
+
+    #[test]
+    fn encoded_checkout_control_stays_private_at_its_bound() {
+        use std::os::unix::fs::PermissionsExt;
+        let key = "TERRARIUM_PUSH_HOOK_B64";
+        let value = "A".repeat(32768);
+        let plan = plan_exec(&exec_req(json!({key: value})), "docker").unwrap();
+        assert!(plan.exec.env.is_empty());
+        assert!(!plan.exec.args.iter().any(|arg| arg.contains(&value)));
+        assert_eq!(file_env(&plan)[key], value);
+        let file = plan.exec.private_file.as_ref().unwrap().path().to_owned();
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(plan);
+        assert!(!file.exists());
+        let fits = "A".repeat(ENV_FILE_LINE_MAX - key.len() - 1);
+        assert!(plan_exec(&exec_req(json!({key: fits})), "docker").is_ok());
+        let too_long = "A".repeat(ENV_FILE_LINE_MAX - key.len());
+        assert!(plan_exec(&exec_req(json!({key: too_long})), "docker").is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let result = super::plan_exec(
+            &exec_req(json!({key: value, "TERRARIUM_Z": "raw\nhook"})),
+            "docker",
+            dir.path(),
+        );
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
