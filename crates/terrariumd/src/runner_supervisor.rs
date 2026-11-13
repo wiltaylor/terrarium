@@ -4574,7 +4574,10 @@ impl RunnerSupervisor {
             warn!(read, "the event replay stopped at its limit");
         }
         seen.prune();
-        info!(read, replayed, "the push listener replayed the missed events");
+        info!(
+            read,
+            replayed, "the push listener replayed the missed events"
+        );
     }
 
     /// Queue the pointer items of one hub event: a lead nudge, a mail, a
@@ -4598,8 +4601,7 @@ impl RunnerSupervisor {
                 if ev.data.get("held").and_then(Value::as_bool) == Some(true) {
                     return;
                 }
-                let (Some(message_id), Some(thread)) = (s("message_id"), s("thread_id"))
-                else {
+                let (Some(message_id), Some(thread)) = (s("message_id"), s("thread_id")) else {
                     return;
                 };
                 let from = s("from_name").or_else(|| s("from")).unwrap_or_default();
@@ -4614,8 +4616,7 @@ impl RunnerSupervisor {
                 let self_made = ev.actor.as_deref() == Some(&format!("agent:{agent}"));
                 let change = match s("change").as_deref() {
                     Some("assigned")
-                        if s("assignee").as_deref() == Some(&agent.to_string())
-                            && !self_made =>
+                        if s("assignee").as_deref() == Some(&agent.to_string()) && !self_made =>
                     {
                         CardChange::Assigned
                     }
@@ -9255,7 +9256,10 @@ mod tests {
 
     /// The typed turns that hold `line`, summed.
     fn typed_count(runner: &ClaimRunner, line: &str) -> usize {
-        lock(&runner.typed).iter().map(|t| t.matches(line).count()).sum()
+        lock(&runner.typed)
+            .iter()
+            .map(|t| t.matches(line).count())
+            .sum()
     }
 
     /// Let the push listener run its replay, then the delivery end.
