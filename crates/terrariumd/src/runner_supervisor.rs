@@ -10212,7 +10212,10 @@ mod tests {
         slot.note_rest(AgentStatus::Working, None, t);
         assert_eq!(slot.kick, kick, "a turn that runs keeps it");
         slot.note_rest(AgentStatus::Waiting, None, t);
-        assert_eq!(slot.kick, None, "a turn that took a pointer ends it at rest");
+        assert_eq!(
+            slot.kick, None,
+            "a turn that took a pointer ends it at rest"
+        );
         assert!(!slot.kick_pointer, "the rest takes the mark");
     }
 
