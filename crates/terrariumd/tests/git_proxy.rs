@@ -995,11 +995,65 @@ async fn review_p3_push_options_and_magic_refs_are_refused() {
     assert!(forge_ref(root, "app.git", "refs/tags/v1").is_some());
 }
 
+/// The threads of one runtime, by Linux thread ID. The test that owns the
+/// runtime reads their CPU time; the other tests of this binary run on
+/// other threads and do not count.
+#[derive(Clone, Default)]
+struct RuntimeThreads(Arc<Mutex<Vec<String>>>);
+
+impl RuntimeThreads {
+    /// Record the calling thread.
+    fn add_current(&self) {
+        // `/proc/thread-self` links to `<pid>/task/<tid>`.
+        let link = std::fs::read_link("/proc/thread-self").unwrap();
+        let tid = link.file_name().unwrap().to_string_lossy().into_owned();
+        // Without schedstat (no CONFIG_SCHED_INFO) every count would be 0.
+        assert!(
+            std::path::Path::new(&format!("/proc/self/task/{tid}/schedstat")).exists(),
+            "no schedstat for thread {tid}"
+        );
+        self.0.lock().unwrap().push(tid);
+    }
+
+    /// The CPU time that the recorded threads have used: the first field of
+    /// `/proc/self/task/<tid>/schedstat`, in nanoseconds. A thread that
+    /// has exited counts nothing, so the runtime keeps its threads.
+    fn cpu(&self) -> Duration {
+        let tids = self.0.lock().unwrap().clone();
+        tids.iter()
+            .filter_map(|tid| {
+                std::fs::read_to_string(format!("/proc/self/task/{tid}/schedstat")).ok()
+            })
+            .map(|s| Duration::from_nanos(s.split_whitespace().next().unwrap().parse().unwrap()))
+            .sum()
+    }
+}
+
 /// Review P2: a command list in 1-byte chunks. Before the fix, 128 KiB
 /// took about 50 s of CPU (release) and hit the 120 s limit in a debug
-/// build; the parse is now linear.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn review_p2_one_byte_chunks_are_cheap() {
+/// build; the parse is now linear. The parser work is counted in
+/// `git_proxy::pkt::tests::one_byte_chunks_cost_linear_time`. Here the
+/// bound is the CPU time of the threads of this test's runtime, not the
+/// wall clock: a loaded host makes the push slower, not more CPU
+/// (TER-1218, as TER-1189).
+#[test]
+fn review_p2_one_byte_chunks_are_cheap() {
+    let threads = RuntimeThreads::default();
+    let on_start = threads.clone();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .on_thread_start(move || on_start.add_current())
+        // A blocking thread that exits takes its CPU time with it.
+        .thread_keep_alive(Duration::from_secs(3600))
+        .build()
+        .unwrap();
+    // `block_on` polls the client on this thread.
+    threads.add_current();
+    rt.block_on(review_p2_push(&threads));
+}
+
+async fn review_p2_push(threads: &RuntimeThreads) {
     let (_forge_dir, _forge_addr, td, proxy_addr) = review_setup().await;
     // A forge that is never reached: the last ref is denied.
     td.post(
@@ -1029,7 +1083,7 @@ async fn review_p2_one_byte_chunks_are_cheap() {
         .iter()
         .map(|b| Ok(Bytes::copy_from_slice(&[*b])))
         .collect();
-    let t = std::time::Instant::now();
+    let cpu_before = threads.cpu();
     let resp = reqwest::Client::new()
         .post(format!(
             "http://{proxy_addr}/git/p/far.git/git-receive-pack"
@@ -1044,11 +1098,12 @@ async fn review_p2_one_byte_chunks_are_cheap() {
         .unwrap();
     let status = resp.status().as_u16();
     let answer = resp.bytes().await.unwrap();
-    let took = t.elapsed();
+    let cpu = threads.cpu() - cpu_before;
     assert_eq!(status, 200);
     assert!(String::from_utf8_lossy(&answer).contains("ng refs/heads/main"));
-    // Most of this is the HTTP chunk handling of a debug build.
-    assert!(took < std::time::Duration::from_secs(30), "{took:?}");
+    // CPU time of the client and the daemon together. Most of it is the
+    // HTTP chunk handling of a debug build.
+    assert!(cpu < Duration::from_secs(30), "{cpu:?} of CPU");
 }
 
 /// Review P6: one agent holds at most 4 requests at one time; another
