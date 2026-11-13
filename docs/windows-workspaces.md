@@ -143,3 +143,25 @@ window, fixture accounts and roots, and a matching deployment:
 - N12: the path decision under impersonation sees the account's `subst`
   and mapped drives, and `C:\Terrarium.\work\...` or
   `C:\Terrarium\work.\...` with an existing tail is refused
+- F14: a UNC path through an ordinary (not administrative) share that
+  points into or above the workspace base.
+  - Setup (ops, admin): on winhost, share `C:\Terrarium` as `termroot`,
+    with Read/Change share rights for account A. A's workspace `WA` exists
+    (`C:\Terrarium\work\<project>\<A>`), with a file `f` in it.
+  - Action, as A through the run-as target: `cp` pull and push of
+    `\\winhost\termroot\work\<project>\<A>\f`, and an exec with that
+    directory as cwd. Also `\\?\UNC\winhost\termroot\work\...`.
+  - What the code does today: `\\?\UNC\...` is refused (TER-969 rules:
+    a `?` component). `\\winhost\termroot\...` passes the lexical rules and
+    `classify` gives `Other`, because only `X$` admin shares are refused.
+    `canonical_alias` then resolves it to `\\?\UNC\winhost\termroot\...`,
+    strips only `\\?\`, and `UNC\winhost\...` is never inside
+    `C:\Terrarium\work`. So `decide` returns `Ok(None)`, and the path goes to
+    the TER-272 handling: it opens by path over SMB as A, following links,
+    with no no-reparse walk. The DACL still limits it to A's own rights
+    (inside R1).
+  - Correct result: refused while workspaces are on, with an error, never
+    the TER-272 handling. Expected now: the pull, push and cwd succeed
+    through the TER-272 handling (finding F14, open). A fix (refuse every
+    UNC path while workspaces are on, or resolve the share to its local
+    path) is in the F14/F15 follow-up card.
