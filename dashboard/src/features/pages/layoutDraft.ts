@@ -93,6 +93,12 @@ export interface LayoutEditor {
   update(change: (pages: readonly ProjectLayoutPage[]) => ProjectLayoutPage[] | undefined): boolean;
   /** The canonical snapshot of the last successful save in this scope. */
   committed(): ProjectLayout | undefined;
+  /**
+   * A server write that replaces the layout from the draft's start revision:
+   * a built-in reset or a confirmed copy (TER-1077). Only with a draft that
+   * has no unsaved change. The draft then starts again from the new snapshot.
+   */
+  apply(run: (base: number) => Promise<ProjectLayout>): Promise<boolean>;
 }
 
 export const LayoutEditorContext = createContext<LayoutEditor>();
@@ -185,6 +191,25 @@ export function createLayoutEditor(
       return true;
     },
     committed: () => { const c = committed(); return c && c.scope === scope() ? c.layout : undefined; },
+    async apply(run) {
+      const d = current();
+      if (!d || busy() || !allowed() || editor.dirty()) return false;
+      const want = d.scope; const mine = ++generation;
+      setBusy(true); setError(undefined);
+      try {
+        const layout = await run(d.base);
+        if (want !== scope()) return false;
+        setCommitted({ scope: want, layout });
+        if (mine !== generation) return true;
+        const pages = draftFromLayout(layout);
+        setRemote(undefined); setConflict(undefined);
+        setState({ scope: want, base: layout.revision, start: JSON.stringify(pages), pages });
+        return true;
+      } catch (e) {
+        if (mine === generation && want === scope()) setError(e);
+        return false;
+      } finally { if (mine === generation) setBusy(false); }
+    },
   };
   return editor;
 }

@@ -12,7 +12,11 @@ import { combineWidgetBadges } from "../pages/widgetBadges";
 import { widgetBadgeSources } from "../pages/widgetRegistry";
 import { projectPagesEnabled } from "../pages/pageCapability";
 import { addPage, movePage, removePage, renamePage, useLayoutEditor } from "../pages/layoutDraft";
-import type { PageWidget } from "../../api/types";
+import type { PageBuiltin, PageWidget, ProjectPage } from "../../api/types";
+
+/** The built-in pages in their default order. A built-in page is also active on its legacy route (`/p/<name>/<builtin>/...`). */
+export const PAGE_BUILTINS: readonly PageBuiltin[] = ["board", "tests", "schedules", "rules", "agents", "repos", "knowledge", "pipelines", "calendar", "logs"];
+const builtinLabel = (b: PageBuiltin) => b[0]!.toUpperCase() + b.slice(1);
 
 /**
  * `base` is the encoded project URL, `/p/<name>`. `active` says which tab path is selected.
@@ -28,7 +32,14 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
   const pages = { get latest() { return !scopedPages.error && scopedPages.latest?.scope === scope() ? scopedPages.latest.value : undefined; }, get error() { return scopedPages.error; } };
   // Solid throws when `latest` of an errored resource is read. Check the error first (fail closed).
   const enabled = () => !scopedPages.error && projectPagesEnabled(scopedPages.latest, scope(), undefined);
+  // OFF keeps the old row: the fixed tabs plus the custom pages. Built-in
+  // pages that an ON period left behind (a rollback) stay stored but hidden.
+  const shown = (): ProjectPage[] => (pages.latest?.items ?? []).filter(page => enabled() || !page.builtin);
+  const pageActive = (page: { slug: string; builtin?: PageBuiltin }) =>
+    props.active(`pages/${page.slug}`) || (enabled() && !!page.builtin && props.active(page.builtin));
   const [adding, setAdding] = createSignal(false);
+  const [restoring, setRestoring] = createSignal<PageBuiltin | "">("");
+  const [copyFrom, setCopyFrom] = createSignal("");
   const [slug, setSlug] = createSignal("");
   const [title, setTitle] = createSignal("");
   const [error, setError] = createSignal<unknown>();
@@ -71,6 +82,26 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
     const slug = pages.latest?.items.find(page => props.active(`pages/${page.slug}`));
     if (!slug && location.pathname.includes("/pages/")) navigate(pages.latest?.items[0] ? href(pages.latest.items[0].slug) : `${props.base}/board`);
   }
+  const draftBuiltin = (b: PageBuiltin) => editor?.draft()?.find(page => page.builtin === b);
+  // Reset or add again one built-in page from the server default (one write, same base revision).
+  async function restore() {
+    const b = restoring();
+    if (!b || !editor) return;
+    const existing = draftBuiltin(b);
+    if (existing && !window.confirm(`Reset the page "${existing.title || existing.slug}" to the default ${builtinLabel(b)} page?`)) return;
+    if (await editor.apply(base => api.pages.resetLayout(project(), { base_revision: base, builtin: b }))) setRestoring("");
+  }
+  // Copy replaces every page of this project. The server needs the explicit confirmation too.
+  async function copy() {
+    const source = copyFrom().trim();
+    if (!source || !editor) return;
+    if (!window.confirm(`Replace all pages of ${project()} with the pages of ${source}? The current pages of ${project()} are lost.`)) return;
+    if (await editor.apply(base => api.pages.copyLayout(project(), { base_revision: base, source_project: source, confirm: true }))) {
+      setCopyFrom("");
+      const first = editor.draft()?.[0];
+      if (location.pathname.includes("/pages/") && !editor.draft()?.some(page => props.active(`pages/${page.slug}`))) navigate(first ? href(first.slug) : `${props.base}/board`);
+    }
+  }
   const pageBadge = (page: { slug: string; widgets: PageWidget[] }) => {
     // No question-bearing v2 part is defined yet. C7 must preserve this
     // alias fallback until explicit question metadata replaces it.
@@ -108,9 +139,9 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
   return (
     // Route links, not an ARIA tablist: every tab is a page.
     <nav ref={tabs} class="tabs project-tabs" aria-label="Project">
-      <Show when={editing()} fallback={<For each={pages.latest?.items}>{page => {
+      <Show when={editing()} fallback={<For each={shown()}>{page => {
         const badge = () => pageBadge(page);
-        return <A href={href(page.slug)} class={props.active(`pages/${page.slug}`) ? "active" : undefined} activeClass="" inactiveClass="" title={badge()?.text}>
+        return <A href={href(page.slug)} class={pageActive(page) ? "active" : undefined} activeClass="" inactiveClass="" title={badge()?.text}>
           {page.title}<Show when={badge()}>{b => <><span class={b().cls} aria-hidden="true">{b().n}</span><span class="sr-only">, {b().text}</span></>}</Show>
         </A>;
       }}</For>}>
@@ -119,12 +150,12 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
           const page = () => editor!.page(slug);
           const index = () => editor!.draft()?.findIndex(item => item.slug === slug) ?? -1;
           const count = () => editor!.draft()?.length ?? 0;
-          return <span class="project-tab-edit" data-slug={slug} classList={{ active: props.active(`pages/${slug}`), dragging: dragging() === slug }} draggable={true}
+          return <span class="project-tab-edit" data-slug={slug} classList={{ active: pageActive({ slug, builtin: page()?.builtin }), dragging: dragging() === slug }} draggable={true}
             onDragStart={e => { setDragging(slug); e.dataTransfer?.setData("text/plain", slug); }}
             onDragOver={e => { if (dragging()) e.preventDefault(); }}
             onDrop={e => { e.preventDefault(); const from = dragging(); setDragging(); if (from && from !== slug) reorder(from, index()); }}
             onDragEnd={() => setDragging()}>
-            <A href={href(slug)} class={props.active(`pages/${slug}`) ? "active" : undefined} activeClass="" inactiveClass=""
+            <A href={href(slug)} class={pageActive({ slug, builtin: page()?.builtin }) ? "active" : undefined} activeClass="" inactiveClass=""
               aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight"
               onKeyDown={e => { if (!e.altKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return; e.preventDefault(); keep(e.currentTarget, () => reorder(slug, index() + (e.key === "ArrowLeft" ? -1 : 1))); }}>{page()?.title || slug}</A>
             <input aria-label={`Title of ${slug}`} required maxlength={120} value={page()?.title ?? ""} onInput={e => editor!.update(p => renamePage(p, slug, e.currentTarget.value))} />
@@ -134,7 +165,8 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
           </span>;
         }}</For>
       </Show>
-      <For each={PROJECT_TABS}>
+      {/* ON: the stored pages replace the fixed tabs. Settings is behind the cog. */}
+      <For each={enabled() ? [] : PROJECT_TABS}>
         {(tab) => (
           <A
             href={`${props.base}/${tab.path}`}
@@ -166,6 +198,11 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
           <button type="submit" disabled={saving() || pages.latest?.items.some(p => p.slug === slug())}>Create page</button>
         </form></Show>
       </Show>
+      <Show when={enabled()}>
+        <A href={`${props.base}/settings`} class={props.active("settings") ? "tab-cog active" : "tab-cog"} activeClass="" inactiveClass="" aria-label="Project settings" title="Project settings">
+          <span aria-hidden="true">⚙</span>
+        </A>
+      </Show>
       <Show when={shared() && pages.latest?.can_edit}>
         <Show when={editing()} fallback={<button disabled={editor!.busy()} onClick={() => void editor!.begin()}>Edit pages</button>}>
           <button type="button" onClick={() => setAdding(!adding())} disabled={editor!.busy() || (editor!.draft()?.length ?? 0) >= 30}>Add page</button>
@@ -174,6 +211,17 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
             <label>Page title<input required maxlength={120} value={draftTitle()} onInput={e => setDraftTitle(e.currentTarget.value)} /></label>
             <button type="submit" disabled={editor!.draft()?.some(p => p.slug === draftSlug())}>Add to draft</button>
           </form></Show>
+          <form class="row" onSubmit={e => { e.preventDefault(); void restore(); }}>
+            <label>Built-in page<select value={restoring()} onChange={e => setRestoring(e.currentTarget.value as PageBuiltin | "")}>
+              <option value="">Choose a built-in page</option>
+              <For each={PAGE_BUILTINS}>{b => <option value={b}>{builtinLabel(b)}{draftBuiltin(b) ? " (reset to default)" : " (add again)"}</option>}</For>
+            </select></label>
+            <button type="submit" disabled={!restoring() || editor!.busy() || editor!.dirty()} title={editor!.dirty() ? "Save or cancel your changes first" : undefined}>Restore default</button>
+          </form>
+          <form class="row" onSubmit={e => { e.preventDefault(); void copy(); }}>
+            <label>Copy layout from project<input value={copyFrom()} onInput={e => setCopyFrom(e.currentTarget.value)} /></label>
+            <button type="submit" class="danger" disabled={!copyFrom().trim() || copyFrom().trim() === project() || editor!.busy() || editor!.dirty()} title={editor!.dirty() ? "Save or cancel your changes first" : undefined}>Copy layout</button>
+          </form>
           <button type="button" disabled={editor!.busy()} onClick={cancelLayout}>Cancel</button>
           <button type="button" class="primary" disabled={editor!.busy() || editor!.draft()?.some(p => !p.title.trim())} onClick={() => void saveLayout()}>Save pages</button>
           <Show when={editor!.conflict() !== undefined}><div class="row" role="alert">
