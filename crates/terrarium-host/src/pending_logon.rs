@@ -1,13 +1,26 @@
 //! Bounded, connection-revocable reservations for Windows credential preparation.
 //! Contains no passwords or tokens. Cancelled work keeps its capacity until the
 //! non-interruptible native logon returns, preventing cancellation/retry floods.
+//! Start commitment is atomic and never holds queue/registry locks across OS
+//! calls. Revocation after that boundary cannot undo an in-flight OS creation:
+//! the owner stops the child once its handle exists. New admission may return
+//! Busy during another start's commit rather than stall the connection reader.
 
 use crate::protocol::SessionId;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 const MAX_EVENTS: usize = 64;
-const MAX_BYTES: usize = 8 * crate::protocol::CHUNK_SIZE;
+// The CLI sends 256 KiB inputs and the daemon accepts MAX_DATA_PAYLOAD.
+// Budget four maximum encoded frames plus one host chunk for terminal/control
+// frames. This includes the wire header, unlike a CHUNK_SIZE-only budget.
+const MAX_BYTES: usize = 4 * (crate::protocol::MAX_DATA_PAYLOAD + crate::protocol::DATA_HEADER_LEN)
+    + crate::protocol::CHUNK_SIZE;
+const PREPARING: u8 = 0;
+const COMMITTED: u8 = 1;
+const CANCELLED: u8 = 2;
+const REVOKED: u8 = 3;
 
 pub(crate) enum Event {
     Control(Box<crate::protocol::DaemonFrame>),
@@ -15,15 +28,15 @@ pub(crate) enum Event {
 }
 
 #[derive(Default)]
-pub(crate) struct State {
-    cancelled: bool,
-    committing: bool,
+struct State {
+    handed_off: bool,
     bytes: usize,
     queue: VecDeque<(Event, usize)>,
 }
 
 #[derive(Default)]
 pub(crate) struct Pending {
+    phase: AtomicU8,
     state: Mutex<State>,
 }
 
@@ -89,16 +102,19 @@ impl Reservations {
     }
 
     pub(crate) fn route(&self, id: SessionId, event: Event, bytes: usize) -> Routed {
-        let registry = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(pending) = registry.get(&id) else {
+        let pending = self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned();
+        let Some(pending) = pending else {
             return Routed::Absent(event);
         };
         let mut state = pending.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.cancelled {
+        if state.handed_off {
+            return Routed::Absent(event);
+        }
+        if pending.cancelled() {
             return Routed::Cancelled;
         }
         if state.queue.len() >= MAX_EVENTS || bytes > MAX_BYTES.saturating_sub(state.bytes) {
-            state.cancelled = true;
+            pending.revoke();
             state.queue.clear();
             state.bytes = 0;
             return Routed::Overflow;
@@ -109,45 +125,59 @@ impl Reservations {
     }
 
     pub(crate) fn cancel(&self, id: SessionId) -> Option<bool> {
-        let registry = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let pending = registry.get(&id)?;
+        let pending = self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned()?;
         Some(pending.cancel())
     }
 
+    pub(crate) fn cancel_preparing(&self, id: SessionId) -> Option<bool> {
+        let pending = self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned()?;
+        Some(pending.cancel_preparing())
+    }
+
     pub(crate) fn cancel_all(&self) {
-        for pending in self.0.lock().unwrap_or_else(|e| e.into_inner()).values() {
+        let pending: Vec<_> = self.0.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
+        for pending in pending {
             pending.cancel();
         }
     }
 }
 
 impl Pending {
+    fn revoke(&self) -> bool {
+        let old = self.phase.fetch_update(Ordering::AcqRel, Ordering::Acquire, |phase| {
+            Some(match phase { PREPARING | CANCELLED => CANCELLED, _ => REVOKED })
+        }).expect("phase update always has a replacement");
+        matches!(old, COMMITTED | REVOKED)
+    }
+
     pub(crate) fn cancel(&self) -> bool {
+        let committed = self.revoke();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.cancelled = true;
         state.queue.clear();
         state.bytes = 0;
-        state.committing
+        committed
+    }
+
+    fn cancel_preparing(&self) -> bool {
+        if self.phase.compare_exchange(PREPARING, CANCELLED, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return false;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.queue.clear();
+        state.bytes = 0;
+        true
     }
 
     pub(crate) fn cancelled(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .cancelled
+        matches!(self.phase.load(Ordering::Acquire), CANCELLED | REVOKED)
     }
 
-    /// Linearize process-start commitment against pending cancellation. The
-    /// short synchronous spawn runs while holding this guard. A cancellation
-    /// that wins first cannot start a child. Once spawn has committed, normal
-    /// session controls stop the child instead of cancelling an earlier logon.
-    pub(crate) fn commit(&self) -> Option<std::sync::MutexGuard<'_, State>> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.cancelled {
-            return None;
-        }
-        state.committing = true;
-        Some(state)
+    /// Logical start boundary, not a claim that the OS has created the child.
+    /// Cancellation winning this CAS prevents spawn. After it, OS creation may
+    /// block: revoke is nonblocking and the child is stopped once available.
+    /// No queue or registry lock is held across filesystem/process APIs.
+    pub(crate) fn commit(&self) -> bool {
+        self.phase.compare_exchange(PREPARING, COMMITTED, Ordering::AcqRel, Ordering::Acquire).is_ok()
     }
 }
 
@@ -156,12 +186,14 @@ impl Lease {
     pub(crate) fn pop_or_handoff(&self) -> Option<Event> {
         let mut registry = self.registry.0.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.pending.state.lock().unwrap_or_else(|e| e.into_inner());
-        if !state.cancelled
-            && let Some((event, bytes)) = state.queue.pop_front()
-        {
+        // A revoked reservation must remain owned until the worker has cleaned
+        // up any published entry. Otherwise its cleanup could hit a reused ID.
+        if self.pending.cancelled() { return None; }
+        if let Some((event, bytes)) = state.queue.pop_front() {
             state.bytes -= bytes;
             return Some(event);
         }
+        state.handed_off = true;
         if registry
             .get(&self.id)
             .is_some_and(|p| Arc::ptr_eq(p, &self.pending))
@@ -227,7 +259,7 @@ mod tests {
         let registry = Reservations::default();
         let lease = registry.reserve(1);
         assert_eq!(registry.cancel(1), Some(false));
-        assert!(lease.pending.commit().is_none());
+        assert!(!lease.pending.commit());
         assert_eq!(registry.count(), 1);
         drop(lease);
         assert_eq!(registry.count(), 0);
@@ -241,6 +273,17 @@ mod tests {
         let new = registry.reserve(1);
         drop(old);
         assert!(registry.owns(1, Some(&new.pending)));
+    }
+
+    #[test]
+    fn cancelled_pop_keeps_ownership_until_cleanup_and_drop() {
+        let registry = Reservations::default();
+        let lease = registry.reserve(1);
+        registry.cancel(1);
+        assert!(lease.pop_or_handoff().is_none());
+        assert!(registry.owns(1, Some(&lease.pending)));
+        drop(lease);
+        assert!(!registry.contains(1));
     }
 
     #[test]
@@ -287,7 +330,7 @@ mod tests {
         let (finish, blocked) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             blocked.await.unwrap();
-            lease.pending.commit().map(|_| ()).is_some()
+            lease.pending.commit()
         });
         registry.cancel_all();
         assert_eq!(registry.count(), 1);

@@ -991,9 +991,8 @@ impl Client {
         bytes: usize,
     ) -> Option<DaemonFrame> {
         let (id, cancel) = match &frame {
-            DaemonFrame::Release { session } | DaemonFrame::Signal { session, .. } => {
-                (*session, true)
-            }
+            DaemonFrame::Release { session } => (*session, true),
+            DaemonFrame::Signal { session, .. } => (*session, false),
             DaemonFrame::Eof { session }
             | DaemonFrame::Resize { session, .. }
             | DaemonFrame::CpEnd { session, .. } => (*session, false),
@@ -1014,19 +1013,25 @@ impl Client {
             return None;
         }
         if cancel {
-            let committed = self.cancel_pending(id);
-            if !committed && !matches!(frame, DaemonFrame::Release { .. }) {
+            self.cancel_pending(id);
+            self.sessions().remove(&id);
+            return None;
+        }
+        if matches!(&frame, DaemonFrame::Signal { .. }) {
+            match self.shared.pending_logons.cancel_preparing(id) {
+                None => return Some(frame),
+                Some(true) => {
                 send_error(
                     tx,
                     id,
                     ErrorCode::Interrupted,
                     "pending logon was cancelled".into(),
                 );
+                    return None;
+                }
+                // Once start has committed, preserve signal/input ordering.
+                Some(false) => {}
             }
-            if matches!(frame, DaemonFrame::Release { .. }) {
-                self.sessions().remove(&id);
-            }
-            return None;
         }
         match self
             .shared
@@ -1124,8 +1129,10 @@ impl Client {
                     PendingEvent::Binary(bytes) => client.on_binary_ready(&bytes, &tx).await,
                 }
             }
-            if lease.pending.cancelled() {
+            if lease.pending.cancelled()
+                && client.shared.pending_logons.owns(id, Some(&lease.pending)) {
                 client.cancel_pending(id);
+                client.sessions().remove(&id);
             }
         });
     }
@@ -1672,20 +1679,14 @@ impl Client {
         };
         let outbox = self.new_outbox(session, tx);
         let program = plan.exec.program.clone();
-        let commitment = match owner {
-            Some(owner) => match owner.commit() {
-                Some(commitment) => Some(commitment),
-                None => {
-                    return send_error(
+        if owner.is_some_and(|owner| !owner.commit()) {
+            return send_error(
                         tx,
                         session,
                         ErrorCode::Interrupted,
                         "pending logon was cancelled".into(),
-                    );
-                }
-            },
-            None => None,
-        };
+            );
+        }
         let running = match session::spawn(plan.exec, outbox.clone()) {
             Ok(r) => r,
             Err(e) => {
@@ -1693,12 +1694,8 @@ impl Client {
                 return send_error(tx, session, ErrorCode::SpawnFailed, e.to_string());
             }
         };
-        drop(commitment);
         tracing::info!(session, %program, pid = running.pid, "session started");
-        outbox.send_now(HostFrame::Started {
-            session,
-            pid: running.pid,
-        });
+        let pid = running.pid;
         self.sessions().insert(
             session,
             Entry {
@@ -1709,7 +1706,10 @@ impl Client {
             },
         );
         if owner.is_some_and(|owner| owner.cancelled()) {
+            outbox.detach();
             self.cancel_pending(session);
+        } else {
+            outbox.send_now(HostFrame::Started { session, pid });
         }
         let parser = plan.parser;
         let done = running.done;
@@ -2464,7 +2464,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert!(lease.pending.cancelled());
-        assert!(lease.pending.commit().is_none());
+        assert!(!lease.pending.commit());
         assert!(!client.admit(2, &tx));
         assert!(matches!(
             rx.recv().await,
@@ -2485,7 +2485,7 @@ pub(crate) mod tests {
         let (complete, waiting) = tokio::sync::oneshot::channel();
         let actor = tokio::spawn(async move {
             waiting.await.unwrap();
-            lease.pending.commit().map(|_| ()).is_some()
+            lease.pending.commit()
         });
         client.detach_all();
         assert_eq!(client.session_count(), 1);
@@ -2581,6 +2581,94 @@ pub(crate) mod tests {
                 ..
             }))
         ));
+    }
+
+    #[tokio::test]
+    async fn pending_logon_accepts_cli_chunks_and_four_maximum_encoded_frames() {
+        for stream in [StreamTag::Stdin, StreamTag::File] {
+            let client = Client::new(ClientOptions::new("ws://localhost", "fixture", "fixture"));
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let lease = client.shared.pending_logons.reserve(1);
+            // remote.rs::CHUNK is 256 KiB, not the host's output CHUNK_SIZE.
+            let cli = DataFrame::new(1, stream, vec![7; 256 * 1024]).encode();
+            assert_eq!(cli.len(), 256 * 1024 + crate::protocol::DATA_HEADER_LEN);
+            client.on_binary(&cli, &tx).await;
+            assert!(lease.pop_or_handoff().is_some());
+            for value in 0..4u8 {
+                let wire = DataFrame::new(1, stream, vec![value; crate::protocol::MAX_DATA_PAYLOAD]).encode();
+                assert_eq!(wire.len(), crate::protocol::MAX_DATA_PAYLOAD + crate::protocol::DATA_HEADER_LEN);
+                client.on_binary(&wire, &tx).await;
+            }
+            client.on_text(r#"{"type":"eof","session":1}"#, &tx).await.unwrap();
+            for value in 0..4u8 {
+                let Some(PendingEvent::Binary(wire)) = lease.pop_or_handoff() else { panic!("maximum frame was lost"); };
+                let decoded = DataFrame::decode(&wire).unwrap();
+                assert_eq!(decoded.payload.len(), crate::protocol::MAX_DATA_PAYLOAD);
+                assert!(decoded.payload.iter().all(|byte| *byte == value));
+            }
+            assert!(matches!(lease.pop_or_handoff(), Some(PendingEvent::Control(frame)) if matches!(*frame, DaemonFrame::Eof {..})));
+            assert!(!lease.pending.cancelled());
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_logon_fifth_maximum_frame_hits_bounded_backpressure() {
+        let client = Client::new(ClientOptions::new("ws://localhost", "fixture", "fixture"));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let lease = client.shared.pending_logons.reserve(1);
+        let wire = DataFrame::new(1, StreamTag::File, vec![1; crate::protocol::MAX_DATA_PAYLOAD]).encode();
+        for _ in 0..5 { client.on_binary(&wire, &tx).await; }
+        assert!(lease.pending.cancelled());
+        assert_eq!(client.session_count(), 1);
+        assert!(matches!(rx.recv().await, Some(Outgoing::Control(HostFrame::Error {code:ErrorCode::Busy, ..}))));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_logon_slow_committed_spawn_keeps_reader_and_revoke_responsive() {
+        let client = Client::new(ClientOptions::new("ws://localhost", "fixture", "fixture"));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let lease = client.shared.pending_logons.reserve(1);
+        let pending = lease.pending.clone();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let (finish, blocked) = std::sync::mpsc::channel();
+        let spawn = std::thread::spawn(move || {
+            assert!(pending.commit()); // Same logical boundary as the real spawn.
+            ready.send(()).unwrap();
+            // Model an OS creation call blocked on a remote image/cwd. Keep a
+            // watchdog so a regression fails rather than hanging the suite.
+            let _ = blocked.recv_timeout(Duration::from_secs(5));
+            pending.cancelled()
+        });
+        started.await.unwrap();
+        let reader = client.clone();
+        let wire_tx = tx.clone();
+        let operations = tokio::spawn(async move {
+            reader.on_binary(&DataFrame::new(1, StreamTag::Stdin, vec![1; 256 * 1024]).encode(), &wire_tx).await;
+            reader.on_text(r#"{"type":"signal","session":1,"signal":"INT"}"#, &wire_tx).await.unwrap();
+            reader.on_text(r#"{"type":"ping","nonce":81}"#, &wire_tx).await.unwrap();
+        });
+        let result = tokio::time::timeout(Duration::from_secs(2), operations).await;
+        if result.is_err() { let _ = finish.send(()); let _ = spawn.join(); panic!("reader waited for OS spawn"); }
+        result.unwrap().unwrap();
+        assert!(matches!(rx.recv().await, Some(Outgoing::Control(HostFrame::Pong {nonce:81}))));
+        assert!(matches!(lease.pop_or_handoff(), Some(PendingEvent::Binary(_))));
+        assert!(matches!(lease.pop_or_handoff(), Some(PendingEvent::Control(frame)) if matches!(*frame, DaemonFrame::Signal {ref signal, ..} if signal == "INT")));
+        assert!(!lease.pending.cancelled()); // Committed INT preserves queued input.
+        let reader = client.clone();
+        let operations = tokio::spawn(async move {
+            reader.on_text(r#"{"type":"release","session":1}"#, &tx).await.unwrap();
+            reader.on_text(r#"{"type":"ping","nonce":82}"#, &tx).await.unwrap();
+        });
+        let result = tokio::time::timeout(Duration::from_secs(2), operations).await;
+        let _ = finish.send(());
+        assert!(spawn.join().unwrap());
+        result.expect("revoke waited for OS spawn").unwrap();
+        assert!(matches!(rx.recv().await, Some(Outgoing::Control(HostFrame::Pong {nonce:82}))));
+        assert_eq!(client.session_count(), 1);
+        drop(lease);
+        assert_eq!(client.session_count(), 0);
     }
 
     #[tokio::test]
