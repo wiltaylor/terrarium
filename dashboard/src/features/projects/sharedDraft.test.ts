@@ -65,7 +65,7 @@ const button = (host: HTMLElement, text: string) => {
   const found = [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === text || b.getAttribute("aria-label") === text);
   expect(found, text).toBeTruthy(); return found!;
 };
-const has = (host: HTMLElement, text: string) => [...host.querySelectorAll("button")].some(b => b.textContent === text);
+const has = (host: HTMLElement, text: string) => [...host.querySelectorAll("button")].some(b => b.textContent === text || b.getAttribute("aria-label") === text);
 const input = (element: HTMLInputElement | HTMLSelectElement, value: string, kind = "input") => { element.value = value; element.dispatchEvent(new Event(kind, { bubbles: true })); };
 const tabOrder = (host: HTMLElement) => [...host.querySelectorAll<HTMLElement>(".project-tab-edit")].map(t => t.dataset.slug);
 const link = (host: HTMLElement, href: string) => host.querySelector<HTMLAnchorElement>(`nav a[href="${href}"]`)!;
@@ -194,7 +194,10 @@ it("adds a draft-only tab that opens before Save and keeps the draft inside the 
   seed();
   const { host } = await mount();
   await startEdit(host);
-  button(host, "Add page").click();
+  // The Add page "+" (TER-1107): its name and tooltip stay "Add page".
+  const add = button(host, "Add page");
+  expect([add.textContent, add.title, add.disabled]).toEqual(["+", "Add page", false]);
+  add.click();
   const form = host.querySelector("nav form")!;
   const [slug, title] = [...form.querySelectorAll("input")];
   input(slug!, "new-tab"); input(title!, "New tab");

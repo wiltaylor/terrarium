@@ -11,7 +11,7 @@ import type { TabBadge } from "./tabCounts";
 import { combineWidgetBadges } from "../pages/widgetBadges";
 import { widgetBadgeSources } from "../pages/widgetRegistry";
 import { projectPagesEnabled } from "../pages/pageCapability";
-import { addPage, movePage, removePage, renamePage, useLayoutEditor } from "../pages/layoutDraft";
+import { addPage, MAX_LAYOUT_PAGES, movePage, removePage, renamePage, useLayoutEditor } from "../pages/layoutDraft";
 import type { PageBuiltin, PageWidget, ProjectPage } from "../../api/types";
 
 /** The built-in pages in their default order. A built-in page is also active on its legacy route (`/p/<name>/<builtin>/...`). */
@@ -59,6 +59,8 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
   const [draftSlug, setDraftSlug] = createSignal("");
   const [draftTitle, setDraftTitle] = createSignal("");
   const href = (slug: string) => `${props.base}/pages/${slug}`;
+  // The tooltip of a disabled Add page (TER-1107): the reason, not only a grey "+".
+  const full = (count: number | undefined, max: number) => (count ?? 0) >= max ? `Add page: this project has the maximum of ${max} pages` : undefined;
   function reorder(slug: string, to: number) { editor!.update(p => movePage(p, slug, to)); }
   // A moved DOM node loses focus in browsers. Keyboard users stay on the control.
   function keep(element: HTMLElement, change: () => void) { change(); if (!(element as HTMLButtonElement).disabled) element.focus(); }
@@ -120,7 +122,7 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
   }
   let tabs!: HTMLElement;
 
-  // Creating a page can leave the row scrolled to Add page at the far end.
+  // Creating a page can leave the row scrolled to the Add page "+" at the far end.
   // Reveal the selected tab without moving the document vertically.
   createEffect(
     on(
@@ -191,7 +193,8 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
       </For>
       {/* The legacy immediate-save Add is for OFF only. With v2 ON and no shell editor (the agent page), there is no Add. */}
       <Show when={!enabled() && pages.latest?.can_edit}>
-        <button onClick={() => setAdding(!adding())} disabled={(pages.latest?.items.length ?? 0) >= 10}>Add page</button>
+        <button type="button" class="project-tab-add" aria-label="Add page" aria-expanded={adding()} title={full(pages.latest?.items.length, 10) ?? "Add page"}
+          onClick={() => setAdding(!adding())} disabled={(pages.latest?.items.length ?? 0) >= 10}>+</button>
         <Show when={adding()}><form class="row" onSubmit={e => { e.preventDefault(); void add(); }}>
           <label>Page slug<input required pattern="[a-z0-9][a-z0-9_-]{0,63}" value={slug()} onInput={e => setSlug(e.currentTarget.value)} /></label>
           <label>Page title<input required maxlength={120} value={title()} onInput={e => setTitle(e.currentTarget.value)} /></label>
@@ -205,7 +208,8 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
       </Show>
       <Show when={shared() && pages.latest?.can_edit}>
         <Show when={editing()} fallback={<button disabled={editor!.busy()} onClick={() => void editor!.begin()}>Edit pages</button>}>
-          <button type="button" onClick={() => setAdding(!adding())} disabled={editor!.busy() || (editor!.draft()?.length ?? 0) >= 30}>Add page</button>
+          <button type="button" class="project-tab-add" aria-label="Add page" aria-expanded={adding()} title={full(editor!.draft()?.length, MAX_LAYOUT_PAGES) ?? "Add page"}
+            onClick={() => setAdding(!adding())} disabled={editor!.busy() || (editor!.draft()?.length ?? 0) >= MAX_LAYOUT_PAGES}>+</button>
           <Show when={adding()}><form class="row" onSubmit={e => { e.preventDefault(); addTab(); }}>
             <label>Page slug<input required pattern="[a-z0-9][a-z0-9_-]{0,63}" value={draftSlug()} onInput={e => setDraftSlug(e.currentTarget.value)} /></label>
             <label>Page title<input required maxlength={120} value={draftTitle()} onInput={e => setDraftTitle(e.currentTarget.value)} /></label>
