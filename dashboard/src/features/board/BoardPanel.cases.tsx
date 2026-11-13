@@ -97,10 +97,11 @@ it("defers live reload during drag and cancels pending work at unmount", async (
 it("puts a column cog on each column head, also in the read-only page widget (TER-1116)", async () => {
   const el = host();
   dispose = render(() => <BoardPanel project="terrarium" query={{}} onQueryChange={() => {}} onToggleDone={() => {}} canWriteCards={false} canEditColumns={false} />, el);
-  const board = await api.board.get("terrarium");
   await waitFor(() => expect(el.querySelectorAll("[data-column-head] [data-column-cog]").length).toBeGreaterThan(0));
   const cogs = [...el.querySelectorAll<HTMLElement>("[data-column-head] [data-column-cog]")].map(b => b.dataset.columnCog);
-  expect(cogs).toEqual(board.columns.map(c => c.name));
+  const heads = [...el.querySelectorAll<HTMLElement>("[data-column-head]")].map(h => h.dataset.columnHead);
+  expect(cogs).toEqual(heads);
+  expect(cogs).toContain("review");
   el.querySelector<HTMLButtonElement>('[data-column-head="review"] [data-column-cog]')!.click();
   await waitFor(() => expect(document.querySelector('[role="dialog"] .column-options')).not.toBeNull());
 });
