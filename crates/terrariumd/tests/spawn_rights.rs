@@ -964,7 +964,14 @@ async fn spawn_usage_ranks_pool_and_real_limits_allow_alternative() {
     s.usage.limits.mark("pool-a", None);
     s.usage.limits.mark("pool-b", None);
     s.db.write("system", |t| {
-        terrariumd::store::subscriptions::insert_sample(t, "pool-alt", "5h", 125.0, None, &json!({}))
+        terrariumd::store::subscriptions::insert_sample(
+            t,
+            "pool-alt",
+            "5h",
+            125.0,
+            None,
+            &json!({}),
+        )
     })
     .await
     .unwrap();
@@ -1129,7 +1136,14 @@ async fn spawn_alt_fallback_never_takes_a_cloud_subscription() {
     // cloud subscription. They do not override its cloud eligibility.
     for used in [100.0, 125.0] {
         s.db.write("system", move |t| {
-            terrariumd::store::subscriptions::insert_sample(t, "aws", "budget", used, None, &json!({}))
+            terrariumd::store::subscriptions::insert_sample(
+                t,
+                "aws",
+                "budget",
+                used,
+                None,
+                &json!({}),
+            )
         })
         .await
         .unwrap();

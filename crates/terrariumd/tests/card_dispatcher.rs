@@ -973,11 +973,7 @@ async fn estimated_usage_admits_start_and_daemon_entrypoints() {
         .await
         .unwrap();
     let started = td
-        .agent(
-            "p",
-            "started",
-            json!({"subscription":"dispatch-estimated"}),
-        )
+        .agent("p", "started", json!({"subscription":"dispatch-estimated"}))
         .await;
     assert_eq!(started["subscription"], "dispatch-estimated");
     let lead = lead_id(&td).await;

@@ -391,29 +391,30 @@ async fn request_and_architect_admit_high_estimated_usage() {
         .await
         .unwrap();
     for (name, roles) in [("request", json!([])), ("architect", json!(["architect"]))] {
-        let made = l.td.post(
-            "/api/templates",
-            json!({"name": name,
+        let made =
+            l.td.post(
+                "/api/templates",
+                json!({"name": name,
                    "spec": {"harness": "claude", "roles": roles,
                             "subscription": "request-estimated"}}),
-        )
-        .await;
+            )
+            .await;
         assert_eq!(made.status, 201, "{}", made.body);
     }
-    let th = l.open(
-        json!({"report_to": "p/lead", "topic": "Estimated usage",
-               "text": "Start without a probe-estimate refusal."}),
-    )
-    .await;
+    let th = l
+        .open(json!({"report_to": "p/lead", "topic": "Estimated usage",
+               "text": "Start without a probe-estimate refusal."}))
+        .await;
     let request_agent = l.agent(th["agent"].as_str().unwrap()).await;
     assert_eq!(request_agent["subscription"], "request-estimated");
     let tid = id(&th);
-    let swapped = l.td.post_as(
-        &l.p_lead,
-        &format!("/api/threads/{tid}/swap"),
-        json!({"template": "global:architect", "reason": "Needs design"}),
-    )
-    .await;
+    let swapped =
+        l.td.post_as(
+            &l.p_lead,
+            &format!("/api/threads/{tid}/swap"),
+            json!({"template": "global:architect", "reason": "Needs design"}),
+        )
+        .await;
     assert_eq!(swapped.status, 200, "{}", swapped.body);
     let architect = l.agent(swapped.body["agent"].as_str().unwrap()).await;
     assert_eq!(architect["roles"], json!(["architect"]));
