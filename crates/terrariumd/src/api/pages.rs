@@ -57,6 +57,16 @@ async fn list(
 ) -> ApiResult<Json<Value>> {
     policy::read_project(&actor, &project)?;
     let can_edit = policy::admin_project(&actor, &project, "editing project pages").is_ok();
+    // The caller's existing rights, for the controls of the page widgets
+    // (TER-1077). Each is the result of the policy check that the domain
+    // endpoint runs; the endpoints still check every write.
+    let rights = json!({
+        "write_project": policy::write_project(&actor, &project).is_ok(),
+        "admin_project": can_edit,
+        "manage_schedules": policy::schedule_scope(&actor, Some(&project)).is_ok(),
+        "manage_global": policy::sysadmin(&actor, "managing global schedules and event sources").is_ok(),
+        "operator": policy::operator_only(&actor, "pinned conversations").is_ok(),
+    });
     let (items, dashboard_slug) =
         s.db.read(move |c| {
             Ok((
@@ -66,7 +76,7 @@ async fn list(
         })
         .await?;
     Ok(Json(
-        json!({"items": items, "can_edit": can_edit, "dashboard_slug": dashboard_slug,
+        json!({"items": items, "can_edit": can_edit, "rights": rights, "dashboard_slug": dashboard_slug,
             "capabilities": {"project_pages_v2": s.web.project_pages_v2}}),
     ))
 }
