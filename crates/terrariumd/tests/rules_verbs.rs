@@ -5255,11 +5255,16 @@ async fn column_rules_fix_then_split_a_red_merge_batch() {
         x["body"].as_str().unwrap_or_default().contains("FAILED"),
         "{x}"
     );
-    assert!(x.get("group").is_none_or(Value::is_null), "{x}");
     let fail = runs_of(&td, "p", "merge_queue/job-fail-red").await;
     assert_eq!(fail.last().unwrap()["state"], "done", "{fail:?}");
     let back = runs_of(&td, "p", "ready/merge-group-returned").await;
-    assert_eq!(states(&back), vec!["done"], "{back:?}");
+    assert_eq!(
+        states(&back),
+        vec!["done"],
+        "{back:?} {:?}",
+        card_writes(&td, &f1).await
+    );
+    assert!(x.get("group").is_none_or(Value::is_null), "{x}");
 
     // The group's own cards pass: they go to accepted, the merge group
     // closes, and the version is cut and built.
