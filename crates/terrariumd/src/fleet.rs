@@ -1771,11 +1771,7 @@ fn apply_project(
     if let Some(flow) = def.board_flow {
         projects::set_board_flow(t, &def.name, flow)?;
     }
-    projects::set_review_dispatcher(
-        t,
-        &def.name,
-        def.review_dispatcher.as_deref().unwrap_or("off"),
-    )?;
+    projects::set_review_dispatcher_from_file(t, &def.name, def.review_dispatcher.as_deref())?;
     projects::set_card_dispatcher_from_file(t, &def.name, def.card_dispatcher.as_deref())?;
     // Repos: the file list replaces the repos the fleet applied before,
     // and takes over API repos with the same name. Equal repos stay, so

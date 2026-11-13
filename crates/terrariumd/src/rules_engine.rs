@@ -303,6 +303,7 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
                 let ctx = Context {
                     columns: None,
                     max_rules: usize::MAX,
+                    columns_flow: false,
                 };
                 let own = match rules::parse_off(text, rules::file_path(&project), ctx).await? {
                     Ok(s) => s,
@@ -1123,6 +1124,7 @@ pub async fn run_one(state: &Shared, id: &str, live: &HashSet<(String, String)>)
                 let ctx = Context {
                     columns: Some(columns),
                     max_rules: 1,
+                    columns_flow: false,
                 };
                 let result =
                     rule_script::actions(&input, &ctx, rule_script::Budget::engine(&row.project))
@@ -2217,6 +2219,7 @@ pub async fn dry_run_scripts(plans: &mut [DryPlan]) {
             let check = Context {
                 columns: Some(ctx.columns.clone()),
                 max_rules: 1,
+                columns_flow: false,
             };
             match rule_script::actions(
                 &input,

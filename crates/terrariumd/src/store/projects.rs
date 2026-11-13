@@ -367,13 +367,43 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Pro
 
 /// Store a name rather than an ID so file sync can precede agent creation.
 /// The runtime requires this agent to be a project admin on every dispatch.
+/// A project on `board_flow = columns` starts reviews with the
+/// `review.start` rule action (TER-1214, D24): an owner other than `off`
+/// is refused there.
 pub fn set_review_dispatcher(t: &mut Tx<'_>, project: &str, owner: &str) -> ApiResult<()> {
     check_name("review dispatcher owner", owner)?;
+    let owner = (owner != "off").then_some(owner);
+    if owner.is_some() && board_flow(t, project)? == BoardFlow::Columns {
+        return Err(ApiError::conflict(format!(
+            "project `{project}` runs its board on column rules: start reviews with a \
+             `review.start` rule, not with `review_dispatcher`"
+        ))
+        .with_details(serde_json::json!({"reason": "board_flow_columns"})));
+    }
     t.execute(
         "UPDATE projects SET review_dispatcher = ?2 WHERE name = ?1",
-        params![project, (owner != "off").then_some(owner)],
+        params![project, owner],
     )?;
     Ok(())
+}
+
+/// The `review_dispatcher` of a project file (file sync and the fleet). On
+/// a columns board the setting has no effect: it is stored as `off` with a
+/// warning, so the file does not stop the sync.
+pub fn set_review_dispatcher_from_file(
+    t: &mut Tx<'_>,
+    project: &str,
+    owner: Option<&str>,
+) -> ApiResult<()> {
+    let owner = owner.unwrap_or("off");
+    if owner != "off" && board_flow(t, project)? == BoardFlow::Columns {
+        tracing::warn!(
+            %project,
+            "review_dispatcher in the project file is ignored: the board runs on column rules"
+        );
+        return set_review_dispatcher(t, project, "off");
+    }
+    set_review_dispatcher(t, project, owner)
 }
 
 /// A project on `board_flow = columns` assigns with the `card.assign` rule
