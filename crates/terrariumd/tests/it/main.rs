@@ -5,6 +5,7 @@ mod board_summary_growth;
 mod card_waits;
 mod column_engine;
 mod column_options;
+mod column_queues;
 mod column_rules;
 #[path = "../common/mod.rs"]
 mod common;
@@ -14,6 +15,7 @@ mod live_workspace;
 mod pages;
 mod read_positions;
 mod remotes;
+mod rule_assign;
 mod run_cancel;
 mod ssh_restart;
 mod ter221_latency;

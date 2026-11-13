@@ -4983,6 +4983,49 @@ paths and ops, `if_card` and `if_job` fields), `actions` (each verb with its
 arguments: `name`, `type`, `required`, and `values` of a `one_of`),
 `placeholders`, and `limits`.
 
+#### 8.2.2 Column queues (TER-1114)
+
+Only a project with `board_flow = columns` has column queues. On every other
+board a full column refuses a move with `409 wip_limit`, as before.
+
+A move into a column that cannot take the card now is accepted. The card is
+in the column and waits in its queue; the move checks of §8.2.1 (rights, a
+final column, dependencies, the comment) still run at the move, and the ETA
+is cleared. The `moved` event has `queued: true`, and the column's `lands`
+and `count_reached` rules do not run yet. A claim, the move of a met card
+wait (the wait mail says `wait met, queued in <column>`), a card made in a
+column, and the `card.move` verb all go through the same move.
+
+Cards leave the queue first in, first out; a new card never overtakes one
+that waits. When a card gets its slot the daemon writes the `card` event
+`admitted` (with `queued_at` and `to_count`, the admitted cards of the
+column), and the `lands` and `count_reached` rules of the column run on it.
+A card that leaves the queue (a move or an archive) never landed: its
+column runs no `leaves` or `archived` rule for it (`from_queued: true` on
+the `moved` event, `queued: true` on `archived`).
+
+The capacity is the column's `wip_limit` (none: no limit) in each release
+(`queue.release` of §8.2.1):
+
+| Release | A waiting card is admitted when |
+|---|---|
+| `wip` | the admitted cards are fewer than the WIP limit |
+| `job` | one job at a time: no card of the column holds the job slot. A card that lands or is admitted holds it until a job of the card has ended after that (passed, failed, or cancelled) and it has no open job, or until it leaves the column. A job that is requeued (lost at a restart) stays open and keeps the slot |
+| `batch` | no card of the last batch is still in the column, and `batch_size` cards wait or the first has waited `max_wait_seconds`. Up to `max_batch_cards` (default `batch_size`) are admitted, in queue order |
+
+The release runs in the transaction of its cause: a move into or out of
+the column, an archive, a job end or cancel, a board `PATCH`, and an
+options `PUT`. The rule engine's tick also releases every queue (the wait
+of a batch, and any release that no cause triggered).
+
+A card that waits shows `queued: {column, since, place, held_eta}` (place 1
+goes next); a board column shows `queued`, the number that wait (absent
+when 0); `count` counts them too. An ETA set on a waiting card (`PATCH
+eta_at`, `card claim --eta`) is held, not set: it is set when the card is
+admitted, and a duration counts from then. A waiting card has no ETA, so it
+raises no ETA signal, and the card reminder skips it. The `job.queue` batch
+verb leaves out a card that waits in the queue of its column.
+
 ### 8.3 Endpoints
 
 | Endpoint | Body | Answer |
@@ -9573,7 +9616,8 @@ rule "note-review" {
 
 `if_card` (on the run's card; a rule with one runs only for events with a
 card): `column` (in one of these), `not_column`, `has_labels` (every
-one), `lacks_labels` (none), `assigned`, `archived`. `if_job` (on the job
+one), `any_labels` (at least one, TER-1115), `lacks_labels` (none),
+`assigned`, `archived`. `if_job` (on the job
 of a `job` event, `data.id`, or of a `job.verdict` event, `data.job`; a
 rule with one runs only for those events): `state` (`queued`, `running`,
 `passed`, `failed`, `cancelled`), `outcome` (`red`, `conflict`, `error`,
@@ -9700,9 +9744,30 @@ expression. No manual close endpoint exists.
   is left out. `remove` takes globs (`by:*`); a label that `add` names
   stays. No change: a no-op.
 - `card_comment`: a comment on the run's card.
-- `card_assign`: assign the run's card to `who` (an agent name or a
-  template), or unassign it with `none`. A template that fills to nothing
-  fails the action (only `none` unassigns). The same assignee: a no-op.
+- `card_assign`: exactly one of `who`, `template` or `templates`.
+  - `who`: assign the run's card to an agent name, or unassign it with
+    `none`. A placeholder that fills to nothing fails the action (only
+    `none` unassigns). The same assignee: a no-op.
+  - `template` or `templates` (TER-1115, kanban rework C4 D6): a new bound
+    agent from a template claims the card, as the ready-card dispatcher
+    does (docs/card-dispatcher.md). `templates` is a list of
+    `<label>=<template>`: the card must have exactly one of the labels,
+    and that label picks the template. `owner` (required) is a
+    non-ephemeral project admin of the project: its spawn rights and caps
+    are used, and pausing it pauses the action. `from` (a column): take the
+    top eligible cards of that column in board order, up to `limit` (1 to
+    16, default 1), for a rule with no card (a `timer`). Without `from`,
+    the run's card, in the column it is in. The column with the role
+    `working`, where the claim lands, must be under its WIP limit, counting
+    the cards that wait in its queue: a free slot, never a queue place, so
+    no agent starts for a card that would only wait. A working column with
+    no limit starts nothing. Eligible: no assignee, no open bound agent, its
+    dependencies met, not held, not cooling down after a failed spawn, and
+    a matching template. The run's write picks the card and reports it
+    (`changed`); the spawn runs after the commit and checks the owner and
+    the card again. No room, no eligible card, a paused owner, or an owner
+    at a spawn cap: a no-op with the reason. A failed spawn gives the card
+    the dispatcher's cooldown, comment and owner mail.
 - `card_prepend`: put `text` at the top of the card body. A body that
   starts with the text already: a no-op.
 - `mail`: mail from `project:<project>` to each of `to` (`operator`,
@@ -10215,6 +10280,14 @@ else the column named `x`), and it holds that column when it does not
 resolve on the board after the change (TER-1199): `@x` holds the only
 column with the role `x`, unless another column has that role after the
 change.
+The same check runs on every board change, also with no column removed
+(TER-1210): a change that leaves a reference `@x` of a rule naming no
+column (the role `x` cleared, or moved away with no column to take it,
+and no column named `x`) is `409 conflict` with `details.reason =
+role_in_use`, `details.roles`, and `details.rules`, and nothing changes.
+The reference is not rewritten: `@x` follows the role, so there is no
+column to rewrite it to. A reference that named no column before the
+change does not block it.
 
 ## 20. Event sources and ingest
 

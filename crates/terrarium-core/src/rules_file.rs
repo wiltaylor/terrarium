@@ -262,8 +262,15 @@ pub const VERBS: &[Verb] = &[
     Verb {
         kind: "card_assign",
         name: "card.assign",
-        args: &[("who", Arg::Text)],
-        required: &["who"],
+        args: &[
+            ("who", Arg::Text),
+            ("template", Arg::Text),
+            ("templates", Arg::List),
+            ("owner", Arg::Text),
+            ("from", Arg::Column),
+            ("limit", Arg::Count),
+        ],
+        required: &[],
     },
     Verb {
         kind: "card_prepend",
@@ -521,6 +528,9 @@ pub struct CardCondition {
     /// Has every one of these labels.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub has_labels: Vec<String>,
+    /// Has at least one of these labels (TER-1115).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub any_labels: Vec<String>,
     /// Has none of these labels.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lacks_labels: Vec<String>,
@@ -881,6 +891,75 @@ fn texts(v: &Value) -> Vec<&str> {
     }
 }
 
+/// The most cards that one `card.assign` from a column starts agents for.
+pub const MAX_ASSIGN_LIMIT: i64 = 16;
+
+/// One entry of `card.assign.templates`: `<label>=<template>`, both plain
+/// and non-empty. Returns the label and the template.
+pub fn assign_template_entry(entry: &str) -> Option<(&str, &str)> {
+    let (label, template) = entry.split_once('=')?;
+    let (label, template) = (label.trim(), template.trim());
+    let plain = |s: &str| !s.is_empty() && !s.contains("{{") && !s.contains(char::is_whitespace);
+    (plain(label) && plain(template)).then_some((label, template))
+}
+
+/// The checks of `card.assign` across its arguments (TER-1115): exactly one
+/// of `who` (a name or `none`), `template` or `templates` (a new agent);
+/// a new agent needs `owner`; `from` and `limit` are for a new
+/// agent only; `limit` needs `from` and is 1 to [`MAX_ASSIGN_LIMIT`]; each
+/// `templates` entry is `<label>=<template>`, with no label twice.
+fn check_assign_args(args: &Map<String, Value>) -> Vec<String> {
+    let set = |k: &str| args.get(k).is_some_and(|v| !v.is_null());
+    let mut out = Vec::new();
+    let modes = ["who", "template", "templates"]
+        .iter()
+        .filter(|k| set(k))
+        .count();
+    if modes != 1 {
+        out.push("card_assign needs exactly one of `who`, `template` or `templates`".to_owned());
+    }
+    if set("who") {
+        for key in ["owner", "from", "limit"] {
+            if set(key) {
+                out.push(format!(
+                    "card_assign.{key} is for a new agent (`template` or `templates`) only"
+                ));
+            }
+        }
+        return out;
+    }
+    if (set("template") || set("templates")) && !set("owner") {
+        out.push("card_assign of a new agent needs `owner` (a project admin)".to_owned());
+    }
+    if set("limit") && !set("from") {
+        out.push("card_assign.limit needs `from` (a column)".to_owned());
+    }
+    if let Some(n) = args.get("limit").and_then(Value::as_i64)
+        && !(1..=MAX_ASSIGN_LIMIT).contains(&n)
+    {
+        out.push(format!(
+            "card_assign.limit is 1 to {MAX_ASSIGN_LIMIT}, not {n}"
+        ));
+    }
+    let entries = texts(args.get("templates").unwrap_or(&Value::Null));
+    if set("templates") && entries.is_empty() {
+        out.push("card_assign.templates needs at least one `<label>=<template>`".to_owned());
+    }
+    let mut seen = Vec::new();
+    for e in entries {
+        match assign_template_entry(e) {
+            None => out.push(format!(
+                "card_assign.templates entry `{e}` is not `<label>=<template>`"
+            )),
+            Some((label, _)) if seen.contains(&label) => out.push(format!(
+                "card_assign.templates names the label `{label}` twice"
+            )),
+            Some((label, _)) => seen.push(label),
+        }
+    }
+    out
+}
+
 /// The checks of `job_queue` across its arguments: a batch needs `from`;
 /// `limit`, `min_cards`, and `max_wait_minutes` are for a batch only;
 /// `max_wait_minutes` needs `min_cards` (without it the batch goes at
@@ -1063,6 +1142,9 @@ pub fn check_action(ctx: &Context, a: &Action) -> Vec<(Option<String>, String)> 
     if verb.kind == "job_queue" {
         out.extend(check_batch_args(&a.args).into_iter().map(|e| (None, e)));
     }
+    if verb.kind == "card_assign" {
+        out.extend(check_assign_args(&a.args).into_iter().map(|e| (None, e)));
+    }
     if verb.name == SCRIPT_VERB
         && let Some(f) = a.args.get("fuel").and_then(Value::as_u64)
         && f > MAX_SCRIPT_FUEL
@@ -1089,6 +1171,7 @@ pub fn check_card_condition(ctx: &Context, c: &CardCondition) -> Result<(), Stri
     }
     if c.has_labels
         .iter()
+        .chain(&c.any_labels)
         .chain(&c.lacks_labels)
         .any(|l| l.trim().is_empty() || l.contains("{{"))
     {
@@ -1140,6 +1223,7 @@ fn read_if_card(ctx: &Context, fields: &Map<String, Value>) -> Result<CardCondit
         column: text_list(fields, "column"),
         not_column: text_list(fields, "not_column"),
         has_labels: text_list(fields, "has_labels"),
+        any_labels: text_list(fields, "any_labels"),
         lacks_labels: text_list(fields, "lacks_labels"),
         assigned: fields.get("assigned").and_then(Value::as_bool),
         archived: fields.get("archived").and_then(Value::as_bool),
@@ -1525,6 +1609,11 @@ pub fn parse(text: &str, file: &str, ctx: &Context) -> Result<RuleSet, FileError
             }
             if verb.kind == "job_queue" {
                 for e in check_batch_args(&args) {
+                    problems.push(problem_at(text, Some(cat), format!("rule `{name}`: {e}")));
+                }
+            }
+            if verb.kind == "card_assign" {
+                for e in check_assign_args(&args) {
                     problems.push(problem_at(text, Some(cat), format!("rule `{name}`: {e}")));
                 }
             }
@@ -2053,6 +2142,52 @@ rule "validate-pass" {
             .collect();
         let verbs: Vec<&str> = VERBS.iter().map(|v| v.kind).collect();
         assert_eq!(kinds, verbs);
+    }
+
+    #[test]
+    fn a_template_assign_reads_and_its_arguments_check() {
+        let text = r#"rule "r" {
+  on = ["card"]
+  if_card { any_labels = ["type:small", "type:impl"] }
+  card_assign {
+    templates = ["type:small=card-small", "type:impl=card-impl"]
+    owner = "lead"
+    from = "@ready"
+    limit = 4
+  }
+}
+"#;
+        let set = parse(text, "rules.wcl", &board()).unwrap();
+        let r = &set.rules[0];
+        assert_eq!(r.if_card[0].any_labels, vec!["type:small", "type:impl"]);
+        assert_eq!(r.actions[0].args["owner"], "lead");
+        let bad = |action: &str| {
+            errors(&format!(
+                "rule \"r\" {{\n  on = [\"card\"]\n  {action}\n}}\n"
+            ))
+        };
+        let e = bad(r#"card_assign { template = "card-small" }"#);
+        assert!(e.contains("needs `owner`"), "{e}");
+        let e = bad("card_assign {}");
+        assert!(e.contains("exactly one of"), "{e}");
+        let e = bad(r#"card_assign { who = "w" owner = "lead" }"#);
+        assert!(e.contains("card_assign.owner is for a new agent"), "{e}");
+        let e = bad(r#"card_assign { template = "t" owner = "lead" limit = 2 }"#);
+        assert!(e.contains("limit needs `from`"), "{e}");
+        let e = bad(r#"card_assign { template = "t" owner = "lead" from = "@ready" limit = 17 }"#);
+        assert!(e.contains("limit is 1 to 16"), "{e}");
+        let e = bad(r#"card_assign { templates = ["a=x", "a=y"] owner = "lead" }"#);
+        assert!(e.contains("names the label `a` twice"), "{e}");
+        let e = bad(r#"card_assign { template = "t" owner = "lead" room = "review" }"#);
+        assert!(!e.is_empty(), "room is not an argument: {e}");
+        let e = bad(r#"card_assign { templates = ["a"] owner = "lead" }"#);
+        assert!(e.contains("is not `<label>=<template>`"), "{e}");
+        let ok = "rule \"r\" {\n  on = [\"card\"]\n  card_assign { who = \"w\" }\n}\n";
+        assert!(parse(ok, "rules.wcl", &board()).is_ok());
+        assert_eq!(assign_template_entry(" a = b "), Some(("a", "b")));
+        assert_eq!(assign_template_entry("a=b c"), None);
+        assert_eq!(assign_template_entry("a={{card.id}}"), None);
+        assert_eq!(assign_template_entry("=b"), None);
     }
 
     #[test]

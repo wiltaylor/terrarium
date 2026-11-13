@@ -10,7 +10,9 @@
 //! A column that a rule names by name (TER-1159, decided on TER-1113): a
 //! rename of the column rewrites the name in every rule of the board
 //! ([`rename_in_rules`]); a removal is refused while a rule of another
-//! column names it ([`check_removal`]). A reference `@x` to a role stays.
+//! column names it ([`check_refs`]). A reference `@x` to a role stays, and
+//! a change that leaves it naming no column (the role cleared) is refused
+//! too (TER-1210).
 //!
 //! The options belong to the column ID: a rename keeps them, and a role
 //! change does not move them. The queue settings are stored only; the
@@ -81,7 +83,7 @@ pub enum QueueRelease {
 }
 
 impl QueueRelease {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Wip => "wip",
             Self::Batch => "batch",
@@ -89,7 +91,7 @@ impl QueueRelease {
         }
     }
 
-    fn parse(s: &str) -> rusqlite::Result<Self> {
+    pub(crate) fn parse(s: &str) -> rusqlite::Result<Self> {
         match s {
             "wip" => Ok(Self::Wip),
             "batch" => Ok(Self::Batch),
@@ -480,9 +482,10 @@ pub fn put_options(
         write_rules(t, col.id, &before.rules, &rules)?;
     }
     let col = column(t, project, &col.name)?;
-    let after = read(t, project, &col)?;
-    record(t, project, &before, &after)?;
-    Ok(after)
+    record(t, project, &before, &read(t, project, &col)?)?;
+    // New queue options may release waiting cards (TER-1114).
+    super::queues::release(t, col.id)?;
+    read(t, project, &col)
 }
 
 /// The audit row `board.column_options` and the `board` event of one
@@ -636,25 +639,34 @@ fn project_rules(
         .collect()
 }
 
-/// The legacy board PATCH (`super::set_columns`) removes the columns
-/// `removed` (TER-1159): refused with `409` while a rule of a column that
-/// stays names one of them. A reference names the column that it resolves
-/// to on the board before the change (`current`,
-/// [`rules_file::resolve_column`]: `@x` is the column with the role `x`,
-/// else the column named `x`). It holds that column when it does not
-/// resolve on the board after the change (`after`, TER-1199): so `@x` holds
-/// the only column with the role `x` unless another column has that role
-/// after the change. Nothing is written.
-pub(super) fn check_removal(
+/// The references of the column rules on the board after a legacy board
+/// PATCH (`super::set_columns`), checked on every PATCH (TER-1159,
+/// TER-1199, TER-1210). A reference of a rule of a column that stays is
+/// refused with `409` when it resolves on the board before the change
+/// (`current`, [`rules_file::resolve_column`]: `@x` is the column with the
+/// role `x`, else the column named `x`) and resolves to no column on the
+/// board after the change (`after`), once the renames (`renames`, old name
+/// to new name) are applied as [`rename_in_rules`] applies them. A
+/// reference that already named no column before the change is left
+/// alone. The reason in `details.reason`:
+///
+/// - `column_in_use`: the column it named is removed (`removed`). So `@x`
+///   holds the only column with the role `x` unless another column has
+///   that role after the change.
+/// - `role_in_use`: the column stays, but no column has the role `x` (nor
+///   the name `x`) after the change: the role was cleared, or moved away
+///   with no column to take it. Refused, not rewritten: `@x` follows the
+///   role, so there is no column to rewrite it to.
+///
+/// Nothing is written.
+pub(super) fn check_refs(
     t: &Tx<'_>,
     project: &str,
     current: &[ColumnRow],
     after: &[BoardColumn],
     removed: &[&ColumnRow],
+    renames: &HashMap<String, String>,
 ) -> ApiResult<()> {
-    if removed.is_empty() {
-        return Ok(());
-    }
     let before: Vec<BoardColumn> = current
         .iter()
         .map(|c| BoardColumn {
@@ -662,9 +674,12 @@ pub(super) fn check_removal(
             role: c.role.clone(),
         })
         .collect();
+    let roles_after: Vec<String> = after.iter().filter_map(|c| c.role.clone()).collect();
     let gone_ids: Vec<i64> = removed.iter().map(|c| c.id).collect();
-    let mut users: Vec<Value> = Vec::new();
-    let mut named: Vec<String> = Vec::new();
+    let mut col_users: Vec<Value> = Vec::new();
+    let mut col_named: Vec<String> = Vec::new();
+    let mut role_users: Vec<Value> = Vec::new();
+    let mut role_named: Vec<String> = Vec::new();
     for (_, col_id, col, rule) in project_rules(t, project)? {
         if gone_ids.contains(&col_id) {
             continue;
@@ -674,37 +689,62 @@ pub(super) fn check_removal(
             let Some(target) = rules_file::resolve_column(&before, &r) else {
                 continue;
             };
-            if !removed.iter().any(|c| c.name == target.name)
-                || rules_file::resolve_column(after, &r).is_some()
-            {
+            // The reference as the PATCH leaves it ([`rename_in_rules`]).
+            let mut probe = [rules_file::CardCondition {
+                column: vec![r.clone()],
+                ..Default::default()
+            }];
+            rules_file::rename_columns(&mut probe, &mut [], renames, &roles_after);
+            if rules_file::resolve_column(after, &probe[0].column[0]).is_some() {
                 continue;
             }
-            let g = target.name.clone();
-            if !named.contains(&g) {
-                named.push(g.clone());
+            if removed.iter().any(|c| c.name == target.name) {
+                let g = target.name.clone();
+                if !col_named.contains(&g) {
+                    col_named.push(g.clone());
+                }
+                col_users.push(json!({"column": col, "rule": rule.name, "names": g}));
+            } else {
+                let role = r.strip_prefix('@').unwrap_or(&r).to_owned();
+                if !role_named.contains(&role) {
+                    role_named.push(role);
+                }
+                role_users.push(json!({"column": col, "rule": rule.name, "names": r}));
             }
-            users.push(json!({"column": col, "rule": rule.name, "names": g}));
         }
     }
-    if users.is_empty() {
-        return Ok(());
+    let list = |users: &[Value]| -> String {
+        users
+            .iter()
+            .map(|u| {
+                format!(
+                    "{}/{}",
+                    u["column"].as_str().unwrap_or_default(),
+                    u["rule"].as_str().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if !col_users.is_empty() {
+        return Err(ApiError::conflict(format!(
+            "column `{}` is named by the column rule(s) {}; change those rules first",
+            col_named.join("`, `"),
+            list(&col_users)
+        ))
+        .with_details(
+            json!({"reason": "column_in_use", "columns": col_named, "rules": col_users}),
+        ));
     }
-    let list: Vec<String> = users
-        .iter()
-        .map(|u| {
-            format!(
-                "{}/{}",
-                u["column"].as_str().unwrap_or_default(),
-                u["rule"].as_str().unwrap_or_default()
-            )
-        })
-        .collect();
-    Err(ApiError::conflict(format!(
-        "column `{}` is named by the column rule(s) {}; change those rules first",
-        named.join("`, `"),
-        list.join(", ")
-    ))
-    .with_details(json!({"reason": "column_in_use", "columns": named, "rules": users})))
+    if !role_users.is_empty() {
+        return Err(ApiError::conflict(format!(
+            "the role `{}` is named by the column rule(s) {}, and no column has it after this              change; keep the role on a column, or change those rules first",
+            role_named.join("`, `"),
+            list(&role_users)
+        ))
+        .with_details(json!({"reason": "role_in_use", "roles": role_named, "rules": role_users})));
+    }
+    Ok(())
 }
 
 /// The legacy board PATCH (`super::set_columns`) renamed columns
