@@ -183,6 +183,10 @@ pub fn select(
     .optional()?;
     // Fail closed without an explicit limit: opt-in must not create an
     // unbounded number of agents on a board with no concurrency policy.
+    // The count is every card in the column, also a card that waits in the
+    // column's queue (TER-1114): room is a free WIP slot, never a queue
+    // place, so no agent starts for a claim that would only queue. The
+    // spawn transaction runs this check again before the claim.
     if !matches!(room, Some((Some(limit), count)) if count < limit) {
         return Ok(Err("no room under the WIP limit"));
     }

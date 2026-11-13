@@ -9715,7 +9715,9 @@ expression. No manual close endpoint exists.
     top eligible cards of that column in board order, up to `limit` (1 to
     16, default 1), for a rule with no card (a `timer`). Without `from`,
     the run's card, in the column it is in. `room` (a column, default the
-    `working` role) must be under its WIP limit; a column with no limit
+    `working` role) must be under its WIP limit, counting the cards that
+    wait in its queue: room is a free slot, never a queue place, so no
+    agent starts for a card that would only wait. A column with no limit
     starts nothing. Eligible: no assignee, no open bound agent, its
     dependencies met, not held, not cooling down after a failed spawn, and
     a matching template. The run's write picks the card and reports it
