@@ -13,7 +13,7 @@ pub struct PendingPointer {
     /// Higher for a newer item.
     pub id: i64,
     pub agent: String,
-    /// `card`, `lead`, or `lease`.
+    /// `card`, `lead`, `lease`, or `reservation`.
     pub kind: String,
     /// One item for each agent, kind, and key.
     pub key: String,
