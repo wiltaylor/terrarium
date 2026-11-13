@@ -4997,7 +4997,10 @@ async fn column_rules_merge_a_batch_cut_a_version_and_build_it() {
     let merge_group = g["id"].as_str().unwrap().to_owned();
     assert_eq!(g["members"], json!([a, b]));
     for id in [&a, &b] {
-        assert_eq!(card(&td, id).await["labels"], json!(["version:vnext", "validation:queued"]));
+        assert_eq!(
+            card(&td, id).await["labels"],
+            json!(["version:vnext", "validation:queued"])
+        );
     }
 
     // The job passes: both cards go to accepted and the merge group closes.
@@ -5078,7 +5081,11 @@ async fn column_rules_split_a_red_merge_batch() {
     for id in [&a, &b] {
         let x = card(&td, id).await;
         assert_eq!(x["column"], "merge_queue", "{x}");
-        assert_eq!(x["labels"], json!(["version:vnext", "validation:queued"]), "{x}");
+        assert_eq!(
+            x["labels"],
+            json!(["version:vnext", "validation:queued"]),
+            "{x}"
+        );
     }
     let note = runs_of(&td, "p", "merge_queue/merge-red-split-note").await;
     assert_eq!(states(&note), vec!["done", "done"], "{note:?}");
