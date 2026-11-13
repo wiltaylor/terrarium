@@ -13,7 +13,7 @@ use axum::{
     Json,
     extract::{Path, State},
     http::{Method, StatusCode},
-    routing::get,
+    routing::{get, post},
 };
 use serde_json::{Value, json};
 
@@ -23,6 +23,21 @@ pub fn routes() -> RegisteredRouter {
             "/projects/{name}/pages",
             get(list),
             &[(Method::GET, Access::Link)],
+        )
+        .route(
+            "/projects/{name}/page-layout",
+            get(layout_show).put(layout_set),
+            &[(Method::GET, Access::Link), (Method::PUT, Access::Link)],
+        )
+        .route(
+            "/projects/{name}/page-layout/reset",
+            post(layout_reset),
+            &[(Method::POST, Access::Link)],
+        )
+        .route(
+            "/projects/{name}/page-layout/copy",
+            post(layout_copy),
+            &[(Method::POST, Access::Link)],
         )
         .route(
             "/projects/{name}/pages/{slug}",
@@ -51,7 +66,107 @@ async fn list(
         })
         .await?;
     Ok(Json(
-        json!({"items": items, "can_edit": can_edit, "dashboard_slug": dashboard_slug}),
+        json!({"items": items, "can_edit": can_edit, "dashboard_slug": dashboard_slug,
+            "capabilities": {"project_pages_v2": s.web.project_pages_v2}}),
+    ))
+}
+
+fn enabled(s: &Shared) -> ApiResult<()> {
+    if !s.web.project_pages_v2 {
+        return Err(ApiError::not_found("project pages v2 is disabled"));
+    }
+    Ok(())
+}
+
+async fn layout_show(
+    State(s): State<Shared>,
+    actor: Actor,
+    Path(project): Path<String>,
+) -> ApiResult<Json<pages::Snapshot>> {
+    policy::read_project(&actor, &project)?;
+    enabled(&s)?;
+    Ok(Json(
+        s.db.read(move |c| pages::snapshot(c, &project)).await?,
+    ))
+}
+
+async fn layout_set(
+    State(s): State<Shared>,
+    actor: Actor,
+    Path(project): Path<String>,
+    ApiJson(value): ApiJson<Value>,
+) -> ApiResult<Json<pages::Snapshot>> {
+    policy::admin_project(&actor, &project, "editing project pages")?;
+    enabled(&s)?;
+    let input: pages::LayoutInput = serde_json::from_value(value)
+        .map_err(|e| ApiError::invalid(format!("invalid layout: {e}")))?;
+    let author = actor.label();
+    Ok(Json(
+        s.db.write(author.clone(), move |t| {
+            pages::replace_layout(t, &project, &input, &author, "replace")
+        })
+        .await?,
+    ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResetInput {
+    base_revision: u64,
+    builtin: pages::Builtin,
+}
+
+async fn layout_reset(
+    State(s): State<Shared>,
+    actor: Actor,
+    Path(project): Path<String>,
+    ApiJson(value): ApiJson<Value>,
+) -> ApiResult<Json<pages::Snapshot>> {
+    policy::admin_project(&actor, &project, "resetting project pages")?;
+    enabled(&s)?;
+    let input: ResetInput = serde_json::from_value(value)
+        .map_err(|e| ApiError::invalid(format!("invalid reset: {e}")))?;
+    let author = actor.label();
+    Ok(Json(
+        s.db.write(author.clone(), move |t| {
+            pages::reset_builtin(t, &project, input.base_revision, input.builtin, &author)
+        })
+        .await?,
+    ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CopyInput {
+    base_revision: u64,
+    source_project: String,
+    confirm: bool,
+}
+
+async fn layout_copy(
+    State(s): State<Shared>,
+    actor: Actor,
+    Path(project): Path<String>,
+    ApiJson(value): ApiJson<Value>,
+) -> ApiResult<Json<pages::Snapshot>> {
+    policy::admin_project(&actor, &project, "copying project pages")?;
+    enabled(&s)?;
+    let input: CopyInput = serde_json::from_value(value)
+        .map_err(|e| ApiError::invalid(format!("invalid copy: {e}")))?;
+    policy::read_project(&actor, &input.source_project)?;
+    let author = actor.label();
+    Ok(Json(
+        s.db.write(author.clone(), move |t| {
+            pages::copy_layout(
+                t,
+                &project,
+                &input.source_project,
+                input.base_revision,
+                input.confirm,
+                &author,
+            )
+        })
+        .await?,
     ))
 }
 

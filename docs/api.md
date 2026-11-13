@@ -351,6 +351,7 @@ gives them to the routers and the mail code.
 | `TERRARIUM_ARTIFACT_LISTEN` | `--artifact-listen` | `0.0.0.0:8081` | The artifact origin listener. Empty: none, and the dashboard port serves `/a/...`. |
 | `TERRARIUM_ARTIFACT_PUBLIC_URL` | `--artifact-public-url` | unset | The artifact origin in signed URLs and the CSP. |
 | `TERRARIUM_WS_QUERY_TOKEN` | `--ws-query-token` | `0` | `1`: take `?token=` on an upgrade. |
+| `TERRARIUM_PROJECT_PAGES_V2` | `--project-pages-v2` | `0` | Staged project-page layout capability. Strict switch parser. Deployment activation and explicit default initialization belong to C7 (TER-1077). |
 | `TERRARIUM_SESSION_TTL` | `--session-ttl` | `30d` | The life of a session cookie. The daemon renews it past half its life. |
 | `TERRARIUM_CLI_SESSION_TTL` | `--cli-session-ttl` | `90d` | The life of a CLI session token (`terrarium login`). |
 | `TERRARIUM_SESSION_MAX_AGE` | `--session-max-age` | `90d` | The longest life of a dashboard session through its renewals, from the login. |
@@ -11395,6 +11396,99 @@ to project Settings, Monitors. GET/PUT `/api/projects/{name}/dashboard`
 and the dashboard CLI remain compatibility aliases for at least one release.
 The alias reads an empty layout if the mapped page was deleted. Saving it
 replaces monitor/Markdown widgets and preserves system and wiki widgets.
+
+#### Project page layout v2 (staged, default OFF)
+
+`GET /api/projects/{name}/pages` additionally returns
+`capabilities: {project_pages_v2: boolean}`. Only exact `true` from the
+current project's current instance enables the v2 UI. Missing, failed or
+stale responses are OFF. `can_edit` remains independent. OFF retains the
+shipped custom-page CRUD, limits and navigation, rejects new widget kinds,
+options and frames, and returns 404 for authorized v2 calls. Write rights
+are checked first, so unauthorized writers receive 403 even while OFF.
+There is no frontend flag or GET-triggered initialization.
+
+The new collection URL deliberately differs from `/pages/{slug}` so an
+existing custom page named `layout` remains accessible:
+
+| Method and path under `/api/projects/{name}` | Body / result |
+|---|---|
+| GET `/page-layout` | `{revision,pages}` snapshot |
+| PUT `/page-layout` | `{base_revision,pages}` replaces the whole layout |
+| POST `/page-layout/reset` | `{base_revision,builtin}` resets or re-adds one built-in |
+| POST `/page-layout/copy` | `{base_revision,source_project,confirm:true}` replaces target with source layout |
+
+All writes return the canonical snapshot. Input pages contain exactly
+`{slug,title,position,widgets,builtin?}`. `position` must equal the array
+index. At most 30 pages, unique slugs and unique non-null built-in identities
+are allowed. Response pages retain `project`, `updated_at`, `updated_by`
+and optional `builtin`. Built-in identity is independent of the slug:
+`board`, `tests`, `schedules`, `rules`, `agents`, `repos`, `knowledge`,
+`pipelines`, `calendar`, `logs`. Settings is excluded.
+
+The required nonnegative `base_revision` is compared under the same
+IMMEDIATE transaction as validation and replacement. A stale base returns
+409 `conflict`, with `error.details.revision` containing the current revision.
+Clients retain their draft and can GET the current snapshot. Validation or
+conflict changes no rows, revision, audit or events. Successful bulk writes
+increment once and emit one `page.layout` audit and one `page.updated` event
+with `{project,revision,operation}`. Operation is `replace`, `copy`, `reset`
+or `initialize`. Enabled legacy slug saves/deletes, dashboard-alias saves
+and dashboard monitor removal also increment the revision and add
+`revision` and `operation` to their existing event payloads.
+
+V2 widgets retain stable IDs and all existing grid/content bounds. Optional
+`frame` is `grid`, `full_width` or `viewport`. Absent means legacy grid.
+The latter two require `x=0,w=12`. The client owns viewport sizing, document
+scrolling and phone stacking, without changing saved cells. Duplicate kinds
+are valid independent instances with distinct IDs and options.
+
+Existing kinds retain only `range`, `sparkline`, `decimals` options.
+New kinds have no `text`, `wiki` or `monitor` source and accept only optional
+`search` (at most 256 UTF-8 bytes) and `view` from this table. Absent `view`
+means the first listed value. Unknown fields/values and project overrides
+are rejected. Options are validated per kind, never arbitrary JSON.
+
+| Kind | Allowed view values |
+|---|---|
+| `board` | `lanes`, `done`, `columns` |
+| `tests` | `runs` |
+| `schedules` | `schedules`, `triggers`, `event_sources` |
+| `rules` | `flow`, `lint`, `table`, `last_runs` |
+| `agents` | `agents`, `card_agents` |
+| `repos` | `list`, `files` |
+| `wiki_index` | `browser` |
+| `memory` | `list`, `graph` |
+| `db` | `types`, `records` |
+| `pipelines` | `state`, `runs` |
+| `calendar` | `month`, `week`, `agenda` |
+| `mail` | `messages` |
+| `events` | `events` |
+
+The explicit idempotent initializer appends exactly ten built-in pages after
+existing custom pages and the migrated Dashboard, preserving their content,
+metadata and order. It uses the first free `name`, `name-1`, `name-2`, … slug.
+Each view above is a separate default widget, except Calendar defaults to
+month. Knowledge contains wiki browser, memory list/graph and DB types/records.
+Logs contains mail and events. Reset uses the same definitions and affects
+only the selected built-in. A stored initialized marker prevents restart
+from restoring deleted built-ins. Schema migrations add only empty metadata.
+C7 owns calling the initializer before enabled responses and during enabled
+new-project creation. This implementation does not call it automatically.
+
+Copy requires source read plus target administration rights and confirmation.
+It copies neither grants nor source audit actor metadata. References remain
+target-local, including missing wiki paths/monitor IDs. A foreign monitor ID
+is treated as missing in the target, not as permission to read source data.
+Renderers must resolve IDs against the target project's monitor inventory,
+not fetch a global ID because the caller also has source-project rights.
+Existing resource endpoints retain their authorization checks. Compatible
+existing local monitor references are validated normally.
+
+CLI: `page layout`, `page save-layout --from-file FILE`,
+`page reset BUILTIN --base-revision N`, and
+`page copy SOURCE --base-revision N --confirm`. Save accepts `-` for stdin.
+No CLI command enables the capability or initializes defaults.
 
 ### 30.1 Rights
 

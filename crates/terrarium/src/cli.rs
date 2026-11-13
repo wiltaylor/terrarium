@@ -2639,6 +2639,27 @@ pub enum DashboardCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum PageCmd {
+    /// Read the revisioned whole layout (project pages v2)
+    Layout,
+    /// Atomically replace the whole layout from {base_revision,pages} JSON
+    SaveLayout {
+        #[arg(long)]
+        from_file: String,
+    },
+    /// Reset or re-add one built-in page
+    Reset {
+        builtin: String,
+        #[arg(long)]
+        base_revision: u64,
+    },
+    /// Replace this project's layout with another project's layout
+    Copy {
+        source_project: String,
+        #[arg(long)]
+        base_revision: u64,
+        #[arg(long)]
+        confirm: bool,
+    },
     /// List the project pages in tab order
     Ls,
     /// Show a page and its widgets
