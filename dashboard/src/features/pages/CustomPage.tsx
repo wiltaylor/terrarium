@@ -166,7 +166,8 @@ export default function CustomPage() {
       <Show when={isSystemWidget(w.kind)}><SystemWidget kind={w.kind} project={params.project} monitors={monitors.latest ?? []} now={now()} /></Show>
       <Show when={!widgetDefinition(w)}><p>Not Found</p></Show>
       <Show when={widgetDefinition(w)?.host === "feature"}>
-        <Show when={enabled()} fallback={<p>Not Found</p>}><FeatureWidget project={params.project} widget={current()} grants={grants()} /></Show>
+        {/* Until the first capability answer nothing shows, so an ON page never flashes Not Found. */}
+        <Show when={enabled()} fallback={<Show when={scopedRights.error || scopedRights.latest}><p>Not Found</p></Show>}><FeatureWidget project={params.project} widget={current()} grants={grants()} /></Show>
       </Show>
       <Show when={widgetDefinition(w)?.host === "monitor"}>
         <Show when={!enabled() || monitors.latest?.some(m => m.id === w.monitor && m.project === params.project)} fallback={<p>Not Found</p>}>

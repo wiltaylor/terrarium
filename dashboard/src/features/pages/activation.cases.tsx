@@ -141,6 +141,8 @@ it("ON: the host renders every registry part from the composed maps, and Not Fou
   const { host } = mount(`/p/${P}/pages/all`);
   await waitFor(() => expect(widgetEl(host, "bad-view")?.textContent).toBe("Not Found"));
   expect(widgets.length).toBe(28);
+  // No part flashed Not Found while the capability loaded: only the bad view shows it.
+  expect([...host.querySelectorAll("[data-widget-id]")].filter(el => el.textContent === "Not Found").map(el => el.getAttribute("data-widget-id"))).toEqual(["bad-view"]);
   for (const w of widgets.slice(0, -1)) {
     await waitFor(() => expect(widgetEl(host, w.id)?.textContent?.length ?? 0, w.id).toBeGreaterThan(0));
     expect(widgetEl(host, w.id)!.textContent, w.id).not.toBe("Not Found");
