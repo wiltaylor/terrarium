@@ -198,7 +198,11 @@ mod tests {
             Routed::Queued
         ));
         assert!(matches!(
-            registry.route(1, Event::Control(Box::new(DaemonFrame::Eof { session: 1 })), 0),
+            registry.route(
+                1,
+                Event::Control(Box::new(DaemonFrame::Eof { session: 1 })),
+                0
+            ),
             Routed::Queued
         ));
         assert!(matches!(
