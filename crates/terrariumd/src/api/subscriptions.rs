@@ -1443,6 +1443,9 @@ async fn verify(
             )
         })
         .await?;
+    // A plan that the check read may make an xai key row a plan row: its
+    // key file goes (TER-1239).
+    crate::login_session::drop_plan_row_keys_in(&state).await;
     Ok(Json(
         json!({"subscription": load(&state, name).await?, "status": st}),
     ))
@@ -1849,7 +1852,7 @@ async fn api_key(
         key.base_url.clone(),
         key.models.clone(),
     );
-    state
+    let dropped = state
         .db
         .write(actor.label(), move |t| {
             // A fleet or file apply can make the row an xai plan row after
@@ -1946,24 +1949,36 @@ async fn api_key(
                 };
                 subs::upsert_def(t, &def, SOURCE_API)?;
             }
-            // A file subscription keeps its definition; the env var is
-            // daemon state.
-            subs::set_env_var(t, &n, Some(var))?;
-            let status = if key_plan.is_some() || is_sh || cloud_kind.is_some() {
-                subs::API_KEY
-            } else {
-                subs::LOGGED_IN
-            };
-            subs::set_login_status(t, &n, status)?;
+            // `set_plan` above can make an xai key row an xai plan row (a
+            // Z.ai key with plan `coding` on it, TER-1239). R7: such a row
+            // holds no key. `set_plan` cleared the variable, and the sweep
+            // after the write removes the key file.
+            let plan_row = subs::find(t, &n)?
+                .is_some_and(|s| terrarium_core::xai::is_plan_row(&s.provider, s.plan.as_deref()));
+            if !plan_row {
+                // A file subscription keeps its definition; the env var is
+                // daemon state.
+                subs::set_env_var(t, &n, Some(var))?;
+                let status = if key_plan.is_some() || is_sh || cloud_kind.is_some() {
+                    subs::API_KEY
+                } else {
+                    subs::LOGGED_IN
+                };
+                subs::set_login_status(t, &n, status)?;
+            }
             t.audit(
                 "subscription.api_key",
                 &n,
                 None,
                 json!({"provider": provider, "plan": key_plan, "env_var": var, "base_url": base_url, "models": models,
-                       "cloud": cloud_settings}),
-            )
+                       "cloud": cloud_settings, "dropped": plan_row}),
+            )?;
+            Ok(plan_row)
         })
         .await?;
+    if dropped {
+        crate::login_session::drop_plan_row_keys_in(&state).await;
+    }
     Ok(Json(load(&state, name).await?))
 }
 

@@ -1053,6 +1053,10 @@ pub async fn apply_definitions(
             .push(format!("cannot load the template files: {}", e.message)),
     }
     report.errors.extend(fleet::apply_config_dir(state).await);
+    // A config-dir fleet file that made an xai key row a plan row: its key
+    // file goes too (TER-1239, rev-1205b). The sweep after the file sync
+    // above does not see the fleet rows.
+    login_session::drop_plan_row_keys_in(state).await;
     state.set_definitions(defs);
     // Like `DELETE /api/agents/{id}`: stop, then the dir to the trash.
     for id in &report.removed_agent_ids {

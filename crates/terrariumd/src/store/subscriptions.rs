@@ -366,24 +366,8 @@ pub fn upsert_def(t: &mut Tx<'_>, def: &SubscriptionDef, source: &str) -> ApiRes
     )?;
     // R7 (TER-1191, TER-1205): an xai plan row holds no API key. A fleet or
     // file definition that turns an xai API-key row into a plan row drops
-    // the key here: the row forgets its variable and its key login. The
-    // caller removes the key file (`login_session::drop_plan_row_keys`).
-    if terrarium_core::xai::is_plan_row(&def.provider, def.plan.as_deref()) {
-        let dropped = t.execute(
-            "UPDATE subscriptions SET env_var = NULL,
-                 login_status = CASE WHEN login_status IN (?2, ?3) THEN ?4 ELSE login_status END
-             WHERE name = ?1 AND env_var IS NOT NULL",
-            params![def.name, LOGGED_IN, API_KEY, MISSING],
-        )?;
-        if dropped > 0 {
-            t.audit(
-                "subscription.api_key_dropped",
-                &def.name,
-                None,
-                serde_json::json!({"plan": def.plan}),
-            )?;
-        }
-    }
+    // the key here.
+    drop_plan_row_key(t, &def.name)?;
     get(t, &def.name)
 }
 
@@ -779,11 +763,43 @@ pub fn clear_expired(t: &mut Tx<'_>, name: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// Set the plan of row `name`. A plan that makes it an xai plan row drops
+/// its API key, as in `upsert_def` (TER-1239).
 pub fn set_plan(t: &mut Tx<'_>, name: &str, plan: &str) -> ApiResult<()> {
     t.execute(
         "UPDATE subscriptions SET plan = ?2, updated_at = ?3 WHERE name = ?1",
         params![name, plan, now()],
     )?;
+    drop_plan_row_key(t, name)
+}
+
+/// R7 (TER-1191, TER-1205, TER-1239): an xai plan row holds no API key.
+/// When row `name` is an xai plan row that still names a key variable, the
+/// row forgets its variable and its key login, with the audit record
+/// `subscription.api_key_dropped`. The caller removes the key file
+/// (`login_session::drop_plan_row_keys_in`). Every write that changes a
+/// plan goes through here: `upsert_def` and `set_plan`.
+fn drop_plan_row_key(t: &mut Tx<'_>, name: &str) -> ApiResult<()> {
+    let Some(s) = find(t, name)? else {
+        return Ok(());
+    };
+    if !terrarium_core::xai::is_plan_row(&s.provider, s.plan.as_deref()) {
+        return Ok(());
+    }
+    let dropped = t.execute(
+        "UPDATE subscriptions SET env_var = NULL,
+             login_status = CASE WHEN login_status IN (?2, ?3) THEN ?4 ELSE login_status END
+         WHERE name = ?1 AND env_var IS NOT NULL",
+        params![name, LOGGED_IN, API_KEY, MISSING],
+    )?;
+    if dropped > 0 {
+        t.audit(
+            "subscription.api_key_dropped",
+            name,
+            None,
+            serde_json::json!({"plan": s.plan}),
+        )?;
+    }
     Ok(())
 }
 
@@ -2240,5 +2256,51 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.code, crate::error::Code::NotFound);
+    }
+
+    /// TER-1239 (rev-1205b, finding 2): `set_plan` that makes an xai key
+    /// row a plan row drops the key as `upsert_def` does: no variable, no
+    /// key login, and the audit record `subscription.api_key_dropped`.
+    #[tokio::test]
+    async fn set_plan_to_an_xai_tier_drops_the_api_key() {
+        let db = db();
+        let key_row: SubscriptionDef = toml::from_str(
+            "name = \"x-key\"\nprovider = \"xai\"\nplan = \"API key\"\nharnesses = [\"pi\"]\n",
+        )
+        .unwrap();
+        db.write("operator", move |t| {
+            upsert_def(t, &key_row, SOURCE_API)?;
+            set_env_var(t, "x-key", Some("XAI_API_KEY"))?;
+            set_login_status(t, "x-key", API_KEY)
+        })
+        .await
+        .unwrap();
+        async fn dropped(db: &Db) -> ApiResult<i64> {
+            db.read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM audit WHERE action = 'subscription.api_key_dropped'
+                     AND target = 'x-key'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .await
+        }
+        // Another plan word on a non-tier row keeps the key.
+        db.write("operator", |t| set_plan(t, "x-key", "API key"))
+            .await
+            .unwrap();
+        let s = db.read(|c| get(c, "x-key")).await.unwrap();
+        assert_eq!(s.env_var.as_deref(), Some("XAI_API_KEY"));
+        assert_eq!(dropped(&db).await.unwrap(), 0);
+
+        db.write("operator", |t| set_plan(t, "x-key", "Super"))
+            .await
+            .unwrap();
+        let s = db.read(|c| get(c, "x-key")).await.unwrap();
+        assert_eq!(s.plan.as_deref(), Some("Super"));
+        assert_eq!(s.env_var, None);
+        assert_eq!(s.login_status, MISSING);
+        assert_eq!(dropped(&db).await.unwrap(), 1);
     }
 }
