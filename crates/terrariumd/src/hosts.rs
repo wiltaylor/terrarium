@@ -2343,6 +2343,39 @@ async fn goodbye(socket: &mut WebSocket, reason: &str, message: String) {
     let _ = socket.send(WsMessage::Close(None)).await;
 }
 
+/// Handle one message read from a host link. Returns why the link ends,
+/// or `None` to keep it.
+fn on_link_message(
+    reg: &HostRegistry,
+    host: &str,
+    tx: &mpsc::UnboundedSender<Outgoing>,
+    msg: Option<Result<WsMessage, axum::Error>>,
+) -> Option<&'static str> {
+    match msg {
+        Some(Ok(WsMessage::Text(t))) => match decode_control::<HostFrame>(t.as_str()) {
+            Ok(HostFrame::Ping { nonce }) => {
+                let _ = tx.send(Outgoing::frame(DaemonFrame::Pong { nonce }));
+            }
+            Ok(HostFrame::Pong { .. }) => {}
+            Ok(HostFrame::Hello(_)) => warn!(host = %host, "a second hello; ignored"),
+            Ok(HostFrame::Metrics(m)) => reg.record_metrics(host, *m, Instant::now()),
+            Ok(f) => reg.on_session_frame(host, f),
+            Err(e) => warn!(host = %host, "bad control frame: {e}"),
+        },
+        Some(Ok(WsMessage::Binary(b))) => match DataFrame::decode(&b) {
+            Ok(f) => reg.on_data(host, f),
+            Err(e) => warn!(host = %host, "bad data frame: {e}"),
+        },
+        Some(Ok(WsMessage::Close(_))) | None => return Some("closed by the host"),
+        Some(Ok(_)) => {}
+        Some(Err(e)) => {
+            debug!(host = %host, "link error: {e}");
+            return Some("link error");
+        }
+    }
+    None
+}
+
 async fn drive_link(
     socket: WebSocket,
     reg: &Arc<HostRegistry>,
@@ -2369,27 +2402,8 @@ async fn drive_link(
             },
             msg = stream.next(), if !reg.journal_backpressured(host) => {
                 last_rx = Instant::now();
-                match msg {
-                    Some(Ok(WsMessage::Text(t))) => match decode_control::<HostFrame>(t.as_str()) {
-                        Ok(HostFrame::Ping { nonce }) => {
-                            let _ = tx.send(Outgoing::frame(DaemonFrame::Pong { nonce }));
-                        }
-                        Ok(HostFrame::Pong { .. }) => {}
-                        Ok(HostFrame::Hello(_)) => warn!(host = %host, "a second hello; ignored"),
-                        Ok(HostFrame::Metrics(m)) => reg.record_metrics(host, *m, Instant::now()),
-                        Ok(f) => reg.on_session_frame(host, f),
-                        Err(e) => warn!(host = %host, "bad control frame: {e}"),
-                    },
-                    Some(Ok(WsMessage::Binary(b))) => match DataFrame::decode(&b) {
-                        Ok(f) => reg.on_data(host, f),
-                        Err(e) => warn!(host = %host, "bad data frame: {e}"),
-                    },
-                    Some(Ok(WsMessage::Close(_))) | None => break "closed by the host",
-                    Some(Ok(_)) => {}
-                    Some(Err(e)) => {
-                        debug!(host = %host, "link error: {e}");
-                        break "link error";
-                    }
+                if let Some(why) = on_link_message(reg, host, &tx, msg) {
+                    break why;
                 }
             }
             out = rx.recv() => {
@@ -2423,7 +2437,20 @@ async fn drive_link(
                     last_rx = Instant::now();
                 }
                 if last_rx.elapsed() > hb * MISSED_HEARTBEATS {
-                    break "heartbeat timeout";
+                    // A late wake-up of this task is not silence from the
+                    // host: under load the ticker and a frame that arrived
+                    // meanwhile become ready together, and `select!` may
+                    // pick the ticker first (TER-1132). Count a waiting
+                    // frame before closing the link.
+                    match futures_util::FutureExt::now_or_never(stream.next()) {
+                        Some(msg) => {
+                            last_rx = Instant::now();
+                            if let Some(why) = on_link_message(reg, host, &tx, msg) {
+                                break why;
+                            }
+                        }
+                        None => break "heartbeat timeout",
+                    }
                 }
                 nonce += 1;
                 if sink.send(WsMessage::Text(
@@ -3369,6 +3396,59 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn journal_websocket_no_progress_closes_while_reads_are_paused() {
         journal_websocket_replay(true).await;
+    }
+
+    /// TER-1132: the link task wakes late under load with a host frame
+    /// already waiting. The heartbeat check must count that frame and keep
+    /// the link, not blame the host for the daemon's own delay.
+    #[tokio::test(flavor = "current_thread")]
+    async fn heartbeat_counts_a_frame_that_waits_while_the_daemon_is_late() {
+        use tokio_tungstenite::tungstenite::Message;
+
+        let mut registry = registry("lab1", true);
+        registry.heartbeat = Duration::from_millis(20);
+        let hb = registry.heartbeat;
+        let reg = Arc::new(registry);
+        let (ended_tx, mut ended) = mpsc::unbounded_channel();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move |upgrade: WebSocketUpgrade| {
+                let registry = reg.clone();
+                let ended_tx = ended_tx.clone();
+                async move {
+                    upgrade.on_upgrade(move |socket| async move {
+                        let (tx, rx) = mpsc::unbounded_channel();
+                        let why = drive_link(socket, &registry, "lab1", 77, tx, rx).await;
+                        let _ = ended_tx.send(why);
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            .await
+            .unwrap();
+        for nonce in 0..20 {
+            ws.send(Message::Text(
+                encode_control(&HostFrame::Ping { nonce }).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+            // Block the only runtime thread past the deadline: the link
+            // task cannot read the Ping until its ticker is overdue too.
+            std::thread::sleep(hb * (MISSED_HEARTBEATS + 2));
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            assert!(ended.try_recv().is_err(), "link ended after ping {nonce}");
+        }
+        ws.close(None).await.unwrap();
+        let why = tokio::time::timeout(Duration::from_secs(5), ended.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(why, "closed by the host");
+        server.abort();
     }
 
     async fn journal_websocket_replay(expire: bool) {
