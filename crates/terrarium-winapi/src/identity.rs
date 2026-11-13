@@ -325,6 +325,11 @@ impl Identity {
         &self.environment
     }
 
+    /// The string SID of the logged-on user, for the workspace DACL.
+    pub(crate) fn user_sid(&self) -> io::Result<String> {
+        crate::diagnostics::user_sid(&self.token)
+    }
+
     pub(crate) fn token(&self) -> HANDLE {
         self.token.as_raw_handle()
     }

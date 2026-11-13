@@ -1,12 +1,19 @@
 //! Each transfer owns a synchronous worker. All filesystem operations,
 //! including cleanup and metadata, run under that worker's logon token.
 //! No tokio filesystem worker is allowed to inherit service authority.
+//!
+//! A path in an account workspace (TER-274, `[windows_workspaces]`) goes
+//! through `terrarium_winapi::Workspace`: the service provisions the root,
+//! then the worker walks the inner components as the account with no
+//! reparse-point following, and publishes or deletes its temporary file
+//! by handle. Other paths keep the TER-272 handling.
 
 use super::*;
 use crate::protocol::{CHUNK_SIZE, SessionId, StreamTag};
 use std::io::{Read, Write};
 use std::sync::Arc;
-use terrarium_winapi::Identity;
+use crate::windows_workspace::{Location, split_file};
+use terrarium_winapi::{Dir, Identity, TempFile, Workspace};
 use tokio::sync::{mpsc, oneshot};
 
 type Receipt<T> = oneshot::Sender<Result<T, TransferError>>;
@@ -34,6 +41,97 @@ struct Pending {
     path: PathBuf,
     bytes: u64,
     hasher: Sha256,
+}
+
+/// A push into a workspace: the held directory chain and a temporary file
+/// that is deleted by handle unless it is published.
+struct Confined {
+    dir: Dir,
+    temp: Option<TempFile>,
+    name: String,
+    path: PathBuf,
+    bytes: u64,
+    hasher: Sha256,
+}
+
+enum Sink {
+    Path(Pending),
+    Workspace(Confined),
+}
+
+impl Sink {
+    fn write(&mut self, data: &[u8]) -> Result<(), TransferError> {
+        match self {
+            Self::Path(p) => p.write(data),
+            Self::Workspace(c) => c.write(data),
+        }
+    }
+
+    fn finish(&mut self, bytes: u64, sha256: &str) -> Result<(u64, String), TransferError> {
+        match self {
+            Self::Path(p) => p.finish(bytes, sha256),
+            Self::Workspace(c) => c.finish(bytes, sha256),
+        }
+    }
+}
+
+fn mismatch(got_bytes: u64, got: String, want_bytes: u64, want: &str) -> TransferError {
+    TransferError::Mismatch {
+        got_bytes,
+        got,
+        want_bytes,
+        want: want.to_owned(),
+    }
+}
+
+impl Confined {
+    /// Run as the account (impersonating), after the service opened `workspace`.
+    fn open(
+        workspace: Workspace,
+        location: &Location,
+        path: &Path,
+        mkdirs: bool,
+        session: SessionId,
+    ) -> Result<Self, TransferError> {
+        let (dirs, name) = split_file(location).map_err(|_| TransferError::NotAFile {
+            path: path.to_owned(),
+        })?;
+        let dir = workspace
+            .into_dir(&dirs, mkdirs)
+            .map_err(io("open", path))?;
+        let temp = dir.create_temp(session).map_err(io("create", path))?;
+        Ok(Self {
+            dir,
+            temp: Some(temp),
+            name: name.to_owned(),
+            path: path.to_owned(),
+            bytes: 0,
+            hasher: Sha256::new(),
+        })
+    }
+
+    fn write(&mut self, data: &[u8]) -> Result<(), TransferError> {
+        self.temp
+            .as_mut()
+            .expect("live transfer")
+            .file()
+            .write_all(data)
+            .map_err(io("write", &self.path))?;
+        self.bytes += data.len() as u64;
+        self.hasher.update(data);
+        Ok(())
+    }
+
+    fn finish(&mut self, bytes: u64, sha256: &str) -> Result<(u64, String), TransferError> {
+        let got = hex(&self.hasher.clone().finalize());
+        if self.bytes != bytes || !got.eq_ignore_ascii_case(sha256) {
+            return Err(mismatch(self.bytes, got, bytes, sha256));
+        }
+        let temp = self.temp.take().expect("live transfer");
+        temp.publish(&self.dir, &self.name)
+            .map_err(io("rename", &self.path))?;
+        Ok((self.bytes, got))
+    }
 }
 
 impl Pending {
@@ -77,12 +175,7 @@ impl Pending {
     fn finish(&mut self, bytes: u64, sha256: &str) -> Result<(u64, String), TransferError> {
         let got = hex(&self.hasher.clone().finalize());
         if self.bytes != bytes || !got.eq_ignore_ascii_case(sha256) {
-            return Err(TransferError::Mismatch {
-                got_bytes: self.bytes,
-                got,
-                want_bytes: bytes,
-                want: sha256.to_owned(),
-            });
+            return Err(mismatch(self.bytes, got, bytes, sha256));
         }
         let file = self.file.take().expect("live transfer");
         file.sync_all().map_err(io("sync", &self.path))?;
@@ -116,15 +209,17 @@ impl PushFile {
         mkdirs: bool,
         session: SessionId,
     ) -> Result<Self, TransferError> {
-        Self::open_as(path, mode, mkdirs, session, None).await
+        Self::open_as(path, mode, mkdirs, session, None, None).await
     }
 
+    /// `location`: the path is in an account workspace ([`crate::windows_workspace::locate`]).
     pub async fn open_as(
         path: &Path,
         _mode: Option<u32>,
         mkdirs: bool,
-        _session: SessionId,
+        session: SessionId,
         identity: Option<Arc<Identity>>,
+        location: Option<Location>,
     ) -> Result<Self, TransferError> {
         let (tx, mut rx) = mpsc::channel(8);
         let (ready, opened) = oneshot::channel();
@@ -133,8 +228,29 @@ impl PushFile {
             .name("terrarium-push".into())
             .spawn(move || {
                 let mut ready = Some(ready);
+                // Service authority: provision the workspace before impersonating.
+                let workspace = match &location {
+                    Some(l) => match Workspace::open(&l.project, &l.agent, identity.as_deref(), true)
+                    {
+                        Ok(w) => Some(w),
+                        Err(error) => {
+                            let _ = ready
+                                .take()
+                                .expect("ready once")
+                                .send(Err(io("workspace", &worker_path)(error)));
+                            return;
+                        }
+                    },
+                    None => None,
+                };
                 let result = as_user(identity.as_deref(), || {
-                    let mut file = match Pending::open(&worker_path, mkdirs) {
+                    let opened = match (workspace, &location) {
+                        (Some(w), Some(l)) => {
+                            Confined::open(w, l, &worker_path, mkdirs, session).map(Sink::Workspace)
+                        }
+                        _ => Pending::open(&worker_path, mkdirs).map(Sink::Path),
+                    };
+                    let mut file = match opened {
                         Ok(file) => file,
                         Err(error) => {
                             let _ = ready.take().expect("ready once").send(Err(error));
@@ -206,13 +322,15 @@ impl PushFile {
 }
 
 pub async fn pull(path: &Path, outbox: &Outbox) -> Result<(u64, String), TransferError> {
-    pull_as(path, outbox, None).await
+    pull_as(path, outbox, None, None).await
 }
 
+/// `location`: the path is in an account workspace ([`crate::windows_workspace::locate`]).
 pub async fn pull_as(
     path: &Path,
     outbox: &Outbox,
     identity: Option<Arc<Identity>>,
+    location: Option<Location>,
 ) -> Result<(u64, String), TransferError> {
     let (tx, mut rx) = mpsc::channel(8);
     let worker_path = path.to_owned();
@@ -220,10 +338,37 @@ pub async fn pull_as(
     std::thread::Builder::new()
         .name("terrarium-pull".into())
         .spawn(move || {
+            // Service authority: provision the workspace before impersonating.
+            let workspace = match &location {
+                Some(l) => match Workspace::open(&l.project, &l.agent, identity.as_deref(), true) {
+                    Ok(w) => Some(w),
+                    Err(error) => {
+                        let _ = done.send(Err(io("workspace", &worker_path)(error)));
+                        return;
+                    }
+                },
+                None => None,
+            };
             let transfer = as_user(identity.as_deref(), || {
                 let result = (|| {
-                    let mut file =
-                        std::fs::File::open(&worker_path).map_err(io("open", &worker_path))?;
+                    // The held chain stays alive until the read ends.
+                    let (_dir, mut file) = match (workspace, &location) {
+                        (Some(w), Some(l)) => {
+                            let (dirs, name) =
+                                split_file(l).map_err(|_| TransferError::NotAFile {
+                                    path: worker_path.clone(),
+                                })?;
+                            let dir = w
+                                .into_dir(&dirs, false)
+                                .map_err(io("open", &worker_path))?;
+                            let file = dir.open_read(name).map_err(io("open", &worker_path))?;
+                            (Some(dir), file)
+                        }
+                        _ => (
+                            None,
+                            std::fs::File::open(&worker_path).map_err(io("open", &worker_path))?,
+                        ),
+                    };
                     if !file.metadata().map_err(io("stat", &worker_path))?.is_file() {
                         return Err(TransferError::NotAFile {
                             path: worker_path.clone(),

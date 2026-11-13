@@ -218,6 +218,25 @@ async fn windows_round_trip(no_workspaces: bool) {
         .await
         .err(422, "invalid");
     }
+    // TER-274 D6: the managed checkout is a POSIX sh script. It is refused
+    // for a Windows host before any frame reaches it.
+    let repo = td
+        .post(
+            "/api/projects/p/repos",
+            json!({"url": "https://example.invalid/app.git", "name": "app"}),
+        )
+        .await;
+    let checkout = td
+        .post(
+            &format!("/api/repos/{}/checkout", repo.ok()["id"].as_str().unwrap()),
+            json!({"target": "p-win", "path": r"C:\Terrarium\work\p\worker\app"}),
+        )
+        .await;
+    checkout.err(422, "invalid");
+    let message = checkout.body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("not supported yet"), "{message}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(received.try_recv().is_err(), "no frame for a refused checkout");
     fake.abort();
     listener.abort();
 }

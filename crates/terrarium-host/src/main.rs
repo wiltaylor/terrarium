@@ -211,12 +211,22 @@ fn fingerprint(cert: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Windows reports workspaces only with the host-file opt-in and a protected
+/// `C:\Terrarium\work` (TER-274). Never by default.
+#[cfg(windows)]
+fn windows_workspaces(cfg: &Config) -> bool {
+    cfg.windows_workspaces.enabled && terrarium_host::windows_workspace::base_ready()
+}
+
 async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
     let mut caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
     let paths = cfg.paths();
     caps.no_workspaces = !terrarium_host::workspace::available(&paths.work_dir);
     caps.windows_run_as = cfg!(windows) && cfg.windows_run_as.enabled;
-    caps.no_workspaces |= cfg!(windows);
+    #[cfg(windows)]
+    {
+        caps.no_workspaces = !windows_workspaces(cfg);
+    }
     if cfg.native_gpu.enabled {
         caps.native_gpu = Some(terrarium_host::native::capability(&cfg.native_gpu.socket).await);
     }
@@ -397,8 +407,11 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let name = cfg.resolve_name();
     let mut caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
     caps.windows_run_as = cfg!(windows) && cfg.windows_run_as.enabled;
-    caps.no_workspaces =
-        cfg!(windows) || !terrarium_host::workspace::available(&cfg.paths().work_dir);
+    caps.no_workspaces = !terrarium_host::workspace::available(&cfg.paths().work_dir);
+    #[cfg(windows)]
+    {
+        caps.no_workspaces = !windows_workspaces(&cfg);
+    }
     if caps.no_workspaces {
         tracing::warn!(
             work_dir = %cfg.paths().work_dir.display(),
@@ -456,6 +469,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     }
     let mut opts = ClientOptions::new(url, token, name);
     opts.windows_run_as = cfg.windows_run_as.clone();
+    opts.windows_workspaces = cfg.windows_workspaces.clone();
     opts.native = opts_native;
     opts.capabilities = caps;
     opts.max_sessions = cfg.max_sessions;

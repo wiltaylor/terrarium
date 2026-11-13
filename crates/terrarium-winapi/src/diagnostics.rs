@@ -34,14 +34,9 @@ fn information(token: &OwnedHandle, class: TOKEN_INFORMATION_CLASS) -> io::Resul
     Ok(data)
 }
 
-/// Inspect the process token (not an impersonated thread token). This exports
-/// only SID and policy bits, never token handles, credentials or environment.
-pub fn current_token_snapshot() -> io::Result<TokenSnapshot> {
-    let mut token = null_mut();
-    // SAFETY: valid pseudo process handle and writable token output.
-    checked(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) })?;
-    let token = owned(token)?;
-    let user_data = information(&token, TokenUser)?;
+/// The string SID of a token's user. Never exports the token itself.
+pub(crate) fn user_sid(token: &OwnedHandle) -> io::Result<String> {
+    let user_data = information(token, TokenUser)?;
     // SAFETY: successful TokenUser output contains an aligned TOKEN_USER and SID.
     let user = unsafe { &*user_data.as_ptr().cast::<TOKEN_USER>() };
     let mut string = null_mut();
@@ -56,14 +51,24 @@ pub fn current_token_snapshot() -> io::Result<TokenSnapshot> {
     }
     let string = SidString(string);
     // SAFETY: successful conversion returns a NUL-terminated UTF-16 SID string.
-    let user_sid = unsafe {
+    unsafe {
         let mut len = 0;
         while *string.0.add(len) != 0 {
             len += 1;
         }
         String::from_utf16(std::slice::from_raw_parts(string.0, len))
-            .map_err(|_| io::Error::other("invalid SID string"))?
-    };
+            .map_err(|_| io::Error::other("invalid SID string"))
+    }
+}
+
+/// Inspect the process token (not an impersonated thread token). This exports
+/// only SID and policy bits, never token handles, credentials or environment.
+pub fn current_token_snapshot() -> io::Result<TokenSnapshot> {
+    let mut token = null_mut();
+    // SAFETY: valid pseudo process handle and writable token output.
+    checked(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) })?;
+    let token = owned(token)?;
+    let user_sid = user_sid(&token)?;
     let mut admin = [0u32; 17]; // SECURITY_MAX_SID_SIZE = 68, DWORD aligned.
     let mut size = std::mem::size_of_val(&admin) as u32;
     // SAFETY: sufficiently sized/aligned SID output and writable byte count.

@@ -8,7 +8,7 @@ use windows_sys::Win32::Security::*;
 use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 
-struct Local(*mut std::ffi::c_void);
+pub(crate) struct Local(pub(crate) *mut std::ffi::c_void);
 impl Drop for Local {
     fn drop(&mut self) {
         // SAFETY: uniquely owned LocalAlloc-family allocation from security APIs.
@@ -23,7 +23,7 @@ fn denied() -> io::Error {
     )
 }
 
-fn trusted_sid(sid: PSID, trusted: &[Local]) -> bool {
+pub(crate) fn trusted_sid(sid: PSID, trusted: &[Local]) -> bool {
     if sid.is_null() {
         return false;
     }
@@ -35,6 +35,48 @@ fn trusted_sid(sid: PSID, trusted: &[Local]) -> bool {
 }
 
 fn check_acl(handle: &OwnedHandle, file: bool, trusted: &[Local]) -> io::Result<()> {
+    // Ancestors may allow creating unrelated children, but not deleting or
+    // replacing this directory or changing its policy. On the file all write
+    // permissions are forbidden for any untrusted trustee (conservative ACL audit).
+    let forbidden = DELETE
+        | WRITE_DAC
+        | WRITE_OWNER
+        | GENERIC_ALL
+        | GENERIC_WRITE
+        | if file {
+            FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES
+        } else {
+            FILE_DELETE_CHILD
+        };
+    audit_acl(
+        handle,
+        if file { &trusted[..2] } else { trusted },
+        trusted,
+        &[],
+        forbidden,
+        false,
+    )
+    .map_err(|e| {
+        if e.kind() == io::ErrorKind::PermissionDenied {
+            denied()
+        } else {
+            e
+        }
+    })
+}
+
+/// The owner must be one of `owners`. An allow ACE for a SID outside
+/// `trusted` and `extra` must not grant any `forbidden` right. Unknown ACE
+/// types and a missing DACL fail closed. `protected` also requires a DACL
+/// that does not inherit from its parent.
+pub(crate) fn audit_acl(
+    handle: &OwnedHandle,
+    owners: &[Local],
+    trusted: &[Local],
+    extra: &[Local],
+    forbidden: u32,
+    protected: bool,
+) -> io::Result<()> {
     let (mut owner, mut dacl, mut descriptor) = (null_mut(), null_mut(), null_mut());
     // SAFETY: live read-control handle and writable pointer outputs. Descriptor
     // owns owner/DACL storage and remains alive through all ACE inspection.
@@ -54,22 +96,18 @@ fn check_acl(handle: &OwnedHandle, file: bool, trusted: &[Local]) -> io::Result<
         return Err(io::Error::from_raw_os_error(error as i32));
     }
     let _descriptor = Local(descriptor);
-    if !trusted_sid(owner, if file { &trusted[..2] } else { trusted }) || dacl.is_null() {
-        return Err(denied());
+    let refused = || io::Error::new(io::ErrorKind::PermissionDenied, "untrusted owner or ACL");
+    if !trusted_sid(owner, owners) || dacl.is_null() {
+        return Err(refused());
     }
-    // Ancestors may allow creating unrelated children, but not deleting or
-    // replacing this directory or changing its policy. On the file all write
-    // permissions are forbidden for any untrusted trustee (conservative ACL audit).
-    let forbidden = DELETE
-        | WRITE_DAC
-        | WRITE_OWNER
-        | GENERIC_ALL
-        | GENERIC_WRITE
-        | if file {
-            FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES
-        } else {
-            FILE_DELETE_CHILD
-        };
+    if protected {
+        let (mut control, mut revision) = (0u16, 0u32);
+        // SAFETY: live descriptor from GetSecurityInfo and writable outputs.
+        checked(unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) })?;
+        if control & SE_DACL_PROTECTED == 0 {
+            return Err(refused());
+        }
+    }
     // SAFETY: GetSecurityInfo returned a valid ACL. GetAce bounds-checks index.
     for index in 0..unsafe { (*dacl).AceCount } as u32 {
         let mut ace = null_mut();
@@ -85,22 +123,23 @@ fn check_acl(handle: &OwnedHandle, file: bool, trusted: &[Local]) -> io::Result<
                 // SAFETY: type checked above, body contains a mask and SID start.
                 let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
                 let sid = (&allowed.SidStart as *const u32).cast_mut().cast();
-                if allowed.Mask & forbidden != 0 && !trusted_sid(sid, trusted) {
-                    return Err(denied());
+                if allowed.Mask & forbidden != 0
+                    && !trusted_sid(sid, trusted)
+                    && !trusted_sid(sid, extra)
+                {
+                    return Err(refused());
                 }
             }
             ACCESS_DENIED_ACE_TYPE => {}
             // Unsupported conditional/object ACE semantics cannot silently grant authority.
-            _ => return Err(denied()),
+            _ => return Err(refused()),
         }
     }
     Ok(())
 }
 
-/// Host policy must be on a local absolute drive path. Parent handles deny
-/// delete sharing from root to leaf, so checked components cannot be renamed.
-/// No ACL, ownership, account or privilege is changed by this function.
-pub fn read_host_policy_file(path: &Path) -> io::Result<String> {
+/// SYSTEM, Administrators and TrustedInstaller, in that order.
+pub(crate) fn trusted_sids() -> io::Result<Vec<Local>> {
     let mut trusted = Vec::new();
     for sid in [
         "S-1-5-18",
@@ -108,12 +147,24 @@ pub fn read_host_policy_file(path: &Path) -> io::Result<String> {
         // Windows Modules Installer service SID (TrustedInstaller).
         "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
     ] {
-        let sid = wide(OsStr::new(sid))?;
-        let mut output = null_mut();
-        // SAFETY: NUL-terminated SID string and writable allocation output.
-        checked(unsafe { ConvertStringSidToSidW(sid.as_ptr(), &mut output) })?;
-        trusted.push(Local(output));
+        trusted.push(sid_from_string(sid)?);
     }
+    Ok(trusted)
+}
+
+pub(crate) fn sid_from_string(sid: &str) -> io::Result<Local> {
+    let sid = wide(OsStr::new(sid))?;
+    let mut output = null_mut();
+    // SAFETY: NUL-terminated SID string and writable allocation output.
+    checked(unsafe { ConvertStringSidToSidW(sid.as_ptr(), &mut output) })?;
+    Ok(Local(output))
+}
+
+/// Host policy must be on a local absolute drive path. Parent handles deny
+/// delete sharing from root to leaf, so checked components cannot be renamed.
+/// No ACL, ownership, account or privilege is changed by this function.
+pub fn read_host_policy_file(path: &Path) -> io::Result<String> {
+    let trusted = trusted_sids()?;
     let mut components = path.components();
     let Some(Component::Prefix(prefix)) = components.next() else {
         return Err(denied());

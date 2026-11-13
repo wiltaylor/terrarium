@@ -104,6 +104,9 @@ pub struct Config {
     /// Windows password logon and elevation selection, configured only here.
     #[serde(default)]
     pub windows_run_as: crate::windows_run_as::Policy,
+    /// Windows account workspaces (TER-274), configured only here.
+    #[serde(default)]
+    pub windows_workspaces: crate::windows_workspace::Policy,
 }
 
 /// `[native_gpu]` in the config. When it is on, every native `exec` that
@@ -340,6 +343,7 @@ impl Default for Config {
             display: DisplayConfig::default(),
             native_gpu: NativeGpuConfig::default(),
             windows_run_as: Default::default(),
+            windows_workspaces: Default::default(),
         }
     }
 }
@@ -377,7 +381,7 @@ impl Config {
         })?;
         let config = Self::parse(&text, path)?;
         #[cfg(windows)]
-        if config.windows_run_as.enabled {
+        if config.windows_run_as.enabled || config.windows_workspaces.enabled {
             // Re-read from the verified, locked native handle, not the pathname
             // we read above. Untrusted config can never enable full-token logon.
             let protected = terrarium_winapi::read_host_policy_file(path).map_err(|source| {

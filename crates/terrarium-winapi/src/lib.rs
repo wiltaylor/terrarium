@@ -7,6 +7,8 @@ pub use identity::Identity;
 mod policy_file;
 pub use policy_file::read_host_policy_file;
 mod diagnostics;
+mod workspace;
+pub use workspace::{BASE as WORKSPACE_BASE, Dir, TempFile, Workspace, check_name};
 pub use diagnostics::{TokenSnapshot, current_token_snapshot};
 
 use std::collections::BTreeMap;

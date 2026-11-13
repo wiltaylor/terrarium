@@ -5848,6 +5848,11 @@ pub fn parse_checkout(stdout: &str) -> Option<Value> {
 /// Clone or update a repo on a target, through an exec on the host agent
 /// (or ssh). The secret goes in the env of that one run.
 #[allow(clippy::too_many_arguments)]
+/// A checkout on a Windows host is not supported yet: copy files with
+/// `terrarium cp` into the workspace instead.
+pub const WINDOWS_CHECKOUT_REFUSED: &str = "a git checkout on a Windows host is not supported yet; \
+     copy files into the workspace with `terrarium cp`";
+
 pub async fn checkout_on_target(
     state: &Shared,
     actor: &Actor,
@@ -5864,6 +5869,11 @@ pub async fn checkout_on_target(
         return Err(ApiError::invalid(
             "a checkout on a vmlab target is not supported; vmlab exec takes no env for the credential",
         ));
+    }
+    if path_kind(state, &row.def) == terrarium_host::protocol::PathKind::Windows {
+        // The managed checkout (commit provenance and push-deny hooks) is a
+        // POSIX sh script. Never send it to a Windows host (TER-274 D6).
+        return Err(ApiError::invalid(WINDOWS_CHECKOUT_REFUSED));
     }
     let mut cmd = checkout_cmd(url, dest, branch, depth, secret)?;
     let _root_guard = crate::target_roots::lock_card(state, actor, &row.def.name).await?;

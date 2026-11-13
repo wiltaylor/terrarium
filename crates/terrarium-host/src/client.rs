@@ -97,6 +97,8 @@ pub struct ClientOptions {
     /// TER-345). `None`: off.
     pub native: Option<crate::native::NativeOptions>,
     pub windows_run_as: crate::windows_run_as::Policy,
+    /// `[windows_workspaces]` of the host file (TER-274).
+    pub windows_workspaces: crate::windows_workspace::Policy,
 }
 
 impl ClientOptions {
@@ -129,6 +131,7 @@ impl ClientOptions {
             self_update: None,
             native: None,
             windows_run_as: Default::default(),
+            windows_workspaces: Default::default(),
         }
     }
 }
@@ -1298,12 +1301,21 @@ impl Client {
                 #[cfg(not(windows))]
                 let plan = crate::verb::plan_exec(&req, p);
                 #[cfg(windows)]
-                let plan = match identity.as_deref() {
-                    Some(identity) => identity
+                let cwd = req.cwd.as_ref().and_then(|c| c.to_str()).map_or(Ok(()), |cwd| {
+                    crate::windows_workspace::check_cwd(
+                        &self.opts.windows_workspaces,
+                        identity.as_deref(),
+                        cwd,
+                    )
+                });
+                #[cfg(windows)]
+                let plan = match (cwd, identity.as_deref()) {
+                    (Err(m), _) => Err(BuildError::path(m)),
+                    (Ok(()), None) => crate::verb::plan_exec(&req, p),
+                    (Ok(()), Some(identity)) => identity
                         .with_impersonation(|| Ok(crate::verb::plan_exec(&req, p)))
                         .map_err(|_| BuildError::bad("Windows path check impersonation failed"))
                         .and_then(|plan| plan),
-                    None => crate::verb::plan_exec(&req, p),
                 };
                 #[cfg(windows)]
                 let plan = plan.map(|mut plan| {
@@ -2042,7 +2054,13 @@ impl Client {
             Err(m) => return send_error(tx, session, ErrorCode::PathDenied, m),
         };
         #[cfg(windows)]
-        let opened = PushFile::open_as(&path, req.mode, req.mkdirs, session, identity).await;
+        let location = match self.workspace_location(&req.path) {
+            Ok(l) => l,
+            Err(m) => return send_error(tx, session, ErrorCode::PathDenied, m),
+        };
+        #[cfg(windows)]
+        let opened =
+            PushFile::open_as(&path, req.mode, req.mkdirs, session, identity, location).await;
         #[cfg(not(windows))]
         let opened = PushFile::open(&path, req.mode, req.mkdirs, session).await;
         let file = match opened {
@@ -2121,6 +2139,21 @@ impl Client {
         });
     }
 
+    /// The workspace of a copy path when `[windows_workspaces]` is on.
+    /// `Err`: under the workspace base, but not inside one workspace.
+    #[cfg(windows)]
+    fn workspace_location(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Option<crate::windows_workspace::Location>, String> {
+        if !self.opts.windows_workspaces.enabled {
+            return Ok(None);
+        }
+        path.to_str()
+            .and_then(crate::windows_workspace::locate)
+            .transpose()
+    }
+
     async fn start_pull(
         &self,
         req: CpPull,
@@ -2162,6 +2195,11 @@ impl Client {
             Ok(p) => p,
             Err(m) => return send_error(tx, session, ErrorCode::PathDenied, m),
         };
+        #[cfg(windows)]
+        let location = match self.workspace_location(&req.path) {
+            Ok(l) => l,
+            Err(m) => return send_error(tx, session, ErrorCode::PathDenied, m),
+        };
         let _commit_admission = if owner.is_some() {
             Some(self.shared.admission.lock().await)
         } else {
@@ -2183,7 +2221,7 @@ impl Client {
         );
         tokio::spawn(async move {
             #[cfg(windows)]
-            let pulled = transfer::pull_as(&path, &outbox, identity).await;
+            let pulled = transfer::pull_as(&path, &outbox, identity, location).await;
             #[cfg(not(windows))]
             let pulled = transfer::pull(&path, &outbox).await;
             let frame = match pulled {
