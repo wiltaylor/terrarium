@@ -1494,6 +1494,66 @@ pub enum ColumnCmd {
         #[arg(long, value_name = "COLUMN")]
         before: Option<String>,
     },
+    /// The structured rules of a column (TER-1120): list, show, set,
+    /// remove, move, enable, or disable one, and the catalog of triggers,
+    /// conditions and verbs. A change needs project_admin of the project
+    /// or the operator; it reads the options, then writes them with the
+    /// version it read. The engine does not run these rules yet
+    Rule {
+        #[command(subcommand)]
+        command: RuleCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RuleCmd {
+    /// List the rules of a column, in order
+    Ls {
+        /// A column name, or a role alias (`working`, `blocked`)
+        column: String,
+    },
+    /// Show one rule as JSON
+    Show { column: String, rule: String },
+    /// Add a rule, or replace the rule of that name, from JSON: `{"trigger":
+    /// {...}, "actions": [...], ...}` (see `rule catalog`). A replaced rule
+    /// keeps its ID and place; a new one goes last
+    Set {
+        column: String,
+        rule: String,
+        /// The rule as JSON; `-` reads stdin. The output of `rule show
+        /// --json` is a valid file
+        #[arg(long, value_name = "FILE")]
+        from_file: String,
+        /// Put the rule before this rule
+        #[arg(long, value_name = "RULE", conflicts_with = "after")]
+        before: Option<String>,
+        /// Put the rule after this rule
+        #[arg(long, value_name = "RULE")]
+        after: Option<String>,
+    },
+    /// Remove a rule
+    Rm { column: String, rule: String },
+    /// Move a rule in the order of its column
+    Move {
+        column: String,
+        rule: String,
+        #[arg(
+            long,
+            value_name = "RULE",
+            required_unless_present = "before",
+            conflicts_with = "before"
+        )]
+        after: Option<String>,
+        #[arg(long, value_name = "RULE")]
+        before: Option<String>,
+    },
+    /// Turn a rule on
+    Enable { column: String, rule: String },
+    /// Turn a rule off; it stays in the column
+    Disable { column: String, rule: String },
+    /// The rule model: triggers, conditions, verbs with their arguments,
+    /// placeholders, and limits
+    Catalog,
 }
 
 #[derive(Debug, Subcommand)]

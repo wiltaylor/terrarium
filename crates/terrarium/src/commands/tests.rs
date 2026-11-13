@@ -11791,3 +11791,156 @@ async fn board_column_options_show_set_and_from_file() {
         assert!(Cli::try_parse_from(&bad).is_err(), "{bad:?}");
     }
 }
+
+/// The options of a column with two rules (TER-1120).
+fn column_rules_reply() -> Value {
+    let mut o = column_options_reply();
+    o["rules"] = json!([
+        {"id": "R1", "name": "a", "enabled": true, "trigger": {"kind": "lands"},
+         "actions": [{"verb": "card.done_mail"}]},
+        {"id": "R2", "name": "b", "enabled": true,
+         "trigger": {"kind": "job_result", "events": ["ended"], "job_kinds": ["merge"]},
+         "actions": [{"verb": "card.move", "args": {"to": "done"}}]},
+    ]);
+    o
+}
+
+#[tokio::test]
+async fn board_column_rule_ls_show_and_catalog() {
+    const PATH: &str = "/api/projects/terra/board/columns/merge_queue/options";
+    let base = ["-p", "terra", "board", "column", "rule"];
+    let args = |more: &[&'static str]| {
+        let mut a = base.to_vec();
+        a.extend_from_slice(more);
+        a
+    };
+    let out = ok(
+        false,
+        &args(&["ls", "merge_queue"]),
+        vec![(200, column_rules_reply())],
+        vec![req(Get, PATH)],
+    )
+    .await;
+    assert!(out.contains("job_result ended (merge)"), "{out}");
+    assert!(out.contains("card.move") && out.contains("R2"), "{out}");
+    let out = ok(
+        false,
+        &args(&["show", "merge_queue", "b"]),
+        vec![(200, column_rules_reply())],
+        vec![req(Get, PATH)],
+    )
+    .await;
+    assert!(out.contains("\"id\": \"R2\""), "{out}");
+    let r = exec(
+        false,
+        &args(&["show", "merge_queue", "nope"]),
+        vec![(200, column_rules_reply())],
+        None,
+    )
+    .await;
+    let e = format!("{:#}", r.result.unwrap_err());
+    assert!(e.contains("no rule `nope`") && e.contains("a, b"), "{e}");
+    let out = ok(
+        false,
+        &args(&["catalog"]),
+        vec![(
+            200,
+            json!({"model_version": 1,
+                   "triggers": [{"kind": "lands", "description": "a card enters", "fields": []}],
+                   "actions": [{"verb": "card.move",
+                                "args": [{"name": "to", "type": "column", "required": true}]}]}),
+        )],
+        vec![req(Get, "/api/rules/catalog")],
+    )
+    .await;
+    assert!(out.contains("lands") && out.contains("to*"), "{out}");
+}
+
+#[tokio::test]
+async fn board_column_rule_changes_put_the_whole_list_with_the_read_version() {
+    const PATH: &str = "/api/projects/terra/board/columns/merge_queue/options";
+    let put = |more: &[&'static str], stdin: Option<&'static str>, want: Value| {
+        let mut full = vec!["-p", "terra", "board", "column", "rule"];
+        full.extend_from_slice(more);
+        async move {
+            let r = exec(
+                false,
+                &full,
+                vec![(200, column_rules_reply()), (200, column_rules_reply())],
+                stdin,
+            )
+            .await;
+            if let Err(e) = &r.result {
+                panic!("{full:?} failed: {e:#}");
+            }
+            assert_eq!(r.reqs.len(), 2, "{full:?}");
+            assert_eq!(r.reqs[1].method, Put);
+            assert_eq!(r.reqs[1].path, PATH);
+            let body = r.reqs[1].body.clone().unwrap();
+            assert_eq!(body["base_version"], 3, "{full:?}");
+            assert_eq!(body["queue"]["release"], "batch");
+            assert_eq!(body["rules"], want, "{full:?}");
+        }
+    };
+    let reply = column_rules_reply();
+    let (a, b) = (reply["rules"][0].clone(), reply["rules"][1].clone());
+    // A new rule goes last, without an ID; its name comes from the argument.
+    let new = r#"{"id": "X", "trigger": {"kind": "leaves"}, "actions": [{"verb": "card.done_mail"}]}"#;
+    let c = json!({"name": "c", "trigger": {"kind": "leaves"},
+                   "actions": [{"verb": "card.done_mail"}]});
+    put(
+        &["set", "merge_queue", "c", "--from-file", "-"],
+        Some(new),
+        json!([a, b, c]),
+    )
+    .await;
+    put(
+        &["set", "merge_queue", "c", "--from-file", "-", "--before", "b"],
+        Some(new),
+        json!([a, c, b]),
+    )
+    .await;
+    // A replaced rule keeps its ID and its place.
+    let mut b2 = c.clone();
+    b2["name"] = "b".into();
+    b2["id"] = "R2".into();
+    put(
+        &["set", "merge_queue", "b", "--from-file", "-"],
+        Some(new),
+        json!([a, b2]),
+    )
+    .await;
+    put(&["rm", "merge_queue", "a"], None, json!([b])).await;
+    put(
+        &["move", "merge_queue", "a", "--after", "b"],
+        None,
+        json!([b, a]),
+    )
+    .await;
+    let mut off = a.clone();
+    off["enabled"] = false.into();
+    put(&["disable", "merge_queue", "a"], None, json!([off, b])).await;
+    put(&["enable", "merge_queue", "a"], None, json!([a, b])).await;
+    // A file that names another rule, an unknown rule, and a move without a
+    // place are refused before any write.
+    for (more, stdin) in [
+        (
+            vec!["set", "merge_queue", "c", "--from-file", "-"],
+            Some(r#"{"name": "d", "trigger": {"kind": "lands"}, "actions": []}"#),
+        ),
+        (
+            vec!["set", "merge_queue", "c", "--from-file", "-"],
+            Some("[1]"),
+        ),
+        (vec!["rm", "merge_queue", "zzz"], None),
+        (vec!["move", "merge_queue", "a", "--before", "a"], None),
+    ] {
+        let mut full = vec!["-p", "terra", "board", "column", "rule"];
+        full.extend_from_slice(&more);
+        let r = exec(false, &full, vec![(200, column_rules_reply())], stdin).await;
+        assert!(r.result.is_err(), "{full:?}");
+        assert!(r.reqs.iter().all(|q| q.method == Get), "{full:?}");
+    }
+    let bad = ["terrarium", "board", "column", "rule", "move", "x", "a"];
+    assert!(Cli::try_parse_from(bad).is_err());
+}

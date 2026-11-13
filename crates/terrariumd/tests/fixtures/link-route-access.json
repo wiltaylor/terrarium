@@ -1821,6 +1821,12 @@
       "cases": []
     },
     {
+      "source": "api/rules.rs",
+      "registration": "\"/rules/catalog\",get(catalog)",
+      "access": "other",
+      "cases": []
+    },
+    {
       "source": "api/rules_tools.rs",
       "registration": "\"/projects/{name}/rules/effective\",get(effective)",
       "access": "other",

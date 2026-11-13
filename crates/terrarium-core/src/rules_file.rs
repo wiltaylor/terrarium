@@ -127,6 +127,49 @@ impl Verb {
             .filter(|(_, a)| matches!(a, Arg::Column | Arg::Columns))
             .map(|(k, _)| *k)
     }
+
+    /// The arguments that the verb needs.
+    pub fn required_args(&self) -> &'static [&'static str] {
+        self.required
+    }
+
+    /// Each argument with its type, for a catalog (TER-1120): the name, the
+    /// type (`bool`, `text`, `list`, `count`, `column`, `columns`, `one_of`,
+    /// `code`), and the words of a `one_of`.
+    pub fn arg_specs(&self) -> impl Iterator<Item = ArgSpec> + '_ {
+        self.args.iter().map(|(name, a)| {
+            let (kind, values): (&'static str, &'static [&'static str]) = match a {
+                Arg::Bool => ("bool", &[]),
+                Arg::Text => ("text", &[]),
+                Arg::List => ("list", &[]),
+                Arg::Count => ("count", &[]),
+                Arg::Column => ("column", &[]),
+                Arg::Columns => ("columns", &[]),
+                Arg::OneOf(w) => ("one_of", w),
+                Arg::Code => ("code", &[]),
+            };
+            ArgSpec {
+                name,
+                kind,
+                values,
+                required: self.required.contains(name),
+            }
+        })
+    }
+}
+
+/// One argument of a verb, as [`Verb::arg_specs`] lists it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ArgSpec {
+    pub name: &'static str,
+    /// `bool`, `text`, `list`, `count`, `column`, `columns`, `one_of`, or
+    /// `code`.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    /// The words of a `one_of`; else empty.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub values: &'static [&'static str],
+    pub required: bool,
 }
 
 /// The verbs, in the order of the schema.
@@ -967,6 +1010,112 @@ fn text_list(fields: &Map<String, Value>, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Check the verb and the arguments of one action, as [`parse`] checks a
+/// verb block (TER-1120: the structured column rules use it). Each problem
+/// is the argument it is about (`None`: the action) and the message.
+pub fn check_action(ctx: &Context, a: &Action) -> Vec<(Option<String>, String)> {
+    let Some(verb) = VERBS.iter().find(|v| v.name == a.verb) else {
+        let names: Vec<&str> = VERBS.iter().map(|v| v.name).collect();
+        return vec![(
+            None,
+            format!("unknown verb `{}`: use one of {}", a.verb, names.join(", ")),
+        )];
+    };
+    let mut out = Vec::new();
+    for (key, v) in &a.args {
+        let Some((_, arg)) = verb.args.iter().find(|(k, _)| k == key) else {
+            let names: Vec<&str> = verb.arg_names().collect();
+            out.push((
+                Some(key.clone()),
+                format!(
+                    "{} has no argument `{key}`; it takes {}",
+                    verb.name,
+                    if names.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        names.join(", ")
+                    }
+                ),
+            ));
+            continue;
+        };
+        if v.is_null() {
+            continue;
+        }
+        if let Err(e) = check_arg(ctx, *arg, v) {
+            out.push((Some(key.clone()), format!("{}.{key} {e}", verb.name)));
+        }
+    }
+    for key in verb.required {
+        if a.args.get(*key).is_none_or(Value::is_null) {
+            out.push((Some((*key).to_owned()), format!("{} needs `{key}`", verb.name)));
+        }
+    }
+    if verb.kind == "job_queue" {
+        out.extend(check_batch_args(&a.args).into_iter().map(|e| (None, e)));
+    }
+    if verb.name == SCRIPT_VERB
+        && let Some(f) = a.args.get("fuel").and_then(Value::as_u64)
+        && f > MAX_SCRIPT_FUEL
+    {
+        out.push((
+            Some("fuel".into()),
+            format!("script.fuel is at most {MAX_SCRIPT_FUEL}, not {f}"),
+        ));
+    }
+    if verb.kind == "card_label" && a.args.values().all(Value::is_null) {
+        out.push((None, "card.label needs `add` or `remove`".into()));
+    }
+    out
+}
+
+/// Check an `if_card` condition: known columns, plain labels, and at least
+/// one field. [`parse`] and the structured column rules (TER-1120) use it.
+pub fn check_card_condition(ctx: &Context, c: &CardCondition) -> Result<(), String> {
+    for (key, cols) in [("column", &c.column), ("not_column", &c.not_column)] {
+        if !cols.is_empty() {
+            check_arg(ctx, Arg::Columns, &Value::from(cols.clone()))
+                .map_err(|e| format!("if_card.{key} {e}"))?;
+        }
+    }
+    if c.has_labels
+        .iter()
+        .chain(&c.lacks_labels)
+        .any(|l| l.trim().is_empty() || l.contains("{{"))
+    {
+        return Err("if_card labels are plain, non-empty texts".into());
+    }
+    if c == &CardCondition::default() {
+        return Err("if_card needs at least one field".into());
+    }
+    Ok(())
+}
+
+/// Check an `if_job` condition: known states and outcomes, and at least
+/// one field. [`parse`] and the structured column rules (TER-1120) use it.
+pub fn check_job_condition(c: &JobCondition) -> Result<(), String> {
+    if let Some(s) = c.state.iter().find(|s| !JOB_STATES.contains(&s.as_str())) {
+        return Err(format!(
+            "if_job.state `{s}` is not one of {}",
+            JOB_STATES.join(", ")
+        ));
+    }
+    if let Some(o) = c
+        .outcome
+        .iter()
+        .find(|o| !JOB_OUTCOMES.contains(&o.as_str()))
+    {
+        return Err(format!(
+            "if_job.outcome `{o}` is not one of {}",
+            JOB_OUTCOMES.join(", ")
+        ));
+    }
+    if c == &JobCondition::default() {
+        return Err("if_job needs at least one field".into());
+    }
+    Ok(())
+}
+
 /// Read one `if_card` block.
 fn read_if_card(ctx: &Context, fields: &Map<String, Value>) -> Result<CardCondition, String> {
     for key in ["column", "not_column"] {
@@ -986,16 +1135,7 @@ fn read_if_card(ctx: &Context, fields: &Map<String, Value>) -> Result<CardCondit
         assigned: fields.get("assigned").and_then(Value::as_bool),
         archived: fields.get("archived").and_then(Value::as_bool),
     };
-    if c.has_labels
-        .iter()
-        .chain(&c.lacks_labels)
-        .any(|l| l.trim().is_empty() || l.contains("{{"))
-    {
-        return Err("if_card labels are plain, non-empty texts".into());
-    }
-    if c == CardCondition::default() {
-        return Err("if_card needs at least one field".into());
-    }
+    check_card_condition(ctx, &c)?;
     Ok(c)
 }
 
@@ -1010,25 +1150,7 @@ fn read_if_job(fields: &Map<String, Value>) -> Result<JobCondition, String> {
         rerun: flag("rerun"),
         halves: flag("halves"),
     };
-    if let Some(s) = c.state.iter().find(|s| !JOB_STATES.contains(&s.as_str())) {
-        return Err(format!(
-            "if_job.state `{s}` is not one of {}",
-            JOB_STATES.join(", ")
-        ));
-    }
-    if let Some(o) = c
-        .outcome
-        .iter()
-        .find(|o| !JOB_OUTCOMES.contains(&o.as_str()))
-    {
-        return Err(format!(
-            "if_job.outcome `{o}` is not one of {}",
-            JOB_OUTCOMES.join(", ")
-        ));
-    }
-    if c == JobCondition::default() {
-        return Err("if_job needs at least one field".into());
-    }
+    check_job_condition(&c)?;
     Ok(c)
 }
 

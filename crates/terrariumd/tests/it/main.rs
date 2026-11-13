@@ -4,6 +4,7 @@
 mod board_summary_growth;
 mod card_waits;
 mod column_options;
+mod column_rules;
 #[path = "../common/mod.rs"]
 mod common;
 mod exedev;
