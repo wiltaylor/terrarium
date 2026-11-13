@@ -484,7 +484,9 @@ async fn a_changes_verdict_moves_the_card_to_the_top_of_ready() {
     let c = card(&td, &id).await;
     assert_eq!(c["column"], "ready", "{c}");
     assert!(has_comment(&c, "F1: Fix the thing."), "{c}");
-    assert_eq!(applied(&td, &id).await, 2);
+    // The verdict consumed the round (2); the move out of review then
+    // invalidated it (the `card_review_reset` trigger sets 1).
+    assert_eq!(applied(&td, &id).await, 1);
     let other = card(&td, &first).await;
     assert_eq!(other["column"], "ready");
     assert!(
@@ -615,5 +617,24 @@ async fn a_held_card_gets_no_review() {
             .contains("held by the GitHub author gate"),
         "{run}"
     );
-    assert_eq!(card(&td, &id).await["review_round"], 0);
+    let key = id.clone();
+    let (rounds, spawns): (i64, i64) = state(&td)
+        .db
+        .read(move |c| {
+            Ok((
+                c.query_row(
+                    "SELECT count(*) FROM card_reviews WHERE card = ?1",
+                    [&key],
+                    |r| r.get(0),
+                )?,
+                c.query_row(
+                    "SELECT count(*) FROM spawns WHERE bound_kind = 'review'",
+                    [],
+                    |r| r.get(0),
+                )?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!((rounds, spawns), (0, 0));
 }
