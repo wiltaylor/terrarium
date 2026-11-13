@@ -2971,6 +2971,7 @@ impl<'c> Tx<'c> {
     #[cfg(test)]
     pub fn for_test(tx: rusqlite::Transaction<'c>, actor: &str) -> Self {
         Self {
+            project_pages_v2: false,
             tx,
             actor: actor.to_owned(),
             link: actor.strip_prefix("link:").map(str::to_owned),
