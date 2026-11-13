@@ -667,7 +667,10 @@ mod tests {
 }
 
 /// Every column rule of `project`: (rule ID, column ID, column name, rule).
-fn project_rules(conn: &Connection, project: &str) -> ApiResult<Vec<(String, i64, String, ColumnRule)>> {
+fn project_rules(
+    conn: &Connection,
+    project: &str,
+) -> ApiResult<Vec<(String, i64, String, ColumnRule)>> {
     let mut q = conn.prepare(
         "SELECT r.id, r.column_id, c.name, r.name, r.definition_json
            FROM board_column_rules r JOIN board_columns c ON c.id = r.column_id

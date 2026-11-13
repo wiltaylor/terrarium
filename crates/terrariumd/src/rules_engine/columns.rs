@@ -300,7 +300,12 @@ pub fn plan(
                 Some(id) => jobs::get(conn, id).ok().map(|j| j.kind.as_str()),
                 None => None,
             }
-            .or_else(|| e.data["kind"].as_str().and_then(jobs::JobKind::parse).map(|k| k.as_str()));
+            .or_else(|| {
+                e.data["kind"]
+                    .as_str()
+                    .and_then(jobs::JobKind::parse)
+                    .map(|k| k.as_str())
+            });
             // Each card of the job, in the column that it is in now.
             let mut cards: Vec<(i64, i64, String, String)> = Vec::new();
             for id in event_cards(e) {
