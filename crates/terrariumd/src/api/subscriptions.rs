@@ -1718,15 +1718,16 @@ async fn api_key(
             )));
         }
     }
-    // An xai key never goes on an xai plan row (TER-1191): the X
-    // Subscription is a Grok Build login, and an API key is billed apart.
-    if terrarium_core::xai::is_xai(&key.provider)
-        && let Some(s) = &exists
+    // No API key goes on an xai plan row (TER-1191, TER-1205): the X
+    // Subscription is a Grok Build login, its only credential. An xai key is
+    // billed apart, and a key of another provider is not this row's.
+    if let Some(s) = &exists
         && terrarium_core::xai::is_plan_row(&s.provider, s.plan.as_deref())
     {
         return Err(ApiError::invalid(format!(
-            "cannot store an xai API key on subscription `{name}`: it is an xai {} plan (a \
+            "cannot store a {} API key on subscription `{name}`: it is an xai {} plan (a \
              Grok Build login); store the key on another subscription",
+            key.provider,
             s.plan.as_deref().unwrap_or_default()
         )));
     }

@@ -1402,6 +1402,14 @@ async fn finish(state: &Shared, s: &LoginSession) -> Result<subs::Subscription, 
     let list = state.db.read(subs::list).await.map_err(|e| e.message)?;
     let name = login_name(&state.state_dir, &list, &st, s.name.as_deref());
     subs::check_name(&name).map_err(|e| e.message)?;
+    // A Grok login goes only into a row that is still an xai plan row with
+    // grok: the row can change while the operator signs in. Check it before
+    // the tokens leave the scratch home (TER-1205).
+    if s.kind == LoginKind::Grok
+        && let Some(why) = grok_login_refusal(&list, Some(&name))
+    {
+        return Err(format!("the login is not stored: {why}"));
+    }
     // Only the credential leaves the scratch home, into the account of
     // `name`.
     let (dir, n, h, provider) = (
