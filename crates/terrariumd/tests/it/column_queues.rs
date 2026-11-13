@@ -351,7 +351,7 @@ async fn a_met_card_wait_queues_the_card_in_a_full_column() {
 }
 
 #[tokio::test]
-async fn the_job_release_admits_one_card_per_job() {
+async fn the_job_release_admits_one_card_per_job_and_frees_the_slot_of_a_lost_job() {
     let td = setup().await;
     set_options(
         &td,
@@ -364,6 +364,7 @@ async fn the_job_release_admits_one_card_per_job() {
     let a = new_card(&td, "a").await;
     let b = new_card(&td, "b").await;
     let c = new_card(&td, "c").await;
+    let d = new_card(&td, "d").await;
     assert!(move_to(&td, &a, "validating").await.get("queued").is_none());
     assert_eq!(move_to(&td, &b, "validating").await["queued"]["place"], 1);
     assert_eq!(move_to(&td, &c, "validating").await["queued"]["place"], 2);
@@ -405,9 +406,78 @@ async fn the_job_release_admits_one_card_per_job() {
     settle(&td).await;
     assert_eq!(bodies(&td, &b).await, vec!["landed in validating"]);
 
-    // B leaves before any job: C gets the slot.
-    move_to(&td, &b, "review").await;
+    // B's job runs and is lost (a daemon restart): it waits in the job
+    // queue again, so it still holds the slot.
+    job(&td, "JB", &b, "running").await;
+    state(&td)
+        .db
+        .write("operator", |t| {
+            terrariumd::store::jobs::requeue_lost(t, "JB")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    sweep(&td).await;
+    assert_eq!(card(&td, &c).await["queued"]["place"], 1);
+    // The lost job is cancelled: no slot leak, C gets the slot.
+    state(&td)
+        .db
+        .write("operator", |t| {
+            terrariumd::store::jobs::cancel(t, "JB")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     assert!(card(&td, &c).await.get("queued").is_none());
+
+    // C's job fails: D gets the slot.
+    move_to(&td, &d, "validating").await;
+    assert_eq!(card(&td, &d).await["queued"]["place"], 1);
+    job(&td, "JC", &c, "running").await;
+    state(&td)
+        .db
+        .write("operator", |t| {
+            let end = terrariumd::store::jobs::JobEnd {
+                passed: false,
+                outcome: Some("failed".into()),
+                exit_code: Some(1),
+                tail: None,
+                head: None,
+                batch: None,
+            };
+            terrariumd::store::jobs::finish(t, "JC", &end)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(card(&td, &d).await.get("queued").is_none());
+
+    // D leaves before any job: E gets the slot.
+    let e = new_card(&td, "e").await;
+    move_to(&td, &e, "validating").await;
+    assert_eq!(card(&td, &e).await["queued"]["place"], 1);
+    move_to(&td, &d, "review").await;
+    assert!(card(&td, &e).await.get("queued").is_none());
+}
+
+/// Insert job `id` of card `card` in state `state`.
+async fn job(td: &TestDaemon, id: &'static str, card: &str, state_: &'static str) {
+    let card = card.to_owned();
+    state(td)
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, attempt,
+                                   created_by, created_at, started_at)
+                 VALUES (?1, 'flow', ?2, 'validate', 'app', 'x', ?3, 1, 'operator',
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                rusqlite::params![id, card, state_],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
