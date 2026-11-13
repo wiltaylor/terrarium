@@ -2275,7 +2275,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let dropped = |db: &Db| {
+        async fn dropped(db: &Db) -> ApiResult<i64> {
             db.read(|c| {
                 Ok(c.query_row(
                     "SELECT count(*) FROM audit WHERE action = 'subscription.api_key_dropped'
@@ -2284,7 +2284,8 @@ mod tests {
                     |r| r.get::<_, i64>(0),
                 )?)
             })
-        };
+            .await
+        }
         // Another plan word on a non-tier row keeps the key.
         db.write("operator", |t| set_plan(t, "x-key", "API key"))
             .await
