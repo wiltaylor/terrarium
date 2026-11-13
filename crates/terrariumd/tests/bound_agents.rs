@@ -661,7 +661,9 @@ async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
         .enumerate()
     {
         mv(&td, &c, to, None).await;
-        until(&format!("legacy no-op run {}", n + 1), || async {
+        // `until` with the runs in the timeout message.
+        let start = std::time::Instant::now();
+        loop {
             let runs = td
                 .get("/api/projects/p/rules/runs?rule=agent-unpark&limit=500")
                 .await
@@ -669,9 +671,16 @@ async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
                 .as_array()
                 .unwrap()
                 .clone();
-            runs.len() == n + 1 && runs.iter().all(|r| r["state"] == "noop")
-        })
-        .await;
+            if runs.len() == n + 1 && runs.iter().all(|r| r["state"] == "noop") {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "timed out waiting for legacy no-op run {}: {runs:#?}",
+                n + 1
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
     td.post_empty("/api/reload").await.ok();
     let effective = td.get("/api/projects/p/rules/effective").await.ok().clone();
