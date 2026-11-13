@@ -1327,16 +1327,27 @@ async fn held_mail_is_counted_apart_from_queued_work() {
     // Only an admin may PATCH, and each admin may see the count.
     let held_after_patch = |r: &Value| r.get("held_mail").and_then(Value::as_u64);
     let r = td
-        .patch(&format!("/api/agents/{w2}"), json!({"card_reminder": false}))
+        .patch(
+            &format!("/api/agents/{w2}"),
+            json!({"card_reminder": false}),
+        )
         .await;
     assert_eq!(held_after_patch(r.ok()), Some(1), "{}", r.ok());
     let r = td
-        .patch_as(&lead, &format!("/api/agents/{w2}"), json!({"card_reminder": true}))
+        .patch_as(
+            &lead,
+            &format!("/api/agents/{w2}"),
+            json!({"card_reminder": true}),
+        )
         .await;
     assert_eq!(held_after_patch(r.ok()), Some(1), "{}", r.ok());
-    td.patch_as(&w1, &format!("/api/agents/{w2}"), json!({"card_reminder": false}))
-        .await
-        .err(403, "forbidden");
+    td.patch_as(
+        &w1,
+        &format!("/api/agents/{w2}"),
+        json!({"card_reminder": false}),
+    )
+    .await
+    .err(403, "forbidden");
 
     // T7: a restart keeps the counts and releases nothing. The lead still
     // may not release or resume.
