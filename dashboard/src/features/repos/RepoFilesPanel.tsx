@@ -1,4 +1,4 @@
-import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, on, Show } from "solid-js";
 import type { Repo } from "../../api/types";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
 import { useInstance } from "../../instance";
@@ -7,14 +7,16 @@ import { treeText } from "./RepoPage";
 import { createTreeCache } from "./fileTree";
 
 /** Selection is local, never inferred from the host route or another project. */
-export function RepoFilesPanel(props: { project: string }) {
-  return <Show when={props.project} keyed>{(project) => <RepoSelector project={project} />}</Show>;
+/** `search` names a repo of this project to open first. An unknown name shows Not Found. */
+export function RepoFilesPanel(props: { project: string; search?: string }) {
+  return <Show when={props.project} keyed>{(project) => <RepoSelector project={project} search={props.search} />}</Show>;
 }
 
-function RepoSelector(props: { project: string }) {
+function RepoSelector(props: { project: string; search?: string }) {
   const { api } = useInstance();
   const [repos] = createResource(() => props.project, (project) => api.projects.repos(project));
-  const [name, setName] = createSignal("");
+  const [name, setName] = createSignal(props.search?.trim() ?? "");
+  createEffect(on(() => props.search, (search, old) => { if (search !== old) setName(search?.trim() ?? ""); }, { defer: true }));
   const repo = createMemo(() => repos.error ? undefined : repos()?.find((r) => r.name === name()));
   return (
     <>

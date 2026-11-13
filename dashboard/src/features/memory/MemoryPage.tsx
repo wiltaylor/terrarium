@@ -5,7 +5,7 @@ import { useInstance } from "../../instance";
 
 import { useParams, useSearchParams } from "@solidjs/router";
 import { A } from "../../instance/navigation";
-import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, on, Show } from "solid-js";
 import { Empty, PageHead } from "../../components/ui";
 import { RELATIONS, type Memory, type MemoryEdge, type Relation } from "../../api/types";
 import { ago, humanize } from "../../lib/format";
@@ -25,15 +25,17 @@ export default function MemoryPage() {
   return <MemoryContent project={params.project} selected={search.id} onSelect={(id) => setSearch({ id })} />;
 }
 
-export function MemoryPanel(props: { project: string; view: "list" | "graph" }) {
-  return <Show when={props.project} keyed>{(project) => <MemoryContent project={project} view={props.view} />}</Show>;
+/** `search` seeds the local query. Only a changed configured value replaces it. */
+export function MemoryPanel(props: { project: string; view: "list" | "graph"; search?: string }) {
+  return <Show when={props.project} keyed>{(project) => <MemoryContent project={project} view={props.view} search={props.search} />}</Show>;
 }
 
-function MemoryContent(props: { project: string; view?: "list" | "graph"; selected?: string; onSelect?: (id: string) => void }) {
+function MemoryContent(props: { project: string; view?: "list" | "graph"; search?: string; selected?: string; onSelect?: (id: string) => void }) {
   const { api } = useInstance();
   const [localId, setLocalId] = createSignal<string>();
   const pick = (id: string) => props.onSelect ? props.onSelect(id) : setLocalId(id);
-  const [q, setQ] = createSignal("");
+  const [q, setQ] = createSignal(props.search ?? "");
+  createEffect(on(() => props.search, (search, old) => { if (search !== old) setQ(search ?? ""); }, { defer: true }));
   const [tag, setTag] = createSignal("");
   const [author, setAuthor] = createSignal("");
   const [relation, setRelation] = createSignal<Relation | "">("");
