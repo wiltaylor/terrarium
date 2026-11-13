@@ -810,13 +810,17 @@ pub fn operator_mail_count(conn: &Connection, project: Option<&str>) -> ApiResul
     )?)
 }
 
+/// The predicate of a held message that the operator did not release yet
+/// (TER-1105). It has no filter on `state`: a held message is stored as
+/// `delivered`, and a recipient that reads it does not release it.
+const UNRELEASED_HELD: &str = "held = 1 AND released_at IS NULL";
+
 /// The held messages on `thread` that the operator did not release yet,
 /// oldest first.
 pub fn unreleased_held(conn: &Connection, thread: &str) -> ApiResult<Vec<Message>> {
-    let mut st = conn.prepare(
-        "SELECT * FROM messages WHERE thread_id = ?1 AND held = 1 AND released_at IS NULL
-         ORDER BY id",
-    )?;
+    let mut st = conn.prepare(&format!(
+        "SELECT * FROM messages WHERE thread_id = ?1 AND {UNRELEASED_HELD} ORDER BY id"
+    ))?;
     let raws = st
         .query_map([thread], raw_row)?
         .collect::<Result<Vec<_>, _>>()?;
@@ -825,6 +829,22 @@ pub fn unreleased_held(conn: &Connection, thread: &str) -> ApiResult<Vec<Message
         .into_iter()
         .map(|r| render(conn, r, &mut cache))
         .collect())
+}
+
+/// The held mail of agent `id` that the operator did not release yet
+/// (TER-1105): the count only. It is apart from [`agents::queued_count`]:
+/// held mail is not deliverable work, and only `release` or `resume`
+/// makes it `queued`.
+pub fn held_count(conn: &Connection, id: &str) -> ApiResult<usize> {
+    let n: i64 = conn.query_row(
+        &format!(
+            "SELECT count(*) FROM messages
+             WHERE to_kind = 'agent' AND to_agent = ?1 AND {UNRELEASED_HELD}"
+        ),
+        [id],
+        |r| r.get(0),
+    )?;
+    Ok(usize::try_from(n).unwrap_or(0))
 }
 
 /// The threads that need the operator because of the loop guard: a held
@@ -1349,5 +1369,101 @@ mod tests {
         assert_eq!(from_key(&conn, &never, &mut cache).display(), never);
         assert_eq!(from_key(&conn, "system", &mut cache).display(), "system");
         assert_eq!(resolve(&conn, "system", None).unwrap(), Address::System);
+    }
+
+    /// TER-1105 (T1, T2): `held_count` counts the held mail of one agent
+    /// that the operator did not release, apart from `queued_count`. A
+    /// read by the recipient and an operator reply on the thread keep it.
+    /// A release, a resume, and a system release (migration 30) end it.
+    #[test]
+    fn held_count_is_apart_from_queued_and_ends_only_on_a_release() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        let mut ids = Vec::new();
+        for name in ["a", "b"] {
+            let id = ulid::Ulid::new().to_string();
+            conn.execute(
+                "INSERT INTO agents (id, name, project, harness, workspace, created_at, updated_at)
+                 VALUES (?1, ?2, 'p', 'claude', '/w', 't', 't')",
+                params![id, name],
+            )
+            .unwrap();
+            ids.push(id);
+        }
+        let addr = |i: usize, name: &str| Address::Agent {
+            id: ids[i].clone(),
+            name: name.into(),
+            project: "p".into(),
+        };
+        let (a, b) = (addr(0, "a"), addr(1, "b"));
+        let mut t = Tx::for_test(conn.transaction().unwrap(), "operator");
+        // Agent mail on a new thread up to the first held message. The
+        // recipient reads each queued one, so nothing deliverable stays.
+        let chat = |t: &mut Tx<'_>| -> Message {
+            let mut thread: Option<String> = None;
+            for _ in 0..=mail_loop_limit() {
+                let m = send(
+                    t,
+                    Outgoing {
+                        from: &a,
+                        to: &b,
+                        subject: "s",
+                        body: "body",
+                        thread: thread.as_deref(),
+                        in_reply_to: None,
+                    },
+                )
+                .unwrap();
+                if m.held {
+                    return m;
+                }
+                assert_eq!(m.state, "queued");
+                mark_read(t, &m.id).unwrap();
+                thread = Some(m.thread_id.clone());
+            }
+            panic!("the loop guard held nothing");
+        };
+        let held = |t: &Tx<'_>| held_count(t, &ids[1]).unwrap();
+        let queued = |t: &Tx<'_>| agents::queued_count(t, &ids[1]).unwrap();
+
+        // T1: none, 1 held, 2 held on 2 threads.
+        assert_eq!((held(&t), queued(&t)), (0, 0));
+        let one = chat(&mut t);
+        assert_eq!(one.state, "delivered");
+        assert_eq!((held(&t), queued(&t)), (1, 0));
+        let two = chat(&mut t);
+        assert_ne!(one.thread_id, two.thread_id);
+        assert_eq!((held(&t), queued(&t)), (2, 0));
+        assert_eq!(held_count(&t, &ids[0]).unwrap(), 0, "the sender holds none");
+        assert!(!agents::with_queued_work(&t).unwrap().contains(&ids[1]));
+
+        // The recipient reads a held message: it stays held.
+        assert_eq!(mark_read(&mut t, &one.id).unwrap().state, "read");
+        assert_eq!(held(&t), 2);
+        // An operator reply on the thread ends the pause, not the hold.
+        reply(&mut t, &one, &Address::Operator, None, "go on").unwrap();
+        assert_eq!(held(&t), 2);
+        // The operator reply is deliverable work, and only it.
+        assert_eq!(queued(&t), 1);
+
+        // A release: the message becomes queued, and leaves the count.
+        let r = release(&mut t, &two.id).unwrap();
+        assert_eq!(r.state, "queued");
+        assert_eq!((held(&t), queued(&t)), (1, 2));
+
+        // A resume releases the rest of its thread.
+        let three = chat(&mut t);
+        assert_eq!(held(&t), 2);
+        resume(&mut t, &three.thread_id, None).unwrap();
+        assert_eq!(held(&t), 1);
+
+        // A system release (migration 30) does not count either.
+        t.execute(
+            "UPDATE messages SET released_at = 't', released_by = 'system' WHERE id = ?1",
+            [&one.id],
+        )
+        .unwrap();
+        assert_eq!(held(&t), 0);
+        assert!(unreleased_held(&t, &one.thread_id).unwrap().is_empty());
     }
 }
