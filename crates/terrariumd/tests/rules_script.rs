@@ -458,18 +458,17 @@ async fn a_busy_dry_run_slot_refuses_and_does_not_hold_the_engine() {
         slow_returned.store(true, std::sync::atomic::Ordering::SeqCst);
         body
     };
-    // A second dry run finds no slot and is refused within its wait.
+    // A second dry run finds no slot and is refused at the end of its own
+    // wait. Its reason names that wait, not a measured duration: under load
+    // the request around the wait takes seconds (TER-1174).
     let refused = async {
-        let t = std::time::Instant::now();
-        let body = td
-            .post(
-                "/api/projects/sb/rules/dry-run",
-                json!({"seq": seq, "text": SCRIPTED}),
-            )
-            .await
-            .ok()
-            .clone();
-        (body, t.elapsed())
+        td.post(
+            "/api/projects/sb/rules/dry-run",
+            json!({"seq": seq, "text": SCRIPTED}),
+        )
+        .await
+        .ok()
+        .clone()
     };
     // The engine's lane of another project runs its script meanwhile: its
     // comment is there before the slow dry run returns (TER-680: the order
@@ -501,16 +500,21 @@ async fn a_busy_dry_run_slot_refuses_and_does_not_hold_the_engine() {
         assert!(held, "the slow dry run did not take its slot");
         tokio::join!(refused, engine)
     };
-    let (slow_body, ((busy, refused_in), (c, slow_had_returned))) = tokio::join!(slow_run, others);
+    let (slow_body, (busy, (c, slow_had_returned))) = tokio::join!(slow_run, others);
     settle(&td).await;
 
     let plan = &busy["plans"][0];
     assert_eq!(plan["outcome"], "failed", "{plan}");
+    // The wait ran out without a slot (a slot would run the script), and
+    // it was the dry run's own wait: it did not queue for the slow run.
+    let waited = format!(
+        "the script slots are busy: no slot came free in {} ms",
+        terrariumd::rule_script::DRY_RUN_ACQUIRE.as_millis()
+    );
     assert!(
-        plan["reason"].as_str().unwrap().contains("slots are busy"),
+        plan["reason"].as_str().unwrap().contains(&waited),
         "{plan}"
     );
-    assert!(refused_in < Duration::from_secs(4), "{refused_in:?}");
     assert!(
         !slow_had_returned,
         "the engine's rule ran only after the dry run gave its slot back"
