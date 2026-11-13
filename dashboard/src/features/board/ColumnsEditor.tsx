@@ -23,7 +23,13 @@ import {
  * The Edit columns dialog of the board (docs/api.md §8.1). Save sends the whole list, with `rename_from`
  * for a renamed column. `backlog` and `done` stay first and last, and take no WIP limit and no role.
  */
-export function ColumnsEditor(props: { columns: Column[]; onSave: (edits: ReturnType<typeof toEdits>) => Promise<Board>; onClose: () => void }) {
+type ColumnsEditorProps = { columns: Column[]; onSave: (edits: ReturnType<typeof toEdits>) => Promise<Board>; onClose: () => void };
+export function ColumnsEditor(props: ColumnsEditorProps) {
+  return <Modal title="Edit columns" class="modal-full columns-editor-modal" onClose={() => props.onClose()}>
+    <ColumnsEditorFields {...props} />
+  </Modal>;
+}
+export function ColumnsEditorFields(props: ColumnsEditorProps) {
   const [rows, setRows] = createSignal<ColumnRow[]>(rowsFromBoard(props.columns));
   // The check shows after the first save, and then follows each change.
   const [checked, setChecked] = createSignal(false);
@@ -52,7 +58,6 @@ export function ColumnsEditor(props: { columns: Column[]; onSave: (edits: Return
   };
 
   return (
-    <Modal title="Edit columns" class="modal-full columns-editor-modal" onClose={() => props.onClose()}>
       <form
         class="stack columns-editor"
         onSubmit={(e) => {
@@ -208,6 +213,5 @@ export function ColumnsEditor(props: { columns: Column[]; onSave: (edits: Return
           </button>
         </div>
       </form>
-    </Modal>
   );
 }
