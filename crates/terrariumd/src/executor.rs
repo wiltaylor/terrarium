@@ -29,8 +29,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use base64::Engine;
 pub use crate::resource_lock::{ObservedResourceGuard, ObservedResourceLock, ResourceOperation};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -5783,17 +5783,29 @@ mod tests {
         executor.set_resource_pending("h", true);
         let waiting = {
             let executor = executor.clone();
-            tokio::spawn(async move { executor.target_admission(&def, ResourceOperation::Reconcile).await })
+            tokio::spawn(async move {
+                executor
+                    .target_admission(&def, ResourceOperation::Reconcile)
+                    .await
+            })
         };
         tokio::task::yield_now().await;
         assert!(!waiting.is_finished());
-        let reconcile = executor.resource_lock("h").try_lock_owned(ResourceOperation::Reconcile).unwrap();
+        let reconcile = executor
+            .resource_lock("h")
+            .try_lock_owned(ResourceOperation::Reconcile)
+            .unwrap();
         let epoch = executor.resource_epoch("h");
         assert!(executor.finish_resource_reconcile("h", epoch.as_deref()));
         drop(reconcile);
         tokio::time::advance(Duration::from_millis(50)).await;
         let guard = waiting.await.unwrap().unwrap();
-        assert!(executor.resource_lock("h").try_lock_owned(ResourceOperation::Reconcile).is_err());
+        assert!(
+            executor
+                .resource_lock("h")
+                .try_lock_owned(ResourceOperation::Reconcile)
+                .is_err()
+        );
         drop(guard);
     }
 
@@ -5803,11 +5815,19 @@ mod tests {
         let def: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
         executor.set_resource_pending("h", true);
         let started = tokio::time::Instant::now();
-        let error = executor.target_admission(&def, ResourceOperation::Reconcile).await.unwrap_err();
+        let error = executor
+            .target_admission(&def, ResourceOperation::Reconcile)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("reconciliation is pending"));
         assert_eq!(started.elapsed(), Duration::from_secs(60));
         assert!(executor.resource_pending("h"));
-        assert!(executor.resource_lock("h").try_lock_owned(ResourceOperation::Reconcile).is_ok());
+        assert!(
+            executor
+                .resource_lock("h")
+                .try_lock_owned(ResourceOperation::Reconcile)
+                .is_ok()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -5815,9 +5835,17 @@ mod tests {
         let executor = Executor::default();
         let def: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
         executor.set_resource_pending("h", true);
-        let _reconcile = executor.resource_lock("h").lock_owned(ResourceOperation::Reconcile).await;
+        let _reconcile = executor
+            .resource_lock("h")
+            .lock_owned(ResourceOperation::Reconcile)
+            .await;
         let started = tokio::time::Instant::now();
-        assert!(executor.target_admission(&def, ResourceOperation::Reconcile).await.is_err());
+        assert!(
+            executor
+                .target_admission(&def, ResourceOperation::Reconcile)
+                .await
+                .is_err()
+        );
         assert_eq!(started.elapsed(), Duration::from_secs(60));
         assert!(executor.resource_pending("h"));
     }

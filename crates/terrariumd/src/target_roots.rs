@@ -1022,7 +1022,10 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert!(matches!(python_probe_error(&failed_exit).code, Code::Invalid));
+        assert!(matches!(
+            python_probe_error(&failed_exit).code,
+            Code::Invalid
+        ));
         assert_eq!(
             python_probe_error(&failed_exit).message,
             "cannot check target python3 availability: resource_busy"
@@ -1031,8 +1034,8 @@ mod tests {
 
     #[tokio::test]
     async fn busy_python_probe_renders_the_existing_error_envelope() {
-        use axum::response::IntoResponse;
         use crate::executor::{Collected, End};
+        use axum::response::IntoResponse;
         let probe = Collected {
             stderr: b"stderr-canary".to_vec(),
             end: Some(End::Error {
@@ -1043,12 +1046,17 @@ mod tests {
         };
         let response = python_probe_error(&probe).into_response();
         assert_eq!(response.status().as_u16(), 409);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body, serde_json::json!({"error": {
-            "code": "resource_busy",
-            "message": "cannot check target python3 availability: host admission is busy; retry the command"
-        }}));
+        assert_eq!(
+            body,
+            serde_json::json!({"error": {
+                "code": "resource_busy",
+                "message": "cannot check target python3 availability: host admission is busy; retry the command"
+            }})
+        );
     }
 
     /// TER-566: the error of a failed python3 probe says why.

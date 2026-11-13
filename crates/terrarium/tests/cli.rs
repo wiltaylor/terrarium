@@ -514,20 +514,23 @@ fn operator_mode_over_the_unix_socket() {
 fn checkout_resource_busy_is_one_request_and_exit_one() {
     let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let seen = requests.clone();
-    let message = "cannot check target python3 availability: host admission is busy; retry the command";
-    let app = axum::Router::new().route(
-        "/api/projects/terra/repos",
-        get(|| async { Json(json!([{"id": "repo", "name": "repo"}])) }),
-    ).fallback(move || {
-        let seen = seen.clone();
-        async move {
-            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            (
-                StatusCode::CONFLICT,
-                Json(json!({"error": {"code": "resource_busy", "message": message}})),
-            )
-        }
-    });
+    let message =
+        "cannot check target python3 availability: host admission is busy; retry the command";
+    let app = axum::Router::new()
+        .route(
+            "/api/projects/terra/repos",
+            get(|| async { Json(json!([{"id": "repo", "name": "repo"}])) }),
+        )
+        .fallback(move || {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": {"code": "resource_busy", "message": message}})),
+                )
+            }
+        });
     let dir = temp_dir("checkout-busy");
     let socket = dir.join("api.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
@@ -539,9 +542,15 @@ fn checkout_resource_busy_is_one_request_and_exit_one() {
             axum::serve(listener, app).await.unwrap();
         });
     });
-    let output = run(&socket, &["-p", "terra", "repo", "checkout", "repo", "--target", "box"]);
+    let output = run(
+        &socket,
+        &["-p", "terra", "repo", "checkout", "repo", "--target", "box"],
+    );
     assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
-    assert_eq!(text(&output.stderr), format!("terrarium: {message} [resource_busy]\n"));
+    assert_eq!(
+        text(&output.stderr),
+        format!("terrarium: {message} [resource_busy]\n")
+    );
     assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
@@ -1389,17 +1398,25 @@ fn runner_checkout_preserves_busy_code_and_existing_details_envelope() {
     let output = bin()
         .env("TERRARIUM_AGENT", "01AGENT")
         .env("TERRARIUM_SOCKET", socket)
-        .args(["-p", "terra", "--json", "repo", "checkout", "repo", "--target", "box"])
+        .args([
+            "-p", "terra", "--json", "repo", "checkout", "repo", "--target", "box",
+        ])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
     let body: Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(body["error"]["code"], "resource_busy");
-    assert_eq!(body["error"]["details"], json!({"fixture": "existing-envelope"}));
+    assert_eq!(
+        body["error"]["details"],
+        json!({"fixture": "existing-envelope"})
+    );
     let seen = seen.lock().unwrap();
-    let checkouts: Vec<_> = seen.iter().filter(|r| {
-        r["params"]["method"] == "POST" && r["params"]["path"] == "/api/repos/repo/checkout"
-    }).collect();
+    let checkouts: Vec<_> = seen
+        .iter()
+        .filter(|r| {
+            r["params"]["method"] == "POST" && r["params"]["path"] == "/api/repos/repo/checkout"
+        })
+        .collect();
     assert_eq!(checkouts.len(), 1);
 }
 

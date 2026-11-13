@@ -163,7 +163,10 @@ impl ObservedResourceLock {
 }
 
 fn elapsed(now: Instant, start: Instant) -> (u64, bool) {
-    let millis = now.checked_duration_since(start).unwrap_or_default().as_millis();
+    let millis = now
+        .checked_duration_since(start)
+        .unwrap_or_default()
+        .as_millis();
     let cap = 86_400_000_u128;
     (millis.min(cap) as u64, millis > cap)
 }
@@ -178,7 +181,10 @@ impl Drop for ObservedResourceGuard {
                 slot
             }
         };
-        if slot.as_ref().is_some_and(|h| Arc::ptr_eq(&h.generation, &self.generation)) {
+        if slot
+            .as_ref()
+            .is_some_and(|h| Arc::ptr_eq(&h.generation, &self.generation))
+        {
             *slot = None;
         }
         // Explicitly unlock admission before unlocking metadata. A successor
@@ -207,7 +213,12 @@ mod tests {
         assert!(poll!(&mut first).is_pending());
         assert!(poll!(&mut cancelled).is_pending());
         assert!(poll!(&mut last).is_pending());
-        assert!(other.clone().try_lock_owned(ResourceOperation::Command).is_ok());
+        assert!(
+            other
+                .clone()
+                .try_lock_owned(ResourceOperation::Command)
+                .is_ok()
+        );
         drop(cancelled);
         assert_eq!(lock.snapshot(Instant::now()).unwrap().0.tags().0, "grant");
         let timed = tokio::time::timeout(
@@ -250,7 +261,11 @@ mod tests {
         let (operation, age, capped) = lock.snapshot(Instant::now()).unwrap();
         assert_eq!(operation.tags().0, "command");
         assert_eq!((age, capped), (0, false));
-        assert!(lock.clone().try_lock_owned(ResourceOperation::Copy).is_err());
+        assert!(
+            lock.clone()
+                .try_lock_owned(ResourceOperation::Copy)
+                .is_err()
+        );
         drop(new);
         assert!(lock.snapshot(Instant::now()).is_none());
     }
@@ -262,10 +277,26 @@ mod tests {
             Err(())
         }
         let lock = Arc::new(ObservedResourceLock::default());
-        for operation in [Command, Exec, Copy, Job, Lifecycle, Grant, Extend, Finish,
-            Cancel, Sweep, Reconcile, Capacity, TargetUpdate] {
+        for operation in [
+            Command,
+            Exec,
+            Copy,
+            Job,
+            Lifecycle,
+            Grant,
+            Extend,
+            Finish,
+            Cancel,
+            Sweep,
+            Reconcile,
+            Capacity,
+            TargetUpdate,
+        ] {
             let guard = lock.clone().lock_owned(operation).await;
-            assert_eq!(lock.snapshot(Instant::now()).unwrap().0.tags(), operation.tags());
+            assert_eq!(
+                lock.snapshot(Instant::now()).unwrap().0.tags(),
+                operation.tags()
+            );
             let result = fail(guard);
             assert!(result.is_err());
             assert!(lock.snapshot(Instant::now()).is_none());
@@ -277,16 +308,22 @@ mod tests {
                 std::future::pending::<()>().await;
             });
             ready.await.unwrap();
-            assert_eq!(lock.snapshot(Instant::now()).unwrap().0.tags(), operation.tags());
+            assert_eq!(
+                lock.snapshot(Instant::now()).unwrap().0.tags(),
+                operation.tags()
+            );
             task.abort();
             assert!(task.await.unwrap_err().is_cancelled());
             assert!(lock.snapshot(Instant::now()).is_none());
         }
         let guard = lock.clone().lock_owned(Grant).await;
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = guard;
-            panic!("fixture unwind");
-        })).is_err());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = guard;
+                panic!("fixture unwind");
+            }))
+            .is_err()
+        );
         assert!(lock.snapshot(Instant::now()).is_none());
         let (installed, ready) = tokio::sync::oneshot::channel();
         let held = lock.clone();
@@ -306,15 +343,25 @@ mod tests {
     #[test]
     fn poisoned_metadata_is_erased_and_never_trusted_again() {
         let lock = Arc::new(ObservedResourceLock::default());
-        let guard = lock.clone().try_lock_owned(ResourceOperation::Grant).unwrap();
+        let guard = lock
+            .clone()
+            .try_lock_owned(ResourceOperation::Grant)
+            .unwrap();
         let poisoned = lock.clone();
-        assert!(std::thread::spawn(move || {
-            let _slot = poisoned.holder.lock().unwrap();
-            panic!("fixture poison");
-        }).join().is_err());
+        assert!(
+            std::thread::spawn(move || {
+                let _slot = poisoned.holder.lock().unwrap();
+                panic!("fixture poison");
+            })
+            .join()
+            .is_err()
+        );
         assert!(lock.snapshot(Instant::now()).is_none());
         drop(guard);
-        let fresh = lock.clone().try_lock_owned(ResourceOperation::Exec).unwrap();
+        let fresh = lock
+            .clone()
+            .try_lock_owned(ResourceOperation::Exec)
+            .unwrap();
         assert!(lock.snapshot(Instant::now()).is_none());
         drop(fresh);
         assert!(lock.try_lock_owned(ResourceOperation::Copy).is_ok());
@@ -323,7 +370,10 @@ mod tests {
     #[test]
     fn handoff_gap_is_unknown_and_old_generation_cannot_erase_successor() {
         let lock = Arc::new(ObservedResourceLock::default());
-        let old = lock.clone().try_lock_owned(ResourceOperation::Grant).unwrap();
+        let old = lock
+            .clone()
+            .try_lock_owned(ResourceOperation::Grant)
+            .unwrap();
         let old_generation = old.generation.clone();
         let metadata = lock.holder.lock().unwrap();
         let (release, released) = std::sync::mpsc::channel();
@@ -342,7 +392,9 @@ mod tests {
         // Stage the acquisition-to-install gap using private test access.
         let admission = lock.admission.clone().try_lock_owned().unwrap();
         assert!(lock.snapshot(Instant::now()).is_none());
-        let new = lock.clone().install(admission, Arc::new(()), ResourceOperation::Exec);
+        let new = lock
+            .clone()
+            .install(admission, Arc::new(()), ResourceOperation::Exec);
         // A stale cleanup token must not remove the current generation.
         drop(ObservedResourceGuard {
             lock: lock.clone(),
@@ -394,16 +446,27 @@ mod tests {
             .with_writer(move || capture.clone())
             .finish();
         let lock = Arc::new(ObservedResourceLock::default());
-        let guard = lock.clone().lock_owned(ResourceOperation::TargetUpdate).await;
+        let guard = lock
+            .clone()
+            .lock_owned(ResourceOperation::TargetUpdate)
+            .await;
         let start = Instant::now();
         tokio::time::advance(Duration::from_secs(86_401)).await;
         tracing::subscriber::with_default(subscriber, || {
-            let span = tracing::info_span!("private_context",
-                host = "host:host-canary", target = "target-canary",
-                project = "project-canary", agent = "agent-canary",
-                argv = "argv-canary", env = "env-canary", cwd = "cwd-canary",
-                credential = "credential-canary", stderr = "stderr-canary",
-                hook_payload = "payload-canary", reservation = "reservation-canary");
+            let span = tracing::info_span!(
+                "private_context",
+                host = "host:host-canary",
+                target = "target-canary",
+                project = "project-canary",
+                agent = "agent-canary",
+                argv = "argv-canary",
+                env = "env-canary",
+                cwd = "cwd-canary",
+                credential = "credential-canary",
+                stderr = "stderr-canary",
+                hook_payload = "payload-canary",
+                reservation = "reservation-canary"
+            );
             let _entered = span.enter();
             lock.log_timeout(start);
             drop(guard);
@@ -413,8 +476,14 @@ mod tests {
         assert_eq!(rendered.lines().count(), 2, "{rendered}");
         assert!(!rendered.contains("canary"), "{rendered}");
         assert!(!rendered.contains("private_context"), "{rendered}");
-        assert!(rendered.contains("holder_operation=\"target_update\""), "{rendered}");
-        assert!(rendered.contains("holder_phase=\"control_plane\""), "{rendered}");
+        assert!(
+            rendered.contains("holder_operation=\"target_update\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("holder_phase=\"control_plane\""),
+            "{rendered}"
+        );
         assert!(rendered.contains("holder_age_ms=86400000"), "{rendered}");
         assert!(rendered.contains("holder_age_capped=true"), "{rendered}");
         let unknown = rendered.lines().last().unwrap();
