@@ -21,7 +21,8 @@
 //!     card that was queued after it has ended (passed, failed, or
 //!     cancelled) and it has no open job, or it leaves the column. Then the
 //!     next card is admitted. A job from the previous column does not free
-//!     the slot (TER-1204).
+//!     the slot (TER-1204). A failed job ends only when the rules have
+//!     acted on it, so its rerun keeps the slot (TER-1250, `RERUN_SETTLED`).
 //!   - `batch`: when no admitted card is in the column (the last batch, or
 //!     a card that was there before the `batch` release), and
 //!     `batch_size` cards wait or the first one has waited
@@ -156,25 +157,53 @@ pub(crate) fn queued_by_column(
 const JOB_OF_CARD: &str = "(j.card = q.card OR EXISTS (SELECT 1 FROM json_each(j.batch)
                             WHERE json_extract(value, '$.card') = q.card))";
 
-/// A job of card `q.card` that was queued at or after its admission and
-/// has ended: it frees the `job` slot. An older job (one still running
-/// from the previous column) does not (TER-1204).
-const SLOT_JOB_ENDED: &str = "EXISTS (SELECT 1 FROM jobs j
-                            WHERE j.state IN ('passed', 'failed', 'cancelled')
-                              AND j.created_at >= q.admitted_at
-                              AND j.ended_at >= q.admitted_at
-                              AND (j.card = q.card OR EXISTS (SELECT 1 FROM json_each(j.batch)
-                                     WHERE json_extract(value, '$.card') = q.card)))";
+/// The rerun of ended job `j` is settled (TER-1250): `j` did not fail, or
+/// the board rules have acted on its end. A failed job frees the `job`
+/// slot only when its `job.verdict` is written (by `after_end`, after the
+/// end; a kind with no verdict, or 10 minutes after the end, without
+/// one), the rule engine's cursor is past its `job` and `job.verdict`
+/// events, and no rule run of them is pending. A rerun that a rule queued
+/// is then an open job, so the slot stays held until the rerun ends.
+const RERUN_SETTLED: &str = "(j.state <> 'failed'
+    OR ((j.kind IN ('e2e', 'release')
+         OR j.ended_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-600 seconds')
+         OR EXISTS (SELECT 1 FROM events e WHERE e.card = j.card AND e.kind = 'job.verdict'
+                      AND json_extract(e.payload, '$.job') = j.id))
+        AND NOT EXISTS (SELECT 1 FROM events e
+                         WHERE e.seq > coalesce((SELECT seq FROM rule_cursor WHERE id = 1), e.seq)
+                           AND e.kind IN ('job', 'job.verdict')
+                           AND coalesce(json_extract(e.payload, '$.job'),
+                                        json_extract(e.payload, '$.id')) = j.id)
+        AND NOT EXISTS (SELECT 1 FROM rule_runs r JOIN events e ON e.seq = r.event_seq
+                         WHERE r.state = 'pending' AND e.kind IN ('job', 'job.verdict')
+                           AND coalesce(json_extract(e.payload, '$.job'),
+                                        json_extract(e.payload, '$.id')) = j.id)))";
+
+/// A job of card `q.card` that was queued at or after its admission, has
+/// ended, and whose rerun is settled ([`RERUN_SETTLED`]): it frees the
+/// `job` slot. An older job (one still running from the previous column)
+/// does not (TER-1204).
+fn slot_job_ended() -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM jobs j
+                  WHERE j.state IN ('passed', 'failed', 'cancelled')
+                    AND j.created_at >= q.admitted_at
+                    AND j.ended_at >= q.admitted_at
+                    AND {JOB_OF_CARD}
+                    AND {RERUN_SETTLED})"
+    )
+}
 
 /// Does a card of column `column_id` hold its job slot (release `job`)?
 fn job_slot_busy(conn: &Connection, column_id: i64) -> ApiResult<bool> {
+    let ended = slot_job_ended();
     let sql = format!(
         "SELECT EXISTS (SELECT 1 FROM card_queue q JOIN cards c ON c.id = q.card
           WHERE q.column_id = ?1 AND q.admitted_at IS NOT NULL AND c.archived = 0
             AND c.column_id = q.column_id
             AND (EXISTS (SELECT 1 FROM jobs j WHERE j.state IN ('queued', 'running')
                            AND {JOB_OF_CARD})
-                 OR NOT {SLOT_JOB_ENDED}))"
+                 OR NOT {ended}))"
     );
     Ok(conn.query_row(&sql, [column_id], |r| r.get(0))?)
 }
@@ -492,6 +521,7 @@ pub fn release(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
     }
     // A `job` slot that is free again, or a row of a card that left: the row
     // goes, so the table holds only the cards that wait or hold a slot.
+    let ended = slot_job_ended();
     t.execute(
         &format!(
             "DELETE FROM card_queue WHERE rowid IN (
@@ -500,7 +530,7 @@ pub fn release(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
                   AND (c.archived = 1 OR c.column_id <> q.column_id
                        OR (?2 AND NOT EXISTS (SELECT 1 FROM jobs j
                                 WHERE j.state IN ('queued', 'running') AND {JOB_OF_CARD})
-                              AND {SLOT_JOB_ENDED})))"
+                              AND {ended})))"
         ),
         params![s.id, s.release == QueueRelease::Job],
     )?;

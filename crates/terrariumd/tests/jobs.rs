@@ -5674,6 +5674,22 @@ fn alive(pid: u32) -> bool {
         .is_ok_and(|s| !s.rsplit(") ").next().unwrap_or("").starts_with('Z'))
 }
 
+/// The kill report in the tail of job `j` (`[killed on the target: {...}]`,
+/// written when a step of the job got a kill), or `Null` when there is none.
+fn kill_report(j: &Value) -> Value {
+    const MARK: &str = "[killed on the target: ";
+    let tail = j["tail"].as_str().unwrap_or("");
+    tail.rfind(MARK)
+        .and_then(|i| {
+            let rest = &tail[i + MARK.len()..];
+            serde_json::Deserializer::from_str(rest)
+                .into_iter::<Value>()
+                .next()
+                .and_then(Result::ok)
+        })
+        .unwrap_or(Value::Null)
+}
+
 /// The PIDs in `file`, one per line, once there are at least `n`.
 async fn pids(file: &Path, n: usize) -> Vec<u32> {
     let start = Instant::now();
@@ -5976,7 +5992,27 @@ async fn a_cancelled_merge_job_does_not_push() {
     let of = |id: &str| jobs.iter().find(|j| j["id"] == id).unwrap().clone();
     assert_eq!(of(&job)["state"], "cancelled", "{jobs:#?}");
     assert_eq!(of(&v)["state"], "passed", "{jobs:#?}");
-    assert!(!alive(held), "the probe {held} outlived the kill");
+    // TER-1059, TER-1225: the job ends only after the kill report of its
+    // step. A report with the PID of the step and no process left proves
+    // that the group of the probe is gone, so the probe must be gone now,
+    // with no wait. A report with `left` or no PID is a job that freed its
+    // slot before the kill was proven: a product fault, not a slow test.
+    let cancelled = of(&job);
+    let report = kill_report(&cancelled);
+    assert!(
+        report["pid"].is_number(),
+        "the kill of the probe found no PID file: {report} in {cancelled}"
+    );
+    assert_eq!(
+        report["left"],
+        json!([]),
+        "the kill of the probe left processes: {report} in {cancelled}"
+    );
+    assert!(
+        !alive(held),
+        "the probe {held} outlived the kill: {report}, /proc/{held}/stat: {}",
+        std::fs::read_to_string(format!("/proc/{held}/stat")).unwrap_or_default()
+    );
     let log = std::fs::read_to_string(&ran).unwrap_or_default();
     assert!(
         !log.contains(&job),

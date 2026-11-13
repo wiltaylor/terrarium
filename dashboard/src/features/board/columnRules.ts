@@ -59,6 +59,7 @@ const CARD_WORDS: Record<string, (v: unknown) => string> = {
   column: (v) => `it is in ${orList(list(v).map(columnRef))}`,
   not_column: (v) => `it is not in ${orList(list(v).map(columnRef))}`,
   has_labels: (v) => `it has the label${list(v).length === 1 ? "" : "s"} ${orList(list(v), "and")}`,
+  any_labels: (v) => (list(v).length === 1 ? `it has the label ${list(v)[0]}` : `it has one of the labels ${orList(list(v))}`),
   lacks_labels: (v) => `it has none of the labels ${orList(list(v))}`,
   assigned: (v) => (v ? "it has an assignee" : "it has no assignee"),
   archived: (v) => (v ? "it is archived" : "it is not archived"),
@@ -79,14 +80,37 @@ export function actionText(a: RuleAction): string {
       const parts = [list(args.add).length ? `add the label ${orList(list(args.add), "and")}` : "", list(args.remove).length ? `remove the label ${orList(list(args.remove), "and")}` : ""].filter(Boolean);
       return parts.length ? parts.join(" and ") : "change the labels";
     }
-    case "card.comment": return `comment "${String(args.body ?? "")}"`;
-    case "card.assign": return args.to === null || args.to === "none" ? "clear the assignee" : `assign the card to ${String(args.to ?? "")}`;
-    case "mail": return `mail ${String(args.to ?? "")}${args.subject ? ` "${String(args.subject)}"` : ""}`;
+    case "card.comment": return `comment "${String(args.text ?? "")}"`;
+    case "card.assign": return assignText(args);
+    case "mail": return `mail ${orList(list(args.to), "and")}${args.subject ? ` "${String(args.subject)}"` : ""}`;
     default: {
       const rest = Object.entries(args).map(([k, v]) => `${k} ${Array.isArray(v) ? v.join(", ") : String(v)}`);
       return `${a.verb}${rest.length ? ` (${rest.join("; ")})` : ""}`;
     }
   }
+}
+
+/**
+ * `card.assign` as words (docs/api.md §19.9 `card_assign`): `who` assigns or (`none`) unassigns; `template` or
+ * `templates` (`<label>=<template>`, TER-1115) start a new agent owned by `owner` for the run's card, or for the top
+ * `limit` cards of `from`.
+ */
+function assignText(args: Record<string, unknown>): string {
+  const template = typeof args.template === "string" ? args.template.trim() : "";
+  const byLabel = list(args.templates).map((e) => {
+    const i = e.indexOf("=");
+    return i < 0 ? e : `${e.slice(0, i).trim()} gets ${e.slice(i + 1).trim()}`;
+  });
+  if (!template && !byLabel.length) {
+    const who = "who" in args ? args.who : args.to;
+    return who === null || who === "none" ? "clear the assignee" : `assign the card to ${String(who ?? "")}`;
+  }
+  const from = args.from !== undefined && args.from !== null && args.from !== "";
+  const limit = Number(args.limit) || 1;
+  const cards = from ? (limit === 1 ? `the top card of ${columnRef(args.from)}` : `the top ${limit} cards of ${columnRef(args.from)}`) : "the card";
+  const what = template ? `an agent from the template ${template}` : `an agent from the template that its label picks (${orList(byLabel, "and")})`;
+  const owner = String(args.owner ?? "").trim();
+  return `start ${what} for ${cards}${owner ? `, owned by ${owner}` : ""}`;
 }
 
 /** The whole rule in plain words. */

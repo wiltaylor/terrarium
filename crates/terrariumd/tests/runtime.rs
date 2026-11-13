@@ -2788,20 +2788,36 @@ async fn mail_loop_guard_pauses_a_chatty_thread() {
 /// exit-key pause. The harness gets the exit text once and the CR once,
 /// in a write of its own (the fake TUI logs each read of its terminal).
 /// Before the fix, both stops typed the text: `/exit 7/exit 7`.
+///
+/// The pause is held for `EXIT_KEY_HOLD`, so the second stop and the
+/// delete surely come in it. A second stop after the harness exited is a
+/// `409 not_running` by design: with a 300 ms pause, that came under load
+/// (TER-1223).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_second_stop_in_the_exit_key_pause_types_no_more_keys() {
+    /// Far longer than two local requests under load, and short of the
+    /// delete's 10 s wait for the harness to end (`trash::STOP_WAIT`).
+    const EXIT_KEY_HOLD: Duration = Duration::from_secs(3);
     let td = Td::start().await;
     let log = td.dir.path().join("input.log");
     td.adapter.set_env("FAKE_TUI_SLASH_NEEDS_PAUSE", "1");
     td.adapter
         .set_env("FAKE_TUI_INPUT_LOG", log.to_str().unwrap());
     *td.adapter.exit_keys.lock().unwrap() = b"/exit 7\r".to_vec();
-    *td.adapter.exit_pause.lock().unwrap() = Duration::from_millis(300);
+    *td.adapter.exit_pause.lock().unwrap() = EXIT_KEY_HOLD;
     let id = td.agent("demo", "bob", json!({})).await;
     td.post(&format!("/api/agents/{id}/start"), None).await;
     td.wait_status(&id, "idle").await;
+    let first = Instant::now();
     td.post(&format!("/api/agents/{id}/stop"), None).await;
     td.post(&format!("/api/agents/{id}/stop"), None).await;
+    // The first stop typed its text after `first`, so its pause ends after
+    // `first + EXIT_KEY_HOLD`: the second stop was in it.
+    assert!(
+        first.elapsed() < EXIT_KEY_HOLD,
+        "the second stop came after the exit-key pause: {:?}",
+        first.elapsed()
+    );
     let (s, b) = td
         .req(
             Method::DELETE,
@@ -2811,17 +2827,27 @@ async fn a_second_stop_in_the_exit_key_pause_types_no_more_keys() {
         )
         .await;
     assert_eq!(s, 204, "{b}");
-    let reads: Vec<Vec<u8>> = std::fs::read_to_string(&log)
-        .unwrap()
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| {
-            (0..l.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&l[i..i + 2], 16).unwrap())
-                .collect()
-        })
-        .collect();
+    let read_log = || -> Vec<Vec<u8>> {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                (0..l.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&l[i..i + 2], 16).unwrap())
+                    .collect()
+            })
+            .collect()
+    };
+    // The delete waits at most 10 s for the harness to end. Wait for the
+    // CR in the log on a loaded machine.
+    let start = Instant::now();
+    let mut reads = read_log();
+    while !reads.concat().contains(&b'\r') && start.elapsed() < WAIT {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        reads = read_log();
+    }
     let all: Vec<u8> = reads.concat();
     assert_eq!(
         String::from_utf8_lossy(&all),

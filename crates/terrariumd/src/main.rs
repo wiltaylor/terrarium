@@ -49,6 +49,13 @@ async fn daemon_main() -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    if matches!(settings.command, Some(Command::ReleaseEnvKeys)) {
+        println!(
+            "{}",
+            serde_json::to_string(&terrariumd::release_env::release_env())?
+        );
+        return Ok(());
+    }
     let tools = settings.tools_config();
     if let Some(Command::Harness { command }) = &settings.command {
         return harness_command(tools, command).await;

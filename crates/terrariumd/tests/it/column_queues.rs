@@ -448,11 +448,16 @@ async fn the_job_release_admits_one_card_per_job_and_frees_the_slot_of_a_lost_jo
                 head: None,
                 batch: None,
             };
-            terrariumd::store::jobs::finish(t, "JC", &end)?;
+            let j = terrariumd::store::jobs::finish(t, "JC", &end)?.unwrap();
+            terrariumd::jobs::emit_verdicts(t, &j)?;
             Ok(())
         })
         .await
         .unwrap();
+    // The rules act on the failure first (no rerun here, TER-1250).
+    assert_eq!(card(&td, &d).await["queued"]["place"], 1);
+    settle(&td).await;
+    sweep(&td).await;
     assert!(card(&td, &d).await.get("queued").is_none());
 
     // D leaves before any job: E gets the slot.
@@ -461,6 +466,90 @@ async fn the_job_release_admits_one_card_per_job_and_frees_the_slot_of_a_lost_jo
     assert_eq!(card(&td, &e).await["queued"]["place"], 1);
     move_to(&td, &d, "review").await;
     assert!(card(&td, &e).await.get("queued").is_none());
+}
+
+/// A failed job that a column rule runs again keeps the `job` slot until
+/// the rerun ends (TER-1250): the next card is not admitted in the gap
+/// between the end of attempt 1 and the rerun.
+#[tokio::test]
+async fn a_rerun_keeps_the_job_slot_until_it_ends() {
+    let td = setup().await;
+    set_options(
+        &td,
+        "validating",
+        json!({"release": "job"}),
+        json!([{"name": "again", "trigger": {"kind": "job_result", "events": ["verdict"]},
+                "actions": [{"verb": "job.rerun"}]}]),
+    )
+    .await;
+    switch(&td).await;
+    let a = new_card(&td, "a").await;
+    let b = new_card(&td, "b").await;
+    assert!(move_to(&td, &a, "validating").await.get("queued").is_none());
+    assert_eq!(move_to(&td, &b, "validating").await["queued"]["place"], 1);
+
+    // A's job fails: its end and its verdict, as `finish_job` writes them.
+    job(&td, "JA", &a, "running").await;
+    state(&td)
+        .db
+        .write("system", |t| {
+            let end = terrariumd::store::jobs::JobEnd {
+                passed: false,
+                outcome: Some("failed".into()),
+                exit_code: Some(1),
+                tail: None,
+                head: None,
+                batch: None,
+            };
+            let j = terrariumd::store::jobs::finish(t, "JA", &end)?.unwrap();
+            terrariumd::jobs::emit_verdicts(t, &j)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(card(&td, &b).await["queued"]["place"], 1);
+    sweep(&td).await;
+    assert_eq!(card(&td, &b).await["queued"]["place"], 1);
+
+    // The rule queues the rerun: A still holds the slot.
+    settle(&td).await;
+    sweep(&td).await;
+    let qa = a.clone();
+    let rerun: String = state(&td)
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT id FROM jobs WHERE card = ?1 AND attempt = 2 AND state = 'queued'",
+                [qa],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(card(&td, &b).await["queued"]["place"], 1);
+
+    // The rerun passes: B gets the slot.
+    state(&td)
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "UPDATE jobs SET state = 'running', started_at = ?2 WHERE id = ?1",
+                rusqlite::params![rerun, terrariumd::db::now()],
+            )?;
+            let end = terrariumd::store::jobs::JobEnd {
+                passed: true,
+                outcome: Some("passed".into()),
+                exit_code: Some(0),
+                tail: None,
+                head: None,
+                batch: None,
+            };
+            terrariumd::store::jobs::finish(t, &rerun, &end)?.unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(card(&td, &b).await.get("queued").is_none());
 }
 
 /// Insert job `id` of card `card` in state `state`.
