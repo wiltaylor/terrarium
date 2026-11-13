@@ -322,7 +322,10 @@ it("prompts on a Back that leaves the project and stays when it is refused", asy
   seed();
   const confirm = vi.fn(() => false);
   vi.stubGlobal("confirm", confirm);
-  // A history entry outside the project, before the project page.
+  // A history entry outside the project, before the project page. The first
+  // push drops the forward entries of earlier tests, so `length - 1` is the
+  // real position of each entry, as the router's `_depth` needs.
+  window.history.pushState(null, "", "/p/other/board");
   window.history.replaceState({ _depth: window.history.length - 1 }, "", "/p/other/board");
   window.history.pushState({ _depth: window.history.length }, "", "/p/demo/pages/a");
   const host = await mountBrowser("/p/demo/pages/a");
