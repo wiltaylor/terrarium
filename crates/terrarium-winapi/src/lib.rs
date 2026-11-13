@@ -549,6 +549,14 @@ pub fn spawn_with_context(
         unsafe { (zeroed(), zeroed()) };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     startup.lpAttributeList = attributes.ptr();
+    // NULL inherits the parent's station/desktop. A non-NULL empty name asks
+    // Windows to select/connect the logon session's default instead. Do not
+    // select winsta0 or grant access to the service's existing desktop.
+    // https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw
+    let mut desktop = desktop_name(identity.is_some());
+    startup.StartupInfo.lpDesktop = desktop
+        .as_mut()
+        .map_or(null_mut(), |name| name.as_mut_ptr());
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     // Explicit invalid handles prevent Windows from copying the service's
     // redirected standard handles instead of connecting the pseudoconsole.
@@ -573,6 +581,9 @@ pub fn spawn_with_context(
     if let Some(identity) = identity {
         // Windows otherwise opens the image/cwd as the service even though
         // the new process has a user token. Scope those opens to the user too.
+        // CreateProcessAsUser's documented remarks explicitly recommend this
+        // impersonation sequence. An earlier access check followed by a
+        // service-authority image open is not an equivalent security boundary.
         identity.with_impersonation(|| {
             checked(unsafe {
                 CreateProcessAsUserW(
@@ -620,6 +631,21 @@ pub fn spawn_with_context(
         stdout: parent_out.into(),
         stderr: parent_err.map(File::from),
     })
+}
+
+fn desktop_name(run_as: bool) -> Option<[u16; 1]> {
+    run_as.then_some([0])
+}
+
+#[cfg(test)]
+mod desktop_tests {
+    use super::desktop_name;
+
+    #[test]
+    fn run_as_selects_empty_name_instead_of_parent_desktop_inheritance() {
+        assert_eq!(desktop_name(true), Some([0]));
+        assert_eq!(desktop_name(false), None);
+    }
 }
 
 fn resolve_program(
