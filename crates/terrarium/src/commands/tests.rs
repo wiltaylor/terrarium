@@ -6673,7 +6673,11 @@ async fn system_prompt_flags() {
         vec![req(Get, "/api/agents/w")],
     )
     .await;
-    assert_eq!(out, "name  w\nsystem_prompt:\nLine one.\nLine two.\n");
+    // `held_mail` is absent: the caller may not see it (TER-1105).
+    assert_eq!(
+        out,
+        "held_mail  unavailable\nname       w\nsystem_prompt:\nLine one.\nLine two.\n"
+    );
 
     // Templates: the flag sets the key; `--no-system-prompt` removes it.
     ok(
@@ -9700,7 +9704,8 @@ async fn default_skill_flags_and_effective_skills() {
     .await;
     assert_eq!(
         out,
-        "effective_skills  fern-check (explicit), terrarium-db (default)\nname              w\n"
+        "effective_skills  fern-check (explicit), terrarium-db (default)\n\
+         held_mail         unavailable\nname              w\n"
     );
 }
 
