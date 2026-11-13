@@ -10288,6 +10288,12 @@ role_in_use`, `details.roles`, and `details.rules`, and nothing changes.
 The reference is not rewritten: `@x` follows the role, so there is no
 column to rewrite it to. A reference that named no column before the
 change does not block it.
+A change that leaves `@x` resolving by name to another column than
+before (the role `x` cleared while another column is named `x`) is
+refused the same way (TER-1246): `role_in_use`, or `column_in_use` when
+the column it named is removed. `@x` may still follow the role `x` to
+another column, and it may keep its own column by name, also renamed in
+the same change (`@x` rewritten to `@<new name>`).
 
 ## 20. Event sources and ingest
 
