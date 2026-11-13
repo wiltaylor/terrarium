@@ -4078,7 +4078,10 @@ async fn child_login_and_check_commands_get_no_xai_api_key() {
     if std::env::var_os(XAI_ENV_CHILD).is_none() {
         return;
     }
-    assert!(std::env::var_os("XAI_API_KEY").is_some(), "the parent set it");
+    assert!(
+        std::env::var_os("XAI_API_KEY").is_some(),
+        "the parent set it"
+    );
     let env = boot(
         |_| {},
         |u, bin| {
