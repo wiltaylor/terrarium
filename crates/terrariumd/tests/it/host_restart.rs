@@ -93,14 +93,20 @@ async fn process_restart(offline: bool) {
         .await;
     let wid = run.ok()["wait"]["id"].as_str().unwrap().to_owned();
     let sid = run.body["session_id"].as_str().unwrap().to_owned();
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while !pidfile.exists() {
+    // The shell creates the pid file before `echo $$` writes into it, so
+    // wait for a full line, not for the file to exist (TER-1166).
+    let pid = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&pidfile) {
+                if text.len() > 1 && text.ends_with('\n') {
+                    return text;
+                }
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .unwrap();
-    let pid = std::fs::read_to_string(&pidfile).unwrap();
+    .expect("pid file holds a full line within 30s");
     listener.abort();
     let _ = listener.await;
     if offline {
