@@ -89,9 +89,7 @@ pub fn classify(path: &str) -> Class {
         let share = unc.split('/').nth(1).unwrap_or_default();
         let bytes = share.as_bytes();
         if bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b'$' {
-            return Class::Refused(format!(
-                "{path}: administrative drive shares are refused"
-            ));
+            return Class::Refused(format!("{path}: administrative drive shares are refused"));
         }
         return Class::Other;
     }

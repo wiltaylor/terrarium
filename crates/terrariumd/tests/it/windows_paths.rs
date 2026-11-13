@@ -412,9 +412,13 @@ async fn windows_git_checkout_goes_only_to_a_capable_host_in_managed_mode() {
     )
     .await
     .err(422, "invalid");
-    td.post_as(aid, &url(&repos[0]), json!({"target": "p-plain", "path": "app"}))
-        .await
-        .err(422, "invalid");
+    td.post_as(
+        aid,
+        &url(&repos[0]),
+        json!({"target": "p-plain", "path": "app"}),
+    )
+    .await
+    .err(422, "invalid");
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(received.try_recv().is_err(), "no frame for a refusal");
     let mut next_frame = async || {
@@ -429,7 +433,11 @@ async fn windows_git_checkout_goes_only_to_a_capable_host_in_managed_mode() {
     };
     // Token branch.
     let answer = td
-        .post_as(aid, &url(&repos[0]), json!({"target": "p-win", "path": "app"}))
+        .post_as(
+            aid,
+            &url(&repos[0]),
+            json!({"target": "p-win", "path": "app"}),
+        )
         .await;
     assert_eq!(answer.ok()["action"], "cloned", "{}", answer.body);
     let r = next_frame().await;
@@ -440,19 +448,28 @@ async fn windows_git_checkout_goes_only_to_a_capable_host_in_managed_mode() {
         "the token goes in its typed field"
     );
     assert!(
-        r.windows_run_as.as_ref().is_some_and(|w| w.password == LOGIN),
+        r.windows_run_as
+            .as_ref()
+            .is_some_and(|w| w.password == LOGIN),
         "run-as is required (F5)"
     );
     let CheckoutMode::Managed(m) = &r.mode else {
         panic!("an agent checkout must be managed: {:?}", r.mode)
     };
-    assert!(m.commit_hook.contains("# terrarium managed provenance hook"));
+    assert!(
+        m.commit_hook
+            .contains("# terrarium managed provenance hook")
+    );
     terrarium_host::git_checkout::check_push_hook(&m.push_hook).unwrap();
     assert_eq!(m.repo_id, repos[0]);
     // SSH-key branch.
-    td.post_as(aid, &url(&repos[1]), json!({"target": "p-win", "path": "keyed"}))
-        .await
-        .ok();
+    td.post_as(
+        aid,
+        &url(&repos[1]),
+        json!({"target": "p-win", "path": "keyed"}),
+    )
+    .await
+    .ok();
     let r = next_frame().await;
     let Some(GitCredential::SshKey { key }) = &r.credential else {
         panic!("the SSH key goes in its typed field")
@@ -465,7 +482,11 @@ async fn windows_git_checkout_goes_only_to_a_capable_host_in_managed_mode() {
         .to_owned();
     // A failing checkout answers without the secrets.
     let failed = td
-        .post_as(aid, &url(&repos[2]), json!({"target": "p-win", "path": "broken"}))
+        .post_as(
+            aid,
+            &url(&repos[2]),
+            json!({"target": "p-win", "path": "broken"}),
+        )
         .await;
     failed.err(422, "invalid");
     next_frame().await;
@@ -481,7 +502,10 @@ async fn windows_git_checkout_goes_only_to_a_capable_host_in_managed_mode() {
             assert!(!text.contains(sentinel), "a secret in the {place}");
         }
     }
-    assert!(events.contains("repo.checkout"), "checkout events were recorded");
+    assert!(
+        events.contains("repo.checkout"),
+        "checkout events were recorded"
+    );
     fake.abort();
     listener.abort();
 }

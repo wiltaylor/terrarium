@@ -2945,7 +2945,9 @@ mod tests {
             let opened = reg.open_bound("h", None, frame);
             if allowed {
                 assert!(opened.is_ok(), "{os} {capable}");
-                assert!(matches!(rx.try_recv(), Ok(Outgoing::Frame(f)) if matches!(*f, DaemonFrame::GitCheckout(_))));
+                assert!(
+                    matches!(rx.try_recv(), Ok(Outgoing::Frame(f)) if matches!(*f, DaemonFrame::GitCheckout(_)))
+                );
             } else {
                 assert!(
                     matches!(opened, Err(HostError::GitCheckoutUnsupported)),

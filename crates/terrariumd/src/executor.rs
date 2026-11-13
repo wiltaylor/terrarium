@@ -6051,7 +6051,11 @@ mod tests {
             if patterns == "*" {
                 continue;
             }
-            let list = if action.contains("echo") { &mut reject } else { &mut allow };
+            let list = if action.contains("echo") {
+                &mut reject
+            } else {
+                &mut allow
+            };
             list.extend(patterns.split('|').map(str::to_owned));
         }
         let mut want: Vec<_> = ALLOW_PATTERNS.iter().map(|s| s.to_string()).collect();
