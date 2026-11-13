@@ -3194,6 +3194,34 @@ fn check_columns(current: &[ColumnRow], specs: &[ColumnSpec]) -> ApiResult<Vec<W
     Ok(out)
 }
 
+/// The legacy board PATCH keeps today's behaviour (TER-1112): the check of
+/// a role goes with the role. A column that gets the role `working` needs
+/// met dependencies and one that loses it no longer does; the same for
+/// `blocked` and the comment. The other checks stay. A change raises the
+/// options version.
+fn carry_role_checks(t: &Tx<'_>, old: &ColumnRow, role: Option<&str>) -> ApiResult<()> {
+    let was = old.role.as_deref();
+    if was == role {
+        return Ok(());
+    }
+    let mut c = old.checks;
+    if was == Some(WORKING) || role == Some(WORKING) {
+        c.require_dependencies_met = role == Some(WORKING);
+    }
+    if was == Some(BLOCKED) || role == Some(BLOCKED) {
+        c.require_comment_on_enter = role == Some(BLOCKED);
+    }
+    if c != old.checks {
+        t.execute(
+            "UPDATE board_columns SET require_comment_on_enter = ?2,
+                require_dependencies_met = ?3, options_version = options_version + 1
+             WHERE id = ?1",
+            params![old.id, c.require_comment_on_enter, c.require_dependencies_met],
+        )?;
+    }
+    Ok(())
+}
+
 /// Set the columns: the list is the whole board, in order (PLAN §13).
 ///
 /// - `backlog` is first and `done` is last. They stay, keep their names,
@@ -3277,12 +3305,29 @@ pub fn set_columns(
                      WHERE id = ?1",
                     params![id, w.name, w.title, i as i64, w.wip_limit, w.role],
                 )?;
+                if let Some(old) = current.iter().find(|c| c.id == id) {
+                    carry_role_checks(t, old, w.role.as_deref())?;
+                }
             }
             None => {
+                let c = ColumnChecks::default_for(&w.name, w.role.as_deref());
                 t.execute(
-                    "INSERT INTO board_columns (project, name, title, position, wip_limit, role)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![project, w.name, w.title, i as i64, w.wip_limit, w.role],
+                    "INSERT INTO board_columns (project, name, title, position, wip_limit, role,
+                         require_comment_on_enter, require_dependencies_met, terminal_for_members,
+                         clear_eta_on_enter)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        project,
+                        w.name,
+                        w.title,
+                        i as i64,
+                        w.wip_limit,
+                        w.role,
+                        c.require_comment_on_enter,
+                        c.require_dependencies_met,
+                        c.terminal_for_members,
+                        c.clear_eta_on_enter
+                    ],
                 )?;
             }
         }
