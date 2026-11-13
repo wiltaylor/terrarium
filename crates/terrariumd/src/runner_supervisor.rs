@@ -1099,8 +1099,11 @@ struct Slot {
     rest_since: Option<Instant>,
     /// TER-1104: the last kick of the undrained queue of this episode. It
     /// stays over a kick restart (the same epoch), and ends when the queue
-    /// is seen drained or at the next start.
+    /// is seen drained, when a turn ends at rest, or at the next start.
     kick: Option<Kick>,
+    /// TER-1104: a turn (`working`) began since the last rest. Its end at
+    /// rest ends the kick episode; a stall does not.
+    in_turn: bool,
 }
 
 /// TER-1104: the steps of a kick of an agent at rest whose deliverable
@@ -1130,6 +1133,17 @@ impl KickStep {
 struct Kick {
     step: KickStep,
     at: Instant,
+}
+
+/// TER-1104: a claimed kick step ([`RunnerSupervisor::kick_plan`]): the
+/// launch and the runner it was claimed on, and the step it replaced.
+struct KickPlan {
+    id: AgentId,
+    epoch: u64,
+    step: KickStep,
+    runner: Arc<dyn RunnerHandle>,
+    queue: KickQueue,
+    previous: Option<Kick>,
 }
 
 /// What a kick check found queued for an agent: the number of items and
@@ -1330,16 +1344,31 @@ impl Slot {
             start_reason: None,
             rest_since: None,
             kick: None,
+            in_turn: false,
         }
     }
 
-    /// TER-1104: note the runner status `status` for the rest clock. A
-    /// rest keeps its first time; a turn or a start ends it.
-    fn note_rest(&mut self, status: AgentStatus, now: Instant) {
-        if status.is_resting() || status == AgentStatus::Blocked {
+    /// TER-1104: note the runner status `status` with its `reason` for the
+    /// rest clock. A rest is `idle`, `waiting`, or a stall (`blocked` with
+    /// [`terrarium_runner::STALL_REASON`]); it keeps its first time. A
+    /// question or dialog on screen and unsubmitted input are `blocked` in
+    /// a turn, not rest: they end the clock, as a turn or a start does. A
+    /// turn that ends at rest (`working`, then `idle` or `waiting`) ends
+    /// the kick episode: the agent works again, so a later stall starts at
+    /// the first step. A turn that stalls does not end it, so a harness
+    /// that stalls in each turn still reaches `blocked`.
+    fn note_rest(&mut self, status: AgentStatus, reason: Option<&str>, now: Instant) {
+        let stalled =
+            status == AgentStatus::Blocked && reason == Some(terrarium_runner::STALL_REASON);
+        if status.is_resting() || stalled {
             self.rest_since.get_or_insert(now);
         } else {
             self.rest_since = None;
+        }
+        if status == AgentStatus::Working {
+            self.in_turn = true;
+        } else if status.is_resting() && std::mem::take(&mut self.in_turn) {
+            self.kick = None;
         }
     }
 
@@ -1351,6 +1380,7 @@ impl Slot {
     fn kickable(&self) -> bool {
         self.runner.is_some()
             && self.phase == Phase::Running
+            // A `blocked` runner has a rest time only for a stall.
             && self.rest_since.is_some()
             && (self.seen.is_resting() || self.seen == AgentStatus::Blocked)
             && !self.stop_requested
@@ -2668,6 +2698,7 @@ impl RunnerSupervisor {
                     slot.reached_idle = false;
                     slot.seen = runner.status();
                     slot.rest_since = None;
+                    slot.in_turn = false;
                     slot.pointer_busy = false;
                     slot.account = accounts.account.clone();
                     slot.bound = accounts.bound.clone();
@@ -3028,7 +3059,10 @@ impl RunnerSupervisor {
             slot.seen = hello.status;
             // TER-1104: an adopted agent at rest starts its rest clock now.
             slot.rest_since = None;
-            slot.note_rest(hello.status, Instant::now());
+            slot.in_turn = false;
+            // The hello has no reason: a `blocked` runner is not taken
+            // for a stall.
+            slot.note_rest(hello.status, None, Instant::now());
             slot.pointer_busy = false;
             // A turn that runs across a daemon restart holds a stream
             // (`crate::stream_limit`).
@@ -3125,13 +3159,13 @@ impl RunnerSupervisor {
                     slot.session = Some(harness_session.clone());
                 }
             }
-            Event::StatusChanged { to, .. } => {
+            Event::StatusChanged { to, reason, .. } => {
                 if let Some(slot) = lock(&self.inner.slots)
                     .get_mut(&id)
                     .filter(|s| s.epoch == epoch)
                 {
                     slot.seen = *to;
-                    slot.note_rest(*to, Instant::now());
+                    slot.note_rest(*to, reason.as_deref(), Instant::now());
                     if to.is_resting() && rec.seq.is_some() {
                         slot.rest_seq = slot.rest_seq.max(rec.seq);
                     }
@@ -3947,6 +3981,7 @@ impl RunnerSupervisor {
         // its epoch and does not come here.
         slot.rest_since = None;
         slot.kick = None;
+        slot.in_turn = false;
         slot.restart_requested = false;
         slot.restarts.clear();
         slot.upgrade_pending = false;
@@ -4638,11 +4673,15 @@ impl RunnerSupervisor {
     ///    the status `blocked` ("queue not draining") and one mail to the
     ///    project lead.
     ///
-    /// The episode ends when a check sees the queue drained. A working
-    /// agent has no rest, so queue growth during work never kicks it. No
-    /// kick for an agent that is down (paused, parked, `error`), held by a
-    /// quota, or during the self-update drain. Held mail of the loop guard
-    /// is not `queued`: it counts for nothing and is never released here.
+    /// The episode ends when a check sees the queue drained, or when a turn
+    /// of the agent ends at rest ([`Slot::note_rest`]). A working agent has no
+    /// rest, so queue growth during work never kicks it; a `blocked` runner
+    /// rests only for a stall, never for a question, a dialog, or input on
+    /// screen. No kick for an agent that is down (paused, parked, `error`),
+    /// held by a quota, or during the self-update drain; these are checked
+    /// again right before each step ([`Self::kick_run`]). Held mail of the
+    /// loop guard is not `queued`: it counts for nothing and is never
+    /// released here.
     async fn kick_tick(&self, now: Instant) {
         let Some(state) = self.state() else { return };
         if state.self_update.draining() || state.usage.streams.is_closed() {
@@ -4696,48 +4735,139 @@ impl RunnerSupervisor {
             }
         };
         let queue = kick_queue(&queued, rows, pointer_other, chrono::Utc::now());
-        let (step, agent) = {
-            let mut slots = lock(&self.inner.slots);
-            let Some(slot) = slots
-                .get_mut(&id)
-                .filter(|s| s.epoch == epoch && s.kickable() && s.rest_since == Some(rest))
-            else {
-                return;
-            };
-            if queue.count == 0 {
-                if slot.kick.take().is_some() {
-                    info!(agent = %id, "the queue drained: the kick episode ends");
-                }
-                return;
+        if let Some(plan) = self.kick_plan(id, epoch, rest, queue, now) {
+            self.kick_run(state, plan).await;
+        }
+    }
+
+    /// TER-1104: decide the next kick step of `id` under the slot lock and
+    /// claim it: the episode moves on, and for the restart the runner of
+    /// this launch is taken and `restart_requested` set, so no turn, recap
+    /// or pointer goes out from here. `None`: no step (the slot moved on,
+    /// the queue drained, or the step of this episode already ran).
+    fn kick_plan(
+        &self,
+        id: AgentId,
+        epoch: u64,
+        rest: Instant,
+        queue: KickQueue,
+        now: Instant,
+    ) -> Option<KickPlan> {
+        let mut slots = lock(&self.inner.slots);
+        let slot = slots
+            .get_mut(&id)
+            .filter(|s| s.epoch == epoch && s.kickable() && s.rest_since == Some(rest))?;
+        if queue.count == 0 {
+            if slot.kick.take().is_some() {
+                info!(agent = %id, "the queue drained: the kick episode ends");
             }
-            let Some(step) = next_kick(slot.kick, rest, now) else {
-                return;
-            };
-            slot.kick = Some(Kick { step, at: now });
-            if step == KickStep::Restart {
-                // From here no turn, recap or pointer goes out.
-                slot.restart_requested = true;
-            }
-            (step, slot.agent.clone())
+            return None;
+        }
+        let step = next_kick(slot.kick, rest, now)?;
+        let runner = slot.runner.clone()?;
+        let previous = slot.kick.replace(Kick { step, at: now });
+        if step == KickStep::Restart {
+            slot.restart_requested = true;
+            slot.resume = slot.agent.session.clone().or(slot.session.clone());
+        }
+        Some(KickPlan {
+            id,
+            epoch,
+            step,
+            runner,
+            queue,
+            previous,
+        })
+    }
+
+    /// TER-1104: the claimed step can still run, checked right before it:
+    /// no self-update drain, no quota hold, the same launch and runner, no
+    /// stop (a pause) requested, and for the restart its claim still held.
+    fn kick_still_wanted(&self, state: &Shared, plan: &KickPlan) -> bool {
+        if state.self_update.draining()
+            || state.usage.streams.is_closed()
+            || self.held(plan.id).is_some()
+        {
+            return false;
+        }
+        let slots = lock(&self.inner.slots);
+        let Some(slot) = slots.get(&plan.id) else {
+            return false;
         };
+        let same = slot.epoch == plan.epoch
+            && slot.phase == Phase::Running
+            && !slot.stop_requested
+            && slot
+                .runner
+                .as_ref()
+                .is_some_and(|r| Arc::ptr_eq(r, &plan.runner));
+        same && match plan.step {
+            KickStep::Restart => slot.restart_requested,
+            KickStep::Reload | KickStep::Blocked => slot.kickable(),
+        }
+    }
+
+    /// TER-1104: run a claimed kick step ([`Self::kick_plan`]). A step that
+    /// is no longer wanted ([`Self::kick_still_wanted`]) is undone: the
+    /// episode goes back to its last step, and a restart claim of the same
+    /// runner is released. The restart kills exactly the claimed runner,
+    /// and the relaunch of `on_exit` resumes the session: the kick never
+    /// starts an agent, so a pause or an exit into `error` that came first
+    /// wins.
+    async fn kick_run(&self, state: &Shared, plan: KickPlan) {
+        let id = plan.id;
+        if !self.kick_still_wanted(state, &plan) {
+            let released = {
+                let mut slots = lock(&self.inner.slots);
+                match slots.get_mut(&id).filter(|s| s.epoch == plan.epoch) {
+                    Some(slot) => {
+                        slot.kick = plan.previous;
+                        let same = slot
+                            .runner
+                            .as_ref()
+                            .is_some_and(|r| Arc::ptr_eq(r, &plan.runner));
+                        let release =
+                            plan.step == KickStep::Restart && same && slot.restart_requested;
+                        if release {
+                            slot.restart_requested = false;
+                        }
+                        release
+                    }
+                    None => false,
+                }
+            };
+            info!(agent = %id, step = plan.step.as_str(), "the kick step is no longer wanted: not run");
+            if released {
+                self.deliver_pending(id);
+            }
+            return;
+        }
         info!(
             agent = %id,
-            step = step.as_str(),
-            count = queue.count,
-            oldest_age_s = ?queue.oldest_age_s,
+            step = plan.step.as_str(),
+            count = plan.queue.count,
+            oldest_age_s = ?plan.queue.oldest_age_s,
             "the queue does not drain: kicking the agent"
         );
-        self.record_kick(state, id, step, queue).await;
-        match step {
-            KickStep::Reload => self.reload_pointer(id).await,
+        match plan.step {
+            KickStep::Reload => {
+                self.record_kick(state, id, plan.step, plan.queue).await;
+                self.reload_pointer(id).await;
+            }
             KickStep::Restart => {
-                if let Err(e) = self.restart(agent).await {
-                    warn!(agent = %id, "the kick restart failed: {e}");
+                let _ = plan.runner.set_stopped_by(StoppedBy::Policy).await;
+                match plan.runner.kill().await {
+                    Ok(()) => self.record_kick(state, id, plan.step, plan.queue).await,
+                    Err(e) => {
+                        warn!(agent = %id, "the kick restart failed: {e}");
+                        self.restart_not_on_its_way(id, &plan.runner, None);
+                    }
                 }
             }
             KickStep::Blocked => {
+                self.record_kick(state, id, plan.step, plan.queue).await;
                 self.emit_status(id, AgentStatus::Blocked, KICK_BLOCKED_REASON);
-                self.mail_kick_lead(state, id, queue).await;
+                self.mail_kick_lead(state, id, plan.queue).await;
             }
         }
     }
@@ -9666,6 +9796,44 @@ mod tests {
         slot.rest_since = Some(rest);
     }
 
+    /// Pass the runner status `from` -> `to` with `reason` on, as the
+    /// forward task does.
+    fn pass_status(
+        sup: &RunnerSupervisor,
+        id: AgentId,
+        from: AgentStatus,
+        to: AgentStatus,
+        reason: Option<&str>,
+    ) {
+        let epoch = lock(&sup.inner.slots)[&id].epoch;
+        sup.pass_on(
+            id,
+            epoch,
+            EventRecord::now(
+                id,
+                Event::StatusChanged {
+                    from,
+                    to,
+                    reason: reason.map(str::to_owned),
+                },
+            ),
+        );
+    }
+
+    /// A turn starts and stalls; the time of the stall.
+    fn stall(sup: &RunnerSupervisor, id: AgentId) -> Instant {
+        let from = lock(&sup.inner.slots)[&id].seen;
+        pass_status(sup, id, from, AgentStatus::Working, None);
+        pass_status(
+            sup,
+            id,
+            AgentStatus::Working,
+            AgentStatus::Blocked,
+            Some(terrarium_runner::STALL_REASON),
+        );
+        lock(&sup.inner.slots)[&id].rest_since.expect("a stall is rest")
+    }
+
     fn kick_step(sup: &RunnerSupervisor, id: AgentId) -> Option<KickStep> {
         lock(&sup.inner.slots)[&id].kick.map(|k| k.step)
     }
@@ -9801,17 +9969,56 @@ mod tests {
         let mut slot = Slot::new(agent);
         let t0 = Instant::now();
         let t1 = t0 + Duration::from_secs(5);
-        slot.note_rest(AgentStatus::Idle, t0);
+        let stall = Some(terrarium_runner::STALL_REASON);
+        slot.note_rest(AgentStatus::Idle, None, t0);
         assert_eq!(slot.rest_since, Some(t0));
-        slot.note_rest(AgentStatus::Blocked, t1);
-        slot.note_rest(AgentStatus::Waiting, t1);
+        slot.note_rest(AgentStatus::Waiting, None, t1);
         assert_eq!(slot.rest_since, Some(t0));
-        slot.note_rest(AgentStatus::Working, t1);
+        slot.note_rest(AgentStatus::Working, None, t1);
         assert_eq!(slot.rest_since, None);
-        slot.note_rest(AgentStatus::Idle, t1);
+        // A stall is rest; a question, a dialog or input on screen is not.
+        slot.note_rest(AgentStatus::Blocked, stall, t1);
         assert_eq!(slot.rest_since, Some(t1));
-        slot.note_rest(AgentStatus::Starting, t1);
+        for reason in [
+            "question on screen",
+            "Claude needs your permission to use Bash",
+            terrarium_core::adapter::INPUT_PENDING_REASON,
+        ] {
+            slot.note_rest(AgentStatus::Blocked, stall, t1);
+            slot.note_rest(AgentStatus::Blocked, Some(reason), t1);
+            assert_eq!(slot.rest_since, None, "{reason}");
+        }
+        slot.note_rest(AgentStatus::Blocked, None, t1);
         assert_eq!(slot.rest_since, None);
+        slot.note_rest(AgentStatus::Starting, None, t1);
+        assert_eq!(slot.rest_since, None);
+    }
+
+    /// TER-1104: a turn that ends at rest ends the kick episode; a turn
+    /// that stalls keeps it, so a harness that stalls in each turn still
+    /// escalates.
+    #[test]
+    fn a_turn_that_ends_at_rest_ends_the_episode() {
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": AgentId::new(), "name": "a", "project": "p", "harness": "claude", "workspace": "/w"
+        }))
+        .unwrap();
+        let mut slot = Slot::new(agent);
+        let t = Instant::now();
+        let kick = Some(Kick {
+            step: KickStep::Restart,
+            at: t,
+        });
+        slot.kick = kick;
+        slot.note_rest(AgentStatus::Idle, None, t);
+        assert_eq!(slot.kick, kick, "a rest with no turn keeps it");
+        slot.note_rest(AgentStatus::Working, None, t);
+        slot.note_rest(AgentStatus::Blocked, Some(terrarium_runner::STALL_REASON), t);
+        assert_eq!(slot.kick, kick, "a stalled turn keeps it");
+        slot.note_rest(AgentStatus::Working, None, t);
+        assert_eq!(slot.kick, kick, "a turn that runs keeps it");
+        slot.note_rest(AgentStatus::Idle, None, t);
+        assert_eq!(slot.kick, None, "a turn that ended at rest ends it");
     }
 
     /// TER-1104: queued mail counts once each (a pointer mail item is
@@ -9998,10 +10205,10 @@ mod tests {
             .await
             .unwrap();
         let mut rx = sup.inner.tx.subscribe();
-        let rest = Instant::now();
+        // A turn stalls: the runner is `blocked` with the stall reason and
+        // takes no pointer.
+        let rest = stall(&sup, id);
         let at = |s: u64| rest + Duration::from_secs(s);
-        // A stalled runner (`blocked` in a turn) takes no pointer.
-        set_rest(&sup, id, AgentStatus::Blocked, rest);
         sup.kick_tick(at(61)).await;
         settle(&sup, id).await;
         assert!(lock(&runner.typed).is_empty());
@@ -10017,13 +10224,48 @@ mod tests {
         }
         sup.kick_tick(at(302)).await;
         assert_eq!(runner.kills.load(Ordering::SeqCst), 1);
-        // The relaunch (same epoch) rests again, still stalled.
+        // The kill ends the harness: the real `on_exit` takes the restart
+        // claim and relaunches with resume in the same epoch. The episode
+        // stays.
+        let epoch = lock(&sup.inner.slots)[&id].epoch;
+        sup.on_exit(
+            id,
+            epoch,
+            ExitStatus {
+                code: 0,
+                signal: Some("KILL".into()),
+            },
+        )
+        .await;
+        {
+            let slots = lock(&sup.inner.slots);
+            let slot = &slots[&id];
+            assert!(!slot.restart_requested);
+            assert!(slot.runner.is_none());
+            assert_eq!(slot.phase, Phase::Restarting);
+            assert_eq!(slot.epoch, epoch);
+            assert_eq!(slot.kick.map(|k| k.step), Some(KickStep::Restart));
+        }
+        // The fixture has no harness to launch: the relaunch task ends
+        // (an error). The new runner of a relaunch is put in by hand.
+        let start = Instant::now();
+        while lock(&sup.inner.slots)[&id].phase == Phase::Restarting {
+            assert!(start.elapsed() < Duration::from_secs(10), "the relaunch hangs");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         {
             let mut slots = lock(&sup.inner.slots);
             let slot = slots.get_mut(&id).unwrap();
-            slot.restart_requested = false;
-            slot.rest_since = Some(at(310));
+            assert_eq!(slot.epoch, epoch);
+            assert_eq!(slot.kick.map(|k| k.step), Some(KickStep::Restart));
+            slot.runner = Some(runner.clone());
+            slot.phase = Phase::Running;
+            slot.seen = AgentStatus::Starting;
+            slot.rest_since = None;
+            slot.in_turn = false;
         }
+        // The relaunched harness stalls again in its turn.
+        stall(&sup, id);
         sup.kick_tick(at(600)).await;
         assert_eq!(kick_step(&sup, id), Some(KickStep::Restart));
         assert!(mail_to(&state, lead).await.is_empty());
@@ -10085,7 +10327,7 @@ mod tests {
             let mut slots = lock(&sup.inner.slots);
             let slot = slots.get_mut(&id).unwrap();
             slot.seen = AgentStatus::Working;
-            slot.note_rest(AgentStatus::Working, Instant::now());
+            slot.note_rest(AgentStatus::Working, None, Instant::now());
         }
         let now = Instant::now();
         for s in [61, 301, 601, 100_000] {
@@ -10156,6 +10398,118 @@ mod tests {
                     .unwrap()
             };
             assert!(still_held, "{case}");
+        }
+    }
+
+    /// TER-1104 (review R3): a runner `blocked` on a question, a harness
+    /// dialog, or unsubmitted input is in a turn, not at rest: never
+    /// reloaded, restarted, or marked `blocked` by the kick.
+    #[tokio::test]
+    async fn question_dialog_and_input_blocks_are_never_kicked() {
+        for reason in [
+            "question on screen",
+            "Claude needs your permission to use Bash",
+            terrarium_core::adapter::INPUT_PENDING_REASON,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+            store_mail(&state, id, false).await;
+            pass_status(&sup, id, AgentStatus::Idle, AgentStatus::Working, None);
+            pass_status(
+                &sup,
+                id,
+                AgentStatus::Working,
+                AgentStatus::Blocked,
+                Some(reason),
+            );
+            let now = Instant::now();
+            for s in [61, 301, 601, 100_000] {
+                sup.kick_tick(now + Duration::from_secs(s)).await;
+            }
+            settle(&sup, id).await;
+            assert!(lock(&runner.typed).is_empty(), "{reason}");
+            assert!(kicked_events(&state).await.is_empty(), "{reason}");
+            assert_eq!(kick_step(&sup, id), None, "{reason}");
+            assert_eq!(runner.kills.load(Ordering::SeqCst), 0, "{reason}");
+        }
+    }
+
+    /// TER-1104 (review R2): a pause, an exit into `error`, the self-update
+    /// drain, or a quota hold that comes between the claim of the restart
+    /// and its run: the kick kills nothing and starts nothing, records no
+    /// restart, and the episode goes back to its last step.
+    #[tokio::test]
+    async fn a_pause_or_a_drain_between_the_claim_and_the_restart_starts_nothing() {
+        for case in ["pause", "error", "drain", "quota"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+            store_mail(&state, id, false).await;
+            let rest = stall(&sup, id);
+            let at = |s: u64| rest + Duration::from_secs(s);
+            sup.kick_tick(at(61)).await;
+            settle(&sup, id).await;
+            assert_eq!(kick_step(&sup, id), Some(KickStep::Reload), "{case}");
+            let epoch = lock(&sup.inner.slots)[&id].epoch;
+            let queue = KickQueue {
+                count: 1,
+                oldest_age_s: None,
+            };
+            let plan = sup
+                .kick_plan(id, epoch, rest, queue, at(301))
+                .expect("the restart is claimed");
+            assert_eq!(plan.step, KickStep::Restart, "{case}");
+            assert!(lock(&sup.inner.slots)[&id].restart_requested, "{case}");
+            match case {
+                // What a stop (or a fatal exit) and its `on_exit` leave.
+                "pause" | "error" => {
+                    let mut slots = lock(&sup.inner.slots);
+                    let slot = slots.get_mut(&id).unwrap();
+                    slot.stop_requested = case == "pause";
+                    slot.runner = None;
+                    slot.down(if case == "pause" {
+                        AgentStatus::Stopped
+                    } else {
+                        AgentStatus::Error
+                    });
+                }
+                "drain" => crate::self_update::start_drain(&state, "test"),
+                _ => sup
+                    .hold_turns(
+                        id,
+                        Some(TurnHold {
+                            until: None,
+                            reason: "the daily budget is used up".into(),
+                        }),
+                    )
+                    .await
+                    .unwrap(),
+            }
+            sup.kick_run(&state, plan).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(runner.kills.load(Ordering::SeqCst), 0, "{case}");
+            assert_eq!(
+                kicked_steps(&kicked_events(&state).await),
+                ["reload"],
+                "{case}"
+            );
+            let slots = lock(&sup.inner.slots);
+            let slot = &slots[&id];
+            assert_eq!(slot.kick.map(|k| k.step), Some(KickStep::Reload), "{case}");
+            match case {
+                "pause" => {
+                    assert!(slot.runner.is_none());
+                    assert_eq!(slot.phase, Phase::Down(AgentStatus::Stopped));
+                }
+                "error" => {
+                    assert!(slot.runner.is_none());
+                    assert_eq!(slot.phase, Phase::Down(AgentStatus::Error));
+                }
+                _ => {
+                    // The claim is released: the agent runs on.
+                    assert!(!slot.restart_requested, "{case}");
+                    assert_eq!(slot.phase, Phase::Running, "{case}");
+                }
+            }
         }
     }
 }

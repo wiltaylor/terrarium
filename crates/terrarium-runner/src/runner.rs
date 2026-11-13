@@ -173,6 +173,11 @@ impl Delivery {
     }
 }
 
+/// The `blocked` reason of a runner whose turn showed no output and no
+/// hook for `stall_timeout` ([`Block::Stall`]). The daemon tells a stall
+/// from a question or unsubmitted input by it (TER-1104).
+pub const STALL_REASON: &str = "stalled";
+
 /// Why the agent is `blocked`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Block {
@@ -1222,7 +1227,7 @@ impl Inner {
                     if now.duration_since(state.last_activity) >= self.config.stall_timeout =>
                 {
                     state.block = Some(Block::Stall);
-                    self.transition(&mut state, AgentStatus::Blocked, "stalled");
+                    self.transition(&mut state, AgentStatus::Blocked, STALL_REASON);
                 }
                 _ => {}
             }
