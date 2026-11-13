@@ -3472,7 +3472,13 @@ mod tests {
             loop {
                 tokio::select! {
                     why = ended.recv() => break why.unwrap(),
-                    _ = ws.next() => {}
+                    msg = ws.next() => {
+                        // After the close `next` is ready at once: wait for
+                        // the reason instead of spinning on it.
+                        if matches!(msg, None | Some(Err(_)) | Some(Ok(Message::Close(_)))) {
+                            break ended.recv().await.unwrap();
+                        }
+                    }
                 }
             }
         })
