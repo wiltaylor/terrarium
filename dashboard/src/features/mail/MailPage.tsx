@@ -54,10 +54,12 @@ export function MailPanel(props: { project: string }) {
 
 function LocalMail(props: { project: string }) {
   const [params, setParams] = createSignal<LogParams>({});
-  return <MailContent project={props.project} params={params()} onParams={(patch) => setParams((old) => ({ ...old, ...patch }))} />;
+  /** Message posts of this panel get ids of their own (see `mailPostId`). */
+  const idScope = `panel-${createUniqueId()}`;
+  return <MailContent project={props.project} idScope={idScope} params={params()} onParams={(patch) => setParams((old) => ({ ...old, ...patch }))} />;
 }
 
-function MailContent(props: { project?: string; params: LogParams; onParams: (patch: LogParams, options?: { replace: boolean }) => void }) {
+function MailContent(props: { project?: string; idScope?: string; params: LogParams; onParams: (patch: LogParams, options?: { replace: boolean }) => void }) {
   const { api, projects, events } = useInstance();
   const namesId = `mail-log-names-${createUniqueId()}`;
   /** The project of the route wins over the filter. */
@@ -198,6 +200,7 @@ function MailContent(props: { project?: string; params: LogParams; onParams: (pa
                   now={now()}
                   open={openRow() === id}
                   project={props.project}
+                  idScope={props.idScope}
                   onToggle={() => toggle(m())}
                   onThread={() => setFilter({ thread: m().thread_id })}
                   feed={feed}
@@ -222,6 +225,7 @@ function LogRow(props: {
   now: number;
   open: boolean;
   project?: string;
+  idScope?: string;
   onToggle: () => void;
   onThread: () => void;
   feed: MailFeed;
@@ -262,7 +266,7 @@ function LogRow(props: {
       <Show when={props.open}>
         <tr class="log-thread-row">
           <td colspan={5}>
-            <ThreadPanel thread={m().thread_id} row={m()} project={props.project} feed={props.feed} onCompose={props.onCompose} onError={props.onError} />
+            <ThreadPanel thread={m().thread_id} row={m()} project={props.project} idScope={props.idScope} feed={props.feed} onCompose={props.onCompose} onError={props.onError} />
           </td>
         </tr>
       </Show>
@@ -270,7 +274,7 @@ function LogRow(props: {
   );
 }
 
-function ThreadPanel(props: { thread: string; row: Message; project?: string; feed: MailFeed; onCompose: (to?: string) => void; onError: (e: unknown) => void }) {
+function ThreadPanel(props: { thread: string; row: Message; project?: string; idScope?: string; feed: MailFeed; onCompose: (to?: string) => void; onError: (e: unknown) => void }) {
   const { api } = useInstance();
   const messages = createMemo(() => threadOf(props.feed.messages(), props.thread));
   const read = useReadBoundary("mail", () => props.thread, () => messages().map((m) => m.created_at));
@@ -297,7 +301,7 @@ function ThreadPanel(props: { thread: string; row: Message; project?: string; fe
           <>
           <Show when={index() === read.first()}><ReadBoundary /></Show>
           <div class={m.id === props.row.id ? "current" : undefined}>
-            <MessageView message={m} number={index() + 1} project={props.project} onQuote={(quote) => {
+            <MessageView message={m} number={index() + 1} project={props.project} idScope={props.idScope} onQuote={(quote) => {
               setText((old) => old + (old ? "\n\n" : "") + quote);
               replyInput?.focus();
             }} />
