@@ -9043,7 +9043,7 @@ mod tests {
         assert!(lock(&sup.inner.parked).is_empty());
         let rows = state
             .db
-            .read(|c| crate::store::pointers::load(c))
+            .read(crate::store::pointers::load)
             .await
             .unwrap();
         assert!(rows.is_empty(), "{rows:?}");
@@ -9105,7 +9105,7 @@ mod tests {
         );
         let rows = state
             .db
-            .read(|c| crate::store::pointers::load(c))
+            .read(crate::store::pointers::load)
             .await
             .unwrap();
         assert!(rows.is_empty(), "{rows:?}");
