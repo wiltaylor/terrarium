@@ -1004,10 +1004,8 @@ fn check_review_args(ctx: &Context, args: &Map<String, Value>) -> Vec<String> {
             "review_start.template `{t}` is not a template name"
         ));
     }
-    if let (Some(columns), Some(from)) = (
-        &ctx.columns,
-        args.get("from").and_then(Value::as_str),
-    ) && let Some(c) = resolve_column(columns, from)
+    if let (Some(columns), Some(from)) = (&ctx.columns, args.get("from").and_then(Value::as_str))
+        && let Some(c) = resolve_column(columns, from)
         && review_column(columns).is_none_or(|r| r.name != c.name)
     {
         out.push(format!(
@@ -2300,7 +2298,8 @@ rule "validate-pass" {
         };
         let p = check_action(&ctx, &action);
         assert!(
-            p.iter().any(|(_, m)| m.contains("is not the review column")),
+            p.iter()
+                .any(|(_, m)| m.contains("is not the review column")),
             "{p:?}"
         );
     }

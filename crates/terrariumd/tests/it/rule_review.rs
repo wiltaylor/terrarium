@@ -281,9 +281,17 @@ async fn the_round_limit_keeps_the_card_and_mails_the_owner_once() {
     let r = runs(&td).await;
     let mine: Vec<&Value> = r.iter().filter(|r| r["rule"] == "review/review").collect();
     assert_eq!(mine.len(), 3, "{r:?}");
-    assert!(mine[1].to_string().contains("round limit (1)"), "{}", mine[1]);
+    assert!(
+        mine[1].to_string().contains("round limit (1)"),
+        "{}",
+        mine[1]
+    );
     assert_eq!(mine[2]["state"], "noop", "{}", mine[2]);
-    assert!(mine[2].to_string().contains("no eligible card"), "{}", mine[2]);
+    assert!(
+        mine[2].to_string().contains("no eligible card"),
+        "{}",
+        mine[2]
+    );
     let open: i64 = state(&td)
         .db
         .read(|c| {
@@ -322,7 +330,10 @@ async fn from_reviews_the_review_column_and_other_cards_are_a_noop() {
         .find(|r| r["rule"] == "ready/review" && r["card"] == other.as_str())
         .expect("the rule ran");
     assert_eq!(run["state"], "noop", "{run}");
-    assert!(run.to_string().contains("not in the review column"), "{run}");
+    assert!(
+        run.to_string().contains("not in the review column"),
+        "{run}"
+    );
     assert_eq!(card(&td, &other).await["review_round"], 0);
 }
 
@@ -334,8 +345,14 @@ async fn review_start_checks_its_arguments() {
     let o = td.get(&path("review")).await.ok().clone();
     for (args, needle) in [
         (json!({}), "needs `owner`"),
-        (json!({"owner": "lead", "max_rounds": 0}), "max_rounds is 1 to 10"),
-        (json!({"owner": "lead", "max_rounds": 11}), "max_rounds is 1 to 10"),
+        (
+            json!({"owner": "lead", "max_rounds": 0}),
+            "max_rounds is 1 to 10",
+        ),
+        (
+            json!({"owner": "lead", "max_rounds": 11}),
+            "max_rounds is 1 to 10",
+        ),
         (
             json!({"owner": "lead", "from": "@ready"}),
             "is not the review column",
