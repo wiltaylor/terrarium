@@ -80,7 +80,6 @@ it("keeps enabled frames and open editors through page and save rights refreshes
   const expectEnabled = () => {
     expect(host.querySelector(".snap-grid-document")).not.toBeNull();
     expect(host.querySelector("section[data-widget-id]")?.getAttribute("data-frame")).toBe("viewport");
-    expect([...host.querySelectorAll("select option")].map(option => option.textContent)).toContain("board:lanes");
   };
   try {
     await waitFor(() => expect(host.textContent).toContain("Edit page"));
@@ -91,11 +90,13 @@ it("keeps enabled frames and open editors through page and save rights refreshes
     const frame = [...host.querySelectorAll("label")].find(label => label.textContent?.startsWith("Frame"))!.querySelector("select")!;
     frame.value = "viewport"; frame.dispatchEvent(new Event("change", { bubbles: true }));
     expectEnabled();
+    expect([...host.querySelectorAll("select option")].map(option => option.textContent)).toContain("board:lanes");
     expect([...host.querySelectorAll("label")].some(label => label.textContent?.startsWith("Search"))).toBe(true);
 
     listeners.forEach(fn => fn(pageEvent()));
     await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
     expectEnabled();
+    expect([...host.querySelectorAll("select option")].map(option => option.textContent)).toContain("board:lanes");
     expect([...host.querySelectorAll("label")].some(label => label.textContent?.startsWith("Search"))).toBe(true);
     const current = await originalList("terrarium");
     pending.shift()!(current);
