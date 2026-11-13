@@ -10094,11 +10094,15 @@ as it is (`kept`). A second migration of the same board changes nothing.
 A migration before TER-222 wrote `agent-park` and `agent-unpark`
 overrides with the wait columns as names. TER-243 later added
 `merge_queue` to them and appended `merge_queue added (TER-243).` to
-their `description`. Each load of the config (the start and `POST
+their `description`. A migration from TER-222 until the pack used column
+roles wrote them with the wait columns as names, `merge_queue` included,
+and without that note. Each load of the config (the start and `POST
 /api/reload`) removes these overrides from the API rules of a project, so
-the pack's role-aware rules run again (TER-1090). It removes only a block
-after the migration header that is still exactly the text of that old
-migration for the board, or exactly its TER-243 form. The two blocks
+the pack's role-aware rules run again (TER-1090, TER-1219). It removes
+only a block after the migration header that is still exactly the text of
+one of these migrations for the board, or exactly the TER-243 form. As
+overrides the pair had the card cap of an own rule (10 runs an hour),
+and their no-op runs counted toward it. The two blocks
 retire as a pair (TER-1130): when either one is edited (also after the
 TER-243 note, or turned off with `enabled = false`), both stay, so an
 edited legacy park never runs next to the pack's unpark. A pair with

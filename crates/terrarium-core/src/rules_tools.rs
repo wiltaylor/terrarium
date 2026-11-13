@@ -640,6 +640,34 @@ rule "agent-unpark" {
 }
 "#;
 
+/// The `agent-park` and `agent-unpark` rules of the pack from TER-222 to
+/// the role-aware pack (07982934 to 76debcde^): the wait columns as names,
+/// with `merge_queue`. A migration in that window wrote this text mapped
+/// to the board (TER-1219: project terrarium on 0.69.0).
+/// [`retire_legacy_wait_overrides`] removes such an override too.
+pub const TER_222_WAIT_RULES: &str = r#"rule "agent-park" {
+  description = "The card waits on others: its bound agent parks."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to" { one_of = ["validating", "review", "merge_queue", "accepted"] }
+  agent_park { reason = "card in {{card.column}}" }
+}
+
+rule "agent-unpark" {
+  description = "The card came back out of a wait column: its parked agent wakes with the move and the failure block."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to" { ne = "validating" }
+  when "data.to" { ne = "review" }
+  when "data.to" { ne = "merge_queue" }
+  when "data.to" { ne = "accepted" }
+  when "data.to" { ne = "done" }
+  agent_unpark {}
+}
+"#;
+
 /// The note that TER-243 appended to the description of each legacy wait
 /// override when it added the merge queue.
 pub const MERGE_QUEUE_MARK: &str = "merge_queue added (TER-243).";
@@ -658,14 +686,10 @@ fn merge_queue_column(columns: &[BoardColumn]) -> Option<&BoardColumn> {
         })
 }
 
-/// The overrides that [`migrate`] wrote for `columns` before TER-222, as
-/// the blocks of its text, by rule name.
-fn pre_ter_222_overrides(columns: &[BoardColumn]) -> Vec<Rule> {
-    let Ok(old) = rules_file::parse(
-        PRE_TER_222_WAIT_RULES,
-        "pre-ter-222",
-        &rules_file::Context::default(),
-    ) else {
+/// The overrides that [`migrate`] wrote for `columns` from the legacy wait
+/// rules `pack` ([`PRE_TER_222_WAIT_RULES`] or [`TER_222_WAIT_RULES`]).
+fn legacy_overrides(pack: &str, columns: &[BoardColumn]) -> Vec<Rule> {
+    let Ok(old) = rules_file::parse(pack, "legacy-wait", &rules_file::Context::default()) else {
         return Vec::new();
     };
     old.rules
@@ -688,8 +712,9 @@ fn ter_243_upgrade(rule: &Rule, mq: &str) -> Option<Rule> {
 }
 
 /// TER-1090: retire the exact `agent-park` and `agent-unpark` overrides
-/// that [`migrate`] generated before the pack used column roles. Both the
-/// pre-TER-222 form and its TER-243 marked form are recognized. Removing
+/// that [`migrate`] generated before the pack used column roles. The
+/// pre-TER-222 form, its TER-243 marked form, and the TER-222 form
+/// (TER-1219) are recognized. Removing
 /// these blocks restores the current role-aware built-ins and their card
 /// budget; a generic user rule keeps its ten-run budget.
 ///
@@ -709,7 +734,7 @@ pub fn retire_legacy_wait_overrides(
     columns: &[BoardColumn],
 ) -> Option<String> {
     let header = text.find(MIGRATION_HEADER)?;
-    let old = pre_ter_222_overrides(columns);
+    let old = legacy_overrides(PRE_TER_222_WAIT_RULES, columns);
     let mut generated: Vec<(String, String)> =
         old.iter().map(|r| (r.name.clone(), to_wcl(r))).collect();
     if let Some(mq) = merge_queue_column(columns) {
@@ -718,6 +743,11 @@ pub fn retire_legacy_wait_overrides(
                 ter_243_upgrade(r, &mq.name).map(|r| (r.name.clone(), to_wcl(&r)))
             }));
     }
+    generated.extend(
+        legacy_overrides(TER_222_WAIT_RULES, columns)
+            .iter()
+            .map(|r| (r.name.clone(), to_wcl(r))),
+    );
     let mut out = text.to_owned();
     let mut changed = false;
     for r in &own.rules {
@@ -1626,6 +1656,76 @@ rule "to-blocked" {
         let mine = parse(MINE, "rules.wcl", &Context::default()).unwrap();
         let current = migrate(default_pack(), MINE, &mine, &board).text;
         assert_eq!(retire(&current, &board), None);
+    }
+
+    /// The board of project terrarium on 0.69.0: no `validating`.
+    fn terrarium_board() -> Vec<BoardColumn> {
+        cols(&[
+            ("backlog", None),
+            ("research", None),
+            ("ready", None),
+            ("in_progress", Some("working")),
+            ("review", Some("review")),
+            ("merge_queue", Some("merge_queue")),
+            ("accepted", Some("accepted")),
+            ("blocked", Some("blocked")),
+            ("done", None),
+        ])
+    }
+
+    /// The stored rules.wcl of project terrarium on 0.69.0 (TER-1219), as
+    /// `terrarium rule migrate --text` printed it.
+    const TERRARIUM_0_69_RULES: &str = r#"// The built-in pack mapped to this board (terrarium rule migrate, TER-171).
+// A rule here with the name of a pack rule replaces it.
+
+rule "agent-park" {
+  description = "The card waits on others: its bound agent parks. Mapped to this board: the board has no column `validating`: dropped from `data.to`."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to" { one_of = ["review", "merge_queue", "accepted"] }
+  agent_park { reason = "card in {{card.column}}" }
+}
+
+rule "agent-unpark" {
+  description = "The card came back out of a wait column: its parked agent wakes with the move and the failure block. Mapped to this board: the board has no column `validating`: `data.to ne validating` always holds, dropped."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to" { ne = "review" }
+  when "data.to" { ne = "merge_queue" }
+  when "data.to" { ne = "accepted" }
+  when "data.to" { ne = "done" }
+  agent_unpark {}
+}
+"#;
+
+    /// TER-1219: the overrides that a migration wrote from the TER-222
+    /// pack retire, and the pack's role-aware pair runs again.
+    #[test]
+    fn ter_222_wait_overrides_are_retired() {
+        let board = terrarium_board();
+        let new = retire(TERRARIUM_0_69_RULES, &board).expect("the TER-222 blocks retire");
+        assert!(!new.contains("rule \""), "{new}");
+        assert!(new.starts_with(MIGRATION_HEADER), "{new}");
+        let own = parse(&new, "rules.wcl", &ctx(&board)).unwrap();
+        let effective = effective(Some(default_pack()), &own);
+        for name in ["agent-park", "agent-unpark"] {
+            let r = effective.iter().find(|r| r.rule.name == name).unwrap();
+            assert_eq!(r.origin, ORIGIN_PACK, "{name}");
+        }
+        assert_eq!(retire(&new, &board), None);
+        // The same form on another board retires too.
+        let mine = parse(MINE, "rules.wcl", &Context::default()).unwrap();
+        let old = parse(TER_222_WAIT_RULES, "old", &Context::default()).unwrap();
+        let queue = queue_board();
+        let text = migrate(&old, MINE, &mine, &queue).text;
+        let new = retire(&text, &queue).expect("the TER-222 blocks retire");
+        assert!(new.starts_with(MINE.trim_end()), "{new}");
+        assert!(!new.contains("rule \"agent-"), "{new}");
+        // An edit keeps the pair.
+        let edited = TERRARIUM_0_69_RULES.replacen("max_per_hour = 600", "max_per_hour = 60", 1);
+        assert_eq!(retire(&edited, &board), None);
     }
 
     #[test]
