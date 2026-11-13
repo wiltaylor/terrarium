@@ -357,7 +357,16 @@ mod tests {
             }
             _ => None,
         };
-        for tail in [r"f.", r"f ", r"f::$DATA", r"f:name", r"new.", r"new ", r"new::$DATA", r"new:s"] {
+        for tail in [
+            r"f.",
+            r"f ",
+            r"f::$DATA",
+            r"f:name",
+            r"new.",
+            r"new ",
+            r"new::$DATA",
+            r"new:s",
+        ] {
             for path in [
                 format!(r"C:\Terrarium\work\p\a\{tail}"),
                 format!(r"C:\Terrarium\work\p\a\{tail}\below.txt"),
@@ -384,7 +393,10 @@ mod tests {
             assert!(decide_with(path, fake).is_err(), "{path}");
         }
         // Valid workspace paths, existing or new, take the walk.
-        for path in [r"C:\Terrarium\work\p\a\f", r"C:\Terrarium\work\p\a\new\g.txt"] {
+        for path in [
+            r"C:\Terrarium\work\p\a\f",
+            r"C:\Terrarium\work\p\a\new\g.txt",
+        ] {
             assert!(matches!(decide_with(path, fake), Ok(Some(_))), "{path}");
         }
         // Other valid paths still use the TER-272 handling.
