@@ -9,10 +9,19 @@
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::outbox::{Outbox, Overflow};
-use crate::protocol::{CHUNK_SIZE, ErrorCode, SessionId, StreamTag, hex};
+#[cfg(unix)]
+use crate::protocol::{CHUNK_SIZE, SessionId, StreamTag};
+use crate::protocol::{ErrorCode, hex};
+
+#[cfg(windows)]
+#[path = "transfer_windows.rs"]
+mod windows;
+#[cfg(windows)]
+pub use windows::{PushFile, pull, pull_as};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransferError {
@@ -58,6 +67,7 @@ fn io<'a>(op: &'static str, path: &'a Path) -> impl FnOnce(std::io::Error) -> Tr
 
 /// A push in progress.
 #[derive(Debug)]
+#[cfg(unix)]
 pub struct PushFile {
     path: PathBuf,
     tmp: PathBuf,
@@ -68,6 +78,7 @@ pub struct PushFile {
     mode: Option<u32>,
 }
 
+#[cfg(unix)]
 impl PushFile {
     pub async fn open(
         path: &Path,
@@ -164,6 +175,7 @@ impl PushFile {
 }
 
 /// Stream a file into the outbox as `file` frames. Returns bytes and SHA-256.
+#[cfg(unix)]
 pub async fn pull(path: &Path, outbox: &Outbox) -> Result<(u64, String), TransferError> {
     let meta = tokio::fs::metadata(path).await.map_err(io("stat", path))?;
     if !meta.is_file() {
@@ -194,7 +206,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex(&Sha256::digest(data))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::outbox::Outgoing;

@@ -2,6 +2,13 @@
 //! No Win32 handles or unsafe functions are exposed to callers.
 #![cfg(windows)]
 
+mod identity;
+pub use identity::Identity;
+mod policy_file;
+pub use policy_file::read_host_policy_file;
+mod diagnostics;
+pub use diagnostics::{TokenSnapshot, current_token_snapshot};
+
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -54,7 +61,11 @@ pub struct Limits {
 
 /// One session's job. The last handle closing kills every descendant.
 #[derive(Debug)]
-pub struct Job(OwnedHandle, std::sync::Mutex<bool>);
+pub struct Job(
+    OwnedHandle,
+    std::sync::Mutex<bool>,
+    Option<std::sync::Arc<Identity>>,
+);
 
 impl PartialEq for Job {
     fn eq(&self, other: &Self) -> bool {
@@ -69,6 +80,7 @@ impl Job {
         let job = Self(
             owned(unsafe { CreateJobObjectW(null(), null()) })?,
             std::sync::Mutex::new(false),
+            None,
         );
         job.set_limits(limits)?;
         Ok(job)
@@ -134,6 +146,42 @@ impl Job {
     pub fn terminate(&self) -> io::Result<()> {
         // SAFETY: handle remains owned by self throughout the call.
         checked(unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) })
+    }
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        let Some(identity) = self.2.take() else {
+            return;
+        };
+        // A profile must not unload while a descendant still uses it. Explicit
+        // termination precedes closing this last session job handle, even on
+        // async cancellation. If Windows cannot confirm drain, retain the logon
+        // rather than unload a live profile. This bounded failure leaks no secret.
+        let _ = self.terminate();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // SAFETY: valid zero-initialized POD and owned job handle.
+            let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
+            // SAFETY: live job and output matching class and documented size.
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.0.as_raw_handle(),
+                    JobObjectBasicAccountingInformation,
+                    (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                    size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    null_mut(),
+                )
+            };
+            if ok != 0 && info.ActiveProcesses == 0 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                std::mem::forget(identity);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
 
@@ -337,8 +385,69 @@ pub fn spawn_in_holder(
     limits: Limits,
     holder: Option<&Job>,
 ) -> io::Result<Child> {
-    let job = Job::new(limits)?;
-    let executable = resolve_program(program, cwd, env)?;
+    spawn_with_context(
+        program,
+        args,
+        cwd,
+        env,
+        terminal,
+        limits,
+        SpawnContext {
+            holder,
+            identity: None,
+        },
+    )
+}
+
+/// Trusted local identity and shared holder, never deserialized from the wire.
+#[derive(Default)]
+pub struct SpawnContext<'a> {
+    pub holder: Option<&'a Job>,
+    pub identity: Option<&'a std::sync::Arc<Identity>>,
+}
+
+/// CreateProcessAsUser keeps the exact same atomic job/handle/ConPTY boundary
+/// as the service-account spawn. Failure never falls back to CreateProcessW.
+pub fn spawn_with_context(
+    program: &Path,
+    args: &[String],
+    cwd: Option<&Path>,
+    env: &BTreeMap<String, String>,
+    terminal: Option<Size>,
+    limits: Limits,
+    context: SpawnContext<'_>,
+) -> io::Result<Child> {
+    let SpawnContext { holder, identity } = context;
+    let mut job = Job::new(limits)?;
+    job.2 = identity.cloned();
+    let user_cwd = identity
+        .map(|identity| {
+            identity
+                .environment()
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("USERPROFILE"))
+                .map(|(_, v)| std::path::PathBuf::from(v))
+                .filter(|p| p.is_absolute())
+                .ok_or_else(|| io::Error::other("user profile directory is unavailable"))
+        })
+        .transpose()?;
+    let cwd = cwd.or(user_cwd.as_deref());
+    let mut search_env = identity
+        .map(|i| i.environment().clone())
+        .unwrap_or_default();
+    if identity.is_some() && !search_env.keys().any(|k| k.eq_ignore_ascii_case("PATH")) {
+        search_env.insert("PATH".into(), String::new());
+    }
+    for (key, value) in env {
+        search_env.retain(|k, _| !k.eq_ignore_ascii_case(key));
+        search_env.insert(key.clone(), value.clone());
+    }
+    let executable = match identity {
+        Some(identity) => {
+            identity.with_impersonation(|| resolve_program(program, cwd, &search_env))?
+        }
+        None => resolve_program(program, cwd, env)?,
+    };
     let program = wide(executable.as_os_str())?;
     let mut command = quote(executable.as_os_str())?;
     for arg in args {
@@ -349,7 +458,11 @@ pub fn spawn_in_holder(
     let cwd = cwd.map(|p| wide(p.as_os_str())).transpose()?;
     // Case-insensitive merge is required: PATH and Path are the same Windows key.
     let mut merged: BTreeMap<Vec<u16>, (std::ffi::OsString, std::ffi::OsString)> = BTreeMap::new();
-    for (key, value) in std::env::vars_os().chain(env.iter().map(|(k, v)| (k.into(), v.into()))) {
+    let base = identity.map_or_else(|| std::env::vars_os().collect(), |i| i.base_environment());
+    for (key, value) in base
+        .into_iter()
+        .chain(env.iter().map(|(k, v)| (k.into(), v.into())))
+    {
         if key.is_empty() || key.to_string_lossy().contains('=') {
             continue;
         }
@@ -436,6 +549,14 @@ pub fn spawn_in_holder(
         unsafe { (zeroed(), zeroed()) };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     startup.lpAttributeList = attributes.ptr();
+    // NULL inherits the parent's station/desktop. A non-NULL empty name asks
+    // Windows to select/connect the logon session's default instead. Do not
+    // select winsta0 or grant access to the service's existing desktop.
+    // https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw
+    let mut desktop = desktop_name(identity.is_some());
+    startup.StartupInfo.lpDesktop = desktop
+        .as_mut()
+        .map_or(null_mut(), |name| name.as_mut_ptr());
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     // Explicit invalid handles prevent Windows from copying the service's
     // redirected standard handles instead of connecting the pseudoconsole.
@@ -457,20 +578,46 @@ pub fn spawn_in_holder(
     // SAFETY: all inputs point to initialized buffers alive through this call.
     // JOB_LIST assigns containment before any thread runs. HANDLE_LIST limits
     // inheritance to the three pipe ends; ConPTY children inherit no handles.
-    checked(unsafe {
-        CreateProcessW(
-            program.as_ptr(),
-            command.as_mut_ptr(),
-            null(),
-            null(),
-            i32::from(console.is_none()),
-            flags,
-            environment.as_ptr().cast(),
-            cwd.as_ref().map_or(null(), |s| s.as_ptr()),
-            &startup.StartupInfo,
-            &mut result,
-        )
-    })?;
+    if let Some(identity) = identity {
+        // Windows otherwise opens the image/cwd as the service even though
+        // the new process has a user token. Scope those opens to the user too.
+        // CreateProcessAsUser's documented remarks explicitly recommend this
+        // impersonation sequence. An earlier access check followed by a
+        // service-authority image open is not an equivalent security boundary.
+        identity.with_impersonation(|| {
+            checked(unsafe {
+                CreateProcessAsUserW(
+                    identity.token(),
+                    program.as_ptr(),
+                    command.as_mut_ptr(),
+                    null(),
+                    null(),
+                    i32::from(console.is_none()),
+                    flags,
+                    environment.as_ptr().cast(),
+                    cwd.as_ref().map_or(null(), |s| s.as_ptr()),
+                    &startup.StartupInfo,
+                    &mut result,
+                )
+            })
+        })?;
+    } else {
+        // SAFETY: same initialized buffers and atomic containment as above.
+        checked(unsafe {
+            CreateProcessW(
+                program.as_ptr(),
+                command.as_mut_ptr(),
+                null(),
+                null(),
+                i32::from(console.is_none()),
+                flags,
+                environment.as_ptr().cast(),
+                cwd.as_ref().map_or(null(), |s| s.as_ptr()),
+                &startup.StartupInfo,
+                &mut result,
+            )
+        })?;
+    }
     let process = Process {
         handle: owned(result.hProcess)?,
         id: result.dwProcessId,
@@ -484,6 +631,21 @@ pub fn spawn_in_holder(
         stdout: parent_out.into(),
         stderr: parent_err.map(File::from),
     })
+}
+
+fn desktop_name(run_as: bool) -> Option<[u16; 1]> {
+    run_as.then_some([0])
+}
+
+#[cfg(test)]
+mod desktop_tests {
+    use super::desktop_name;
+
+    #[test]
+    fn run_as_selects_empty_name_instead_of_parent_desktop_inheritance() {
+        assert_eq!(desktop_name(true), Some([0]));
+        assert_eq!(desktop_name(false), None);
+    }
 }
 
 fn resolve_program(
