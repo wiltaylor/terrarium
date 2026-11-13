@@ -5,9 +5,10 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { Agent, AgentEvent } from "../../api/types";
 import { waitFor } from "../../test/wait";
 
-const agent = (id: string, project = "demo", extra = {}): Agent => ({
+const agent = (id: string, project = "demo", extra: Partial<Agent> = {}): Agent => ({
   id, name: id, project, harness: "codex", status: "stopped", paused: false, roles: [], ...extra,
-} as Agent);
+  workspace: "/workspace", created_at: "2026-11-12T00:00:00Z",
+});
 const ordinary = [agent("paused", "demo", { paused: true }), agent("working", "demo", { status: "working" })];
 const list = vi.fn(async (project: string) => [agent("ephemeral", project, { ephemeral: true })]);
 const refresh = vi.fn(async () => {});
