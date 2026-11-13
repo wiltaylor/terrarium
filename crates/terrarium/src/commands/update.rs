@@ -133,6 +133,12 @@ fn image_text(v: &Value) -> String {
     }
 }
 
+/// The starts of the compose key warnings of the updater (TER-1209).
+const ENV_KEY_WARNINGS: [&str; 2] = [
+    "WARNING: the deployed compose lacks",
+    "WARNING: the release compose.yaml has",
+];
+
 fn print_status(c: &Ctx, v: &Value) {
     let cur = &v["current"];
     if let Some(missing) = cur["missing_templates"].as_array() {
@@ -142,11 +148,15 @@ fn print_status(c: &Ctx, v: &Value) {
             ));
         }
     }
-    // TER-1209: the updater ends a step detail with `WARNING: ...` when
-    // the deployed compose lacks environment keys of the release.
+    // TER-1209: the updater ends the `environment` step detail with the
+    // compose key warning. Match only that step and those texts: the
+    // detail starts with the output of another check.
     for s in v["last_result"]["steps"].as_array().into_iter().flatten() {
-        if let Some((_, warning)) = s["detail"].as_str().and_then(|d| d.split_once("WARNING: ")) {
-            c.line(format!("WARNING: {warning}"));
+        let Some(detail) = s["detail"].as_str().filter(|_| s["name"] == "environment") else {
+            continue;
+        };
+        if let Some(at) = ENV_KEY_WARNINGS.iter().filter_map(|w| detail.find(w)).min() {
+            c.line(&detail[at..]);
         }
     }
     c.line(format!(
@@ -258,6 +268,10 @@ mod tests {
     use crate::transport::mock::MockTransport;
 
     fn status_with(detail: &str) -> String {
+        status_with_step("environment", detail)
+    }
+
+    fn status_with_step(step: &str, detail: &str) -> String {
         let ctx = Ctx::for_test(Arc::new(MockTransport::new()), None);
         super::print_status(
             &ctx,
@@ -267,7 +281,7 @@ mod tests {
                 "last_result": {
                     "kind": "update", "target": "latest", "outcome": "succeeded",
                     "to": null,
-                    "steps": [{"name": "environment", "state": "ok", "detail": detail}],
+                    "steps": [{"name": step, "state": "ok", "detail": detail}],
                 },
             }),
         );
@@ -287,5 +301,20 @@ mod tests {
         );
         let out = status_with("templates ok; resolved deployment environment");
         assert!(!out.contains("WARNING"), "{out}");
+        // Another WARNING earlier in the detail, or in another step, is
+        // not the compose key warning.
+        let out = status_with(
+            "WARNING: from the template check; resolved deployment environment; \
+             WARNING: the deployed compose lacks environment keys of the release: C (values hidden)",
+        );
+        assert_eq!(
+            out.lines().next().unwrap(),
+            "WARNING: the deployed compose lacks environment keys of the release: C (values hidden)"
+        );
+        let out = status_with_step(
+            "health",
+            "WARNING: the deployed compose lacks environment keys of the release: C",
+        );
+        assert!(out.lines().next().unwrap().starts_with("running:"), "{out}");
     }
 }

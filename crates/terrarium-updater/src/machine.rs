@@ -197,8 +197,26 @@ const ENV_KEYS_FIX: &str =
 /// (`compose_env` of the prepared spec: `KEY=value` strings). Only key
 /// names reach the result, never values. `Ok("")`: nothing to report.
 /// `Ok(note)`: a warning or a skipped check. `Err`: the deployment lacks a
-/// key that the release marks as required (`# update:required`).
-pub fn env_key_check(release: &ExecOut, prepared: &serde_json::Value) -> Res<String> {
+/// key that the release marks as required (`# update:required`); nothing
+/// else stops an update. An engine error of the one-off container, a
+/// non-zero exit, or unreadable output skips the check with a note that
+/// names the kind only: the container runs with the deployed environment,
+/// so its stdout, stderr, and the engine message are never echoed.
+pub fn env_key_check(release: Res<ExecOut>, prepared: &serde_json::Value) -> Res<String> {
+    let release = match release {
+        Ok(out) => out,
+        Err(e) => {
+            let kind = if e.contains("timed out") || e.contains("timeout") {
+                "engine timeout"
+            } else {
+                "engine error"
+            };
+            tracing::warn!(kind, "release env key check did not run (values hidden)");
+            return Ok(format!(
+                "compose key check skipped: the check did not run ({kind})"
+            ));
+        }
+    };
     let parsed = (release.code == 0)
         .then(|| {
             release
@@ -210,7 +228,16 @@ pub fn env_key_check(release: &ExecOut, prepared: &serde_json::Value) -> Res<Str
         })
         .flatten();
     let Some(parsed) = parsed else {
-        return Ok("compose key check skipped: the release lists no environment keys".into());
+        let why = match release.code {
+            // clap: an unknown subcommand, a release before TER-1209.
+            2 => "the release lists no environment keys",
+            0 => "the release key list is unreadable",
+            _ => "the check failed",
+        };
+        return Ok(format!(
+            "compose key check skipped: {why} (exit {})",
+            release.code
+        ));
     };
     let Some(deployed) = prepared["compose_env"].as_array() else {
         return Ok("compose key check skipped: the deployment environment is unknown".into());
@@ -248,13 +275,29 @@ pub fn env_key_check(release: &ExecOut, prepared: &serde_json::Value) -> Res<Str
             required.join(", ")
         ));
     }
-    if missing.is_empty() {
-        return Ok(String::new());
+    let skipped: Vec<String> = parsed["skipped"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_u64)
+        .map(|n| n.to_string())
+        .collect();
+    let mut notes = Vec::new();
+    if !missing.is_empty() {
+        notes.push(format!(
+            "WARNING: the deployed compose lacks environment keys of the release: {} (values hidden); {ENV_KEYS_FIX}",
+            missing.join(", ")
+        ));
     }
-    Ok(format!(
-        "WARNING: the deployed compose lacks environment keys of the release: {} (values hidden); {ENV_KEYS_FIX}",
-        missing.join(", ")
-    ))
+    if !skipped.is_empty() {
+        notes.push(format!(
+            "{}the release compose.yaml has environment entries that the check cannot read, \
+             not checked: lines {}",
+            if missing.is_empty() { "WARNING: " } else { "" },
+            skipped.join(", ")
+        ));
+    }
+    Ok(notes.join("; "))
 }
 
 /// The command that checks the daemon after the start.
@@ -1037,11 +1080,13 @@ impl Updater {
                                 out.code, out.stdout.trim(), out.stderr.trim()
                             ));
                         }
+                        // Only a missing required key fails the step: an
+                        // engine error here is a skip note.
                         let release = self
                             .engine
                             .run_once(&prepared, &to, release_env_argv())
-                            .await?;
-                        let keys = env_key_check(&release, &prepared.spec)?;
+                            .await;
+                        let keys = env_key_check(release, &prepared.spec)?;
                         if !keys.is_empty() {
                             tracing::warn!("{keys}");
                         }

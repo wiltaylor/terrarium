@@ -224,7 +224,14 @@ shown, never values.
   `compose.yaml`, for example
   `TERRARIUM_EXAMPLE: ${TERRARIUM_EXAMPLE:-on}  # update:required`. Mark a
   key only when the new daemon cannot run correctly without it.
-- An older release without `release-env-keys` skips the check and says so.
+- Only a missing required key stops an update. When the check cannot run
+  (an older release without `release-env-keys`, a failed one-off container,
+  a non-zero exit, unreadable output), the step says
+  `compose key check skipped: <why>` with the exit code or the error kind,
+  and the update goes on. The output of the check is never shown.
+- An entry of the release's `environment` that the check cannot read (not
+  `KEY: value` or `- KEY=value` on one line) is not checked: the step warns
+  with its line number in `compose.yaml`.
 
 The manual step for either case: add the missing keys to the deployed
 `compose.yaml` (copy the lines from the release's `compose.yaml`) or to its

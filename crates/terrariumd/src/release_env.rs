@@ -32,6 +32,10 @@ pub struct ReleaseEnv {
     pub keys: Vec<String>,
     /// The keys marked `# update:required`.
     pub required: Vec<String>,
+    /// The 1-based line numbers of environment entries that the parser
+    /// cannot read (no key name). They are not checked, so the updater
+    /// says so. Line numbers only, never the line.
+    pub skipped: Vec<usize>,
 }
 
 fn indent(line: &str) -> usize {
@@ -77,7 +81,9 @@ pub fn service_env(compose: &str, service: &str) -> ReleaseEnv {
     // The indent of the service's own keys (`image:`, `environment:`).
     let mut field_indent: Option<usize> = None;
     let mut env_indent: Option<usize> = None;
-    for line in compose.lines() {
+    // The indent of the entries; a deeper line continues an entry.
+    let mut entry_indent: Option<usize> = None;
+    for (n, line) in compose.lines().enumerate() {
         let body = line.trim();
         if body.is_empty() || body.starts_with('#') {
             continue;
@@ -88,6 +94,7 @@ pub fn service_env(compose: &str, service: &str) -> ReleaseEnv {
             services_indent = None;
             in_service = false;
             env_indent = None;
+            entry_indent = None;
             continue;
         }
         if !in_services {
@@ -95,15 +102,21 @@ pub fn service_env(compose: &str, service: &str) -> ReleaseEnv {
         }
         if let Some(e) = env_indent {
             if ind > e {
-                if let Some(key) = entry_key(body) {
-                    out.keys.push(key.to_owned());
-                    if body.ends_with(REQUIRED_MARK) {
-                        out.required.push(key.to_owned());
+                if *entry_indent.get_or_insert(ind) == ind {
+                    match entry_key(body) {
+                        Some(key) => {
+                            out.keys.push(key.to_owned());
+                            if body.ends_with(REQUIRED_MARK) {
+                                out.required.push(key.to_owned());
+                            }
+                        }
+                        None => out.skipped.push(n + 1),
                     }
                 }
                 continue;
             }
             env_indent = None;
+            entry_indent = None;
         }
         let names = *services_indent.get_or_insert(ind);
         if ind <= names {
@@ -148,6 +161,9 @@ services:
       \"QUOTED_KEY\": 1
 
       PLAIN: plain-value
+      BLOCK: |
+        continued: line
+      not a key line
     volumes:
       - NOT_A_KEY=1
   other:
@@ -162,9 +178,12 @@ volumes:
         let env = service_env(SAMPLE, "terrarium");
         assert_eq!(
             env.keys,
-            ["TERRARIUM_TOKEN", "TERRARIUM_NEW", "QUOTED_KEY", "PLAIN"]
+            ["TERRARIUM_TOKEN", "TERRARIUM_NEW", "QUOTED_KEY", "PLAIN", "BLOCK"]
         );
         assert_eq!(env.required, ["TERRARIUM_NEW"]);
+        // The continuation of BLOCK is no entry; the bad line is reported
+        // by number.
+        assert_eq!(env.skipped, [21]);
         let json = serde_json::to_string(&env).unwrap();
         assert!(!json.contains("sentinel") && !json.contains("plain-value"));
     }
@@ -192,5 +211,6 @@ volumes:
         for key in &env.required {
             assert!(env.keys.contains(key));
         }
+        assert!(env.skipped.is_empty(), "unreadable lines: {:?}", env.skipped);
     }
 }

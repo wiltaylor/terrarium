@@ -45,6 +45,8 @@ struct State {
     release_env: Option<String>,
     /// The resolved deployment environment (`compose_env`), `KEY=value`.
     deployed_env: Option<Vec<String>>,
+    /// The one-off container of `release-env-keys` fails in the engine.
+    release_env_engine_error: bool,
     /// The containers by name.
     containers: HashMap<String, Container>,
     images: HashMap<String, Image>,
@@ -434,6 +436,9 @@ impl Engine for Fake {
                 argv
             };
             if argv.get(1).is_some_and(|s| s == "release-env-keys") {
+                if self.0.lock().unwrap().release_env_engine_error {
+                    return Err("Docker POST /containers/create: 500: secret-sentinel-engine".into());
+                }
                 return Ok(match self.0.lock().unwrap().release_env.clone() {
                     Some(stdout) => ExecOut {
                         code: 0,
@@ -2367,11 +2372,92 @@ fn the_env_key_check_reads_the_last_json_line_and_names_keys_only() {
         stdout: "a log line\n{\"keys\":[\"A\",\"B\",\"C\"],\"required\":[]}\n".into(),
         ..Default::default()
     };
-    let note = env_key_check(&out, &prepared).unwrap();
+    let note = env_key_check(Ok(out.clone()), &prepared).unwrap();
     assert!(note.contains("of the release: C (values hidden)"), "{note}");
     assert!(!note.contains("secret-sentinel"));
-    let unknown = env_key_check(&out, &serde_json::json!({})).unwrap();
+    let unknown = env_key_check(Ok(out), &serde_json::json!({})).unwrap();
     assert!(unknown.contains("deployment environment is unknown"));
+}
+
+#[test]
+fn a_failed_env_key_check_names_the_kind_and_the_exit_but_no_output() {
+    let prepared = serde_json::json!({"compose_env": ["A=1"]});
+    let exit = |code: i64, stdout: &str| {
+        env_key_check(
+            Ok(ExecOut {
+                code,
+                stdout: stdout.into(),
+                stderr: "secret-sentinel-stderr".into(),
+            }),
+            &prepared,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        exit(2, ""),
+        "compose key check skipped: the release lists no environment keys (exit 2)"
+    );
+    assert_eq!(
+        exit(1, "secret-sentinel-stdout"),
+        "compose key check skipped: the check failed (exit 1)"
+    );
+    assert_eq!(
+        exit(0, "secret-sentinel-stdout"),
+        "compose key check skipped: the release key list is unreadable (exit 0)"
+    );
+    assert_eq!(
+        env_key_check(Err("wait: timed out secret-sentinel".into()), &prepared).unwrap(),
+        "compose key check skipped: the check did not run (engine timeout)"
+    );
+}
+
+#[test]
+fn unreadable_release_entries_are_reported_by_line() {
+    let prepared = serde_json::json!({"compose_env": ["A=secret-sentinel"]});
+    let out = |stdout: &str| ExecOut {
+        code: 0,
+        stdout: stdout.into(),
+        ..Default::default()
+    };
+    let only = env_key_check(
+        Ok(out(r#"{"keys":["A"],"required":[],"skipped":[21,40]}"#)),
+        &prepared,
+    )
+    .unwrap();
+    assert_eq!(
+        only,
+        "WARNING: the release compose.yaml has environment entries that the check \
+         cannot read, not checked: lines 21, 40"
+    );
+    let both = env_key_check(
+        Ok(out(r#"{"keys":["A","B"],"required":[],"skipped":[21]}"#)),
+        &prepared,
+    )
+    .unwrap();
+    assert!(both.starts_with("WARNING: the deployed compose lacks"), "{both}");
+    assert!(both.ends_with("; the release compose.yaml has environment entries that the check cannot read, not checked: lines 21"), "{both}");
+    assert!(!both.contains("secret-sentinel"));
+}
+
+#[tokio::test]
+async fn an_engine_error_of_the_env_key_check_is_a_skip_and_the_update_goes_on() {
+    let r = env_rig(
+        DEPLOYED,
+        Some(r#"{"keys":["TERRARIUM_NEW"],"required":["TERRARIUM_NEW"]}"#),
+    );
+    r.fake.0.lock().unwrap().release_env_engine_error = true;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Succeeded, "{:?}", run.error);
+    let detail = env_detail(&run);
+    assert!(
+        detail.ends_with("compose key check skipped: the check did not run (engine error)"),
+        "{detail}"
+    );
+    assert!(steps(&run).contains(&"drain".to_string()));
+    assert_no_values(&run);
 }
 
 #[tokio::test]
