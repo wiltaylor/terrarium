@@ -32,7 +32,7 @@ it.each(["schedules", "triggers", "event_sources"] as const)("renders just %s, w
 
 it("isolates duplicate scope, selections, and drafts", async () => {
   const selected = vi.fn();
-  const first = mount({ project: "terrarium", part: "schedules", canCreate: true, onSelectionChange: selected });
+  const first = mount({ project: "terrarium", part: "schedules", canCreateSchedule: true, onSelectionChange: selected });
   const second = mount({ project: "terrarium", part: "schedules", scope: "global" });
   await tick();
   const disclosure = first.querySelector<HTMLButtonElement>("button[aria-expanded]")!;
