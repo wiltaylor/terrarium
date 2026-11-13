@@ -72,6 +72,12 @@ pub async fn board(ctx: &Ctx, cmd: Option<&BoardCmd>) -> anyhow::Result<()> {
             return ctx.emit(&b["columns"], print_columns);
         }
         Some(BoardCmd::Columns { from_file: Some(f) }) => columns_from(ctx, f)?,
+        Some(BoardCmd::Column {
+            command: command @ ColumnCmd::Options { name, .. },
+        }) => {
+            let path = format!("{path}/columns/{}/options", encode(name));
+            return column_options(ctx, &path, command).await;
+        }
         Some(BoardCmd::Column { command }) => {
             let b = ctx.api.get(&path, vec![]).await?;
             edit_columns(as_items(&b["columns"]), command)?
@@ -171,6 +177,131 @@ fn give_role(specs: &mut [Value], at: usize, role: &str) {
     specs[at]["role"] = role.into();
 }
 
+/// `board column options`: show the options of a column, or read them,
+/// change them, and write them back with the version that was read.
+async fn column_options(ctx: &Ctx, path: &str, cmd: &ColumnCmd) -> anyhow::Result<()> {
+    let current = ctx.api.get(path, vec![]).await?;
+    let body = match cmd {
+        ColumnCmd::Options {
+            from_file: Some(f), ..
+        } => options_from(ctx, f, &current)?,
+        _ => match options_put(&current, cmd)? {
+            Some(b) => b,
+            None => return ctx.emit(&current, print_options),
+        },
+    };
+    let after = ctx.api.put(path, body).await?;
+    ctx.emit(&after, print_options)
+}
+
+/// The `PUT` body of `--from-file`: `{"checks", "queue"}`, and the read
+/// version as `base_version` when the file has none.
+fn options_from(ctx: &Ctx, arg: &str, current: &Value) -> anyhow::Result<Value> {
+    let text = if arg == "-" {
+        ctx.text("-")?
+    } else {
+        std::fs::read_to_string(arg)
+            .map_err(|e| CliError::usage(format!("cannot read {arg}: {e}")))?
+    };
+    let mut v: Value = serde_json::from_str(&text)
+        .map_err(|e| CliError::usage(format!("{arg} is not JSON: {e}")))?;
+    let Some(o) = v.as_object_mut() else {
+        return Err(CliError::usage(format!(
+            "{arg}: give an object with `checks` and `queue`"
+        )));
+    };
+    // The output of `board column options --json` is also a valid file.
+    for k in ["project", "column", "version"] {
+        o.remove(k);
+    }
+    o.entry("base_version")
+        .or_insert_with(|| current["version"].clone());
+    Ok(v)
+}
+
+/// The `PUT` body of the change flags, or `None` when no flag is given.
+pub fn options_put(current: &Value, cmd: &ColumnCmd) -> anyhow::Result<Option<Value>> {
+    let ColumnCmd::Options {
+        require_comment,
+        require_dependencies,
+        terminal,
+        clear_eta,
+        queue_release,
+        batch_size,
+        max_wait_seconds,
+        max_batch_cards,
+        no_max_batch_cards,
+        ..
+    } = cmd
+    else {
+        return Ok(None);
+    };
+    let mut checks = current["checks"].clone();
+    let mut queue = current["queue"].clone();
+    let mut changed = false;
+    for (key, value) in [
+        ("require_comment_on_enter", require_comment),
+        ("require_dependencies_met", require_dependencies),
+        ("terminal_for_members", terminal),
+        ("clear_eta_on_enter", clear_eta),
+    ] {
+        if let Some(v) = value {
+            checks[key] = (*v).into();
+            changed = true;
+        }
+    }
+    if let Some(r) = queue_release {
+        queue["release"] = r.as_str().into();
+        if r != "batch" {
+            for k in ["batch_size", "max_wait_seconds", "max_batch_cards"] {
+                queue[k] = Value::Null;
+            }
+        }
+        changed = true;
+    }
+    for (key, value) in [
+        ("batch_size", batch_size),
+        ("max_wait_seconds", max_wait_seconds),
+        ("max_batch_cards", max_batch_cards),
+    ] {
+        if let Some(v) = value {
+            queue[key] = (*v).into();
+            changed = true;
+        }
+    }
+    if *no_max_batch_cards {
+        queue["max_batch_cards"] = Value::Null;
+        changed = true;
+    }
+    Ok(changed.then(|| {
+        json!({"base_version": current["version"], "checks": checks, "queue": queue})
+    }))
+}
+
+fn print_options(ctx: &Ctx, o: &Value) {
+    ctx.line(format!(
+        "column {} (options version {})",
+        field(o, "column"),
+        field(o, "version")
+    ));
+    for k in [
+        "require_comment_on_enter",
+        "require_dependencies_met",
+        "terminal_for_members",
+        "clear_eta_on_enter",
+    ] {
+        ctx.line(format!("  {k:<26} {}", o["checks"][k]));
+    }
+    let q = &o["queue"];
+    let mut line = format!("  {:<26} {}", "queue_release", field(q, "release"));
+    for k in ["batch_size", "max_wait_seconds", "max_batch_cards"] {
+        if !q[k].is_null() {
+            line.push_str(&format!(", {k} {}", q[k]));
+        }
+    }
+    ctx.line(line);
+}
+
 /// The whole column list after one `board column` change. The daemon
 /// checks the rules (the fixed columns, the roles, cards in a removed
 /// column).
@@ -241,6 +372,11 @@ pub fn edit_columns(cols: &[Value], cmd: &ColumnCmd) -> anyhow::Result<Vec<Value
                 specs[at]["rename_from"] = name.as_str().into();
                 specs[at]["name"] = new.into();
             }
+        }
+        ColumnCmd::Options { .. } => {
+            return Err(CliError::usage(
+                "`board column options` is no change of the column list",
+            ));
         }
         ColumnCmd::Rm { name } => {
             let at = index_of(&specs, name)?;

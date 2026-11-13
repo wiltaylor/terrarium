@@ -1433,6 +1433,52 @@ pub enum ColumnCmd {
         #[arg(long, value_name = "NEW")]
         rename: Option<String>,
     },
+    /// Show or change the options of a column: its move checks and its
+    /// queue settings (TER-1112). With no change flag it shows them. A
+    /// change needs project_admin of the project or the operator; it reads
+    /// the options, then writes them with the version it read
+    Options {
+        /// A column name, or a role alias (`working`, `blocked`)
+        name: String,
+        /// A move into the column needs a comment
+        #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
+        require_comment: Option<bool>,
+        /// A move into the column needs every dependency accepted or done
+        #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
+        require_dependencies: Option<bool>,
+        /// A card in the column is final for members: only a project admin
+        /// or the operator moves, edits, or assigns it
+        #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
+        terminal: Option<bool>,
+        /// A card that enters the column loses its ETA
+        #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
+        clear_eta: Option<bool>,
+        /// When a card leaves the column's queue; a release other than
+        /// `batch` drops the batch settings. Stored only: the queue is not
+        /// run yet
+        #[arg(long, value_parser = ["wip", "batch", "job"])]
+        queue_release: Option<String>,
+        /// `batch`: the cards that release a batch
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        batch_size: Option<u32>,
+        /// `batch`: the seconds the oldest card waits before a smaller batch
+        #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u32).range(1..))]
+        max_wait_seconds: Option<u32>,
+        /// `batch`: the most cards of one batch
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "no_max_batch_cards")]
+        max_batch_cards: Option<u32>,
+        /// `batch`: no cap on the cards of one batch
+        #[arg(long)]
+        no_max_batch_cards: bool,
+        /// The whole options as JSON, `{"checks": {...}, "queue": {...}}`,
+        /// with an optional `base_version`; `-` reads stdin
+        #[arg(long, value_name = "FILE", conflicts_with_all = [
+            "require_comment", "require_dependencies", "terminal", "clear_eta",
+            "queue_release", "batch_size", "max_wait_seconds", "max_batch_cards",
+            "no_max_batch_cards",
+        ])]
+        from_file: Option<String>,
+    },
     /// Remove a column; it must have no cards
     Rm { name: String },
     /// Move a column
