@@ -171,10 +171,10 @@ async fn wait_round(td: &TestDaemon, id: &str, round: u32) -> String {
             })
             .await
             .unwrap();
-        if let Some((r, Some(agent))) = row
-            && r == round
+        if let Some((r, Some(agent))) = &row
+            && *r == round
         {
-            return agent;
+            return agent.clone();
         }
         assert!(
             start.elapsed() < Duration::from_secs(30),
