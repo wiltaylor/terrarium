@@ -4917,8 +4917,66 @@ written. A bad queue is `422 invalid` with `details.path` (for example
 `queue.batch_size`). A write that changes something raises `version` by
 one, writes one audit row `board.column_options` (`{column, version,
 before, after}`), and emits one `board` event (`{column, options_version,
-checks, queue}`). A write that changes nothing keeps the version and writes
+checks, queue, rule_count}`). A write that changes nothing keeps the version and writes
 nothing.
+
+##### Column rules (TER-1120)
+
+The options also hold the column's rules, in order, in `rules` (C1b of the
+kanban rework). They are stored and checked only: the engine still runs
+the legacy rules (§19.8) until C2. Each rule has a stable `id` (the daemon
+gives it), a `name` (unique in the column: a-z, A-Z, 0-9, `.`, `_`, `-`, at
+most 64), an optional `description`, `enabled` (default `true`), a
+`trigger`, conditions, and actions:
+
+```json
+{"id": "01M7...", "name": "merge-pass", "enabled": true,
+ "trigger": {"kind": "job_result", "events": ["ended"], "job_kinds": ["merge"]},
+ "when": [{"path": "data.state", "op": "eq", "value": "passed"}],
+ "if_card": [{"lacks_labels": ["hold"]}],
+ "if_job": [{"state": ["passed"]}],
+ "max_per_hour": 600,
+ "actions": [{"verb": "card.move", "args": {"to": "@accepted"}}]}
+```
+
+| Trigger | Fields | When |
+|---|---|---|
+| `lands` | | a card enters the column (after the column's queue) |
+| `leaves` | | a card leaves the column |
+| `job_result` | `events` (at least one of `queued`, `started`, `requeued`, `verdict`, `cancelled`, `ended`), `job_kinds` (optional: `validate`, `merge`, `e2e`, `release`) | while a card is in the column: an event of its job |
+| `timer` | `every_seconds` (60 to 2592000) | while a card is in the column: every period |
+| `count_reached` | `count` (1 to 1000) | the column holds that many cards |
+| `wait_met` | | while a card is in the column: its wait is met |
+| `archived` | | a card in the column is archived |
+
+`when`, `if_card`, `if_job`, `max_per_hour` and the verbs of `actions` are
+those of the rules file (§19.8), with the same checks: known paths and
+values, known placeholders in texts, columns of the board (`@<role>` or a
+name), and the required arguments of each verb. `if_job` needs a
+`job_result` trigger. Limits: 50 rules in a column, 300 in a project, 20
+actions in a rule, 32 KiB for a rule.
+
+A `PUT` may carry `rules`: the whole list, in order. A rule with an `id`
+replaces that rule of the column; a rule without one is new; a rule that
+is left out is removed. Without `rules` the rules stay as they are. A bad
+list is `422 invalid` with `details.path` (for example
+`rules[1].actions[0].args.to`) and `details.problems` (each `{path,
+message}`), and nothing of the `PUT` is written. An `id` that is not a rule
+of this column, or an `id` twice, is a problem at `rules[i].id`. A rule
+write raises the version and is recorded as above; the audit row holds the
+rules before and after. A rename of the column keeps its rules; a removed
+column takes its rules with it. A board `PATCH` (§8.3) that removes a
+column with rules needs the right to write the options: for another actor
+with the board `PATCH` right (a `sysadmin`) the whole `PATCH` is `403
+forbidden` with `details.column` and `details.rules`, and nothing changes.
+An allowed removal puts the rules in the `board.columns` audit row, as
+`dropped_rules: [{column, before, after}]`.
+
+`GET /api/rules/catalog` (any caller) lists the rule model for an editor:
+`model_version`, `triggers` (each with its fields), `conditions` (`when`
+paths and ops, `if_card` and `if_job` fields), `actions` (each verb with its
+arguments: `name`, `type`, `required`, and `values` of a `one_of`),
+`placeholders`, and `limits`.
 
 ### 8.3 Endpoints
 
@@ -4927,7 +4985,8 @@ nothing.
 | `GET /api/projects/{name}/board?done=&limit=&cursor=` | | `200` board with card summaries; Done pages are opt-in |
 | `PATCH /api/projects/{name}/board` | `{"columns": [column, ...]}` | `200` board; project_admin |
 | `GET /api/projects/{name}/board/columns/{column}/options` | | `200` column options (§8.2.1) |
-| `PUT /api/projects/{name}/board/columns/{column}/options` | `{"base_version", "checks", "queue"}` | `200` column options; the operator or project_admin of the project |
+| `PUT /api/projects/{name}/board/columns/{column}/options` | `{"base_version", "checks", "queue", "rules"?}` | `200` column options; the operator or project_admin of the project |
+| `GET /api/rules/catalog` | | `200` the column rule model (§8.2.1) |
 | `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards in board order: by column, then by place in the column (the top first), then by number. Each card has its `position` in its column, from 0. Cursor: opaque |
 | `POST /api/projects/{name}/cards` | new card | `201` card |
 | `GET /api/cards?columns=working,research` | | `200` the active cards of every board the caller may read (below) |
@@ -7682,6 +7741,11 @@ foreign ownership and group/other writable components. Python 3 is required
 for these checks; missing tools are terminal errors, never installed. The spool
 retains the first 64 MiB per stream, and is removed after 24 hours of result
 retention (at most the command timeout plus 24 hours and two minutes).
+The command, an agent `run` or a queue recipe, runs under the login umask
+of the remote user (often `0022` or `0002`), as a plain ssh command does. The
+spool, its markers and logs stay owner-only (`0700`/`0600`). Before TER-1150
+the command inherited the spool's `077`, so the files that it made were
+`700`/`600`: run `chmod -R go+rX` on such output.
 The remote lifetime is at most seven days, measured from the original
 checkpoint even if first launch is delayed. Recovery refuses a changed
 target incarnation, SSH host key or exe.dev VM ID with `interrupted (target

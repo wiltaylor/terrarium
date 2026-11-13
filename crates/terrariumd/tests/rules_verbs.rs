@@ -4406,6 +4406,11 @@ async fn the_timer_runs_the_batch_when_a_hold_is_released_in_place() {
 #[tokio::test]
 async fn a_card_of_another_repo_does_not_block_the_merge_queue() {
     let td = queue_lab().await;
+    // Only the explicit timer checks below may queue a batch. The cancel
+    // frees the lane in its own write, but an engine tick after it can
+    // queue b before our check, which then reports the lane busy
+    // (TER-1148, as TER-764).
+    state(&td).rule_timers.hold(true);
     add_repo(&td, "lib").await;
     let r = td
         .put(

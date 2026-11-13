@@ -554,7 +554,9 @@ fn script_for_spool(
         r#"
 p=.
 trap ':' TERM
-sh -c {command} &
+# Only the user command runs under the login umask (TER-1150). The spool,
+# its markers and logs keep the private 077 of this script.
+(umask "${{TERRARIUM_LOGIN_UMASK:-077}}" && unset TERRARIUM_LOGIN_UMASK && exec sh -c {command}) &
 f=$!
 # The coordinator anchors the group identity, not the output streams.
 exec >/dev/null 2>&1
@@ -795,6 +797,112 @@ mod tests {
             );
         }
         assert!(!std::path::Path::new(&spool.root).exists());
+    }
+
+    #[tokio::test]
+    async fn durable_command_gets_the_login_umask_and_the_spool_stays_private() {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        // TER-1150: the command ran under the spool's umask 077, so a clone
+        // or build output was 700/600 for a container user.
+        let mode = |p: &std::path::Path| {
+            std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777
+        };
+        for (umask, file, dir) in [("0022", 0o644, 0o755), ("0002", 0o664, 0o775)] {
+            let (temp, spool) = secure_root(false);
+            let work = temp.path().join("work");
+            std::fs::create_dir(&work).unwrap();
+            let path = format!("{}/.terrarium-runs/claim", spool.root);
+            let cmd = RemoteCmd {
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "umask > seen; touch made; mkdir dir; printf %s \"${TERRARIUM_LOGIN_UMASK-unset}\" > env"
+                        .into(),
+                ],
+                cwd: Some(work.to_str().unwrap().into()),
+                ..RemoteCmd::default()
+            };
+            let script =
+                script_for_spool(&path, &cmd, chrono::Utc::now().timestamp(), RETAIN, &spool);
+            let output = tokio::time::timeout(
+                Duration::from_secs(12),
+                tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(format!("umask {umask}\n{script}"))
+                    .output(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let claim = std::path::Path::new(&path);
+            for _ in 0..100 {
+                if let Ok(pid) = std::fs::read_to_string(claim.join("janitor")) {
+                    assert!(
+                        std::process::Command::new("kill")
+                            .args(["-KILL", "--", &format!("-{}", pid.trim())])
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains("X0\n"), "{umask}: {stdout}");
+            assert_eq!(
+                std::fs::read_to_string(work.join("seen")).unwrap().trim(),
+                umask
+            );
+            assert_eq!(mode(&work.join("made")), file, "{umask}");
+            assert_eq!(mode(&work.join("dir")), dir, "{umask}");
+            assert_eq!(
+                std::fs::read_to_string(work.join("env")).unwrap(),
+                "unset",
+                "{umask}"
+            );
+            // The spool, its markers and logs stay owner-only.
+            let parent = claim.parent().unwrap();
+            let mut seen = Vec::new();
+            for dir in [parent, claim] {
+                assert_eq!(mode(dir), 0o700, "{umask}: {}", dir.display());
+                for entry in std::fs::read_dir(dir).unwrap() {
+                    let entry = entry.unwrap();
+                    let kind = entry.file_type().unwrap();
+                    if kind.is_dir() {
+                        continue;
+                    }
+                    assert!(
+                        kind.is_file() || kind.is_fifo(),
+                        "{}",
+                        entry.path().display()
+                    );
+                    assert_eq!(
+                        mode(&entry.path()),
+                        0o600,
+                        "{umask}: {}",
+                        entry.path().display()
+                    );
+                    seen.push(entry.file_name().into_string().unwrap());
+                }
+            }
+            for name in [
+                "out",
+                "err",
+                "exit",
+                "pid",
+                "foreground",
+                "ready",
+                "live",
+                "o",
+                "e",
+            ] {
+                assert!(
+                    seen.iter().any(|s| s == name),
+                    "{umask}: {name} in {seen:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
