@@ -2092,7 +2092,8 @@ pub fn export(
                 schedules: project_schedules,
                 templates: project_templates,
                 github_authors: Vec::new(),
-                board_flow: (p.board_flow != terrarium_core::config::BoardFlow::Code)
+                // `columns` is not a file value (TER-1113): only the upgrade sets it.
+                board_flow: (p.board_flow == terrarium_core::config::BoardFlow::Rules)
                     .then_some(p.board_flow),
             },
             agents,
