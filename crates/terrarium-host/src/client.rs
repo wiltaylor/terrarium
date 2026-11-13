@@ -1301,13 +1301,17 @@ impl Client {
                 #[cfg(not(windows))]
                 let plan = crate::verb::plan_exec(&req, p);
                 #[cfg(windows)]
-                let cwd = req.cwd.as_ref().and_then(|c| c.to_str()).map_or(Ok(()), |cwd| {
-                    crate::windows_workspace::check_cwd(
-                        &self.opts.windows_workspaces,
-                        identity.as_deref(),
-                        cwd,
-                    )
-                });
+                let cwd = req
+                    .cwd
+                    .as_ref()
+                    .and_then(|c| c.to_str())
+                    .map_or(Ok(()), |cwd| {
+                        crate::windows_workspace::check_cwd(
+                            &self.opts.windows_workspaces,
+                            identity.as_deref(),
+                            cwd,
+                        )
+                    });
                 #[cfg(windows)]
                 let plan = match (cwd, identity.as_deref()) {
                     (Err(m), _) => Err(BuildError::path(m)),

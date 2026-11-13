@@ -65,9 +65,9 @@ pub mod update_signature;
 pub mod verb;
 pub mod vmlab;
 pub mod windows_run_as;
-pub mod windows_workspace;
 #[cfg(windows)]
 pub mod windows_update;
+pub mod windows_workspace;
 pub mod workspace;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub mod workspace_helper;

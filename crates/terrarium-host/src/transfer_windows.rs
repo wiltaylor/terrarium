@@ -10,9 +10,9 @@
 
 use super::*;
 use crate::protocol::{CHUNK_SIZE, SessionId, StreamTag};
+use crate::windows_workspace::{Location, split_file};
 use std::io::{Read, Write};
 use std::sync::Arc;
-use crate::windows_workspace::{Location, split_file};
 use terrarium_winapi::{Dir, Identity, TempFile, Workspace};
 use tokio::sync::{mpsc, oneshot};
 
@@ -75,6 +75,36 @@ impl Sink {
     }
 }
 
+fn not_a_file(path: &Path) -> TransferError {
+    TransferError::NotAFile {
+        path: path.to_owned(),
+    }
+}
+
+/// Service authority: provision the workspace before impersonating.
+fn provision(
+    location: Option<&Location>,
+    identity: Option<&Identity>,
+    path: &Path,
+) -> Result<Option<Workspace>, TransferError> {
+    location
+        .map(|l| Workspace::open(&l.project, &l.agent, identity, true))
+        .transpose()
+        .map_err(io("workspace", path))
+}
+
+/// As the account: the held chain stays alive until the read ends.
+fn open_confined(
+    workspace: Workspace,
+    location: &Location,
+    path: &Path,
+) -> Result<(Dir, std::fs::File), TransferError> {
+    let (dirs, name) = split_file(location).map_err(|_| not_a_file(path))?;
+    let dir = workspace.into_dir(&dirs, false).map_err(io("open", path))?;
+    let file = dir.open_read(name).map_err(io("open", path))?;
+    Ok((dir, file))
+}
+
 fn mismatch(got_bytes: u64, got: String, want_bytes: u64, want: &str) -> TransferError {
     TransferError::Mismatch {
         got_bytes,
@@ -93,12 +123,8 @@ impl Confined {
         mkdirs: bool,
         session: SessionId,
     ) -> Result<Self, TransferError> {
-        let (dirs, name) = split_file(location).map_err(|_| TransferError::NotAFile {
-            path: path.to_owned(),
-        })?;
-        let dir = workspace
-            .into_dir(&dirs, mkdirs)
-            .map_err(io("open", path))?;
+        let (dirs, name) = split_file(location).map_err(|_| not_a_file(path))?;
+        let dir = workspace.into_dir(&dirs, mkdirs).map_err(io("open", path))?;
         let temp = dir.create_temp(session).map_err(io("create", path))?;
         Ok(Self {
             dir,
@@ -228,21 +254,14 @@ impl PushFile {
             .name("terrarium-push".into())
             .spawn(move || {
                 let mut ready = Some(ready);
-                // Service authority: provision the workspace before impersonating.
-                let workspace = match &location {
-                    Some(l) => match Workspace::open(&l.project, &l.agent, identity.as_deref(), true)
-                    {
-                        Ok(w) => Some(w),
+                let workspace =
+                    match provision(location.as_ref(), identity.as_deref(), &worker_path) {
+                        Ok(w) => w,
                         Err(error) => {
-                            let _ = ready
-                                .take()
-                                .expect("ready once")
-                                .send(Err(io("workspace", &worker_path)(error)));
+                            let _ = ready.take().expect("ready once").send(Err(error));
                             return;
                         }
-                    },
-                    None => None,
-                };
+                    };
                 let result = as_user(identity.as_deref(), || {
                     let opened = match (workspace, &location) {
                         (Some(w), Some(l)) => {
@@ -338,36 +357,24 @@ pub async fn pull_as(
     std::thread::Builder::new()
         .name("terrarium-pull".into())
         .spawn(move || {
-            // Service authority: provision the workspace before impersonating.
-            let workspace = match &location {
-                Some(l) => match Workspace::open(&l.project, &l.agent, identity.as_deref(), true) {
-                    Ok(w) => Some(w),
-                    Err(error) => {
-                        let _ = done.send(Err(io("workspace", &worker_path)(error)));
-                        return;
-                    }
-                },
-                None => None,
+            let workspace = match provision(location.as_ref(), identity.as_deref(), &worker_path) {
+                Ok(w) => w,
+                Err(error) => {
+                    let _ = done.send(Err(error));
+                    return;
+                }
             };
             let transfer = as_user(identity.as_deref(), || {
                 let result = (|| {
-                    // The held chain stays alive until the read ends.
                     let (_dir, mut file) = match (workspace, &location) {
                         (Some(w), Some(l)) => {
-                            let (dirs, name) =
-                                split_file(l).map_err(|_| TransferError::NotAFile {
-                                    path: worker_path.clone(),
-                                })?;
-                            let dir = w
-                                .into_dir(&dirs, false)
-                                .map_err(io("open", &worker_path))?;
-                            let file = dir.open_read(name).map_err(io("open", &worker_path))?;
+                            let (dir, file) = open_confined(w, l, &worker_path)?;
                             (Some(dir), file)
                         }
-                        _ => (
-                            None,
-                            std::fs::File::open(&worker_path).map_err(io("open", &worker_path))?,
-                        ),
+                        _ => {
+                            let file = std::fs::File::open(&worker_path);
+                            (None, file.map_err(io("open", &worker_path))?)
+                        }
                     };
                     if !file.metadata().map_err(io("stat", &worker_path))?.is_file() {
                         return Err(TransferError::NotAFile {
