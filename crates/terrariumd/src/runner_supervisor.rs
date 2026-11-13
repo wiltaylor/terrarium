@@ -1142,22 +1142,18 @@ struct KickQueue {
 }
 
 /// TER-1104: the deliverable work of an agent: its `queued` mail (held
-/// mail is not `queued`), the mail items in its pointer (counted once with
-/// the same queued mail), and its other pointer items: the stored rows or
+/// mail is not `queued`), and its other pointer items: the stored rows or
 /// the items in memory, whichever is more (a stored row is in memory too
-/// after a launch or a reload).
+/// after a launch or a reload). A mail item in the pointer counts only
+/// while its mail is still `queued` (a failed delivery keeps it so): one
+/// that was read meanwhile is no work.
 fn kick_queue(
     queued: &[crate::store::mail::Message],
     rows: usize,
-    pointer_mail: &std::collections::HashSet<String>,
     pointer_other: usize,
     now: chrono::DateTime<chrono::Utc>,
 ) -> KickQueue {
-    let mail = queued
-        .iter()
-        .filter(|m| !pointer_mail.contains(&m.id))
-        .count()
-        + pointer_mail.len();
+    let mail = queued.len();
     let oldest_age_s = queued
         .iter()
         .filter_map(|m| chrono::DateTime::parse_from_rfc3339(&m.created_at).ok())
@@ -4630,20 +4626,14 @@ impl RunnerSupervisor {
         if self.held(id).is_some() {
             return;
         }
-        let (epoch, rest, pointer_mail, pointer_other) = {
+        let (epoch, rest, pointer_other) = {
             let slots = lock(&self.inner.slots);
             let Some(slot) = slots.get(&id).filter(|s| s.kickable()) else {
                 return;
             };
             let Some(rest) = slot.rest_since else { return };
-            let mail: std::collections::HashSet<String> = slot
-                .pointer
-                .mail
-                .iter()
-                .map(|m| m.message_id.clone())
-                .collect();
             let other = slot.pointer.len() - slot.pointer.mail.len();
-            (slot.epoch, rest, mail, other)
+            (slot.epoch, rest, other)
         };
         let agent = id.to_string();
         let read = state
@@ -4662,13 +4652,7 @@ impl RunnerSupervisor {
                 return;
             }
         };
-        let queue = kick_queue(
-            &queued,
-            rows,
-            &pointer_mail,
-            pointer_other,
-            chrono::Utc::now(),
-        );
+        let queue = kick_queue(&queued, rows, pointer_other, chrono::Utc::now());
         let (step, agent) = {
             let mut slots = lock(&self.inner.slots);
             let Some(slot) = slots
@@ -4785,8 +4769,12 @@ impl RunnerSupervisor {
             })
             .await;
         match result {
-            Ok(Some(lead)) => info!(agent = %id, %lead, "mailed the lead: the queue does not drain"),
-            Ok(None) => warn!(agent = %id, "the queue does not drain, and the project has no other lead to mail"),
+            Ok(Some(lead)) => {
+                info!(agent = %id, %lead, "mailed the lead: the queue does not drain")
+            }
+            Ok(None) => {
+                warn!(agent = %id, "the queue does not drain, and the project has no other lead to mail")
+            }
             Err(e) => warn!(agent = %id, "cannot mail the lead about the queue: {e}"),
         }
     }
@@ -9578,7 +9566,9 @@ mod tests {
                     "SELECT subject, body FROM messages WHERE to_agent = ?1 ORDER BY rowid",
                 )?;
                 let rows = st
-                    .query_map([to], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                    .query_map([to], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    })?
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(rows)
             })
@@ -9660,9 +9650,10 @@ mod tests {
         assert_eq!(slot.rest_since, None);
     }
 
-    /// TER-1104: a mail in the pointer and in the store counts once; stored
-    /// rows and pointer items in memory count as the larger of the two; the
-    /// oldest age comes from the queued mail only.
+    /// TER-1104: queued mail counts once each (a pointer mail item is
+    /// counted through the store); stored rows and pointer items in memory
+    /// count as the larger of the two; the oldest age comes from the queued
+    /// mail only.
     #[test]
     fn kick_queue_counts_each_item_once() {
         let now = chrono::Utc::now();
@@ -9677,15 +9668,17 @@ mod tests {
             .unwrap()
         };
         let queued = vec![mail("m1", 30), mail("m2", 90)];
-        let in_pointer: std::collections::HashSet<String> = ["m1".to_owned()].into();
-        let q = kick_queue(&queued, 1, &in_pointer, 2, now);
+        let q = kick_queue(&queued, 1, 2, now);
         assert_eq!(q.count, 2 + 2);
-        assert!(q.oldest_age_s.is_some_and(|a| (89..=91).contains(&a)), "{q:?}");
-        let none = kick_queue(&[], 0, &Default::default(), 0, now);
+        assert!(
+            q.oldest_age_s.is_some_and(|a| (89..=91).contains(&a)),
+            "{q:?}"
+        );
+        let none = kick_queue(&[], 0, 0, now);
         assert_eq!(none.count, 0);
         assert_eq!(none.oldest_age_s, None);
         // Pointer items with no queued mail: no age.
-        let only = kick_queue(&[], 0, &Default::default(), 1, now);
+        let only = kick_queue(&[], 0, 1, now);
         assert_eq!((only.count, only.oldest_age_s), (1, None));
     }
 
@@ -9761,7 +9754,10 @@ mod tests {
         settle(&sup, id).await;
         let typed = lock(&runner.typed).clone();
         assert_eq!(typed.len(), 1, "{typed:?}");
-        assert!(typed[0].contains(&crate::leases::ended_line("t1104")), "{typed:?}");
+        assert!(
+            typed[0].contains(&crate::leases::ended_line("t1104")),
+            "{typed:?}"
+        );
         let events = kicked_events(&state).await;
         assert_eq!(kicked_steps(&events), ["reload"]);
         assert_eq!(events[0].1["count"], 1);
@@ -9943,9 +9939,7 @@ mod tests {
     /// is never counted or released.
     #[tokio::test]
     async fn excluded_agents_are_never_kicked() {
-        for case in [
-            "paused", "error", "quota", "drain", "upgrade", "held_only",
-        ] {
+        for case in ["paused", "error", "quota", "drain", "upgrade", "held_only"] {
             let tmp = tempfile::tempdir().unwrap();
             let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
             let held = store_mail(&state, id, true).await;
