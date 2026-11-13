@@ -113,6 +113,8 @@ export default function CustomPage() {
       </Show>
     </PageHead>
     <ErrorBanner error={error() ?? (sharedPage() ? undefined : page.error) ?? scopedRights.error ?? monitors.error} />
+    {/* The tab row can still be editing when only this page's read failed. Its Retry does not reach this page. */}
+    <Show when={scopedRights.error}><div class="row"><button type="button" disabled={scopedRights.loading} onClick={() => void refetchRights()}>Retry page rights</button></div></Show>
     <Show when={shared() && editor!.editing() && !sharedPage()}><p class="muted">This page is removed in the unsaved draft.</p></Show>
     <Show when={editing() && shared()}><div class="stack dash-editbar">
       <div class="row"><label>Widget kind<select value={part()} onChange={e => setPart(e.currentTarget.value)}><For each={WIDGET_REGISTRY}>{definition => <option value={definition.part}>{definition.part}</option>}</For></select></label>

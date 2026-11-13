@@ -236,10 +236,12 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
           <Show when={editor!.remote() !== undefined && editor!.conflict() === undefined}><p class="muted" role="status">Someone changed these pages. Your draft is kept. Save reports a conflict.</p></Show>
         </Show>
       </Show>
-      {/* A failed refresh while drafting removes the rights (fail closed) but keeps the draft. */}
-      <Show when={editor?.draft() && !editing()}><div class="row" role="alert">
-        <span>Could not check your rights to edit these pages. Your unsaved draft is kept.</span>
-        <button type="button" disabled={scopedPages.loading} onClick={() => void refetch()}>Retry</button>
+      {/* A failed refresh, a revoke or v2 OFF while drafting removes the rights (fail closed) but keeps the draft. */}
+      <Show when={editor?.draft() && !editing() && (scopedPages.error || pages.latest)}><div class="row" role="alert">
+        <span>{scopedPages.error ? "Could not check your rights to edit these pages."
+          : !enabled() ? "Project pages are off for this project."
+          : "You can no longer edit these pages."} Your unsaved draft is kept.</span>
+        <Show when={scopedPages.error}><button type="button" disabled={scopedPages.loading} onClick={() => void refetch()}>Retry</button></Show>
         <button type="button" onClick={() => { if (window.confirm("Discard your unsaved page layout changes?")) editor!.cancel(); }}>Discard draft</button>
       </div></Show>
       <ErrorBanner error={error() ?? (editor?.conflict() === undefined ? editor?.error() : undefined) ?? pages.error} />
