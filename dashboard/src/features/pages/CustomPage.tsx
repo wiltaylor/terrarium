@@ -26,7 +26,7 @@ export default function CustomPage() {
   const scope = () => `${instanceKey}/${params.project}`;
   const [scopedRights, { refetch: refetchRights }] = createResource(scope, async current => ({ scope: current, value: await api.pages.list(params.project) }));
   const rights = () => !scopedRights.error && scopedRights.latest?.scope === scope() ? scopedRights.latest?.value : undefined;
-  const enabled = () => projectPagesEnabled(scopedRights.error || scopedRights.loading ? undefined : scopedRights(), scope(), scopedRights.loading, scopedRights.error);
+  const enabled = () => projectPagesEnabled(scopedRights.latest, scope(), scopedRights.error);
   const canEdit = () => !scopedRights.error && rights()?.can_edit === true;
   const [monitors, { refetch: refetchMonitors }] = createResource(() => params.project, p => api.monitors.list(p));
   const [draft, setDraft] = createSignal<ProjectPageInput | null>(null);
@@ -107,9 +107,8 @@ export default function CustomPage() {
         <label>Widget title<input maxlength={120} value={w.title ?? ""} onInput={e => patchWidget(w.id, { title: e.currentTarget.value })} /></label>
         <Show when={enabled() && widgetDefinition(w)?.host === "feature"}>
           <label>View<select value={w.options?.view ?? widgetDefinition(w)?.view} onChange={e => patchWidget(w.id, { options: { ...w.options, view: e.currentTarget.value as ProjectWidgetViews[ProjectWidgetKind] } })}><For each={PROJECT_WIDGET_VIEWS[w.kind as ProjectWidgetKind]}>{view => <option value={view}>{view}</option>}</For></select></label>
-          <label>Search<input value={w.options?.search ?? ""} onInput={e => {
-            if (new TextEncoder().encode(e.currentTarget.value).length <= 256) patchWidget(w.id, { options: { ...w.options, search: e.currentTarget.value } });
-          }} /></label>
+          <label>Search<input aria-invalid={new TextEncoder().encode(w.options?.search ?? "").length > 256} value={w.options?.search ?? ""} onInput={e => patchWidget(w.id, { options: { ...w.options, search: e.currentTarget.value } })} /></label>
+          <p class={new TextEncoder().encode(w.options?.search ?? "").length > 256 ? "error" : "muted"}>{new TextEncoder().encode(w.options?.search ?? "").length} / 256 bytes</p>
         </Show>
         <Show when={w.kind === "markdown"}>
           <PostEditor label="Markdown" project={params.project} text={w.text ?? ""}><label>Markdown<textarea value={w.text ?? ""} onInput={e => patchWidget(w.id, { text: e.currentTarget.value })} /></label></PostEditor>

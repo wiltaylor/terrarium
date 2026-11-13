@@ -24,7 +24,7 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
   const scope = () => `${instanceKey}/${project()}`;
   const [scopedPages, { refetch }] = createResource(scope, async current => ({ scope: current, value: await api.pages.list(project()) }));
   const pages = { get latest() { return !scopedPages.error && scopedPages.latest?.scope === scope() ? scopedPages.latest.value : undefined; }, get error() { return scopedPages.error; } };
-  const enabled = () => projectPagesEnabled(scopedPages.error || scopedPages.loading ? undefined : scopedPages(), scope(), scopedPages.loading, scopedPages.error);
+  const enabled = () => projectPagesEnabled(scopedPages.latest, scope(), scopedPages.error);
   const [adding, setAdding] = createSignal(false);
   const [slug, setSlug] = createSignal("");
   const [title, setTitle] = createSignal("");
