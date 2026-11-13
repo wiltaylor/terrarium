@@ -124,6 +124,26 @@ pub(crate) fn queued_count(conn: &Connection, column_id: i64) -> ApiResult<i64> 
     )?)
 }
 
+/// The waiting cards of each column of `project` that has any, by column
+/// ID: one statement for a whole board (the board summary has a statement
+/// budget).
+pub(crate) fn queued_by_column(
+    conn: &Connection,
+    project: &str,
+) -> ApiResult<std::collections::HashMap<i64, i64>> {
+    let mut st = conn.prepare(
+        "SELECT q.column_id, count(*) FROM card_queue q
+           JOIN board_columns k ON k.id = q.column_id
+           JOIN cards c ON c.id = q.card
+          WHERE k.project = ?1 AND q.admitted_at IS NULL AND c.archived = 0
+          GROUP BY q.column_id",
+    )?;
+    let rows = st
+        .query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
 /// A job of card `q.card` (its own job, or a batch job that has it).
 const JOB_OF_CARD: &str = "(j.card = q.card OR EXISTS (SELECT 1 FROM json_each(j.batch)
                             WHERE json_extract(value, '$.card') = q.card))";

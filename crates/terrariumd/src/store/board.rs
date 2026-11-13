@@ -893,10 +893,11 @@ pub(crate) fn selection_cards(
 pub fn get_board(conn: &Connection, project: &str) -> ApiResult<Board> {
     let prefix = crate::store::projects::get(conn, project)?.card_prefix;
     let mut columns = Vec::new();
+    let queued = queues::queued_by_column(conn, project)?;
     for (i, c) in column_rows(conn, project)?.into_iter().enumerate() {
         columns.push(Column {
             count: active_count(conn, c.id)?,
-            queued: queues::queued_count(conn, c.id)?,
+            queued: queued.get(&c.id).copied().unwrap_or(0),
             title: c.title.unwrap_or_else(|| default_title(&c.name)),
             name: c.name,
             position: i as i64,
@@ -932,13 +933,14 @@ pub fn board_summary(
     page: &Page,
 ) -> ApiResult<Value> {
     let prefix = crate::store::projects::get(conn, project)?.card_prefix;
+    let queued = queues::queued_by_column(conn, project)?;
     let columns = column_rows(conn, project)?
         .into_iter()
         .enumerate()
         .map(|(i, c)| {
             Ok(Column {
                 count: active_count(conn, c.id)?,
-                queued: queues::queued_count(conn, c.id)?,
+                queued: queued.get(&c.id).copied().unwrap_or(0),
                 title: c.title.unwrap_or_else(|| default_title(&c.name)),
                 name: c.name,
                 position: i as i64,
