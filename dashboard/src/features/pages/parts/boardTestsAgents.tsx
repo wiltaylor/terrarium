@@ -25,16 +25,19 @@ import { columnTitle } from "../../board/columns";
 import { TestRunsPanel, type TestRunsQuery } from "../../tests/TestRunsPanel";
 import { patchQuery, widgetSearch, widgetView } from "./localQuery";
 
-/** Resource-domain grants. Each field matches one server right of the project. Absent means no right. */
+/**
+ * Resource-domain grants, supplied by the host (TER-1077) from the actual actor and project scope.
+ * Each field keeps its own meaning, also when two share one server policy today. Absent means no right.
+ */
 export interface BoardTestsAgentsGrants {
-  /** Card writes on the board: New card, move, and the card drawer (edit, comment, files, questions, archive). */
-  writeCards?: boolean;
-  /** `PATCH board` (project_admin): Edit columns and the columns editor. */
-  editColumns?: boolean;
-  /** `POST /api/agents` (project_admin of the project): New agent. */
-  createAgent?: boolean;
+  /** `write_project`: New card, move, and the card drawer (edit, comment, files, questions, archive). */
+  canWriteCards?: boolean;
+  /** `PATCH board` (`admin_project` today): Edit columns and the columns editor. */
+  canEditColumns?: boolean;
+  /** `POST /api/agents` (`admin_project` today): New agent. */
+  canCreateAgent?: boolean;
   /** The caller's own agent pins (docs/api.md §6.11). */
-  pinAgents?: boolean;
+  canPinAgents?: boolean;
 }
 
 /** The props of one widget part. `widget` and `grants` are read reactively, so a change applies in place. */
@@ -55,9 +58,9 @@ function BoardCards(props: FeaturePartProps<"board"> & { done: boolean }) {
   // A saved view change (lanes or done) and a project change start from a clean query.
   createEffect(on(() => [props.project, props.done] as const, ([, saved]) => { setQuery({}); setDone(saved); }, { defer: true }));
   // A revoked card grant closes an open drawer: the read-only board has no card in its query.
-  createEffect(on(() => granted(props, "writeCards"), write => { if (!write) setQuery(q => patchQuery(q, { card: undefined })); }, { defer: true }));
+  createEffect(on(() => granted(props, "canWriteCards"), write => { if (!write) setQuery(q => patchQuery(q, { card: undefined })); }, { defer: true }));
   return <BoardPanel project={props.project} done={done()} query={query()}
-    canWriteCards={granted(props, "writeCards")} canEditColumns={granted(props, "editColumns")}
+    canWriteCards={granted(props, "canWriteCards")} canEditColumns={granted(props, "canEditColumns")}
     onQueryChange={patch => setQuery(q => patchQuery(q, patch))}
     onToggleDone={() => { setQuery(q => patchQuery(q, { card: undefined, col: undefined })); setDone(d => !d); }} />;
 }
@@ -67,7 +70,7 @@ const COLUMNS_RELOAD_MS = 300;
 const sameColumns = (a: Column[] | undefined, b: Column[] | undefined) => JSON.stringify(a) === JSON.stringify(b);
 
 function BoardColumns(props: FeaturePartProps<"board">) {
-  return <Show when={props.project} keyed>{project => <BoardColumnsContent project={project} canEdit={granted(props, "editColumns")} />}</Show>;
+  return <Show when={props.project} keyed>{project => <BoardColumnsContent project={project} canEdit={granted(props, "canEditColumns")} />}</Show>;
 }
 function BoardColumnsContent(props: { project: string; canEdit: boolean }) {
   const { api, events } = useInstance();
@@ -133,7 +136,7 @@ function TestRuns(props: FeaturePartProps<"tests">) {
 export const TESTS_PARTS: FeaturePartMap<"tests"> = { runs: TestRuns };
 
 export const AGENTS_PARTS: FeaturePartMap<"agents"> = {
-  agents: props => <AgentsPanel project={props.project} canCreate={granted(props, "createAgent")} canPin={granted(props, "pinAgents")} />,
+  agents: props => <AgentsPanel project={props.project} canCreateAgent={granted(props, "canCreateAgent")} canPin={granted(props, "canPinAgents")} />,
   card_agents: props => <CardAgentsPanel project={props.project} empty="No card agents." />,
 };
 

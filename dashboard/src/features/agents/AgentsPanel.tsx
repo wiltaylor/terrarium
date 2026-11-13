@@ -83,9 +83,9 @@ export function AgentCard(props: { agent: Agent; now: number; onError?: (e: unkn
   );
 }
 
-// `canCreate`: New agent (`POST /api/agents`, project_admin of the project). `canPin`: the pin buttons.
+// `canCreateAgent`: New agent (`POST /api/agents`, project_admin of the project). `canPin`: the pin buttons.
 // Absent is the Agents tab (true).
-export function AgentsPanel(props: { project: string; onRefresh?: () => void; canCreate?: boolean; canPin?: boolean }) {
+export function AgentsPanel(props: { project: string; onRefresh?: () => void; canCreateAgent?: boolean; canPin?: boolean }) {
   const { leases, agents } = useInstance();
   const now = useNow(1000);
   const navigate = useNavigate();
@@ -114,13 +114,13 @@ export function AgentsPanel(props: { project: string; onRefresh?: () => void; ca
         >
           Refresh
         </button>
-        <Show when={props.canCreate !== false}>
+        <Show when={props.canCreateAgent !== false}>
           <button class="primary" onClick={() => setCreating(true)}>
             New agent
           </button>
         </Show>
       </PageHead>
-      <Show when={props.canCreate !== false && creating()}>
+      <Show when={props.canCreateAgent !== false && creating()}>
         <NewAgentDialog project={project()} onClose={() => setCreating(false)} onSaved={(a) => navigate(`/agents/${encodeURIComponent(a.id)}`)} />
       </Show>
       <ErrorBanner error={agents.state.error} />
@@ -164,11 +164,13 @@ function CardAgentsContent(props: CardAgentsProps) {
     off();
   });
 
-  return <><ErrorBanner error={props.empty === undefined ? undefined : cardAgents.error} />
-      <Show when={(cardAgents.latest ?? []).length} fallback={<Show when={props.empty !== undefined && cardAgents.state === "ready"}><Empty>{props.empty}</Empty></Show>}>
+  // A failed load shows its error. Reading `latest` of a failed resource throws, so the list is empty then.
+  const shown = () => (cardAgents.state === "errored" ? [] : (cardAgents.latest ?? []));
+  return <><ErrorBanner error={cardAgents.state === "errored" ? cardAgents.error : undefined} />
+      <Show when={shown().length} fallback={<Show when={props.empty !== undefined && cardAgents.state === "ready"}><Empty>{props.empty}</Empty></Show>}>
         <h3>Card agents</h3>
         <div class="grid card-agents">
-          <For each={cardAgents.latest}>{(a) => <AgentCard agent={a} now={now()} />}</For>
+          <For each={shown()}>{(a) => <AgentCard agent={a} now={now()} />}</For>
         </div>
       </Show>
   </>;

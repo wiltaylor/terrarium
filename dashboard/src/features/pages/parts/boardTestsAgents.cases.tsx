@@ -29,13 +29,14 @@ vi.mock("../../../stores", async () => {
     cardPeek: { open: () => {}, close: () => {} },
   });
 });
+const { CardAgentsPanel } = await import("../../agents/AgentsPanel");
 const { AGENTS_PARTS, BOARD_PARTS, BOARD_TESTS_AGENTS_PARTS, TESTS_PARTS, boardTestsAgentsPart } = await import("./boardTestsAgents");
 
 let dispose: (() => void) | undefined;
 const startUrl = "/p/terrarium/board?card=TER-1&col=review";
 beforeEach(() => window.history.replaceState(null, "", startUrl));
 afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.restoreAllMocks(); vi.useRealTimers(); listeners.clear(); navigate.mockClear(); });
-const admin = { writeCards: true, editColumns: true, createAgent: true, pinAgents: true };
+const admin = { canWriteCards: true, canEditColumns: true, canCreateAgent: true, canPinAgents: true };
 const buttonText = (el: Element, text: string) => [...el.querySelectorAll("button")].find(b => b.textContent?.trim() === text);
 function host() { const el = document.createElement("div"); document.body.append(el); return el; }
 const widget = <K extends PageWidget["kind"]>(id: string, kind: K, options?: PageWidget["options"]) => ({ id, kind, options });
@@ -217,7 +218,7 @@ it("defaults a board widget to read-only and opens a card on its detail route", 
 it("shows board writes only with the grants, and a revoked grant removes them and closes the drawer", async () => {
   const el = host();
   const Lanes = BOARD_PARTS.lanes;
-  const [grants, setGrants] = createSignal<typeof admin | { writeCards?: boolean; editColumns?: boolean }>({ writeCards: true });
+  const [grants, setGrants] = createSignal<typeof admin | { canWriteCards?: boolean; canEditColumns?: boolean }>({ canWriteCards: true });
   dispose = render(() => <Lanes project="terrarium" widget={widget("g", "board")} grants={grants()} />, el);
   await waitFor(() => expect(el.querySelector(".column-add")).not.toBeNull());
   expect(buttonText(el, "Edit columns")).toBeUndefined();
@@ -240,33 +241,47 @@ it("shows read-only columns without a grant and the editor with one", async () =
   const update = vi.spyOn(api.board, "update");
   const el = host();
   const Columns = BOARD_PARTS.columns;
-  const [grants, setGrants] = createSignal<{ editColumns?: boolean } | undefined>(undefined);
+  const [grants, setGrants] = createSignal<{ canEditColumns?: boolean } | undefined>(undefined);
   dispose = render(() => <Columns project="terrarium" widget={widget("c", "board", { view: "columns" })} grants={grants()} />, el);
   await waitFor(() => expect(el.querySelectorAll("table [data-column-row]").length).toBe(board.columns.length));
   expect(el.querySelector("form, input, select, textarea")).toBeNull();
   expect(el.querySelector("button")).toBeNull();
   // A write right of another domain is not a columns grant.
-  setGrants({ editColumns: false });
+  setGrants({ canEditColumns: false });
   expect(el.querySelector("form")).toBeNull();
-  setGrants({ editColumns: true });
+  setGrants({ canEditColumns: true });
   await waitFor(() => expect(el.querySelectorAll(".columns-editor-row").length).toBe(board.columns.length));
   setGrants(undefined);
   expect(el.querySelector("form")).toBeNull();
   expect(update).not.toHaveBeenCalled();
 });
 
+it("shows a card agents load error on the Agents tab and in the widget", async () => {
+  vi.spyOn(api.agents, "list").mockRejectedValue(new ApiError(500, "agents unavailable"));
+  const el = host();
+  const CardAgents = AGENTS_PARTS.card_agents;
+  dispose = render(() => <>
+    <section data-w="tab"><CardAgentsPanel project="terrarium" /></section>
+    <section data-w="widget"><CardAgents project="terrarium" widget={widget("c", "agents", { view: "card_agents" })} /></section>
+  </>, el);
+  const [tab, part] = [...el.querySelectorAll<HTMLElement>("[data-w]")];
+  await waitFor(() => expect(tab!.querySelector("[role=alert]")).not.toBeNull());
+  await waitFor(() => expect(part!.querySelector("[role=alert]")).not.toBeNull());
+  expect(part!.textContent).not.toContain("No card agents.");
+});
+
 it("hides New agent and pins without grants and shows them with grants", () => {
   const el = host();
   const Agents = AGENTS_PARTS.agents;
-  const [grants, setGrants] = createSignal<{ createAgent?: boolean; pinAgents?: boolean } | undefined>(undefined);
+  const [grants, setGrants] = createSignal<{ canCreateAgent?: boolean; canPinAgents?: boolean } | undefined>(undefined);
   dispose = render(() => <Agents project="terrarium" widget={widget("a", "agents")} grants={grants()} />, el);
   expect(el.querySelectorAll(".agent-card")).toHaveLength(2);
   expect(buttonText(el, "New agent")).toBeUndefined();
   expect(buttonText(el, "Pin")).toBeUndefined();
-  setGrants({ createAgent: true });
+  setGrants({ canCreateAgent: true });
   expect(buttonText(el, "New agent")).not.toBeUndefined();
   expect(buttonText(el, "Pin")).toBeUndefined();
-  setGrants({ pinAgents: true });
+  setGrants({ canPinAgents: true });
   expect(buttonText(el, "New agent")).toBeUndefined();
   expect(el.querySelectorAll("button[aria-pressed]")).toHaveLength(2);
 });
