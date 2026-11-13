@@ -357,6 +357,69 @@ async fn request_lead_swaps_to_architect_in_same_thread() {
     assert_eq!(l.spawn_row(agent).await["owner"], l.p_lead);
 }
 
+/// Request and delegated architect starts share the spawn account selector.
+/// A high estimate is not a refusal for either entrypoint.
+#[tokio::test]
+async fn request_and_architect_admit_high_estimated_usage() {
+    let l = lab().await;
+    l.td.post(
+        "/api/subscriptions",
+        json!({"name": "request-estimated", "provider": "anthropic", "harnesses": ["claude"]}),
+    )
+    .await
+    .ok();
+    let login = r#"{"claudeAiOauth":{"accessToken":"test","refreshToken":"test","expiresAt":4102444800000}}"#;
+    terrariumd::accounts::write_credential(
+        &state(&l.td).state_dir,
+        "request-estimated",
+        terrarium_core::HarnessId::Claude,
+        login.as_bytes(),
+    )
+    .unwrap();
+    state(&l.td)
+        .db
+        .write("system", |t| {
+            terrariumd::store::subscriptions::insert_sample(
+                t,
+                "request-estimated",
+                "5h",
+                110.0,
+                None,
+                &json!({}),
+            )
+        })
+        .await
+        .unwrap();
+    for (name, roles) in [("request", json!([])), ("architect", json!(["architect"]))] {
+        let made = l.td.post(
+            "/api/templates",
+            json!({"name": name,
+                   "spec": {"harness": "claude", "roles": roles,
+                            "subscription": "request-estimated"}}),
+        )
+        .await;
+        assert_eq!(made.status, 201, "{}", made.body);
+    }
+    let th = l.open(
+        json!({"report_to": "p/lead", "topic": "Estimated usage",
+               "text": "Start without a probe-estimate refusal."}),
+    )
+    .await;
+    let request_agent = l.agent(th["agent"].as_str().unwrap()).await;
+    assert_eq!(request_agent["subscription"], "request-estimated");
+    let tid = id(&th);
+    let swapped = l.td.post_as(
+        &l.p_lead,
+        &format!("/api/threads/{tid}/swap"),
+        json!({"template": "global:architect", "reason": "Needs design"}),
+    )
+    .await;
+    assert_eq!(swapped.status, 200, "{}", swapped.body);
+    let architect = l.agent(swapped.body["agent"].as_str().unwrap()).await;
+    assert_eq!(architect["roles"], json!(["architect"]));
+    assert_eq!(architect["subscription"], "request-estimated");
+}
+
 #[tokio::test]
 async fn request_swap_refuses_project_and_excess_role_templates() {
     let l = lab().await;

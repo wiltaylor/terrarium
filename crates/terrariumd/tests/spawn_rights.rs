@@ -893,7 +893,7 @@ async fn the_child_takes_the_owner_pool() {
 }
 
 #[tokio::test]
-async fn spawn_headroom_picks_pool_then_allowed_alternative() {
+async fn spawn_usage_ranks_pool_and_real_limits_allow_alternative() {
     let (td, _lead, _w) = setup().await;
     let s = state(&td);
     for n in ["pool-a", "pool-b", "pool-alt"] {
@@ -953,6 +953,21 @@ async fn spawn_headroom_picks_pool_then_allowed_alternative() {
     })
     .await
     .unwrap();
+    // Estimates still rank the pool, but 80 and 90 percent admit either
+    // account rather than forcing the alternative.
+    let r = spawn_as(&td, &o, &o, json!({"template": "headroom"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["agent"]["subscription"], "pool-a");
+    assert_eq!(r.body["template"], "headroom");
+    // A real provider refusal still makes both main accounts ineligible.
+    // The permitted alternative is admissible even above 100 percent.
+    s.usage.limits.mark("pool-a", None);
+    s.usage.limits.mark("pool-b", None);
+    s.db.write("system", |t| {
+        terrariumd::store::subscriptions::insert_sample(t, "pool-alt", "5h", 125.0, None, &json!({}))
+    })
+    .await
+    .unwrap();
     let r = spawn_as(&td, &o, &o, json!({"template": "headroom"})).await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["agent"]["subscription"], "pool-alt");
@@ -975,9 +990,65 @@ async fn spawn_headroom_picks_pool_then_allowed_alternative() {
     assert_eq!(r.status, 409, "{}", r.body);
 }
 
+/// Probe estimates are display and ranking data, not a spawn quota.
+#[tokio::test]
+async fn spawn_admits_missing_equal_full_and_overestimated_windows() {
+    let (td, _lead, _w) = setup().await;
+    let s = state(&td);
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "estimated", "provider": "anthropic", "harnesses": ["claude"]}),
+    )
+    .await
+    .ok();
+    let login = r#"{"claudeAiOauth":{"accessToken":"test","refreshToken":"test","expiresAt":4102444800000}}"#;
+    terrariumd::accounts::write_credential(
+        &s.state_dir,
+        "estimated",
+        HarnessId::Claude,
+        login.as_bytes(),
+    )
+    .unwrap();
+    td.post(
+        "/api/templates",
+        json!({"name": "estimated", "project": "p",
+               "spec": {"harness": "claude", "subscription": "estimated"}}),
+    )
+    .await
+    .ok();
+    let o = id(&td
+        .agent(
+            "p",
+            "estimated-owner",
+            json!({"policy": {"spawn": {
+                "templates": ["estimated"], "max_concurrent": 10}}}),
+        )
+        .await);
+    // No sample is not a fabricated zero-quota refusal.
+    let r = spawn_as(&td, &o, &o, json!({"template": "estimated"})).await;
+    assert_eq!(r.status, 201, "missing: {}", r.body);
+    for used in [80.0, 100.0, 125.0] {
+        s.db.write("system", move |t| {
+            terrariumd::store::subscriptions::insert_sample(
+                t,
+                "estimated",
+                "5h",
+                used,
+                None,
+                &json!({}),
+            )
+        })
+        .await
+        .unwrap();
+        let r = spawn_as(&td, &o, &o, json!({"template": "estimated"})).await;
+        assert_eq!(r.status, 201, "{used}: {}", r.body);
+        assert_eq!(r.body["agent"]["subscription"], "estimated");
+    }
+}
+
 /// TER-630: the automatic main/alt switch never moves a spawn to a cloud
 /// subscription. A template that names the cloud subscription itself gets
-/// it, up to 100 percent of its budget window (not 80).
+/// it regardless of the estimated budget percentage.
 #[tokio::test]
 async fn spawn_alt_fallback_never_takes_a_cloud_subscription() {
     let (td, _lead, _w) = setup().await;
@@ -1032,7 +1103,7 @@ async fn spawn_alt_fallback_never_takes_a_cloud_subscription() {
         "templates": ["cloudy", "cloudy-alt", "aws-direct"], "max_concurrent": 10}}}),
         )
         .await);
-    // The main template has no headroom: the alt names the cloud
+    // A real provider refusal tries the alt. The alt names the cloud
     // subscription, and the spawn does not move to it.
     s.db.write("system", |t| {
         terrariumd::store::subscriptions::insert_sample(t, "main-a", "7d", 90.0, None, &json!({}))?;
@@ -1040,6 +1111,7 @@ async fn spawn_alt_fallback_never_takes_a_cloud_subscription() {
     })
     .await
     .unwrap();
+    s.usage.limits.mark("main-a", None);
     let r = spawn_as(&td, &o, &o, json!({"template": "cloudy"})).await;
     assert_eq!(r.status, 409, "{}", r.body);
     assert!(
@@ -1053,18 +1125,22 @@ async fn spawn_alt_fallback_never_takes_a_cloud_subscription() {
     let r = spawn_as(&td, &o, &o, json!({"template": "aws-direct"})).await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["agent"]["subscription"], "aws");
-    // At 100 percent: refused.
-    s.db.write("system", |t| {
-        terrariumd::store::subscriptions::insert_sample(t, "aws", "budget", 100.0, None, &json!({}))
-    })
-    .await
-    .unwrap();
-    let r = spawn_as(&td, &o, &o, json!({"template": "aws-direct"})).await;
-    assert_eq!(r.status, 409, "{}", r.body);
+    // Full and over-budget estimates still admit the explicitly named
+    // cloud subscription. They do not override its cloud eligibility.
+    for used in [100.0, 125.0] {
+        s.db.write("system", move |t| {
+            terrariumd::store::subscriptions::insert_sample(t, "aws", "budget", used, None, &json!({}))
+        })
+        .await
+        .unwrap();
+        let r = spawn_as(&td, &o, &o, json!({"template": "aws-direct"})).await;
+        assert_eq!(r.status, 201, "{used}: {}", r.body);
+        assert_eq!(r.body["agent"]["subscription"], "aws");
+    }
 }
 
 #[tokio::test]
-async fn spawn_headroom_ignores_reset_windows_and_full_streams() {
+async fn spawn_ignores_stale_usage_and_preserves_stream_limits() {
     let (td, _lead, _w) = setup().await;
     let s = state(&td);
     for n in ["local-a", "local-b"] {
