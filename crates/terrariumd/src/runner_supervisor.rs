@@ -1136,13 +1136,16 @@ struct Kick {
 }
 
 /// TER-1104: a claimed kick step ([`RunnerSupervisor::kick_plan`]): the
-/// launch and the runner it was claimed on, and the step it replaced.
+/// launch and the runner it was claimed on, the episode step it set, and
+/// the step it replaced.
 struct KickPlan {
     id: AgentId,
     epoch: u64,
     step: KickStep,
     runner: Arc<dyn RunnerHandle>,
     queue: KickQueue,
+    /// The episode step that this plan set.
+    claimed: Kick,
     previous: Option<Kick>,
 }
 
@@ -4765,7 +4768,8 @@ impl RunnerSupervisor {
         }
         let step = next_kick(slot.kick, rest, now)?;
         let runner = slot.runner.clone()?;
-        let previous = slot.kick.replace(Kick { step, at: now });
+        let claimed = Kick { step, at: now };
+        let previous = slot.kick.replace(claimed);
         if step == KickStep::Restart {
             slot.restart_requested = true;
             slot.resume = slot.agent.session.clone().or(slot.session.clone());
@@ -4776,6 +4780,7 @@ impl RunnerSupervisor {
             step,
             runner,
             queue,
+            claimed,
             previous,
         })
     }
@@ -4817,28 +4822,21 @@ impl RunnerSupervisor {
     async fn kick_run(&self, state: &Shared, plan: KickPlan) {
         let id = plan.id;
         if !self.kick_still_wanted(state, &plan) {
-            let released = {
-                let mut slots = lock(&self.inner.slots);
-                match slots.get_mut(&id).filter(|s| s.epoch == plan.epoch) {
-                    Some(slot) => {
-                        slot.kick = plan.previous;
-                        let same = slot
-                            .runner
-                            .as_ref()
-                            .is_some_and(|r| Arc::ptr_eq(r, &plan.runner));
-                        let release =
-                            plan.step == KickStep::Restart && same && slot.restart_requested;
-                        if release {
-                            slot.restart_requested = false;
-                        }
-                        release
-                    }
-                    None => false,
-                }
-            };
+            // Undo the episode only while it is still this claim: a turn
+            // that ended at rest meanwhile ended it, and a step of a new
+            // episode is not taken back.
+            if let Some(slot) = lock(&self.inner.slots)
+                .get_mut(&id)
+                .filter(|s| s.epoch == plan.epoch && s.kick == Some(plan.claimed))
+            {
+                slot.kick = plan.previous;
+            }
             info!(agent = %id, step = plan.step.as_str(), "the kick step is no longer wanted: not run");
-            if released {
-                self.deliver_pending(id);
+            // Release the restart claim only on the claimed runner while it
+            // still runs: an exit that came first takes the claim in
+            // `on_exit` (`restart_not_on_its_way`).
+            if plan.step == KickStep::Restart {
+                self.restart_not_on_its_way(id, &plan.runner, None);
             }
             return;
         }
@@ -7210,8 +7208,9 @@ mod tests {
             self.kills.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Ok(()) })
         }
+        /// It runs on: the kill counts, and no exit follows.
         fn wait(&self) -> BoxFuture<'_, terrarium_runner::ExitStatus> {
-            panic!("unused")
+            Box::pin(std::future::pending())
         }
         fn type_turn(&self, text: String) -> terrarium_runner::Delivery {
             assert!(!self.claimed.load(Ordering::SeqCst));
@@ -10520,5 +10519,92 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// TER-1104 (rev-1104c 1): a stall that turns into a question with no
+    /// output (`blocked` -> `blocked` with the question as the reason) ends
+    /// the rest: no kick.
+    #[tokio::test]
+    async fn a_stall_that_turns_into_a_question_is_not_kicked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        store_mail(&state, id, false).await;
+        let rest = stall(&sup, id);
+        pass_status(
+            &sup,
+            id,
+            AgentStatus::Blocked,
+            AgentStatus::Blocked,
+            Some("Allow the tool?"),
+        );
+        assert_eq!(lock(&sup.inner.slots)[&id].rest_since, None);
+        for s in [61, 301, 601, 100_000] {
+            sup.kick_tick(rest + Duration::from_secs(s)).await;
+        }
+        settle(&sup, id).await;
+        assert!(kicked_events(&state).await.is_empty());
+        assert_eq!(kick_step(&sup, id), None);
+        assert_eq!(runner.kills.load(Ordering::SeqCst), 0);
+    }
+
+    /// TER-1104 (rev-1104c 2): the undo of a step that is no longer wanted
+    /// does not bring back an episode that ended meanwhile, and releases
+    /// the restart claim only while the claimed runner still runs.
+    #[tokio::test]
+    async fn the_undo_keeps_a_newer_episode_and_an_exited_runners_claim() {
+        // A turn ends at rest between the claim and the run: the episode
+        // ended and stays ended; the claim on the running runner is
+        // released.
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        store_mail(&state, id, false).await;
+        let rest = stall(&sup, id);
+        let at = |s: u64| rest + Duration::from_secs(s);
+        sup.kick_tick(at(61)).await;
+        settle(&sup, id).await;
+        let epoch = lock(&sup.inner.slots)[&id].epoch;
+        let queue = KickQueue {
+            count: 1,
+            oldest_age_s: None,
+        };
+        let plan = sup
+            .kick_plan(id, epoch, rest, queue, at(301))
+            .expect("the restart is claimed");
+        pass_status(&sup, id, AgentStatus::Blocked, AgentStatus::Working, None);
+        pass_status(&sup, id, AgentStatus::Working, AgentStatus::Idle, None);
+        assert_eq!(kick_step(&sup, id), None, "the turn ended the episode");
+        crate::self_update::start_drain(&state, "test");
+        sup.kick_run(&state, plan).await;
+        {
+            let slots = lock(&sup.inner.slots);
+            assert_eq!(slots[&id].kick, None, "the ended episode stays ended");
+            assert!(!slots[&id].restart_requested, "the running runner's claim is released");
+        }
+        assert_eq!(runner.kills.load(Ordering::SeqCst), 0);
+
+        // The claimed runner exited before the undo: the claim stays for
+        // `on_exit`, which relaunches with resume.
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, _, id) = reload_fixture(tmp.path()).await;
+        let exited = KillErrRunner::new(id, true, true);
+        lock(&sup.inner.slots).get_mut(&id).unwrap().runner = Some(exited.clone());
+        store_mail(&state, id, false).await;
+        let rest = stall(&sup, id);
+        let at = |s: u64| rest + Duration::from_secs(s);
+        sup.kick_tick(at(61)).await;
+        settle(&sup, id).await;
+        assert_eq!(kick_step(&sup, id), Some(KickStep::Reload));
+        let epoch = lock(&sup.inner.slots)[&id].epoch;
+        let plan = sup
+            .kick_plan(id, epoch, rest, queue, at(301))
+            .expect("the restart is claimed");
+        crate::self_update::start_drain(&state, "test");
+        sup.kick_run(&state, plan).await;
+        {
+            let slots = lock(&sup.inner.slots);
+            assert!(slots[&id].restart_requested, "the exit keeps the claim");
+            assert_eq!(slots[&id].kick.map(|k| k.step), Some(KickStep::Reload));
+        }
+        assert_eq!(exited.kills.load(Ordering::SeqCst), 0);
     }
 }

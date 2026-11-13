@@ -931,6 +931,26 @@ impl Inner {
         });
     }
 
+    /// Block the agent for `kind` with `reason`. A runner that is already
+    /// `blocked` for another kind (a stall that turns into a question with
+    /// no output) reports the new reason with a `blocked` -> `blocked`
+    /// change: the daemon tells a stall from a question or input by the
+    /// reason, and never kicks a question (TER-1104).
+    fn block(&self, state: &mut State, kind: Block, reason: &str) {
+        let changed =
+            state.status == AgentStatus::Blocked && state.block.is_some_and(|b| b != kind);
+        state.block = Some(kind);
+        if changed {
+            self.emit(Event::StatusChanged {
+                from: AgentStatus::Blocked,
+                to: AgentStatus::Blocked,
+                reason: Some(reason.to_owned()),
+            });
+        } else {
+            self.transition(state, AgentStatus::Blocked, reason);
+        }
+    }
+
     async fn write_bytes(&self, bytes: Vec<u8>) -> Result<()> {
         let writer = self.writer.clone();
         tokio::task::spawn_blocking(move || {
@@ -1063,12 +1083,10 @@ impl Inner {
                     question: true,
                     message,
                 } => {
-                    state.block = Some(Block::Question);
-                    self.transition(&mut state, AgentStatus::Blocked, &message);
+                    self.block(&mut state, Block::Question, &message);
                 }
                 Event::Question { question, .. } => {
-                    state.block = Some(Block::Question);
-                    self.transition(&mut state, AgentStatus::Blocked, &question);
+                    self.block(&mut state, Block::Question, &question);
                 }
                 Event::ToolUse { .. } | Event::ToolFinished { .. }
                     if state.status == AgentStatus::Blocked =>
@@ -1400,11 +1418,10 @@ impl Inner {
                              or cleared"
                         ),
                     });
-                    state.block = Some(Block::Input);
                     state.input_cleared = None;
-                    self.transition(
+                    self.block(
                         &mut state,
-                        AgentStatus::Blocked,
+                        Block::Input,
                         terrarium_core::adapter::INPUT_PENDING_REASON,
                     );
                 }
