@@ -553,7 +553,8 @@ async fn a_rerun_keeps_the_job_slot_until_it_ends() {
 }
 
 /// End job `id` as failed; `verdict`: also write its `job.verdict`.
-async fn fail_job(td: &TestDaemon, id: &'static str, verdict: bool) {
+async fn fail_job(td: &TestDaemon, id: &str, verdict: bool) {
+    let id = id.to_owned();
     state(td)
         .db
         .write("system", move |t| {
@@ -565,7 +566,7 @@ async fn fail_job(td: &TestDaemon, id: &'static str, verdict: bool) {
                 head: None,
                 batch: None,
             };
-            let j = terrariumd::store::jobs::finish(t, id, &end)?.unwrap();
+            let j = terrariumd::store::jobs::finish(t, &id, &end)?.unwrap();
             if verdict {
                 terrariumd::jobs::emit_verdicts(t, &j)?;
             }
@@ -573,6 +574,38 @@ async fn fail_job(td: &TestDaemon, id: &'static str, verdict: bool) {
         })
         .await
         .unwrap();
+}
+
+/// Start queued job `id` (a rerun).
+async fn start_job(td: &TestDaemon, id: &str) {
+    let id = id.to_owned();
+    state(td)
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "UPDATE jobs SET state = 'running', started_at = ?2 WHERE id = ?1",
+                rusqlite::params![id, terrariumd::db::now()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// The queued attempt `attempt` of the job of card `card`.
+async fn rerun_id(td: &TestDaemon, card: &str, attempt: i64) -> String {
+    let card = card.to_owned();
+    state(td)
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT id FROM jobs WHERE card = ?1 AND attempt = ?2 AND state = 'queued'",
+                rusqlite::params![card, attempt],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap()
 }
 
 /// Run `before`, the sweep, then `after` in one write, so the rule engine
@@ -600,131 +633,229 @@ where
         .unwrap()
 }
 
-/// Move the end of job `JA` and the admission of the admitted card 11 and
-/// 20 minutes back: past the 10-minute limit of `RERUN_SETTLED`.
-fn age_ja(c: &rusqlite::Connection) -> rusqlite::Result<()> {
-    c.execute_batch(
-        "UPDATE jobs SET ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-660 seconds')
-          WHERE id = 'JA';
-         UPDATE card_queue SET admitted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1200 seconds')
-          WHERE admitted_at IS NOT NULL;",
-    )
+/// Move the end of job `job` 11 minutes back and the admission of the
+/// admitted card 20 minutes back: past the 10 minutes of `RERUN_SETTLED`.
+fn aged(job: &'static str) -> impl Fn(&rusqlite::Connection) -> rusqlite::Result<()> + Copy {
+    move |c| {
+        c.execute(
+            "UPDATE jobs SET ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-660 seconds')
+              WHERE id = ?1",
+            [job],
+        )?;
+        c.execute(
+            "UPDATE card_queue
+                SET admitted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1200 seconds')
+              WHERE admitted_at IS NOT NULL",
+            [],
+        )?;
+        Ok(())
+    }
 }
 
-/// A failed job with no `job.verdict` (a daemon stop between `finish` and
-/// `after_end`) frees the `job` slot 10 minutes after its end (TER-1254).
-#[tokio::test]
-async fn a_failed_job_without_a_verdict_frees_the_job_slot_after_10_minutes() {
-    let td = setup().await;
-    set_options(
-        &td,
-        "validating",
-        json!({"release": "job"}),
-        json!([note("in", "lands", "landed in validating")]),
-    )
-    .await;
-    switch(&td).await;
-    let a = new_card(&td, "a").await;
-    let b = new_card(&td, "b").await;
-    assert!(move_to(&td, &a, "validating").await.get("queued").is_none());
-    assert_eq!(move_to(&td, &b, "validating").await["queued"]["place"], 1);
-
-    job(&td, "JA", &a, "running").await;
-    fail_job(&td, "JA", false).await;
-    settle(&td).await;
-    sweep(&td).await;
-    // The rules have read the end, but no verdict exists: A holds the slot.
-    assert_eq!(card(&td, &b).await["queued"]["place"], 1);
-
-    // 10 minutes after the end: B gets the slot.
-    assert!(!waits_after_sweep(&td, &b, age_ja, |_| Ok(())).await);
-    assert!(card(&td, &b).await.get("queued").is_none());
+/// A pending rule run of event `seq`, last active `age` seconds ago.
+fn pending_run(
+    seq: i64,
+    age: i64,
+) -> impl Fn(&rusqlite::Connection) -> rusqlite::Result<()> + Copy {
+    move |c| {
+        c.execute(
+            "INSERT INTO rule_runs (id, project, rule, rule_hash, ord, event_seq, card, lane,
+                                    rule_json, cause, state, created_at, updated_at)
+             VALUES ('RR-TER-1254', 'flow', 'held', 'h', 0, ?1, NULL, 'flow', '{}', '{}',
+                     'pending', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2),
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2))",
+            rusqlite::params![seq, format!("-{age} seconds")],
+        )
+        .map(|_| ())
+    }
 }
 
-/// An event of a failed job after the rule cursor, or a pending rule run
-/// of it, holds the `job` slot; 10 minutes after the end it does not
-/// (TER-1254), so a stalled or lost rule run cannot hold it for ever.
-#[tokio::test]
-async fn an_unread_event_or_a_pending_rule_run_holds_the_job_slot_up_to_10_minutes() {
-    let td = setup().await;
-    set_options(
-        &td,
-        "validating",
-        json!({"release": "job"}),
-        json!([note("in", "lands", "landed in validating")]),
-    )
-    .await;
-    switch(&td).await;
-    let a = new_card(&td, "a").await;
-    let b = new_card(&td, "b").await;
-    assert!(move_to(&td, &a, "validating").await.get("queued").is_none());
-    assert_eq!(move_to(&td, &b, "validating").await["queued"]["place"], 1);
+fn drop_run(c: &rusqlite::Connection) -> rusqlite::Result<()> {
+    c.execute("DELETE FROM rule_runs WHERE id = 'RR-TER-1254'", [])
+        .map(|_| ())
+}
 
-    job(&td, "JA", &a, "running").await;
-    fail_job(&td, "JA", true).await;
-    settle(&td).await;
+fn set_cursor(seq: i64) -> impl Fn(&rusqlite::Connection) -> rusqlite::Result<()> + Copy {
+    move |c| {
+        c.execute("UPDATE rule_cursor SET seq = ?1 WHERE id = 1", [seq])
+            .map(|_| ())
+    }
+}
 
-    // The `job` event of the end, the first event the rules read for JA.
-    let first: i64 = state(&td)
+/// The first `job` or `job.verdict` event of job `job`.
+async fn first_event(td: &TestDaemon, job: &'static str) -> i64 {
+    state(td)
         .db
-        .read(|c| {
+        .read(move |c| {
             Ok(c.query_row(
                 "SELECT min(seq) FROM events WHERE kind IN ('job', 'job.verdict')
                    AND coalesce(json_extract(payload, '$.job'),
-                                json_extract(payload, '$.id')) = 'JA'",
-                [],
+                                json_extract(payload, '$.id')) = ?1",
+                [job],
                 |r| r.get(0),
             )?)
         })
         .await
-        .unwrap();
-    let cursor = |seq: i64| {
-        move |c: &rusqlite::Connection| {
-            c.execute("UPDATE rule_cursor SET seq = ?1 WHERE id = 1", [seq])
-                .map(|_| ())
+        .unwrap()
+}
+
+/// Column `validating` with a `job` release and `rules`, and `n` cards
+/// moved into it: the first holds the slot, the others wait in order.
+async fn job_column(td: &TestDaemon, rules: Value, n: usize) -> Vec<String> {
+    set_options(td, "validating", json!({"release": "job"}), rules).await;
+    switch(td).await;
+    let mut cards = Vec::new();
+    for i in 0..n {
+        let c = new_card(td, &format!("c{i}")).await;
+        let moved = move_to(td, &c, "validating").await;
+        if i == 0 {
+            assert!(moved.get("queued").is_none());
+        } else {
+            assert_eq!(moved["queued"]["place"], i);
         }
+        cards.push(c);
+    }
+    cards
+}
+
+/// A failed job frees the `job` slot 10 minutes after its end without a
+/// verdict, and 10 minutes after a rule run of it was last active when
+/// that run is lost (TER-1254).
+#[tokio::test]
+async fn a_missing_verdict_or_a_lost_rule_run_frees_the_job_slot_after_10_minutes() {
+    let td = setup().await;
+    let cards = job_column(&td, json!([note("in", "lands", "landed")]), 3).await;
+    let (a, b, c) = (&cards[0], &cards[1], &cards[2]);
+
+    // A's job fails and no verdict is written: A holds the slot ...
+    job(&td, "JA", a, "running").await;
+    fail_job(&td, "JA", false).await;
+    settle(&td).await;
+    sweep(&td).await;
+    assert_eq!(card(&td, b).await["queued"]["place"], 1);
+    // ... until 10 minutes after the end.
+    assert!(!waits_after_sweep(&td, b, aged("JA"), |_| Ok(())).await);
+    assert_eq!(card(&td, c).await["queued"]["place"], 1);
+
+    // B's job fails with a verdict. A rule run of its end is pending and
+    // was active just now: B holds the slot, also 10 minutes after the end.
+    job(&td, "JB", b, "running").await;
+    fail_job(&td, "JB", true).await;
+    settle(&td).await;
+    let seq = first_event(&td, "JB").await;
+    let held = move |c: &rusqlite::Connection| {
+        pending_run(seq, 0)(c)?;
+        aged("JB")(c)
     };
+    assert!(waits_after_sweep(&td, c, held, drop_run).await);
+    // The run was last active 11 minutes ago (lost): C gets the slot.
+    let lost = move |c: &rusqlite::Connection| {
+        pending_run(seq, 660)(c)?;
+        aged("JB")(c)
+    };
+    assert!(!waits_after_sweep(&td, c, lost, drop_run).await);
+    assert!(card(&td, c).await.get("queued").is_none());
+}
+
+/// After a daemon stop the sweep runs before the engine reads the log
+/// (TER-1254 review): an end the rules have not read holds the slot at
+/// any age, and a run that the engine resumes counts its 10 minutes from
+/// the start.
+#[tokio::test]
+async fn after_a_daemon_stop_the_job_slot_waits_for_the_rules() {
+    let td = setup().await;
+    let cards = job_column(&td, json!([note("in", "lands", "landed")]), 2).await;
+    let (a, b) = (&cards[0], &cards[1]);
+    job(&td, "JA", a, "running").await;
+    fail_job(&td, "JA", true).await;
+    settle(&td).await;
+    let seq = first_event(&td, "JA").await;
     let read_to: i64 = state(&td)
         .db
         .read(|c| Ok(rules_engine::cursor(c)?.unwrap()))
         .await
         .unwrap();
-    assert!(read_to >= first);
+    assert!(read_to >= seq);
 
-    // The cursor is before the end: A holds the slot.
-    assert!(waits_after_sweep(&td, &b, cursor(first - 1), cursor(read_to)).await);
+    // The cursor is before the end, which is 11 minutes old: held.
+    let unread = move |c: &rusqlite::Connection| {
+        set_cursor(seq - 1)(c)?;
+        aged("JA")(c)
+    };
+    assert!(waits_after_sweep(&td, b, unread, set_cursor(read_to)).await);
 
-    // A rule run of the end is pending: A holds the slot.
-    let pending = move |c: &rusqlite::Connection| {
-        c.execute(
-            "INSERT INTO rule_runs (id, project, rule, rule_hash, ord, event_seq, card, lane,
-                                    rule_json, cause, state, created_at, updated_at)
-             VALUES ('RR-TER-1254', 'flow', 'held', 'h', 0, ?1, NULL, 'flow', '{}', '{}',
-                     'pending', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
-            [first],
-        )
-        .map(|_| ())
+    // A run left pending 45 minutes ago, and the engine starts: held.
+    let resumed = move |c: &rusqlite::Connection| {
+        pending_run(seq, 2700)(c)?;
+        aged("JA")(c)?;
+        rules_engine::resume_pending(c).unwrap();
+        Ok(())
     };
-    let done = |c: &rusqlite::Connection| {
-        c.execute("DELETE FROM rule_runs WHERE id = 'RR-TER-1254'", [])
-            .map(|_| ())
-    };
-    assert!(waits_after_sweep(&td, &b, pending, done).await);
-    assert_eq!(card(&td, &b).await["queued"]["place"], 1);
+    assert!(waits_after_sweep(&td, b, resumed, drop_run).await);
+    assert_eq!(card(&td, b).await["queued"]["place"], 1);
 
-    // Both still hold, but the end is 10 minutes old: B gets the slot.
-    let held = move |c: &rusqlite::Connection| {
-        pending(c)?;
-        cursor(first - 1)(c)?;
-        age_ja(c)
+    // The same run, not resumed (lost): B gets the slot.
+    let lost = move |c: &rusqlite::Connection| {
+        pending_run(seq, 2700)(c)?;
+        aged("JA")(c)
     };
-    let restore = move |c: &rusqlite::Connection| {
-        done(c)?;
-        cursor(read_to)(c)
-    };
-    assert!(!waits_after_sweep(&td, &b, held, restore).await);
-    assert!(card(&td, &b).await.get("queued").is_none());
+    assert!(!waits_after_sweep(&td, b, lost, drop_run).await);
+    assert!(card(&td, b).await.get("queued").is_none());
+}
+
+/// A failed rerun holds the slot until the rules act on its own end,
+/// though the first failed job is settled (TER-1254, rev-1250 minor 3).
+#[tokio::test]
+async fn a_second_rerun_keeps_the_job_slot_until_it_ends() {
+    let td = setup().await;
+    let cards = job_column(
+        &td,
+        json!([{"name": "again", "trigger": {"kind": "job_result", "events": ["verdict"]},
+                "actions": [{"verb": "job.rerun", "args": {"max_attempts": 3}}]}]),
+        2,
+    )
+    .await;
+    let (a, b) = (&cards[0], &cards[1]);
+
+    job(&td, "JA", a, "running").await;
+    fail_job(&td, "JA", true).await;
+    settle(&td).await;
+    sweep(&td).await;
+    let second = rerun_id(&td, a, 2).await;
+    assert_eq!(card(&td, b).await["queued"]["place"], 1);
+
+    // The second attempt fails: JA is settled, but its rerun is not.
+    start_job(&td, &second).await;
+    fail_job(&td, &second, true).await;
+    assert_eq!(card(&td, b).await["queued"]["place"], 1);
+    sweep(&td).await;
+    assert_eq!(card(&td, b).await["queued"]["place"], 1);
+
+    // The rule queues the third attempt: A still holds the slot.
+    settle(&td).await;
+    sweep(&td).await;
+    let third = rerun_id(&td, a, 3).await;
+    assert_eq!(card(&td, b).await["queued"]["place"], 1);
+
+    // The third attempt passes: B gets the slot.
+    start_job(&td, &third).await;
+    state(&td)
+        .db
+        .write("system", move |t| {
+            let end = terrariumd::store::jobs::JobEnd {
+                passed: true,
+                outcome: Some("passed".into()),
+                exit_code: Some(0),
+                tail: None,
+                head: None,
+                batch: None,
+            };
+            terrariumd::store::jobs::finish(t, &third, &end)?.unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(card(&td, b).await.get("queued").is_none());
 }
 
 /// Insert job `id` of card `card` in state `state`.

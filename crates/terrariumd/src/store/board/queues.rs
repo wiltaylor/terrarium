@@ -21,8 +21,8 @@
 //!     card has ended after it (passed, failed, or cancelled) and it has no
 //!     open job, or it leaves the column. Then the next card is admitted.
 //!     A failed job ends only when the rules have acted on it, so its
-//!     rerun keeps the slot (TER-1250, `RERUN_SETTLED`), for at most 10
-//!     minutes after its end (TER-1254).
+//!     rerun keeps the slot (TER-1250, `RERUN_SETTLED`); a pending rule
+//!     run holds it for at most 10 minutes (TER-1254).
 //!   - `batch`: when no card of the last batch is still in the column, and
 //!     `batch_size` cards wait or the first one has waited
 //!     `max_wait_seconds`: admit up to `max_batch_cards` (default
@@ -153,23 +153,37 @@ const JOB_OF_CARD: &str = "(j.card = q.card OR EXISTS (SELECT 1 FROM json_each(j
 
 /// The rerun of ended job `j` is settled (TER-1250): `j` did not fail, or
 /// the board rules have acted on its end. A failed job frees the `job`
-/// slot only when its `job.verdict` is written (by `after_end`, after the
-/// end; a kind with no verdict, or 10 minutes after the end, without
-/// one), the rule engine's cursor is past its `job` and `job.verdict`
-/// events, and no rule run of them is pending. A rerun that a rule queued
-/// is then an open job, so the slot stays held until the rerun ends.
+/// slot only when:
+/// - no later attempt of `j` exists (TER-1254): a rerun that a rule
+///   queued decides for itself, so a failed rerun holds the slot until the
+///   rules act on its own end;
+/// - its `job.verdict` is written (by `after_end`, after the end; a kind
+///   with no verdict, or 10 minutes after the end, without one);
+/// - the rule engine's cursor is past its `job` and `job.verdict` events.
+///   No time limit: after a daemon stop, the sweep runs before the engine
+///   reads the log, and the end must not free the slot before its rule
+///   ran. The cursor is a scalar subquery, so the clause reads only the
+///   events after it (a rowid range, never a scan of `events`); with no
+///   cursor yet (the engine starts at the end of the log) none is after it;
+/// - no rule run of those events is pending and was active in the last 10
+///   minutes (TER-1254), so a lost or stalled run cannot hold the slot for
+///   ever. The engine marks its pending runs active when it starts
+///   ([`crate::rules_engine::resume_pending`]), so the 10 minutes count
+///   from the run or from the daemon start, whichever is later.
 ///
-/// TER-1254: the 10 minutes after the end bound the whole clause, so a
-/// stalled or lost rule run cannot hold the slot for ever. The cursor
-/// clause reads only the events after the cursor (a rowid range on
-/// `events`, never a scan): the cursor is a scalar subquery, and with no
-/// cursor yet (the engine starts at the end of the log) no event is after
-/// it.
+/// A rerun that a rule queued is then an open job, so the slot stays held
+/// until the rerun ends.
 const RERUN_SETTLED: &str = "(j.state <> 'failed'
-    OR j.ended_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-600 seconds')
-    OR ((j.kind IN ('e2e', 'release')
-         OR EXISTS (SELECT 1 FROM events e WHERE e.card = j.card AND e.kind = 'job.verdict'
-                      AND json_extract(e.payload, '$.job') = j.id))
+    OR (NOT EXISTS (SELECT 1 FROM jobs k
+                     WHERE k.project = j.project AND k.created_at = j.created_at
+                       AND k.kind = j.kind AND k.repo = j.repo
+                       AND k.split_path = j.split_path
+                       AND coalesce(k.parent, '') = coalesce(j.parent, '')
+                       AND k.attempt > j.attempt)
+        AND (j.kind IN ('e2e', 'release')
+             OR j.ended_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-600 seconds')
+             OR EXISTS (SELECT 1 FROM events e WHERE e.card = j.card AND e.kind = 'job.verdict'
+                          AND json_extract(e.payload, '$.job') = j.id))
         AND NOT EXISTS (SELECT 1 FROM events e
                          WHERE e.seq > (SELECT coalesce(max(seq), (SELECT max(seq) FROM events))
                                           FROM rule_cursor WHERE id = 1)
@@ -177,7 +191,9 @@ const RERUN_SETTLED: &str = "(j.state <> 'failed'
                            AND coalesce(json_extract(e.payload, '$.job'),
                                         json_extract(e.payload, '$.id')) = j.id)
         AND NOT EXISTS (SELECT 1 FROM rule_runs r JOIN events e ON e.seq = r.event_seq
-                         WHERE r.state = 'pending' AND e.kind IN ('job', 'job.verdict')
+                         WHERE r.state = 'pending'
+                           AND r.updated_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-600 seconds')
+                           AND e.kind IN ('job', 'job.verdict')
                            AND coalesce(json_extract(e.payload, '$.job'),
                                         json_extract(e.payload, '$.id')) = j.id)))";
 
@@ -505,4 +521,36 @@ pub fn sweep_all(t: &mut Tx<'_>) -> ApiResult<()> {
         release_project(t, &project)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    /// `RERUN_SETTLED` reads `events` only by the card index and the
+    /// rowid range after the cursor, never by a scan (TER-1254: a scan of
+    /// `events` read over 700k rows on each move and sweep).
+    #[test]
+    fn rerun_settled_scans_no_table() {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        let sql = format!(
+            "EXPLAIN QUERY PLAN SELECT 1 FROM jobs j WHERE j.id = 'J' AND {RERUN_SETTLED}"
+        );
+        let plans: Vec<String> = c
+            .prepare(&sql)
+            .unwrap()
+            .query_map([], |r| r.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plans
+                .iter()
+                .any(|p| p.contains("SEARCH e USING INTEGER PRIMARY KEY (rowid>?)")),
+            "{plans:?}"
+        );
+        assert!(!plans.iter().any(|p| p.starts_with("SCAN")), "{plans:?}");
+    }
 }
