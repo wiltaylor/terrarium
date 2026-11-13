@@ -6,6 +6,25 @@ project definition, or PATCH `/api/projects/<project>` with
 to disable. The named agent must be a non-ephemeral project admin.
 Removing the setting from a project file or fleet disables dispatch too.
 
+A project on `board_flow = columns` has no `card_dispatcher` (TER-1115).
+Setting an owner there is refused with 409 (`board_flow_columns`), and a
+project file or fleet value is stored as `off` with a warning. Such a
+board dispatches with a column rule on `ready`, for example:
+
+```json
+{"name": "dispatch", "trigger": {"kind": "timer", "every_seconds": 60},
+ "actions": [{"verb": "card.assign", "args": {
+   "from": "@ready", "owner": "lead", "limit": 4,
+   "templates": ["type:small=card-small", "type:impl=card-impl",
+                 "type:hard=card-impl-hard", "type:impl-hard=card-impl-hard"]}}]}
+```
+
+The selection, the rechecks, the cooldown and the failure notices below
+are the same for the rule action (docs/api.md, `card_assign`). One
+difference: a spawn cap or a missing spawn right that the run sees before
+the spawn is a no-op with the reason in the rule's run log, not a
+deferral mail.
+
 The lifecycle timer fills free places in the column with role `working`.
 That column must have an explicit WIP limit. It takes unassigned cards in
 `ready` (or the column with that role), by position, skipping unfinished

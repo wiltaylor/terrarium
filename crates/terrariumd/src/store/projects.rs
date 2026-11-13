@@ -375,14 +375,43 @@ pub fn set_review_dispatcher(t: &mut Tx<'_>, project: &str, owner: &str) -> ApiR
     )?;
     Ok(())
 }
+
+/// A project on `board_flow = columns` assigns with the `card.assign` rule
+/// action (TER-1115, D6): an owner other than `off` is refused there.
 pub fn set_card_dispatcher(t: &mut Tx<'_>, project: &str, owner: &str) -> ApiResult<()> {
     check_name("dispatcher owner", owner)?;
     let owner = (owner != "off").then_some(owner);
+    if owner.is_some() && board_flow(t, project)? == BoardFlow::Columns {
+        return Err(ApiError::conflict(format!(
+            "project `{project}` runs its board on column rules: set the card dispatch \
+             as a `card.assign` rule with a template, not as `card_dispatcher`"
+        ))
+        .with_details(serde_json::json!({"reason": "board_flow_columns"})));
+    }
     t.execute(
         "UPDATE projects SET card_dispatcher = ?2 WHERE name = ?1",
         params![project, owner],
     )?;
     Ok(())
+}
+
+/// The `card_dispatcher` of a project file (file sync and the fleet). On a
+/// columns board the setting has no effect: it is stored as `off` with a
+/// warning, so the file does not stop the sync.
+pub fn set_card_dispatcher_from_file(
+    t: &mut Tx<'_>,
+    project: &str,
+    owner: Option<&str>,
+) -> ApiResult<()> {
+    let owner = owner.unwrap_or("off");
+    if owner != "off" && board_flow(t, project)? == BoardFlow::Columns {
+        tracing::warn!(
+            %project,
+            "card_dispatcher in the project file is ignored: the board runs on column rules"
+        );
+        return set_card_dispatcher(t, project, "off");
+    }
+    set_card_dispatcher(t, project, owner)
 }
 
 /// Set the GitHub author allow list of a project (TER-85). The caller

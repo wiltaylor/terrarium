@@ -1414,6 +1414,13 @@ pub fn card_condition_fails(
     if let Some(l) = cond.has_labels.iter().find(|l| !card.labels.contains(l)) {
         return Some(format!("{} has no label {l}", card.id));
     }
+    if !cond.any_labels.is_empty() && !cond.any_labels.iter().any(|l| card.labels.contains(l)) {
+        return Some(format!(
+            "{} has none of the labels {}",
+            card.id,
+            cond.any_labels.join(", ")
+        ));
+    }
     if let Some(l) = cond.lacks_labels.iter().find(|l| card.labels.contains(l)) {
         return Some(format!("{} has the label {l}", card.id));
     }

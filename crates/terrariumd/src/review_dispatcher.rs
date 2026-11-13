@@ -226,7 +226,7 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
     )
     .await;
     if let Err(e) = result {
-        return crate::card_dispatcher::handle_spawn_error(state, project, id, who, e).await;
+        return crate::card_dispatcher::handle_spawn_error(state, project, id, who, e, None).await;
     }
     Ok(true)
 }
