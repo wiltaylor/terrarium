@@ -511,10 +511,7 @@ async fn a_busy_dry_run_slot_refuses_and_does_not_hold_the_engine() {
         "the script slots are busy: no slot came free in {} ms",
         terrariumd::rule_script::DRY_RUN_ACQUIRE.as_millis()
     );
-    assert!(
-        plan["reason"].as_str().unwrap().contains(&waited),
-        "{plan}"
-    );
+    assert!(plan["reason"].as_str().unwrap().contains(&waited), "{plan}");
     assert!(
         !slow_had_returned,
         "the engine's rule ran only after the dry run gave its slot back"
