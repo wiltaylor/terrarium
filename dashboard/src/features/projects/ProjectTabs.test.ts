@@ -85,3 +85,14 @@ it("does not infer a question-bearing Dashboard from its slug when no dashboard 
     expect(host.querySelector('a[href$="/pages/dashboard"] .nav-count')).toBeNull();
   } finally { dispose(); }
 });
+it("shows no per-page Add or shared Edit outside the project shell when v2 is on", async () => {
+  const page = { project: "terrarium", slug: "work", title: "Work", position: 0, updated_at: "", updated_by: "operator", widgets: [] };
+  vi.spyOn(api.pages, "list").mockResolvedValue({ items: [page], can_edit: true, capabilities: { project_pages_v2: true } });
+  const { host, dispose } = mount();
+  try {
+    // The page list has arrived when its tab shows.
+    await waitFor(() => expect(host.querySelector('a[href$="/pages/work"]')).not.toBeNull());
+    expect(host.textContent).not.toContain("Add page");
+    expect(host.textContent).not.toContain("Edit pages");
+  } finally { dispose(); }
+});

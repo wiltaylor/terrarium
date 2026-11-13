@@ -1,4 +1,4 @@
-//! Admission by headroom for new ephemeral agents, not a live quota hold.
+//! Account selection for new ephemeral agents, not a live quota hold.
 
 use rusqlite::Connection;
 use terrarium_core::config::AgentDef;
@@ -7,13 +7,12 @@ use crate::api::Shared;
 use crate::error::ApiResult;
 use crate::store::subscriptions as subs;
 
-/// Pick the account with most headroom below 80 percent in every window.
-/// Missing samples are not evidence that an account is full. A cloud
-/// subscription counts only when the definition names it as
-/// `subscription`, never from the pool, and never when `fallback` is true
-/// (the `<template>-alt` of the automatic main/alt switch). A cloud
-/// subscription has room up to 100 percent of its budget window: the
-/// operator's line is the alert at 80 and the hold at 100.
+/// Pick the eligible account with the lowest estimated use in any window.
+/// Usage samples rank accounts but never refuse them: only a real provider
+/// limit is an admission refusal. Missing samples and expired windows rank
+/// as zero. A cloud subscription counts only when the definition names it
+/// as `subscription`, never from the pool, and never when `fallback` is
+/// true (the `<template>-alt` of the automatic main/alt switch).
 pub fn pick(
     conn: &Connection,
     def: &AgentDef,
@@ -68,18 +67,9 @@ pub fn pick(
             .filter(|_| sub.provider != "litellm")
             .map(|w| crate::quota_policy::effective_pct(w.used_pct, w.resets_at.as_deref(), now))
             .fold(0.0, f64::max);
-        // A cloud subscription: room up to its used-up budget.
-        let line = if sub.cloud_kind().is_some() {
-            100.0
-        } else {
-            80.0
-        };
-        if used < line && used < lowest {
+        if used < lowest {
             best = Some(name.clone());
             lowest = used;
-        }
-        if used >= line {
-            refusals.push(format!("{name}: window use {used}% is at or above {line}%"));
         }
     }
     Ok(best)

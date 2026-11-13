@@ -40,7 +40,9 @@ export type ProjectFeatureWidget = { [K in ProjectWidgetKind]: Omit<PageWidget, 
   text?: never; wiki?: never; monitor?: never;
 } }[ProjectWidgetKind];
 export interface ProjectPage extends ProjectPageInput { project: string; slug: string; updated_at: string; updated_by: string }
-export interface ProjectPageList { items: ProjectPage[]; can_edit: boolean; dashboard_slug?: string; capabilities?: { project_pages_v2?: boolean } }
+/** The caller's existing rights in the project (TER-1077). Each is the result of the domain endpoint's own policy check. */
+export interface ProjectPageRights { write_project: boolean; admin_project: boolean; manage_schedules: boolean; manage_global: boolean; operator: boolean }
+export interface ProjectPageList { items: ProjectPage[]; can_edit: boolean; rights?: ProjectPageRights; dashboard_slug?: string; capabilities?: { project_pages_v2?: boolean } }
 export interface ProjectLayoutPage extends ProjectPageInput { slug: string }
 export interface ProjectLayout { revision: number; pages: ProjectPage[] }
 export interface ProjectLayoutInput { base_revision: number; pages: ProjectLayoutPage[] }

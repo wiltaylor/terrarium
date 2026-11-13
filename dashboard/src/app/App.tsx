@@ -2,9 +2,10 @@ import { InstanceAnchor } from "../instance/navigation";
 import { useInstance } from "../instance";
 import { Route, Router, useParams } from "@solidjs/router";
 import { Navigate } from "../instance/navigation";
-import { For, lazy, Match, Show, Switch } from "solid-js";
+import { createResource, For, lazy, Match, Show, Switch } from "solid-js";
 import { isMock } from "../api";
-import { escapeMalformedPath } from "../lib/url";
+import { decodePathParam, escapeMalformedPath } from "../lib/url";
+import { projectIndexPath } from "../features/projects/projectIndex";
 
 import { Layout } from "./Layout";
 import { RemoteScope } from "./RemoteScope";
@@ -60,10 +61,15 @@ const SecretsPage = lazy(() => import("../features/secrets/SecretsPage"));
 // Mock only: the hostile payloads, to eyeball that the sanitizer keeps them inert.
 const XssPage = lazy(() => import("../features/devxss/XssPage"));
 
-/** The project index opens Board, the first tab of the project shell. */
+/**
+ * The project index opens Board, the first tab of the project shell. With
+ * project pages ON it opens the Board page, else the first page (TER-1077).
+ */
 function ProjectIndex() {
+  const { api } = useInstance();
   const params = useParams();
-  return <Navigate href={`/p/${params.project}/board`} />;
+  const [list] = createResource(() => params.project, p => api.pages.list(decodePathParam(p)).catch(() => undefined));
+  return <Show when={!list.loading}><Navigate href={`/p/${params.project}/${projectIndexPath(list())}`} /></Show>;
 }
 
 function NotFound() {

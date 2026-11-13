@@ -603,10 +603,10 @@ async fn rights_plan_as_a_reader_apply_as_an_admin() {
     .err(409, "conflict");
 }
 
-/// TER-243: the wait overrides that a migration wrote before TER-222 get
-/// the merge queue at the next load of the config, once.
+/// TER-1090: a reload retires exact generated legacy wait overrides with
+/// a hash-checked write, restoring the built-ins. A later load is a no-op.
 #[tokio::test]
-async fn a_reload_adds_the_merge_queue_to_old_wait_overrides() {
+async fn a_reload_retires_old_wait_overrides() {
     let td = lab().await;
     let cols: Vec<Value> = [
         "backlog",
@@ -622,6 +622,10 @@ async fn a_reload_adds_the_merge_queue_to_old_wait_overrides() {
     .collect();
     let r = td
         .patch("/api/projects/p/board", json!({"columns": cols}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = td
+        .patch("/api/projects/p", json!({"board_flow": "rules"}))
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     // The text of a migration before TER-222 for this board.
@@ -648,36 +652,45 @@ async fn a_reload_adds_the_merge_queue_to_old_wait_overrides() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert!(
-        text.contains("when \"data.to\" { one_of = [\"review\", \"merge_queue\"] }"),
-        "{text}"
-    );
-    assert!(
-        text.contains(
-            "when \"data.to\" { ne = \"review\" }\n  when \"data.to\" { ne = \"merge_queue\" }\n  when \"data.to\" { ne = \"done\" }"
-        ),
-        "{text}"
-    );
+    assert!(!text.contains("rule \"agent-park\""), "{text}");
+    assert!(!text.contains("rule \"agent-unpark\""), "{text}");
+    let effective = td.get("/api/projects/p/rules/effective").await.ok().clone();
+    for name in ["agent-park", "agent-unpark"] {
+        let rule = effective["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap();
+        assert_eq!(rule["origin"], "pack");
+        let role_condition = if name == "agent-park" {
+            "data.to_role"
+        } else {
+            "data.from_role"
+        };
+        assert!(rule["wcl"].as_str().unwrap().contains(role_condition));
+    }
     let puts = audit_rows(&td, "rules.put").await;
     assert_eq!(puts.len(), 2, "{puts:?}");
 
-    assert!(text.contains("merge_queue added (TER-243)."), "{text}");
     // A second load changes nothing.
     td.post_empty("/api/reload").await.ok();
     assert_eq!(td.get("/api/projects/p/rules").await.ok()["text"], text);
     assert_eq!(audit_rows(&td, "rules.put").await.len(), 2);
 
-    // The operator takes merge_queue out again in the same form: the next
-    // load keeps it out.
-    let removed = text
-        .replace(", \"merge_queue\"] }", "] }")
-        .replace("  when \"data.to\" { ne = \"merge_queue\" }\n", "");
-    assert!(!removed.contains("\"merge_queue\""), "{removed}");
+    // A custom cap makes the park block unrecognized, so a reload keeps it.
+    let edited = old.replacen("max_per_hour = 600", "max_per_hour = 60", 1);
     let r = td
-        .put("/api/projects/p/rules", json!({"text": removed}))
+        .put("/api/projects/p/rules", json!({"text": edited}))
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     td.post_empty("/api/reload").await.ok();
-    assert_eq!(td.get("/api/projects/p/rules").await.ok()["text"], removed);
-    assert_eq!(audit_rows(&td, "rules.put").await.len(), 3);
+    let after = td.get("/api/projects/p/rules").await.ok()["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(after.contains("max_per_hour = 60"), "{after}");
+    assert!(after.contains("rule \"agent-park\""), "{after}");
+    assert!(!after.contains("rule \"agent-unpark\""), "{after}");
+    assert_eq!(audit_rows(&td, "rules.put").await.len(), 4);
 }

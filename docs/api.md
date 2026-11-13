@@ -351,7 +351,7 @@ gives them to the routers and the mail code.
 | `TERRARIUM_ARTIFACT_LISTEN` | `--artifact-listen` | `0.0.0.0:8081` | The artifact origin listener. Empty: none, and the dashboard port serves `/a/...`. |
 | `TERRARIUM_ARTIFACT_PUBLIC_URL` | `--artifact-public-url` | unset | The artifact origin in signed URLs and the CSP. |
 | `TERRARIUM_WS_QUERY_TOKEN` | `--ws-query-token` | `0` | `1`: take `?token=` on an upgrade. |
-| `TERRARIUM_PROJECT_PAGES_V2` | `--project-pages-v2` | `0` | Staged project-page layout capability. Strict switch parser. Deployment activation and explicit default initialization belong to C7 (TER-1077). |
+| `TERRARIUM_PROJECT_PAGES_V2` | `--project-pages-v2` | `0` | Project pages (TER-1077). Strict switch parser. `1` turns them on: see "Project page layout v2" for the switch-on step and what the first start initializes. `0` is the rollback. |
 | `TERRARIUM_SESSION_TTL` | `--session-ttl` | `30d` | The life of a session cookie. The daemon renews it past half its life. |
 | `TERRARIUM_CLI_SESSION_TTL` | `--cli-session-ttl` | `90d` | The life of a CLI session token (`terrarium login`). |
 | `TERRARIUM_SESSION_MAX_AGE` | `--session-max-age` | `90d` | The longest life of a dashboard session through its renewals, from the login. |
@@ -3758,11 +3758,12 @@ or the operator may spawn for an owner. The checks, in order:
 `like` (CLI `--like <agent>`) copies a same-project agent's policy targets,
 agent-level secret grant references (never values), skills settings, subscription
 and pool: the copied subscription and pool replace the template's and the
-owner's, and subscription selection uses the copied pool's headroom. The
-template still supplies the harness and other settings. The source must use
-the same harness; a mismatch is `422 invalid` and names the template, also
-when it is the alternative picked for headroom. Each copied target and grant
-is checked against the owner through the normal spawn-rights checks, and a
+owner's, and subscription selection ranks the copied pool by estimated usage.
+The template still supplies the harness and other settings. The source must
+use the same harness; a mismatch is `422 invalid` and names the template,
+also when it is the alternative selected after an eligibility refusal. Each
+copied target and grant is checked against the owner through the normal
+spawn-rights checks, and a
 copied target that the body's `targets` also names is granted once. A missing
 right is `403`. A copied target is named. A copied grant is named (secret
 and level) only when the owner may already read the secret's name (a grant of
@@ -6593,11 +6594,11 @@ A cloud subscription is never in the automatic account choice: the
 auto-swap after a usage limit (§16.6) never moves an agent to one, the
 spawn pick takes one only when the template or the agent names it as
 `subscription`, never from `subscription_pool`, and the `<template>-alt`
-fallback of a spawn without headroom never takes one, also when the alt
-template names it. The spawn pick counts a cloud subscription as full at
-100 percent of its budget window, not at 80. A swap that names it is
-allowed (`POST /api/agents/{id}/subscription`, §6.2, with the rules of a
-swap).
+fallback after an eligibility refusal never takes one, also when the alt
+template names it. Estimated usage, including the cloud budget window,
+ranks otherwise eligible accounts but never refuses a spawn at 80, 100, or
+a higher percentage. A swap that names a cloud subscription is allowed
+(`POST /api/agents/{id}/subscription`, §6.2, with the rules of a swap).
 
 **The monthly budget.** With `budget_usd`, the daemon keeps the spend of
 the UTC month: the sum of the `costUSD` running totals of the Claude Code
@@ -11435,7 +11436,7 @@ and the dashboard CLI remain compatibility aliases for at least one release.
 The alias reads an empty layout if the mapped page was deleted. Saving it
 replaces monitor/Markdown widgets and preserves system and wiki widgets.
 
-#### Project page layout v2 (staged, default OFF)
+#### Project page layout v2 (default OFF)
 
 `GET /api/projects/{name}/pages` additionally returns
 `capabilities: {project_pages_v2: boolean}`. Only exact `true` from the
@@ -11511,8 +11512,11 @@ month. Knowledge contains wiki browser, memory list/graph and DB types/records.
 Logs contains mail and events. Reset uses the same definitions and affects
 only the selected built-in. A stored initialized marker prevents restart
 from restoring deleted built-ins. Schema migrations add only empty metadata.
-C7 owns calling the initializer before enabled responses and during enabled
-new-project creation. This implementation does not call it automatically.
+With the capability ON, the daemon runs the initializer for every project
+without the marker at each start, before it serves a request (one
+transaction per project, a refusal is logged and the other projects go on),
+and in the transaction of each project creation. OFF never runs it, and a
+new project then gets only the Dashboard page as before. GET never runs it.
 
 Copy requires source read plus target administration rights and confirmation.
 It copies neither grants nor source audit actor metadata. References remain
@@ -11522,6 +11526,53 @@ Renderers must resolve IDs against the target project's monitor inventory,
 not fetch a global ID because the caller also has source-project rights.
 Existing resource endpoints retain their authorization checks. Compatible
 existing local monitor references are validated normally.
+
+The page list also returns `rights`, the caller's existing rights in the
+project, for the controls of the page widgets:
+
+| Field | The check it reports | Widget controls |
+|---|---|---|
+| `write_project` | `write_project` (own project, sysadmin, operator) | Board New card, moves and the card drawer |
+| `admin_project` | `admin_project` (same as `can_edit`) | Board columns, New agent, project event sources, rules, pipelines |
+| `manage_schedules` | `schedule_scope` of the project | New schedule or trigger, edit of a project schedule |
+| `manage_global` | `sysadmin` | global schedules and event sources |
+| `operator` | the operator | agent pins |
+
+They describe the endpoints and give no right: each endpoint still checks
+every write and answers 403. A missing or failed rights read shows the
+widgets read-only. `can_edit` stays the layout right only. The Repos,
+Knowledge and Logs widgets keep the controls of their routes, and a refused
+write shows the endpoint's 403. The mail widget sends `project` to
+`GET /api/mail`, so the daemon returns that project's mail only.
+
+Dashboard (TER-1077), with the capability ON: the stored pages replace the
+ten fixed project tabs, in their order. A cog next to Edit pages opens the
+project settings (General, Secrets, Templates, Monitors) at the unchanged
+`/p/{name}/settings/...` URLs, and the cog of the project row in the
+sidebar stays. Settings is no page and has no widgets. The old routes
+(`/p/{name}/board?card=…`, `/tests/{id}`, `/repos/{repo}`,
+`/knowledge/wiki/…`, `/logs/mail?open=…`, the redirects of nav.ts) still
+open their old views with their queries, and the built-in page of that
+route is the active tab. A project click opens the Board built-in page,
+else the first page, else `/board`. In Edit pages, "Restore default" adds a
+deleted built-in again or resets one (`/page-layout/reset`), and "Copy
+layout" replaces the whole layout after a confirmation (`/page-layout/copy`).
+Both need a draft without unsaved changes. With the capability OFF the
+tab row is the old one, and built-in pages that an ON period left are
+stored but hidden. An OFF save of a page with v2 widgets returns 422 and
+changes nothing.
+
+Switch-on step for a deployment: set `TERRARIUM_PROJECT_PAGES_V2=1` in the
+daemon's environment (the `terrarium` service in `compose.yaml` passes
+`TERRARIUM_PROJECT_PAGES_V2: ${TERRARIUM_PROJECT_PAGES_V2:-0}`, so set it in
+the `.env` next to `compose.yaml` or in the service environment), then
+restart the daemon. At the first start with it ON, each existing project
+gets the ten built-in pages appended after its stored pages, once (the
+marker survives restarts and rollbacks). Each project's layout revision
+increases by one, with one `page.layout` audit row (`initialize`) and one
+`page.updated` event. Rollback: set it to `0` and restart. The built-in
+pages stay stored and hidden, and switching on again shows them without a
+second initialization.
 
 CLI: `page layout`, `page save-layout --from-file FILE`,
 `page reset BUILTIN --base-revision N`, and

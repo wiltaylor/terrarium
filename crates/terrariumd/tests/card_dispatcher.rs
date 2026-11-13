@@ -939,6 +939,82 @@ async fn claims_in_order_with_role_based_wip_and_no_duplicate() {
     assert!(get(&td, &second).await["agent"].is_null());
 }
 
+/// Estimated usage neither prevents an ordinary agent start nor daemon
+/// worker/reviewer spawns. The dispatchers use the same account selector
+/// as the manual spawn API.
+#[tokio::test]
+async fn estimated_usage_admits_start_and_daemon_entrypoints() {
+    let td = setup(2, 4, 10).await;
+    td.post(
+        "/api/subscriptions",
+        json!({"name":"dispatch-estimated","provider":"openai","harnesses":["codex"]}),
+    )
+    .await
+    .ok();
+    terrariumd::accounts::write_credential(
+        &state(&td).state_dir,
+        "dispatch-estimated",
+        terrarium_core::HarnessId::Codex,
+        br#"{"token":"test"}"#,
+    )
+    .unwrap();
+    state(&td)
+        .db
+        .write("system", |t| {
+            terrariumd::store::subscriptions::insert_sample(
+                t,
+                "dispatch-estimated",
+                "5h",
+                120.0,
+                None,
+                &json!({}),
+            )
+        })
+        .await
+        .unwrap();
+    let started = td
+        .agent("p", "started", json!({"subscription":"dispatch-estimated"}))
+        .await;
+    assert_eq!(started["subscription"], "dispatch-estimated");
+    let worker_template = td
+        .patch(
+            "/api/templates/p%2Fcard-small",
+            json!({"spec":{"harness":"codex","subscription":"dispatch-estimated"}}),
+        )
+        .await;
+    assert_eq!(worker_template.status, 200, "{}", worker_template.body);
+    let review_template = td
+        .post(
+            "/api/templates",
+            json!({"name":"card-review","project":"p",
+                   "spec":{"harness":"codex","subscription":"dispatch-estimated"}}),
+        )
+        .await;
+    assert_eq!(review_template.status, 201, "{}", review_template.body);
+    let id = card(&td, "small").await;
+    enabled(&td).await;
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+    let c = get(&td, &id).await;
+    let worker = td
+        .get(&format!("/api/agents/{}", c["agent"].as_str().unwrap()))
+        .await;
+    assert_eq!(worker.ok()["subscription"], "dispatch-estimated");
+    td.post(&format!("/api/cards/{id}/move"), json!({"column":"review"}))
+        .await
+        .ok();
+    td.patch("/api/projects/p", json!({"review_dispatcher":"lead"}))
+        .await
+        .ok();
+    assert!(
+        terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+            .await
+            .unwrap()
+    );
+    let review_agent = reviewer(&td, &id).await;
+    let reviewer_view = td.get(&format!("/api/agents/{review_agent}")).await;
+    assert_eq!(reviewer_view.ok()["subscription"], "dispatch-estimated");
+}
+
 #[tokio::test]
 async fn concurrent_dispatchers_cannot_overfill_wip() {
     let td = setup(1, 3, 10).await;

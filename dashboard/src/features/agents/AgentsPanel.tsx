@@ -1,6 +1,6 @@
 import { useInstance } from "../../instance";
 import { A, useNavigate } from "../../instance/navigation";
-import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { LeaseChips } from "../../components/Leases";
 import { HoldBadge } from "../../components/HoldBadge";
 import { StatusBadge } from "../../components/StatusBadge";
@@ -19,7 +19,8 @@ export function RoleBadges(props: { agent: Agent }) {
   );
 }
 
-export function AgentCard(props: { agent: Agent; now: number; onError?: (e: unknown) => void }) {
+// `pin`: the pin button (the caller's own pins, docs/api.md §6.11). Absent: shown.
+export function AgentCard(props: { agent: Agent; now: number; onError?: (e: unknown) => void; pin?: boolean }) {
   const a = () => props.agent;
   return (
     <div class="card-box agent-card">
@@ -32,7 +33,7 @@ export function AgentCard(props: { agent: Agent; now: number; onError?: (e: unkn
           <HoldBadge agentId={a().id} now={props.now} />
           <StatusBadge agent={a()} />
           {/* The pin the sidebar agent rows had (TER-153). An ephemeral agent is short-lived: no pin, as on the agent page. */}
-          <Show when={!a().ephemeral}>
+          <Show when={!a().ephemeral && props.pin !== false}>
             <PinButton agent={a()} class="small" onError={props.onError} />
           </Show>
         </span>
@@ -82,12 +83,16 @@ export function AgentCard(props: { agent: Agent; now: number; onError?: (e: unkn
   );
 }
 
-export function AgentsPanel(props: { project: string; onRefresh?: () => void }) {
+// `canCreateAgent`: New agent (`POST /api/agents`, project_admin of the project). `canPin`: the pin buttons.
+// Absent is the Agents tab (true).
+export function AgentsPanel(props: { project: string; onRefresh?: () => void; canCreateAgent?: boolean; canPin?: boolean }) {
   const { leases, agents } = useInstance();
   const now = useNow(1000);
   const navigate = useNavigate();
   const project = () => props.project;
   const [creating, setCreating] = createSignal(false);
+  // A revoked grant closes New agent, so a re-grant does not open it again without a click.
+  createEffect(() => { if (props.canCreateAgent === false) setCreating(false); });
   const [pinError, setPinError] = createSignal<unknown>(null);
   // The "holds <target>" chips: the leases older than the event backlog.
   onMount(() => void leases.loadAll());
@@ -111,18 +116,20 @@ export function AgentsPanel(props: { project: string; onRefresh?: () => void }) 
         >
           Refresh
         </button>
-        <button class="primary" onClick={() => setCreating(true)}>
-          New agent
-        </button>
+        <Show when={props.canCreateAgent !== false}>
+          <button class="primary" onClick={() => setCreating(true)}>
+            New agent
+          </button>
+        </Show>
       </PageHead>
-      <Show when={creating()}>
+      <Show when={props.canCreateAgent !== false && creating()}>
         <NewAgentDialog project={project()} onClose={() => setCreating(false)} onSaved={(a) => navigate(`/agents/${encodeURIComponent(a.id)}`)} />
       </Show>
       <ErrorBanner error={agents.state.error} />
       <ErrorBanner error={pinError()} onDismiss={() => setPinError(null)} />
       <Show when={shown().length} fallback={<Empty>{agents.state.loading ? "Loading…" : "No agents match."}</Empty>}>
         <div class="grid">
-          <For each={shown()}>{(a) => <AgentCard agent={a} now={now()} onError={setPinError} />}</For>
+          <For each={shown()}>{(a) => <AgentCard agent={a} now={now()} onError={setPinError} pin={props.canPin !== false} />}</For>
         </div>
       </Show>
 
@@ -130,11 +137,14 @@ export function AgentsPanel(props: { project: string; onRefresh?: () => void }) 
   );
 }
 
-export function CardAgentsPanel(props: { project: string; refreshKey?: number }) {
+// `empty` is the text that a page widget shows when the project has no card agents.
+// The Agents tab leaves it out and shows nothing.
+type CardAgentsProps = { project: string; refreshKey?: number; empty?: string };
+export function CardAgentsPanel(props: CardAgentsProps) {
   return <Show when={props.project} keyed>{(project) => <CardAgentsContent {...props} project={project} />}</Show>;
 }
 
-function CardAgentsContent(props: { project: string; refreshKey?: number }) {
+function CardAgentsContent(props: CardAgentsProps) {
   const { leases, api, events } = useInstance();
   const now = useNow(1000);
   const project = () => props.project;
@@ -156,10 +166,13 @@ function CardAgentsContent(props: { project: string; refreshKey?: number }) {
     off();
   });
 
-  return <><Show when={(cardAgents() ?? []).length}>
+  // A failed load shows its error. Reading `latest` of a failed resource throws, so the list is empty then.
+  const shown = () => (cardAgents.state === "errored" ? [] : (cardAgents.latest ?? []));
+  return <><ErrorBanner error={cardAgents.state === "errored" ? cardAgents.error : undefined} />
+      <Show when={shown().length} fallback={<Show when={props.empty !== undefined && cardAgents.state === "ready"}><Empty>{props.empty}</Empty></Show>}>
         <h3>Card agents</h3>
         <div class="grid card-agents">
-          <For each={cardAgents()}>{(a) => <AgentCard agent={a} now={now()} />}</For>
+          <For each={shown()}>{(a) => <AgentCard agent={a} now={now()} />}</For>
         </div>
       </Show>
   </>;

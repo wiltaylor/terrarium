@@ -186,7 +186,7 @@ cloned terrarium in work/terrarium of worker
 HEAD 3f2c1e0b9a0d... (main)
 ```
 
-`--target <name>` runs the clone or fetch on that target through its host agent. A vmlab target is refused (422).
+`--target <name>` runs the clone or fetch on that target through its host agent. A vmlab target is refused (422). The work tree gets the modes of a plain `git clone` under the umask of the target user (`0002` gives `rwxrwxr-x` on an executable file), as in 0.64. Only the staging of the managed hooks and the SSH key file are owner-only (TER-1127). On a 0.65 checkout made before this fix the tree is `700`/`600`: run `chmod -R go+rX` on your own checkout.
 
 `terrarium repo credential get` is hidden. git runs it as the credential
 helper that the daemon writes into each workspace clone. It reads git's

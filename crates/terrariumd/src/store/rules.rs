@@ -438,19 +438,17 @@ pub fn file_projects(conn: &Connection) -> ApiResult<Vec<String>> {
     Ok(rows)
 }
 
-/// TER-243: the `agent-park` and `agent-unpark` overrides that a migration
-/// before TER-222 wrote into the API rules of a project get the wait
-/// column `merge_queue`, one time
-/// ([`rules_tools::add_merge_queue_to_wait_overrides`]). At each load of
-/// the config (the start and `POST /api/reload`); a changed block carries
-/// [`rules_tools::MERGE_QUEUE_MARK`], so a later pass leaves it alone. A
-/// file's rules stay as the file has them. Each change is a [`put`] with
-/// the hash it read (audit `rules.put`). This step never fails the load:
-/// each problem, also a DB error, is one line for the report of the load.
-pub async fn add_merge_queue(db: &crate::db::Db) -> Vec<String> {
+/// TER-1090: retire only the exact generated legacy `agent-park` and
+/// `agent-unpark` overrides, restoring the current built-ins
+/// ([`rules_tools::retire_legacy_wait_overrides`]). At each load of the
+/// config (the start and `POST /api/reload`). A file's rules stay as the
+/// file has them. Each change is a [`put`] with the hash it read (audit
+/// `rules.put`). This step never fails the load: each problem, also a DB
+/// error, is one line for the report of the load.
+pub async fn retire_legacy_wait_overrides(db: &crate::db::Db) -> Vec<String> {
     let line = |project: &str, what: &str, e: &ApiError| {
         format!(
-            "rules of project `{project}`: merge_queue wait column not added: {what}: {}",
+            "rules of project `{project}`: legacy wait overrides not retired: {what}: {}",
             e.message
         )
     };
@@ -474,7 +472,7 @@ pub async fn add_merge_queue(db: &crate::db::Db) -> Vec<String> {
         Ok(rows) => rows,
         Err(e) => {
             return vec![format!(
-                "rules: merge_queue wait column step: read: {}",
+                "rules: legacy wait override retirement: read: {}",
                 e.message
             )];
         }
@@ -505,14 +503,13 @@ pub async fn add_merge_queue(db: &crate::db::Db) -> Vec<String> {
             }
         };
         let columns = ctx.columns.clone().unwrap_or_default();
-        let Some(new) = rules_tools::add_merge_queue_to_wait_overrides(&text, &own, &columns)
-        else {
+        let Some(new) = rules_tools::retire_legacy_wait_overrides(&text, &own, &columns) else {
             continue;
         };
         match parse_off(new.clone(), rules_file::FILE_NAME.to_owned(), ctx.clone()).await {
             Ok(Ok(set)) => puts.push((project, new, set, ctx, hash)),
             Ok(Err(e)) => errors.push(format!(
-                "rules of project `{project}`: merge_queue wait column not added: the new text does not check: {}",
+                "rules of project `{project}`: legacy wait overrides not retired: the new text does not check: {}",
                 e.to_string().lines().next().unwrap_or_default()
             )),
             Err(e) => errors.push(line(&project, "check", &e)),
@@ -528,10 +525,9 @@ pub async fn add_merge_queue(db: &crate::db::Db) -> Vec<String> {
                 // A write or a board change since the read: the next load
                 // tries again.
                 match put(t, &project, &text, set, &ctx, Some(&hash)) {
-                    Ok(_) => tracing::info!(
-                        project,
-                        "rules: added merge_queue to the migrated wait overrides"
-                    ),
+                    Ok(_) => {
+                        tracing::info!(project, "rules: retired generated legacy wait overrides")
+                    }
                     Err(e) => errors.push(line(&project, "write", &e)),
                 }
             }
@@ -541,7 +537,7 @@ pub async fn add_merge_queue(db: &crate::db::Db) -> Vec<String> {
     match stored {
         Ok(e) => errors.extend(e),
         Err(e) => errors.push(format!(
-            "rules: merge_queue wait column step: write: {}",
+            "rules: legacy wait override retirement: write: {}",
             e.message
         )),
     }

@@ -2,17 +2,34 @@ import { useInstance } from "../../instance";
 // The shell of every project page. The first path segment selects a project
 // tab, so deep links and browser history keep working without a route change.
 
-import { useParams, type RouteSectionProps } from "@solidjs/router";
+import { useBeforeLeave, useParams, type RouteSectionProps } from "@solidjs/router";
 import { useLocation } from "../../instance/navigation";
-import { createEffect, on } from "solid-js";
+import { createEffect, on, onCleanup } from "solid-js";
 import { PageHead } from "../../components/ui";
 import { decodePath, decodePathParam, projectBase } from "../../lib/url";
 
 import { ProjectTabs } from "./ProjectTabs";
 import { blockedAgents, createProjectCounts, tabBadge } from "./tabCounts";
+import { createLayoutEditor, LayoutEditorContext } from "../pages/layoutDraft";
+
+/**
+ * The draft stays only inside the same project of the same instance. Compare
+ * full browser paths: `/p/demo` of the home and `/remote/a/p/demo` are two
+ * instances, even with the same project name. A history step (a number) leaves.
+ */
+export function leavesProject(href: (path: string) => string, base: string, to: string | number): boolean {
+  if (typeof to !== "string") return true;
+  const path = decodePath(to.split(/[?#]/)[0]!).replace(/\/$/, "");
+  const target = decodePath(href(base));
+  return path !== target && !path.startsWith(`${target}/`);
+}
+
+// A history step has no known target, so the text must be true inside and outside the project.
+export const LEAVE_DRAFT = "Unsaved page layout changes are lost if you leave this project. Continue?";
 
 export default function ProjectScreen(props: RouteSectionProps) {
-  const { api, events, agents } = useInstance();
+  const instance = useInstance();
+  const { api, events, agents } = instance;
   const params = useParams<{ project: string }>();
   const location = useLocation();
 
@@ -23,6 +40,23 @@ export default function ProjectScreen(props: RouteSectionProps) {
   // The tab counts (TER-154): one bounded read per project and per change.
   const { counts, refresh } = createProjectCounts(api, events, project);
   createEffect(on(project, () => void refresh()));
+  // One layout draft for all tabs of this project in this instance (TER-1073).
+  const editor = createLayoutEditor(api, events, instance.key, project);
+  // Links, history and instance switches (RemoteScope is a route) all leave
+  // through the router, so one guard covers them. It never ends the draft:
+  // a confirmed Back inside the project keeps it, and leaving the project
+  // unmounts this screen or changes the scope, which ends it.
+  useBeforeLeave(event => {
+    if (!editor.dirty() || !leavesProject(instance.href, base(), event.to)) return;
+    if (!window.confirm(LEAVE_DRAFT)) event.preventDefault();
+  });
+  const unload = (event: BeforeUnloadEvent) => {
+    if (!editor.dirty()) return;
+    event.preventDefault();
+    event.returnValue = "";
+  };
+  window.addEventListener("beforeunload", unload);
+  onCleanup(() => window.removeEventListener("beforeunload", unload));
   const badge = (path: string) => tabBadge(path, blockedAgents(agents.inProject(project())), counts());
   const active = (path: string) => {
     const current = decodePath(location.pathname).replace(/\/$/, "");
@@ -30,10 +64,10 @@ export default function ProjectScreen(props: RouteSectionProps) {
     return current === target || current.startsWith(`${target}/`);
   };
   return (
-    <>
+    <LayoutEditorContext.Provider value={editor}>
       <PageHead title={project()} />
       <ProjectTabs base={base()} active={active} badge={badge} />
       {props.children}
-    </>
+    </LayoutEditorContext.Provider>
   );
 }
