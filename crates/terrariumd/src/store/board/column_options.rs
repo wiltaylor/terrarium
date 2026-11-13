@@ -81,7 +81,7 @@ pub enum QueueRelease {
 }
 
 impl QueueRelease {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Wip => "wip",
             Self::Batch => "batch",
@@ -89,7 +89,7 @@ impl QueueRelease {
         }
     }
 
-    fn parse(s: &str) -> rusqlite::Result<Self> {
+    pub(crate) fn parse(s: &str) -> rusqlite::Result<Self> {
         match s {
             "wip" => Ok(Self::Wip),
             "batch" => Ok(Self::Batch),
@@ -480,9 +480,10 @@ pub fn put_options(
         write_rules(t, col.id, &before.rules, &rules)?;
     }
     let col = column(t, project, &col.name)?;
-    let after = read(t, project, &col)?;
-    record(t, project, &before, &after)?;
-    Ok(after)
+    record(t, project, &before, &read(t, project, &col)?)?;
+    // New queue options may release waiting cards (TER-1114).
+    super::queues::release(t, col.id)?;
+    read(t, project, &col)
 }
 
 /// The audit row `board.column_options` and the `board` event of one

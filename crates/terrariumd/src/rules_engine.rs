@@ -2032,6 +2032,16 @@ async fn drive_pass(state: &Shared, cache: &mut Cache, lanes: &mut Lanes) -> Api
             {
                 warn!("the rule engine cannot check the timers: {e}");
             }
+            // The column queues (TER-1114): the wait of a batch, and a
+            // release that no move or job end triggered.
+            if !state.rule_timers.held()
+                && let Err(e) = state
+                    .db
+                    .write("system", crate::store::board::queues::sweep_all)
+                    .await
+            {
+                warn!("the rule engine cannot release the column queues: {e}");
+            }
         }
         let live = Arc::new(live_rules(&projects));
         // Discover runnable lanes in the planning transaction. A separate

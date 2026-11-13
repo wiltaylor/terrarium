@@ -4983,6 +4983,49 @@ paths and ops, `if_card` and `if_job` fields), `actions` (each verb with its
 arguments: `name`, `type`, `required`, and `values` of a `one_of`),
 `placeholders`, and `limits`.
 
+#### 8.2.2 Column queues (TER-1114)
+
+Only a project with `board_flow = columns` has column queues. On every other
+board a full column refuses a move with `409 wip_limit`, as before.
+
+A move into a column that cannot take the card now is accepted. The card is
+in the column and waits in its queue; the move checks of §8.2.1 (rights, a
+final column, dependencies, the comment) still run at the move, and the ETA
+is cleared. The `moved` event has `queued: true`, and the column's `lands`
+and `count_reached` rules do not run yet. A claim, the move of a met card
+wait (the wait mail says `wait met, queued in <column>`), a card made in a
+column, and the `card.move` verb all go through the same move.
+
+Cards leave the queue first in, first out; a new card never overtakes one
+that waits. When a card gets its slot the daemon writes the `card` event
+`admitted` (with `queued_at` and `to_count`, the admitted cards of the
+column), and the `lands` and `count_reached` rules of the column run on it.
+A card that leaves the queue (a move or an archive) never landed: its
+column runs no `leaves` or `archived` rule for it (`from_queued: true` on
+the `moved` event, `queued: true` on `archived`).
+
+The capacity is the column's `wip_limit` (none: no limit) in each release
+(`queue.release` of §8.2.1):
+
+| Release | A waiting card is admitted when |
+|---|---|
+| `wip` | the admitted cards are fewer than the WIP limit |
+| `job` | one job at a time: no card of the column holds the job slot. A card that lands or is admitted holds it until a job of the card has ended after that (passed, failed, or cancelled) and it has no open job, or until it leaves the column. A job that is requeued (lost at a restart) stays open and keeps the slot |
+| `batch` | no card of the last batch is still in the column, and `batch_size` cards wait or the first has waited `max_wait_seconds`. Up to `max_batch_cards` (default `batch_size`) are admitted, in queue order |
+
+The release runs in the transaction of its cause: a move into or out of
+the column, an archive, a job end or cancel, a board `PATCH`, and an
+options `PUT`. The rule engine's tick also releases every queue (the wait
+of a batch, and any release that no cause triggered).
+
+A card that waits shows `queued: {column, since, place, held_eta}` (place 1
+goes next); a board column shows `queued`, the number that wait (absent
+when 0); `count` counts them too. An ETA set on a waiting card (`PATCH
+eta_at`, `card claim --eta`) is held, not set: it is set when the card is
+admitted, and a duration counts from then. A waiting card has no ETA, so it
+raises no ETA signal, and the card reminder skips it. The `job.queue` batch
+verb leaves out a card that waits in the queue of its column.
+
 ### 8.3 Endpoints
 
 | Endpoint | Body | Answer |

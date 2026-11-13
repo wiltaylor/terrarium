@@ -840,6 +840,13 @@ pub fn pick_batch(
                 .push(json!({"card": c.id, "reason": format!("open job {}", j.id)}));
             continue;
         }
+        // A card that waits in the column's queue is not admitted yet
+        // (TER-1114): its batch is the one that the queue releases.
+        if board::queues::is_waiting(conn, &c.id)? {
+            out.left_out
+                .push(json!({"card": c.id, "reason": "waits in the column queue"}));
+            continue;
+        }
         // A card goes in a batch only with its reviewed commit, the head
         // that the review accept recorded (TER-553); until then it waits,
         // and does not count as waiting.

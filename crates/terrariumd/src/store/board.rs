@@ -38,6 +38,7 @@ use crate::store::{Page, Paged, agents, github_gate, json_col, questions};
 
 pub mod card_waits;
 pub mod column_options;
+pub mod queues;
 
 pub use column_options::ColumnChecks;
 
@@ -118,8 +119,17 @@ pub struct Column {
     /// `working`, `blocked`, or none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    /// Cards in the column, archived cards not counted.
+    /// Cards in the column, archived cards not counted. The cards that
+    /// wait in its queue count too.
     pub count: i64,
+    /// The cards that wait in the column's queue (TER-1114). 0 off a
+    /// `columns` board.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub queued: i64,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -235,6 +245,11 @@ pub struct Card {
     /// (TER-158, D4). Absent when the card has no open job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<crate::store::jobs::CardJob>,
+    /// The queue place of the card (TER-1114): it is in its column but
+    /// waits for a slot, and the column's `lands` rules have not run yet.
+    /// Absent when the card is admitted, and off a `columns` board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued: Option<queues::CardQueue>,
     /// The stored status of the assignee agent (`working`, `idle`,
     /// `waiting`, `blocked`, `stopped`, ...). Absent for the operator, no
     /// assignee, or a removed agent.
@@ -529,6 +544,8 @@ pub fn working_cards_of(
 ) -> ApiResult<Vec<(String, Option<String>)>> {
     let mut stmt = conn.prepare(&format!(
         "{CARD_SELECT} WHERE c.assignee = ?1 AND k.role = ?2 AND c.archived = 0
+           AND NOT EXISTS (SELECT 1 FROM card_queue q
+                            WHERE q.card = c.id AND q.admitted_at IS NULL)
          ORDER BY c.project, c.number"
     ))?;
     let rows = stmt
@@ -765,6 +782,7 @@ fn render(
         group: crate::store::groups::for_card(conn, &row.id)?,
         tests: crate::store::test_runs::card_chip(conn, &row.id)?,
         job,
+        queued: queues::of_card(conn, &row.id)?,
         assignee_status,
         depends_on: deps(conn, &row.id)?,
         blocked_by: unmet(conn, &row.id)?,
@@ -865,6 +883,7 @@ pub(crate) fn selection_cards(
             tests: None,
             idle_since: None,
             job: None,
+            queued: None,
             assignee_status: None,
         })
     })?
@@ -874,9 +893,11 @@ pub(crate) fn selection_cards(
 pub fn get_board(conn: &Connection, project: &str) -> ApiResult<Board> {
     let prefix = crate::store::projects::get(conn, project)?.card_prefix;
     let mut columns = Vec::new();
+    let queued = queues::queued_by_column(conn, project)?;
     for (i, c) in column_rows(conn, project)?.into_iter().enumerate() {
         columns.push(Column {
             count: active_count(conn, c.id)?,
+            queued: queued.get(&c.id).copied().unwrap_or(0),
             title: c.title.unwrap_or_else(|| default_title(&c.name)),
             name: c.name,
             position: i as i64,
@@ -912,12 +933,14 @@ pub fn board_summary(
     page: &Page,
 ) -> ApiResult<Value> {
     let prefix = crate::store::projects::get(conn, project)?.card_prefix;
+    let queued = queues::queued_by_column(conn, project)?;
     let columns = column_rows(conn, project)?
         .into_iter()
         .enumerate()
         .map(|(i, c)| {
             Ok(Column {
                 count: active_count(conn, c.id)?,
+                queued: queued.get(&c.id).copied().unwrap_or(0),
                 title: c.title.unwrap_or_else(|| default_title(&c.name)),
                 name: c.name,
                 position: i as i64,
@@ -1374,7 +1397,9 @@ fn with_to_count(
     }
     let n: i64 = conn.query_row(
         "SELECT count(*) FROM cards c JOIN board_columns b ON b.id = c.column_id
-          WHERE b.project = ?1 AND b.name = ?2 AND c.archived = 0",
+          WHERE b.project = ?1 AND b.name = ?2 AND c.archived = 0
+            AND NOT EXISTS (SELECT 1 FROM card_queue q
+                             WHERE q.card = c.id AND q.admitted_at IS NULL)",
         params![project, column],
         |r| r.get(0),
     )?;
@@ -1895,8 +1920,11 @@ fn check_move(
     } else {
         0
     };
+    // On a `columns` board a full column queues the card (TER-1114,
+    // [`queues`]); every other board refuses the move.
     if let Some(limit) = to.wip_limit
         && active_count(t, to.id)? + helpers >= limit
+        && !queues::active(t, &card.project)?
     {
         return Err(ApiError::new(
             Code::WipLimit,
@@ -1921,6 +1949,7 @@ fn check_move(
     Ok(())
 }
 
+/// Returns whether the card waits in the queue of `to` (TER-1114).
 fn apply_move(
     t: &mut Tx<'_>,
     actor: &Actor,
@@ -1928,9 +1957,13 @@ fn apply_move(
     to: &ColumnRow,
     position: Option<i64>,
     comment: Option<&str>,
-) -> ApiResult<()> {
+) -> ApiResult<bool> {
     let comment = comment.map(str::trim).filter(|c| !c.is_empty());
     let same = to.id == card.column_id;
+    // The column queues (TER-1114): the card leaves the queue of its old
+    // column, and waits in the queue of the new one when it has no slot.
+    let from_queued = !same && queues::leave(t, &card.id)?;
+    let queued = !same && queues::must_queue(t, &card.project, to.id)?;
     // Take the card out of its column, then put it in at the new place.
     t.execute(
         "UPDATE cards SET position = position - 1
@@ -1964,6 +1997,11 @@ fn apply_move(
          WHERE id = ?1",
         params![card.id, to.id, at, now(), same, to.name == DONE, keep_eta],
     )?;
+    if queued {
+        queues::enqueue(t, &card.id, to.id)?;
+    } else if !same {
+        queues::landed(t, &card.id, to.id)?;
+    }
     let author = author_of(t, actor);
     if let Some(c) = comment {
         insert_comment(t, &card.id, &author, c)?;
@@ -1971,7 +2009,7 @@ fn apply_move(
     let moved = find_row(t, &card.id)?;
     if same {
         card_event(t, &moved, "reordered", json!({"position": at}))?;
-        return Ok(());
+        return Ok(false);
     }
     card_event(
         t,
@@ -1983,7 +2021,8 @@ fn apply_move(
             &to.name,
             json!({"from": card.column, "to": to.name, "from_role": card.column_role,
                    "to_role": to.role, "comment": comment, "assignee": moved.assignee,
-                   "previous_eta_at": card.eta_at, "author": author}),
+                   "previous_eta_at": card.eta_at, "author": author,
+                   "queued": queued, "from_queued": from_queued}),
         )?,
     )?;
     // The review accept opens a round of the reviewed commit; a move out
@@ -2033,7 +2072,14 @@ fn apply_move(
         card_waits::on_dependency_reopened(t, &card.id)?;
     }
     card_waits::on_dependency_changed(t, &card.id, false)?;
-    Ok(())
+    // A slot of the old column may be free now; the new column may admit
+    // the card (a batch that is full now). The `admitted` events come
+    // after `moved`, so `leaves` runs before the `lands` of a next card.
+    queues::release(t, card.column_id)?;
+    if queued {
+        queues::release(t, to.id)?;
+    }
+    Ok(queued)
 }
 
 /// The blocked notice of card `id`, as a move to blocked by `author`
@@ -2822,7 +2868,17 @@ pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> Ap
             }
             let at =
                 terrarium_core::eta::resolve(v, chrono::Utc::now()).map_err(ApiError::invalid)?;
+            // A card that waits in a queue keeps the ETA for its admission
+            // (TER-1114): the ETA is for the work of the column, which
+            // starts with the slot (TER-155 D1).
+            if queues::hold_eta(t, &card.id, Some(v.trim()), &actor.address())? {
+                card_event(t, &card, "eta_held", json!({"held_eta": v.trim()}))?;
+                return get_card(t, &card.id);
+            }
             Some(crate::time_param::stored(at))
+        }
+        None if queues::hold_eta(t, &card.id, None, &actor.address())? => {
+            return get_card(t, &card.id);
         }
         None if card.eta_at.is_none() => return get_card(t, &card.id),
         None => None,
@@ -2918,7 +2974,11 @@ pub fn archive_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
     if admin && !mine {
         t.audit("card.archive", &card.id, Some(&card.project), json!({}))?;
     }
-    card_event(t, &card, "archived", json!({}))?;
+    // A card that waited in a queue never landed: no `archived` rule runs
+    // for it (TER-1114).
+    let queued = queues::leave(t, &card.id)?;
+    card_event(t, &card, "archived", json!({"queued": queued}))?;
+    queues::release(t, card.column_id)?;
     crate::store::threads::on_card_archived(t, &card.id)?;
     card_waits::on_dependency_changed(t, &card.id, true)?;
     Ok(())
@@ -3421,5 +3481,7 @@ pub fn set_columns(
         )
         .project(project),
     )?;
+    // A new WIP limit may free places in a column queue (TER-1114).
+    queues::release_project(t, project)?;
     get_board(t, project)
 }

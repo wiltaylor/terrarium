@@ -717,12 +717,21 @@ async fn show_board(ctx: &Ctx, path: &str) -> anyhow::Result<()> {
     })
 }
 
+/// The column of a card, with its queue place when it waits for a slot
+/// (TER-1114): `in_progress, queued 2`.
+fn column_text(k: &Value) -> String {
+    match k["queued"]["place"].as_i64() {
+        Some(place) => format!("{}, queued {place}", field(k, "column")),
+        None => field(k, "column"),
+    }
+}
+
 pub fn print_card(ctx: &Ctx, k: &Value) {
     ctx.line(format!(
         "{}  {}  [{}]{}",
         field(k, "id"),
         field(k, "title"),
-        field(k, "column"),
+        column_text(k),
         if k["archived"] == true {
             "  (archived)"
         } else {
@@ -838,7 +847,7 @@ fn card_line(ctx: &Ctx, verb: &str, k: &Value) {
         "{verb} {}: {} [{}]",
         field(k, "id"),
         field(k, "title"),
-        field(k, "column")
+        column_text(k)
     ));
 }
 
