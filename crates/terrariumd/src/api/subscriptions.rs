@@ -1408,7 +1408,8 @@ async fn verify(
             )
             .await;
             // Grok refreshes its own login file: a verify puts the tokens
-            // of today into the redaction matcher (TER-1191).
+            // of today into the redaction matcher (TER-1191). The tokens of
+            // an earlier build stay in it (TER-1259).
             if meta.harness == HarnessId::Grok {
                 crate::secrets::redact::rebuild(&state).await;
             }
@@ -1475,8 +1476,9 @@ async fn logout(
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?
             .map_err(|e| ApiError::internal(format!("cannot remove the account: {e}")))?;
-        // The removed login leaves the redaction matcher (a delete: after
-        // it, PLAN §16b.6).
+        // Build the matcher again after the delete (PLAN §16b.6). The
+        // removed tokens stay in it for the life of the daemon (TER-1257,
+        // TER-1259): an agent that used them may still print them.
         crate::secrets::redact::rebuild(&state).await;
         let n = name.clone();
         state
