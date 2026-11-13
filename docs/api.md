@@ -4809,6 +4809,10 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 
 ### 8.2 Rules (PLAN §13)
 
+The checks of dependencies, blocked, done, and ETA below are **column
+options** (TER-1112, §8.2.1). Their defaults are the rules as written here.
+Own cards, the GitHub hold, and the WIP limit stay fixed.
+
 - **Own cards.** A member may move, edit, and link its own cards. A card is
   its own when it is assigned to the member, or when it is unassigned and the
   member made it. A member claims unassigned cards and comments on any card
@@ -4857,12 +4861,64 @@ archived cards. The columns are configurable (§8.3, "Columns"):
   previous_planned_secs}`).
 - **Events.** Every change is a `card` event with the actor (§9).
 
+#### 8.2.1 Column options (TER-1112)
+
+Each column has options: four move checks and the settings of its queue.
+
+| Check | Default | What it does |
+|---|---|---|
+| `require_dependencies_met` | the `working` column | a move into the column needs met dependencies (`409 dependencies_unmet`), also for a claim and a wait action |
+| `require_comment_on_enter` | the `blocked` column | a move into the column needs a non-blank comment (`422 comment_required`) |
+| `terminal_for_members` | `done` | the **Done** rule above for a card in the column: only a project admin or the operator moves it out, edits it, or reassigns it (`403`); nobody claims it or gives it a new ETA (`409`); only an admin makes a card in it (`403`) |
+| `clear_eta_on_enter` | every column | a card that enters the column loses its ETA (**ETA per column** above) |
+
+The mails on a move to `blocked` and `done`, `done_at`, and the reopen
+audit stay with the column role and the name `done`, not with the options.
+
+The queue settings are stored but not used yet (C3 runs the queue):
+`release` is `wip` (the default), `batch`, or `job`. Only `batch` takes
+`batch_size` (1 to 1000) and `max_wait_seconds` (1 to 2592000), both
+required, and `max_batch_cards` (optional, `batch_size` to 1000).
+
+The options belong to the column: a rename or a reorder keeps them. The
+board `PATCH` (§8.3) does not carry them, with one exception that keeps
+today's behaviour: when a column gets or loses the role `working`, its
+`require_dependencies_met` follows the role, and the same for `blocked`
+and `require_comment_on_enter`. A new column from the board `PATCH` gets the
+defaults of its role. Migration `ter-1112-column-options.sql` sets the
+defaults on each existing board from its roles and the name `done`.
+
+`GET /api/projects/{name}/board/columns/{column}/options` (a project
+reader; a role alias names the column with that role):
+
+```json
+{"project": "p", "column": "merge_queue", "version": 3,
+ "checks": {"require_comment_on_enter": false, "require_dependencies_met": false,
+            "terminal_for_members": false, "clear_eta_on_enter": true},
+ "queue": {"release": "batch", "batch_size": 4, "max_wait_seconds": 1800,
+           "max_batch_cards": 8}}
+```
+
+`PUT` on the same path takes the whole `checks` and `queue` and the
+`base_version` that was read, and returns the new options. Only the
+operator and a `project_admin` of that project write (`403` for every other
+actor, a `sysadmin` too: it reads only). A `base_version` that is not the
+current `version` is `409 stale_base` with `details.version`, and nothing is
+written. A bad queue is `422 invalid` with `details.path` (for example
+`queue.batch_size`). A write that changes something raises `version` by
+one, writes one audit row `board.column_options` (`{column, version,
+before, after}`), and emits one `board` event (`{column, options_version,
+checks, queue}`). A write that changes nothing keeps the version and writes
+nothing.
+
 ### 8.3 Endpoints
 
 | Endpoint | Body | Answer |
 |---|---|---|
 | `GET /api/projects/{name}/board?done=&limit=&cursor=` | | `200` board with card summaries; Done pages are opt-in |
 | `PATCH /api/projects/{name}/board` | `{"columns": [column, ...]}` | `200` board; project_admin |
+| `GET /api/projects/{name}/board/columns/{column}/options` | | `200` column options (§8.2.1) |
+| `PUT /api/projects/{name}/board/columns/{column}/options` | `{"base_version", "checks", "queue"}` | `200` column options; the operator or project_admin of the project |
 | `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards in board order: by column, then by place in the column (the top first), then by number. Each card has its `position` in its column, from 0. Cursor: opaque |
 | `POST /api/projects/{name}/cards` | new card | `201` card |
 | `GET /api/cards?columns=working,research` | | `200` the active cards of every board the caller may read (below) |

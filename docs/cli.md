@@ -895,6 +895,10 @@ terrarium board column add <name> [--title t] [--wip N] [--role r] [--after c | 
 terrarium board column set <name> [--title t] [--wip N | --no-wip] [--role r | --no-role] [--rename new]
 terrarium board column rm <name>
 terrarium board column move <name> (--after c | --before c)
+terrarium board column options <name> [--require-comment B] [--require-dependencies B] [--terminal B]
+                              [--clear-eta B] [--queue-release wip|batch|job] [--batch-size N]
+                              [--max-wait-seconds S] [--max-batch-cards N | --no-max-batch-cards]
+                              [--from-file f.json | -]
 terrarium card ls [-c column] [--mine | --assignee a] [--unassigned] [--label l] [--archived]
 terrarium card show <id>
 terrarium card new <title> [-b body | -] [-c column] [--label l]... [--depends-on id]...
@@ -1020,6 +1024,19 @@ fails while the column has cards; the error lists them. `backlog` and
 under the card count is allowed: the column takes no more cards until it
 is under the limit. `board columns --from-file` sends a whole list: a JSON
 list of columns, or `{"columns": [...]}`; `-` reads stdin.
+
+`board column options <name>` shows the options of a column (TER-1112,
+docs/api.md §8.2.1): its four move checks and its queue settings, with the
+options version. With a flag it changes them: the CLI reads the options,
+changes the flagged values, and sends the whole options with the version it
+read (`PUT .../board/columns/<name>/options`). `B` is `true` or `false`. A
+`--queue-release` other than `batch` drops the batch settings. Another
+write in between fails with `409 stale_base`: run the command again.
+`--from-file` sends `{"checks", "queue"}` from a file (`-` reads stdin);
+without a `base_version` in the file, the version just read is used, so the
+`--json` output of a read is a valid file. A change needs project_admin of
+the project or the operator; a sysadmin only reads. The queue settings are
+stored only: no column queues cards yet.
 
 `card eta` sets when the work is expected to be done: a duration from now
 with one or more parts (`45m`, `2h30m`, `1d`), or an RFC 3339 time. The

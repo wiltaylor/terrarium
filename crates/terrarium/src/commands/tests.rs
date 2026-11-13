@@ -11666,3 +11666,107 @@ async fn uploads_retry_a_429_after_retry_after() {
     assert_eq!(reqs[0].body, reqs[1].body);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The options of a column as `GET .../options` gives them (TER-1112).
+fn column_options_reply() -> Value {
+    json!({"project": "terra", "column": "merge_queue", "version": 3,
+           "checks": {"require_comment_on_enter": false, "require_dependencies_met": false,
+                      "terminal_for_members": false, "clear_eta_on_enter": true},
+           "queue": {"release": "batch", "batch_size": 4, "max_wait_seconds": 1800,
+                     "max_batch_cards": 8}})
+}
+
+#[tokio::test]
+async fn board_column_options_show_set_and_from_file() {
+    const PATH: &str = "/api/projects/terra/board/columns/merge_queue/options";
+    let base = &["-p", "terra", "board", "column", "options", "merge_queue"];
+    // No change flag: one GET, and the options as text.
+    let out = ok(
+        false,
+        base,
+        vec![(200, column_options_reply())],
+        vec![req(Get, PATH)],
+    )
+    .await;
+    assert!(out.contains("column merge_queue (options version 3)"), "{out}");
+    assert!(out.contains("clear_eta_on_enter"), "{out}");
+    assert!(
+        out.contains("queue_release") && out.contains("batch, batch_size 4"),
+        "{out}"
+    );
+    // Flags: GET, then PUT of the whole options with the version read.
+    let put = |args: &[&'static str], stdin: Option<&'static str>, want: Value| {
+        let mut full = base.to_vec();
+        full.extend_from_slice(args);
+        async move {
+            let r = exec(
+                false,
+                &full,
+                vec![(200, column_options_reply()), (200, column_options_reply())],
+                stdin,
+            )
+            .await;
+            if let Err(e) = &r.result {
+                panic!("{full:?} failed: {e:#}");
+            }
+            assert_eq!(r.reqs.len(), 2, "{full:?}");
+            assert_eq!(r.reqs[1].method, Put);
+            assert_eq!(r.reqs[1].path, PATH);
+            assert_eq!(r.reqs[1].body, Some(want), "{full:?}");
+        }
+    };
+    let mut want = column_options_reply();
+    let o = want.as_object_mut().unwrap();
+    for k in ["project", "column"] {
+        o.remove(k);
+    }
+    let v = o.remove("version").unwrap();
+    o.insert("base_version".into(), v);
+    let mut w = want.clone();
+    w["checks"]["require_comment_on_enter"] = true.into();
+    w["checks"]["terminal_for_members"] = true.into();
+    w["queue"]["max_batch_cards"] = Value::Null;
+    put(
+        &[
+            "--require-comment",
+            "true",
+            "--terminal",
+            "true",
+            "--no-max-batch-cards",
+        ],
+        None,
+        w,
+    )
+    .await;
+    // A release other than batch drops the batch settings.
+    let mut w = want.clone();
+    w["queue"] = json!({"release": "job", "batch_size": null, "max_wait_seconds": null,
+                        "max_batch_cards": null});
+    put(&["--queue-release", "job"], None, w).await;
+    let mut w = want.clone();
+    w["queue"]["batch_size"] = 6.into();
+    w["queue"]["max_wait_seconds"] = 600.into();
+    put(&["--batch-size", "6", "--max-wait-seconds", "600"], None, w).await;
+    // --from-file: the file's own base_version wins; the --json output of
+    // a read is a valid file too (its version becomes the base).
+    put(
+        &["--from-file", "-"],
+        Some(r#"{"base_version": 2, "checks": {"x": 1}, "queue": {"release": "wip"}}"#),
+        json!({"base_version": 2, "checks": {"x": 1}, "queue": {"release": "wip"}}),
+    )
+    .await;
+    put(
+        &["--from-file", "-"],
+        Some(r#"{"project": "terra", "column": "merge_queue", "version": 9, "checks": {}, "queue": {}}"#),
+        json!({"base_version": 3, "checks": {}, "queue": {}}),
+    )
+    .await;
+    // Flags do not mix with --from-file, and a bool needs a value.
+    for bad in [
+        vec!["terrarium", "board", "column", "options", "x", "--from-file", "-", "--terminal", "true"],
+        vec!["terrarium", "board", "column", "options", "x", "--terminal"],
+        vec!["terrarium", "board", "column", "options", "x", "--queue-release", "lifo"],
+    ] {
+        assert!(Cli::try_parse_from(&bad).is_err(), "{bad:?}");
+    }
+}
