@@ -7,7 +7,8 @@ import { useInstance } from "../../instance";
 // `board_flow = rules` (a plan first, then Apply).
 
 import { useParams } from "@solidjs/router";
-import { createEffect, createSignal, For, on, Show } from "solid-js";
+import { createEffect, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
 import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui";
 import type { EffectiveRules, RuleRun, RulesMigration, RuleFinding } from "../../api/types";
 
@@ -15,9 +16,20 @@ import { ago } from "../../lib/format";
 import { changeText, findingText, flowText, offerMigration, ruleRows, runTone, stepsText, toggleText } from "./model";
 
 export default function RulesPage() {
-  const { api } = useInstance();
   const params = useParams<{ project: string }>();
-  const project = () => params.project;
+  return <RulesPanel project={params.project} canManage />;
+}
+
+export type RulesPart = "flow" | "lint" | "table" | "last_runs";
+
+export function RulesPanel(props: { project: string; part?: RulesPart; search?: string; canManage?: boolean; onSelectionChange?: (name: string | null) => void }) {
+  return <Show when={props.project} keyed>{(project) => <RulesBody {...props} project={project} />}</Show>;
+}
+
+function RulesBody(props: { project: string; part?: RulesPart; search?: string; canManage?: boolean; onSelectionChange?: (name: string | null) => void }) {
+  const { api } = useInstance();
+  const project = () => props.project;
+  const includes = (part: RulesPart) => props.part === undefined || props.part === part;
 
   const [rules, setRules] = createSignal<EffectiveRules | null>(null);
   const [findings, setFindings] = createSignal<RuleFinding[]>([]);
@@ -29,6 +41,7 @@ export default function RulesPage() {
   const [notice, setNotice] = createSignal<string | null>(null);
   const [loading, setLoading] = createSignal(true);
   let generation = 0;
+  onCleanup(() => { generation++; });
 
   const load = async () => {
     const gen = ++generation;
@@ -52,6 +65,11 @@ export default function RulesPage() {
       setLoading(true);
       setRules(null);
       setPlan(null);
+      setOpen(null);
+      setFindings([]);
+      setRuns([]);
+      setNotice(null);
+      setBusy(null);
       void load();
     }),
   );
@@ -90,7 +108,14 @@ export default function RulesPage() {
       await load();
     });
 
-  const rows = () => ruleRows(rules()?.rules ?? []);
+  const [data, setData] = createStore<{ rows: ReturnType<typeof ruleRows> }>({ rows: [] });
+  createEffect(() => setData("rows", reconcile(ruleRows(rules()?.rules ?? []).filter((r) => !props.search || `${r.name} ${r.description ?? ""}`.toLowerCase().includes(props.search.toLowerCase())), { key: "name" })));
+  const rows = () => data.rows;
+  const select = (name: string) => {
+    const next = open() === name ? null : name;
+    setOpen(next);
+    props.onSelectionChange?.(next);
+  };
 
   return (
     <>
@@ -109,21 +134,21 @@ export default function RulesPage() {
       <Show when={rules()} fallback={<Empty>{loading() ? "Loading…" : "No rules."}</Empty>}>
         {(eff) => (
           <>
-            <p class="small" aria-label="Board flow">
+            <Show when={includes("flow")}><p class="small" aria-label="Board flow">
               {flowText(eff().board_flow)}
               <Show when={eff().source === "file"}> rules.wcl comes from a file: edit the file, then reload.</Show>
-            </p>
+            </p></Show>
 
-            <section class="card-box" style={{ "margin-bottom": "16px" }} aria-label="Lint">
+            <Show when={includes("lint")}><section class="card-box" style={{ "margin-bottom": "16px" }} aria-label="Lint">
               <h3>Lint</h3>
               <Show when={findings().length} fallback={<p class="small muted">No findings: every column that a rule names is on the board, and a rule moves cards out of each column that rules move them into.</p>}>
                 <ul>
                   <For each={findings()}>{(f) => <li class="small">{findingText(f)}</li>}</For>
                 </ul>
               </Show>
-            </section>
+            </section></Show>
 
-            <Show when={offerMigration(eff().board_flow, findings())}>
+            <Show when={props.canManage && includes("flow") && offerMigration(eff().board_flow, findings())}>
               <section class="card-box" style={{ "margin-bottom": "16px" }} aria-label="Migration">
                 <h3>Switch to rules</h3>
                 <p class="small muted">The migration maps the built-in pack to this board: a move to a column that the board lacks becomes its comment, and the wait columns map by role. It writes the overrides into rules.wcl and sets board_flow rules in one write.</p>
@@ -152,7 +177,7 @@ export default function RulesPage() {
               </section>
             </Show>
 
-            <section class="card-box" style={{ "margin-bottom": "16px" }}>
+            <Show when={includes("table")}><section class="card-box" style={{ "margin-bottom": "16px" }}>
               <div class="table-wrap">
                 <table aria-label="Rules">
                   <thead>
@@ -171,7 +196,7 @@ export default function RulesPage() {
                           <>
                             <tr aria-label={`Rule ${r.name}`}>
                               <td>
-                                <button class="ghost small disclosure" aria-expanded={open() === r.name} aria-label={`${open() === r.name ? "Close" : "Open"} the text of ${r.name}`} onClick={() => setOpen(open() === r.name ? null : r.name)}>
+                                <button class="ghost small disclosure" aria-expanded={open() === r.name} aria-label={`${open() === r.name ? "Close" : "Open"} the text of ${r.name}`} onClick={() => select(r.name)}>
                                   {open() === r.name ? "▾" : "▸"}
                                 </button>{" "}
                                 <strong>{r.name}</strong>
@@ -183,7 +208,7 @@ export default function RulesPage() {
                               <td class="small mono">{r.events}</td>
                               <td class="small mono">{r.verbs}</td>
                               <td>
-                                <input type="checkbox" checked={r.enabled} aria-label={`Enable ${r.name}`} disabled={busy() !== null || eff().source === "file"} onChange={(e) => void toggle(r.name, e.currentTarget)} />
+                                <Show when={props.canManage} fallback={<span>{r.enabled ? "On" : "Off"}</span>}><input type="checkbox" checked={r.enabled} aria-label={`Enable ${r.name}`} disabled={busy() !== null || eff().source === "file"} onChange={(e) => void toggle(r.name, e.currentTarget)} /></Show>
                               </td>
                             </tr>
                             <Show when={open() === r.name}>
@@ -200,9 +225,9 @@ export default function RulesPage() {
                   </tbody>
                 </table>
               </div>
-            </section>
+            </section></Show>
 
-            <section class="card-box" aria-label="Runs">
+            <Show when={includes("last_runs")}><section class="card-box" aria-label="Runs">
               <h3>Last runs</h3>
               <div class="table-wrap">
                 <table aria-label="Rule runs">
@@ -236,7 +261,7 @@ export default function RulesPage() {
                   </tbody>
                 </table>
               </div>
-            </section>
+            </section></Show>
           </>
         )}
       </Show>
