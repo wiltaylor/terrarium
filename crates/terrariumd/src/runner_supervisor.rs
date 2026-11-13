@@ -9041,11 +9041,7 @@ mod tests {
             assert!(!slots[&id].reload_wanted);
         }
         assert!(lock(&sup.inner.parked).is_empty());
-        let rows = state
-            .db
-            .read(crate::store::pointers::load)
-            .await
-            .unwrap();
+        let rows = state.db.read(crate::store::pointers::load).await.unwrap();
         assert!(rows.is_empty(), "{rows:?}");
         assert!(lock(&runner.typed).is_empty());
     }
@@ -9103,11 +9099,7 @@ mod tests {
             typed[0].contains(&crate::leases::ended_line("t1103")),
             "{typed:?}"
         );
-        let rows = state
-            .db
-            .read(crate::store::pointers::load)
-            .await
-            .unwrap();
+        let rows = state.db.read(crate::store::pointers::load).await.unwrap();
         assert!(rows.is_empty(), "{rows:?}");
     }
 }
