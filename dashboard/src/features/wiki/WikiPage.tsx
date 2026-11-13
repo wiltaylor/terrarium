@@ -23,7 +23,7 @@ const TABS = [
   { id: "history", label: "History" },
 ] as const;
 
-function Tree(props: { nodes: TreeNode[]; project: string; current: string }): JSX.Element {
+function Tree(props: { nodes: TreeNode[]; project: string; current: string; onPath?: (path: string) => void }): JSX.Element {
   return (
     <ul class="tree">
       <For each={props.nodes}>
@@ -31,7 +31,7 @@ function Tree(props: { nodes: TreeNode[]; project: string; current: string }): J
           <li>
             <Show when={n.page} fallback={<div class="dir">{n.name}/</div>}>
               {(p) => (
-                <A href={wikiHref(props.project, p().path)} class={props.current === p().path ? "active" : ""}>
+                <A href={wikiHref(props.project, p().path)} class={props.current === p().path ? "active" : ""} onClick={(e) => { if (props.onPath) { e.preventDefault(); props.onPath(p().path); } }}>
                   {p().title}
                   <Show when={p().status === "ready_for_review"}>
                     {" "}
@@ -41,7 +41,7 @@ function Tree(props: { nodes: TreeNode[]; project: string; current: string }): J
               )}
             </Show>
             <Show when={n.children.length}>
-              <Tree nodes={n.children} project={props.project} current={props.current} />
+              <Tree nodes={n.children} project={props.project} current={props.current} onPath={props.onPath} />
             </Show>
           </li>
         )}
@@ -53,20 +53,33 @@ function Tree(props: { nodes: TreeNode[]; project: string; current: string }): J
 export const wikiHref = (project: string, path: string) => `/p/${encodeURIComponent(project)}/knowledge/wiki/${path.split("/").map(encodeURIComponent).join("/")}`;
 
 export default function WikiPage() {
-  const { api, projects, bookmarks } = useInstance();
   const params = useParams<{ project: string; path?: string }>();
-  const path = () => (params.path && params.path.length ? decodeURIComponent(params.path) : "index");
-  const bookmarkUrl = () => wikiHref(params.project, path());
+  return <WikiContent project={params.project} path={params.path && params.path.length ? decodeURIComponent(params.path) : "index"} />;
+}
+
+export function WikiBrowserPanel(props: { project: string }) {
+  return <Show when={props.project} keyed>{(project) => <LocalWiki project={project} />}</Show>;
+}
+
+function LocalWiki(props: { project: string }) {
+  const [path, setPath] = createSignal("index");
+  return <WikiContent project={props.project} path={path()} onPath={setPath} />;
+}
+
+function WikiContent(props: { project: string; path: string; onPath?: (path: string) => void }) {
+  const { api, projects, bookmarks } = useInstance();
+  const path = () => props.path;
+  const bookmarkUrl = () => wikiHref(props.project, path());
   const [tab, setTab] = createSignal<(typeof TABS)[number]["id"]>("page");
   const [error, setError] = createSignal<unknown>(null);
   const [q, setQ] = createSignal("");
 
-  const [tree, { refetch: refetchTree }] = createResource(() => ({ p: params.project, q: q() }), (k) => api.wiki.tree(k.p, k.q ? { q: k.q } : {}));
-  const [allPages, { refetch: refetchAll }] = createResource(() => params.project, (p) => api.wiki.tree(p));
-  const [artifacts] = createResource(() => params.project, (p) => api.artifacts.list(p).catch((): Artifact[] => []));
+  const [tree, { refetch: refetchTree }] = createResource(() => ({ p: props.project, q: q() }), (k) => api.wiki.tree(k.p, k.q ? { q: k.q } : {}));
+  const [allPages, { refetch: refetchAll }] = createResource(() => props.project, (p) => api.wiki.tree(p));
+  const [artifacts] = createResource(() => props.project, (p) => api.artifacts.list(p).catch((): Artifact[] => []));
   // The page key is `project/path` (docs/api.md §11.1).
   const [page, { mutate: setPage }] = createResource(
-    () => (allPages() ? `${params.project}/${path()}` : undefined),
+    () => (allPages() ? `${props.project}/${path()}` : undefined),
     (key) => api.wiki.get(key).catch((e: unknown) => (isMissingEndpoint(e) ? Promise.reject(e) : null)),
   );
   const [revisions, { refetch: refetchRevs }] = createResource(() => (tab() === "history" ? page()?.id : undefined), (id) => api.wiki.revisions(id));
@@ -90,7 +103,7 @@ export default function WikiPage() {
     if (!p) return "";
     const prefixes = projects.prefixes();
     return renderWiki(p.body, {
-      project: params.project,
+      project: props.project,
       pages: new Set((allPages() ?? []).map((x) => x.path)),
       cardPrefixes: new Set(Object.keys(prefixes)),
       prefixProject: prefixes,
@@ -103,6 +116,15 @@ export default function WikiPage() {
   const [saveSummary, setSaveSummary] = createSignal("");
   const [reviewComment, setReviewComment] = createSignal("");
   const [diff, setDiff] = createSignal<{ rev: number; text: string } | null>(null);
+  const pickPath = (next: string) => {
+    if (next === path()) return;
+    setTab("page");
+    setDraft("");
+    setSaveSummary("");
+    setReviewComment("");
+    setDiff(null);
+    props.onPath?.(next);
+  };
 
   const run = async (fn: () => Promise<unknown>) => {
     try {
@@ -123,14 +145,14 @@ export default function WikiPage() {
       <div class="split">
         <nav class="card-box" aria-label="Pages">
           <Show when={tree()?.length} fallback={<span class="muted">No pages.</span>}>
-            <Tree nodes={buildTree(tree() ?? [])} project={params.project} current={path()} />
+            <Tree nodes={buildTree(tree() ?? [])} project={props.project} current={path()} onPath={props.onPath ? pickPath : undefined} />
           </Show>
         </nav>
 
         <Show
           when={page()}
           fallback={
-            <Show when={allPages.loading || page.loading} fallback={<NewPage project={params.project} path={path()} onCreated={(p) => (setPage(p), void refetchAll(), void refetchTree())} />}>
+            <Show when={allPages.loading || page.loading} fallback={<Show when={!props.onPath} fallback={<Empty>Not Found</Empty>}><NewPage project={props.project} path={path()} onCreated={(p) => (setPage(p), void refetchAll(), void refetchTree())} /></Show>}>
               <Empty>Loading…</Empty>
             </Show>
           }
@@ -188,7 +210,7 @@ export default function WikiPage() {
               <Switch>
                 <Match when={tab() === "page"}>
                   <div class="card-box">
-                    <Markdown html={html()} artifacts={artifactMap()} project={params.project} />
+                    <Markdown html={html()} artifacts={artifactMap()} project={props.project} />
                   </div>
                   <Show when={backlinks()?.length}>
                     <div class="small">
@@ -196,7 +218,7 @@ export default function WikiPage() {
                       <For each={backlinks()}>
                         {(b) => (
                           <>
-                            <A href={`/p/${params.project}/knowledge/wiki/${b.path}`}>{b.title}</A>{" "}
+                            <A href={`/p/${props.project}/knowledge/wiki/${b.path}`} onClick={(e) => { if (props.onPath) { e.preventDefault(); pickPath(b.path); } }}>{b.title}</A>{" "}
                           </>
                         )}
                       </For>
