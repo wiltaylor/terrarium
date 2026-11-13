@@ -4230,229 +4230,6 @@ impl RunnerSupervisor {
         warn!(agent = %id, "the pointer reload gave up: deliveries ran during each read");
     }
 
-    /// TER-1104: run [`Self::kick_tick`] every [`KICK_TICK`] until the
-    /// shutdown.
-    fn spawn_kick_loop(&self) {
-        let me = self.clone();
-        tokio::spawn(async move {
-            let mut stop = me.inner.stop_tx.subscribe();
-            let mut tick = tokio::time::interval(KICK_TICK);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tokio::select! {
-                    () = stopped(&mut stop) => return,
-                    _ = tick.tick() => me.kick_tick(Instant::now()).await,
-                }
-            }
-        });
-    }
-
-    /// TER-1104: the bounded kick of agents at rest whose deliverable queue
-    /// does not drain, at time `now`. An agent that rested at least
-    /// [`KICK_REST`] with deliverable work (queued mail that is not held,
-    /// stored pointer rows, or items in its pointer, for example after a
-    /// delivery that failed) gets, once each per episode:
-    ///
-    /// 1. a reload of its pointer from the store and a push
-    ///    ([`Self::reload_pointer`]), with no restart;
-    /// 2. after [`KICK_ESCALATE`] of rest still undrained, one restart with
-    ///    resume;
-    /// 3. [`KICK_ESCALATE`] after that restart, at rest and still undrained:
-    ///    the status `blocked` ("queue not draining") and one mail to the
-    ///    project lead.
-    ///
-    /// The episode ends when a check sees the queue drained. A working
-    /// agent has no rest, so queue growth during work never kicks it. No
-    /// kick for an agent that is down (paused, parked, `error`), held by a
-    /// quota, or during the self-update drain. Held mail of the loop guard
-    /// is not `queued`: it counts for nothing and is never released here.
-    async fn kick_tick(&self, now: Instant) {
-        let Some(state) = self.state() else { return };
-        if state.self_update.draining() || state.usage.streams.is_closed() {
-            return;
-        }
-        let ids: Vec<AgentId> = lock(&self.inner.slots)
-            .iter()
-            .filter(|(_, s)| {
-                s.kickable()
-                    && s.rest_since
-                        .is_some_and(|r| now.saturating_duration_since(r) >= KICK_REST)
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        for id in ids {
-            self.kick_check(&state, id, now).await;
-        }
-    }
-
-    /// TER-1104: one kick check of agent `id` ([`Self::kick_tick`]).
-    async fn kick_check(&self, state: &Shared, id: AgentId, now: Instant) {
-        // A quota hold types nothing until its end. `holds` is never
-        // locked inside `slots`.
-        if self.held(id).is_some() {
-            return;
-        }
-        let (epoch, rest, pointer_mail, pointer_other) = {
-            let slots = lock(&self.inner.slots);
-            let Some(slot) = slots.get(&id).filter(|s| s.kickable()) else {
-                return;
-            };
-            let Some(rest) = slot.rest_since else { return };
-            let mail: std::collections::HashSet<String> = slot
-                .pointer
-                .mail
-                .iter()
-                .map(|m| m.message_id.clone())
-                .collect();
-            let other = slot.pointer.len() - slot.pointer.mail.len();
-            (slot.epoch, rest, mail, other)
-        };
-        let agent = id.to_string();
-        let read = state
-            .db
-            .read(move |c| {
-                Ok((
-                    crate::store::mail::queued_for(c, &agent)?,
-                    crate::store::pointers::for_agent(c, &agent)?.len(),
-                ))
-            })
-            .await;
-        let (queued, rows) = match read {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(agent = %id, "the kick check cannot read the queue: {e}");
-                return;
-            }
-        };
-        let queue = kick_queue(
-            &queued,
-            rows,
-            &pointer_mail,
-            pointer_other,
-            chrono::Utc::now(),
-        );
-        let (step, agent) = {
-            let mut slots = lock(&self.inner.slots);
-            let Some(slot) = slots
-                .get_mut(&id)
-                .filter(|s| s.epoch == epoch && s.kickable() && s.rest_since == Some(rest))
-            else {
-                return;
-            };
-            if queue.count == 0 {
-                if slot.kick.take().is_some() {
-                    info!(agent = %id, "the queue drained: the kick episode ends");
-                }
-                return;
-            }
-            let Some(step) = next_kick(slot.kick, rest, now) else {
-                return;
-            };
-            slot.kick = Some(Kick { step, at: now });
-            if step == KickStep::Restart {
-                // From here no turn, recap or pointer goes out.
-                slot.restart_requested = true;
-            }
-            (step, slot.agent.clone())
-        };
-        info!(
-            agent = %id,
-            step = step.as_str(),
-            count = queue.count,
-            oldest_age_s = ?queue.oldest_age_s,
-            "the queue does not drain: kicking the agent"
-        );
-        self.record_kick(state, id, step, queue).await;
-        match step {
-            KickStep::Reload => self.reload_pointer(id).await,
-            KickStep::Restart => {
-                if let Err(e) = self.restart(agent).await {
-                    warn!(agent = %id, "the kick restart failed: {e}");
-                }
-            }
-            KickStep::Blocked => {
-                self.emit_status(id, AgentStatus::Blocked, KICK_BLOCKED_REASON);
-                self.mail_kick_lead(state, id, queue).await;
-            }
-        }
-    }
-
-    /// TER-1104: the event `agent.kicked`, with the step, the count and the
-    /// oldest age only: never a body, subject, or sender.
-    async fn record_kick(&self, state: &Shared, id: AgentId, step: KickStep, q: KickQueue) {
-        let key = id.to_string();
-        let result = state
-            .db
-            .write("system", move |t| {
-                let v = crate::store::agents::get(t, &key)?;
-                t.emit(
-                    crate::events::EventDraft::new(
-                        "agent.kicked",
-                        format!(
-                            "{}: kicked ({}), {} queued",
-                            v.agent.name,
-                            step.as_str(),
-                            q.count
-                        ),
-                        kick_data(step, q),
-                    )
-                    .agent(key.clone(), v.agent.name.clone())
-                    .project(v.agent.project.clone()),
-                )?;
-                Ok(())
-            })
-            .await;
-        if let Err(e) = result {
-            warn!(agent = %id, "cannot record the kick: {e}");
-        }
-    }
-
-    /// TER-1104: the one mail of an episode to the project lead: the first
-    /// `project_admin` of the agent's project that is not the agent. With
-    /// no such lead, no mail.
-    async fn mail_kick_lead(&self, state: &Shared, id: AgentId, q: KickQueue) {
-        use crate::store::mail;
-        let key = id.to_string();
-        let result = state
-            .db
-            .write("system", move |t| {
-                let v = crate::store::agents::get(t, &key)?;
-                let page = crate::store::Page {
-                    limit: Some(crate::store::Page::MAX),
-                    cursor: None,
-                };
-                let lead = crate::store::agents::list(t, Some(&v.agent.project), &page)?
-                    .items
-                    .into_iter()
-                    .find(|l| {
-                        l.agent.roles.contains(&terrarium_core::Role::ProjectAdmin)
-                            && l.agent.id != id
-                    });
-                let Some(lead) = lead else { return Ok(None) };
-                let to = mail::resolve(t, &lead.agent.id.to_string(), None)?;
-                let subject = format!("agent {}: queue not draining", v.agent.name);
-                let body = kick_mail_body(&v.agent.name, q);
-                mail::send(
-                    t,
-                    mail::Outgoing {
-                        from: &mail::Address::System,
-                        to: &to,
-                        subject: &subject,
-                        body: &body,
-                        thread: None,
-                        in_reply_to: None,
-                    },
-                )?;
-                Ok(Some(lead.agent.name))
-            })
-            .await;
-        match result {
-            Ok(Some(lead)) => info!(agent = %id, %lead, "mailed the lead: the queue does not drain"),
-            Ok(None) => warn!(agent = %id, "the queue does not drain, and the project has no other lead to mail"),
-            Err(e) => warn!(agent = %id, "cannot mail the lead about the queue: {e}"),
-        }
-    }
-
     /// Type the pending pointer when the agent is idle and no pointer is on
     /// the way. A `working` agent gets it after its next stop hook.
     fn maybe_push(&self, id: AgentId) {
@@ -4788,6 +4565,229 @@ impl RunnerSupervisor {
             .await;
         if let Err(e) = result {
             warn!("cannot mark mail delivered: {e}");
+        }
+    }
+
+    /// TER-1104: run [`Self::kick_tick`] every [`KICK_TICK`] until the
+    /// shutdown.
+    fn spawn_kick_loop(&self) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut stop = me.inner.stop_tx.subscribe();
+            let mut tick = tokio::time::interval(KICK_TICK);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    () = stopped(&mut stop) => return,
+                    _ = tick.tick() => me.kick_tick(Instant::now()).await,
+                }
+            }
+        });
+    }
+
+    /// TER-1104: the bounded kick of agents at rest whose deliverable queue
+    /// does not drain, at time `now`. An agent that rested at least
+    /// [`KICK_REST`] with deliverable work (queued mail that is not held,
+    /// stored pointer rows, or items in its pointer, for example after a
+    /// delivery that failed) gets, once each per episode:
+    ///
+    /// 1. a reload of its pointer from the store and a push
+    ///    ([`Self::reload_pointer`]), with no restart;
+    /// 2. after [`KICK_ESCALATE`] of rest still undrained, one restart with
+    ///    resume;
+    /// 3. [`KICK_ESCALATE`] after that restart, at rest and still undrained:
+    ///    the status `blocked` ("queue not draining") and one mail to the
+    ///    project lead.
+    ///
+    /// The episode ends when a check sees the queue drained. A working
+    /// agent has no rest, so queue growth during work never kicks it. No
+    /// kick for an agent that is down (paused, parked, `error`), held by a
+    /// quota, or during the self-update drain. Held mail of the loop guard
+    /// is not `queued`: it counts for nothing and is never released here.
+    async fn kick_tick(&self, now: Instant) {
+        let Some(state) = self.state() else { return };
+        if state.self_update.draining() || state.usage.streams.is_closed() {
+            return;
+        }
+        let ids: Vec<AgentId> = lock(&self.inner.slots)
+            .iter()
+            .filter(|(_, s)| {
+                s.kickable()
+                    && s.rest_since
+                        .is_some_and(|r| now.saturating_duration_since(r) >= KICK_REST)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            self.kick_check(&state, id, now).await;
+        }
+    }
+
+    /// TER-1104: one kick check of agent `id` ([`Self::kick_tick`]).
+    async fn kick_check(&self, state: &Shared, id: AgentId, now: Instant) {
+        // A quota hold types nothing until its end. `holds` is never
+        // locked inside `slots`.
+        if self.held(id).is_some() {
+            return;
+        }
+        let (epoch, rest, pointer_mail, pointer_other) = {
+            let slots = lock(&self.inner.slots);
+            let Some(slot) = slots.get(&id).filter(|s| s.kickable()) else {
+                return;
+            };
+            let Some(rest) = slot.rest_since else { return };
+            let mail: std::collections::HashSet<String> = slot
+                .pointer
+                .mail
+                .iter()
+                .map(|m| m.message_id.clone())
+                .collect();
+            let other = slot.pointer.len() - slot.pointer.mail.len();
+            (slot.epoch, rest, mail, other)
+        };
+        let agent = id.to_string();
+        let read = state
+            .db
+            .read(move |c| {
+                Ok((
+                    crate::store::mail::queued_for(c, &agent)?,
+                    crate::store::pointers::for_agent(c, &agent)?.len(),
+                ))
+            })
+            .await;
+        let (queued, rows) = match read {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(agent = %id, "the kick check cannot read the queue: {e}");
+                return;
+            }
+        };
+        let queue = kick_queue(
+            &queued,
+            rows,
+            &pointer_mail,
+            pointer_other,
+            chrono::Utc::now(),
+        );
+        let (step, agent) = {
+            let mut slots = lock(&self.inner.slots);
+            let Some(slot) = slots
+                .get_mut(&id)
+                .filter(|s| s.epoch == epoch && s.kickable() && s.rest_since == Some(rest))
+            else {
+                return;
+            };
+            if queue.count == 0 {
+                if slot.kick.take().is_some() {
+                    info!(agent = %id, "the queue drained: the kick episode ends");
+                }
+                return;
+            }
+            let Some(step) = next_kick(slot.kick, rest, now) else {
+                return;
+            };
+            slot.kick = Some(Kick { step, at: now });
+            if step == KickStep::Restart {
+                // From here no turn, recap or pointer goes out.
+                slot.restart_requested = true;
+            }
+            (step, slot.agent.clone())
+        };
+        info!(
+            agent = %id,
+            step = step.as_str(),
+            count = queue.count,
+            oldest_age_s = ?queue.oldest_age_s,
+            "the queue does not drain: kicking the agent"
+        );
+        self.record_kick(state, id, step, queue).await;
+        match step {
+            KickStep::Reload => self.reload_pointer(id).await,
+            KickStep::Restart => {
+                if let Err(e) = self.restart(agent).await {
+                    warn!(agent = %id, "the kick restart failed: {e}");
+                }
+            }
+            KickStep::Blocked => {
+                self.emit_status(id, AgentStatus::Blocked, KICK_BLOCKED_REASON);
+                self.mail_kick_lead(state, id, queue).await;
+            }
+        }
+    }
+
+    /// TER-1104: the event `agent.kicked`, with the step, the count and the
+    /// oldest age only: never a body, subject, or sender.
+    async fn record_kick(&self, state: &Shared, id: AgentId, step: KickStep, q: KickQueue) {
+        let key = id.to_string();
+        let result = state
+            .db
+            .write("system", move |t| {
+                let v = crate::store::agents::get(t, &key)?;
+                t.emit(
+                    crate::events::EventDraft::new(
+                        "agent.kicked",
+                        format!(
+                            "{}: kicked ({}), {} queued",
+                            v.agent.name,
+                            step.as_str(),
+                            q.count
+                        ),
+                        kick_data(step, q),
+                    )
+                    .agent(key.clone(), v.agent.name.clone())
+                    .project(v.agent.project.clone()),
+                )?;
+                Ok(())
+            })
+            .await;
+        if let Err(e) = result {
+            warn!(agent = %id, "cannot record the kick: {e}");
+        }
+    }
+
+    /// TER-1104: the one mail of an episode to the project lead: the first
+    /// `project_admin` of the agent's project that is not the agent. With
+    /// no such lead, no mail.
+    async fn mail_kick_lead(&self, state: &Shared, id: AgentId, q: KickQueue) {
+        use crate::store::mail;
+        let key = id.to_string();
+        let result = state
+            .db
+            .write("system", move |t| {
+                let v = crate::store::agents::get(t, &key)?;
+                let page = crate::store::Page {
+                    limit: Some(crate::store::Page::MAX),
+                    cursor: None,
+                };
+                let lead = crate::store::agents::list(t, Some(&v.agent.project), &page)?
+                    .items
+                    .into_iter()
+                    .find(|l| {
+                        l.agent.roles.contains(&terrarium_core::Role::ProjectAdmin)
+                            && l.agent.id != id
+                    });
+                let Some(lead) = lead else { return Ok(None) };
+                let to = mail::resolve(t, &lead.agent.id.to_string(), None)?;
+                let subject = format!("agent {}: queue not draining", v.agent.name);
+                let body = kick_mail_body(&v.agent.name, q);
+                mail::send(
+                    t,
+                    mail::Outgoing {
+                        from: &mail::Address::System,
+                        to: &to,
+                        subject: &subject,
+                        body: &body,
+                        thread: None,
+                        in_reply_to: None,
+                    },
+                )?;
+                Ok(Some(lead.agent.name))
+            })
+            .await;
+        match result {
+            Ok(Some(lead)) => info!(agent = %id, %lead, "mailed the lead: the queue does not drain"),
+            Ok(None) => warn!(agent = %id, "the queue does not drain, and the project has no other lead to mail"),
+            Err(e) => warn!(agent = %id, "cannot mail the lead about the queue: {e}"),
         }
     }
 
