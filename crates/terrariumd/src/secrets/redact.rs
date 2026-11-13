@@ -497,6 +497,11 @@ mod tests {
             r.redact_str("xai-at-N4eW8tOk3nV6yU2c"),
             "[secret:subscription/x-super]"
         );
+        // The daemon replaced the file: the old token stays (TER-1257).
+        assert_eq!(
+            r.redact_str("xai-at-Q7w9Zk2LmP4rT8vB"),
+            "[secret:subscription/x-super]"
+        );
         // A transcript block: the text, the tool input, and the result.
         use terrarium_core::transcript::{BlockKind, BlockRole, ToolCall, ToolResult};
         let mut b = Block::new(
@@ -538,12 +543,14 @@ mod tests {
             !text.contains("xai-at-") && !text.contains("xai-rt-"),
             "{text}"
         );
-        // The logout removes the account: the next build has no Grok entry.
+        // The logout removes the account. Its tokens stay in the matcher
+        // for the life of the daemon (TER-1257); no Grok file is read.
         assert!(crate::accounts::remove(dir.path(), "x-super").unwrap());
+        assert!(crate::accounts::grok_secret_values(dir.path()).is_empty());
         let r = build(&c, dir.path()).unwrap();
         assert_eq!(
-            r.redact_str("xai-at-N4eW8tOk3nV6yU2c"),
-            "xai-at-N4eW8tOk3nV6yU2c"
+            r.redact_str("xai-at-N4eW8tOk3nV6yU2c xai-rt-H3nJ6sD1fG5kL0pX"),
+            "[secret:subscription/x-super] [secret:subscription/x-super]"
         );
     }
 
