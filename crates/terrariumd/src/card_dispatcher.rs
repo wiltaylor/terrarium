@@ -1,6 +1,12 @@
 //! Opt-in ready-card dispatch. All spawn rights and caps belong to the
 //! configured project admin, never to the operator. Selection is rechecked
 //! in the transaction that creates the bound agent and claims its card.
+//!
+//! Two callers share the selection and the spawn ([`Pick`], [`run`]): the
+//! `card_dispatcher` project setting (the fixed `type:` map, [`template`])
+//! and the `card.assign` rule action with a `template` or `templates`
+//! (TER-1115, kanban rework C4, D6). A project on `board_flow = columns`
+//! has only the rule action: its setting is refused and ignored.
 
 use rusqlite::{Connection, OptionalExtension, params};
 use terrarium_core::Role;
@@ -22,19 +28,76 @@ pub(crate) fn actor(agent: terrarium_core::Agent) -> Actor {
 }
 
 fn owner(c: &Connection, project: &str) -> ApiResult<Option<Actor>> {
-    let Some(name) = projects::get(c, project)?.card_dispatcher else {
+    let p = projects::get(c, project)?;
+    // The column rules assign on a columns board (TER-1115 D24).
+    if p.board_flow == terrarium_core::config::BoardFlow::Columns {
+        return Ok(None);
+    }
+    let Some(name) = p.card_dispatcher else {
         return Ok(None);
     };
-    let v = agents::find(c, &name, Some(project))?;
+    named_owner(c, project, &name, "card dispatcher")
+}
+
+/// The agent `name` as the owner of a dispatch in `project`: a project
+/// admin of that project, not ephemeral. A paused owner dispatches nothing
+/// (`None`). `what` names the owner in the refusal.
+pub(crate) fn named_owner(
+    c: &Connection,
+    project: &str,
+    name: &str,
+    what: &str,
+) -> ApiResult<Option<Actor>> {
+    let v = agents::find(c, name, Some(project))?;
     if v.agent.project != project || !v.agent.roles.contains(&Role::ProjectAdmin) || v.ephemeral {
-        return Err(ApiError::forbidden(
-            "card dispatcher must be a project admin",
-        ));
+        return Err(ApiError::forbidden(format!(
+            "{what} must be a project admin"
+        )));
     }
     if v.paused {
         return Ok(None);
     }
     Ok(Some(actor(v.agent)))
+}
+
+/// How a dispatch picks the template of a card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Templates {
+    /// The fixed map of the `card_dispatcher` setting ([`template`]).
+    TypeMap,
+    /// One template for every eligible card (`card.assign.template`).
+    One(String),
+    /// `<label>=<template>` entries (`card.assign.templates`): the card
+    /// must have exactly one of the labels.
+    ByLabel(Vec<(String, String)>),
+}
+
+impl Templates {
+    /// The template for a card with `labels`, if the card has one.
+    pub fn pick(&self, labels: &[String]) -> Option<String> {
+        match self {
+            Self::TypeMap => template(labels),
+            Self::One(t) => Some(t.clone()),
+            Self::ByLabel(map) => {
+                let mut hits = map.iter().filter(|(l, _)| labels.contains(l));
+                match (hits.next(), hits.next()) {
+                    (Some((_, t)), None) => Some(t.clone()),
+                    _ => None,
+                }
+            }
+        }
+    }
+}
+
+/// What one dispatch chooses from: the cards of column `from` (only
+/// `card` when it is set), the column `room` that must be under its WIP
+/// limit (`None`: the working role), and the templates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pick {
+    pub from: String,
+    pub room: Option<String>,
+    pub templates: Templates,
+    pub card: Option<String>,
 }
 
 pub(crate) fn template(labels: &[String]) -> Option<String> {
@@ -82,21 +145,68 @@ WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = 
   AND (c.position, c.id) > (?4, ?5)
 ORDER BY c.position, c.id LIMIT ?6";
 
+/// The WIP check of a named column, as [`WORKING_WIP`] for a rule's `room`.
+pub const ROOM_WIP: &str = "
+SELECT k.wip_limit,
+       (SELECT count(*) FROM cards c WHERE c.column_id = k.id
+         AND c.archived = 0 AND c.kind = 'card')
+FROM board_columns k WHERE k.project = ?1 AND k.name = ?2";
+
+/// One card of [`CANDIDATES`]: the same tests, for the card `?4` only (a
+/// rule action on its run's card).
+pub const ONE_CANDIDATE: &str = "
+SELECT c.id, c.position, c.title, c.labels FROM cards c
+WHERE c.id = ?4
+  AND c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = ?2)
+  AND c.archived = 0 AND c.kind = 'card' AND c.assignee IS NULL
+  AND NOT EXISTS (SELECT 1 FROM spawns s WHERE s.bound_kind = 'card'
+      AND s.bound_id = c.id AND s.finished_at IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM conflict_fixes f WHERE f.card = c.id AND f.done = 0)
+  AND NOT EXISTS (SELECT 1 FROM card_dispatch_retries d WHERE d.card = c.id AND d.retry_at > ?3)
+  AND NOT EXISTS (SELECT 1 FROM card_dependency_unmet e WHERE e.card = c.id)";
+
 fn working_wip(r: &rusqlite::Row<'_>) -> rusqlite::Result<(Option<i64>, i64)> {
     Ok((r.get(0)?, r.get(1)?))
 }
 
-fn candidate(c: &Connection, project: &str) -> ApiResult<Option<(String, String)>> {
-    let working = c
-        .query_row(WORKING_WIP, [project], working_wip)
-        .optional()?;
+/// The first card of `pick` and its template, or why there is none now
+/// (no room, no eligible card, no matching template).
+pub fn select(
+    c: &Connection,
+    project: &str,
+    pick: &Pick,
+) -> ApiResult<Result<(String, String), &'static str>> {
+    let room = match &pick.room {
+        None => c.query_row(WORKING_WIP, [project], working_wip),
+        Some(column) => c.query_row(ROOM_WIP, params![project, column], working_wip),
+    }
+    .optional()?;
     // Fail closed without an explicit limit: opt-in must not create an
     // unbounded number of agents on a board with no concurrency policy.
-    if !matches!(working, Some((Some(limit), count)) if count < limit) {
-        return Ok(None);
+    if !matches!(room, Some((Some(limit), count)) if count < limit) {
+        return Ok(Err("no room under the WIP limit"));
     }
-    let ready = board::role_name(c, project, "ready", "ready")?;
     let now = chrono::Utc::now().timestamp();
+    if let Some(id) = &pick.card {
+        let row = c
+            .query_row(
+                ONE_CANDIDATE,
+                params![project, pick.from, now, id],
+                |r| Ok((r.get::<_, String>(2)?, r.get::<_, String>(3)?)),
+            )
+            .optional()?;
+        let Some((title, labels)) = row else {
+            return Ok(Err("the card is not eligible"));
+        };
+        let labels = crate::store::json_col::<Vec<String>>(&labels);
+        if crate::store::github_gate::is_held(&title, &labels) {
+            return Ok(Err("the card is not eligible"));
+        }
+        return Ok(match pick.templates.pick(&labels) {
+            Some(t) => Ok((id.clone(), t)),
+            None => Err("no template matches the card"),
+        });
+    }
     let mut q = c.prepare(CANDIDATES)?;
     // Positions are neither dense nor unique (archived cards keep theirs,
     // group cards go in at 0 with no shift, create counts active cards
@@ -110,7 +220,7 @@ fn candidate(c: &Connection, project: &str) -> ApiResult<Option<(String, String)
         let mut rows: Vec<(String, i64, String, String)> = Vec::new();
         {
             let it = q.query_map(
-                params![project, ready, now, after.0, after.1, CANDIDATE_PAGE],
+                params![project, pick.from, now, after.0, after.1, CANDIDATE_PAGE],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
@@ -131,15 +241,30 @@ fn candidate(c: &Connection, project: &str) -> ApiResult<Option<(String, String)
             if crate::store::github_gate::is_held(&title, &labels) {
                 continue;
             }
-            if let Some(template) = template(&labels) {
-                return Ok(Some((id, template)));
+            if let Some(template) = pick.templates.pick(&labels) {
+                return Ok(Ok((id, template)));
             }
         }
-        // A page that is not full is the end of the ready column.
+        // A page that is not full is the end of the column.
         if !full {
-            return Ok(None);
+            return Ok(Err("no eligible card"));
         }
     }
+}
+
+/// The `card_dispatcher` setting's pick: the ready column, the working
+/// role's room, the fixed map.
+fn setting_pick(c: &Connection, project: &str) -> ApiResult<Pick> {
+    Ok(Pick {
+        from: board::role_name(c, project, "ready", "ready")?,
+        room: None,
+        templates: Templates::TypeMap,
+        card: None,
+    })
+}
+
+fn candidate(c: &Connection, project: &str, pick: &Pick) -> ApiResult<Option<(String, String)>> {
+    Ok(select(c, project, pick)?.ok())
 }
 
 /// Try one card. The timer repeats after a successful claim to fill free WIP.
@@ -164,19 +289,56 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
         return Ok(false);
     }
     let p = project.to_owned();
-    let selected = state.db.read(move |c| candidate(c, &p)).await?;
+    let pick = state.db.read(move |c| setting_pick(c, &p)).await?;
+    run(state, project, who, pick, Owner::Setting).await
+}
+
+/// Where the owner of a dispatch comes from, for the recheck in the spawn
+/// transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Owner {
+    /// The `card_dispatcher` setting.
+    Setting,
+    /// The `owner` of a `card.assign` rule action: an agent name.
+    Named(String),
+}
+
+impl Owner {
+    fn current(&self, c: &Connection, project: &str) -> ApiResult<Option<Actor>> {
+        match self {
+            Self::Setting => owner(c, project),
+            Self::Named(name) => named_owner(c, project, name, "card.assign owner"),
+        }
+    }
+}
+
+/// Select one card of `pick` and start its bound agent as `who`, which
+/// claims the card. `Ok(true)`: an agent started. The owner and the
+/// selection are rechecked in the spawn transaction. Public for tests.
+pub async fn run(
+    state: &Shared,
+    project: &str,
+    who: Actor,
+    pick: Pick,
+    source: Owner,
+) -> ApiResult<bool> {
+    let (p, pk) = (project.to_owned(), pick.clone());
+    let selected = state.db.read(move |c| candidate(c, &p, &pk)).await?;
     let Some((id, template)) = selected else {
         return Ok(false);
     };
-    let (p, expected, expected_owner, expected_template) = (
+    // The setting keeps today's cooldown test (ready or review).
+    let fail_from = (source != Owner::Setting).then(|| pick.from.clone());
+    let (p, expected, expected_owner, expected_template, pk) = (
         project.to_owned(),
         id.clone(),
         who.clone(),
         template.clone(),
+        pick.clone(),
     );
     let check: crate::spawn::DefCheck = Box::new(move |c, _| {
-        if owner(c, &p)?.as_ref() != Some(&expected_owner)
-            || candidate(c, &p)? != Some((expected, expected_template))
+        if source.current(c, &p)?.as_ref() != Some(&expected_owner)
+            || candidate(c, &p, &pk)? != Some((expected, expected_template))
         {
             return Err(ApiError::conflict("dispatcher selection changed")
                 .with_details(serde_json::json!({"dispatcher_selection_changed": true})));
@@ -228,7 +390,7 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
     )
     .await;
     if let Err(error) = result {
-        return handle_spawn_error(state, project, id, who, error).await;
+        return handle_spawn_error(state, project, id, who, error, fail_from).await;
     }
     let p = project.to_owned();
     state
@@ -246,12 +408,16 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
 
 /// Handle a refusal after selection, including a cap reached by a concurrent
 /// manual spawn. Separate from preflight so both paths have regression tests.
+///
+/// `from`: the column that the card was picked from (`None`: the review
+/// column of the review dispatcher, or the ready column).
 pub async fn handle_spawn_error(
     state: &Shared,
     project: &str,
     id: String,
     who: Actor,
     error: ApiError,
+    from: Option<String>,
 ) -> ApiResult<bool> {
     let details = error.details.as_ref();
     if details.is_some_and(|d| d["dispatcher_selection_changed"] == true) {
@@ -267,7 +433,7 @@ pub async fn handle_spawn_error(
     }
     // Forbidden is not inherently owner-wide: template allowlists, targets,
     // and grants can reject only this card while later templates are usable.
-    record_failure(state, id, who, error.message.clone()).await?;
+    record_failure(state, id, who, error.message.clone(), from).await?;
     Err(error)
 }
 
@@ -334,13 +500,24 @@ pub(crate) async fn defer_project(
 
 /// Persistent cooldown and a single visible notice for a failing card.
 /// A concurrent successful claim must not receive a failure notice.
-async fn record_failure(state: &Shared, id: String, who: Actor, error: String) -> ApiResult<()> {
+async fn record_failure(
+    state: &Shared,
+    id: String,
+    who: Actor,
+    error: String,
+    from: Option<String>,
+) -> ApiResult<()> {
     state.db.write("system", move |t| {
         let card = board::get_card(t, &id)?;
-        let ready = board::role_name(t, &card.project, "ready", "ready")?;
         let review = board::role_name(t, &card.project, "review", "review")?;
-        let ineligible_column =
-            card.column != review && (card.column != ready || card.agent.is_some());
+        let ineligible_column = match &from {
+            // A card dispatch: still in the column it was picked from.
+            Some(from) if *from != review => card.column != *from || card.agent.is_some(),
+            _ => {
+                let ready = board::role_name(t, &card.project, "ready", "ready")?;
+                card.column != review && (card.column != ready || card.agent.is_some())
+            }
+        };
         if card.archived || ineligible_column || card.assignee.is_some() {
             return Ok(());
         }

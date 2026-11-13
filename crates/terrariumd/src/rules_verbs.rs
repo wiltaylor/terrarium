@@ -36,6 +36,7 @@ use tracing::warn;
 
 use crate::actor::Actor;
 use crate::api::Shared;
+use crate::card_dispatcher::{self, Pick, Templates};
 use crate::api::jobs as api_jobs;
 use crate::db::Tx;
 use crate::error::{ApiError, ApiResult, Code};
@@ -86,6 +87,14 @@ pub enum Effect {
         outcome: &'static str,
         result: String,
     },
+    /// Start new bound agents for cards (`card.assign` with a template,
+    /// TER-1115): up to `limit` cards of `pick`, as the agent `owner`.
+    Dispatch {
+        project: String,
+        owner: String,
+        pick: Pick,
+        limit: i64,
+    },
 }
 
 /// Run the effects of an action, in order, after its commit.
@@ -108,6 +117,45 @@ pub async fn apply(state: &Shared, effects: Vec<Effect>) {
             } => {
                 if let Err(e) = crate::bound::end(state, &bound, outcome, result, true).await {
                     warn!(bound = %bound.text(), "a rule cannot close the bound agent: {e}");
+                }
+            }
+            Effect::Dispatch {
+                project,
+                owner,
+                pick,
+                limit,
+            } => dispatch(state, &project, &owner, &pick, limit).await,
+        }
+    }
+}
+
+/// The spawns of a `card.assign` with a template, after the commit. The
+/// owner and the selection are read again; each spawn rechecks them in its
+/// transaction. A card that fails gets the dispatcher's cooldown, and the
+/// next card is tried.
+async fn dispatch(state: &Shared, project: &str, owner: &str, pick: &Pick, limit: i64) {
+    for _ in 0..limit.clamp(1, rules_file::MAX_ASSIGN_LIMIT) {
+        let (p, o) = (project.to_owned(), owner.to_owned());
+        let who = state
+            .db
+            .read(move |c| card_dispatcher::named_owner(c, &p, &o, "card.assign owner"))
+            .await;
+        let who = match who {
+            Ok(Some(who)) => who,
+            Ok(None) => return,
+            Err(e) => {
+                warn!(%project, %owner, "card.assign cannot start an agent: {e}");
+                return;
+            }
+        };
+        let source = card_dispatcher::Owner::Named(owner.to_owned());
+        match card_dispatcher::run(state, project, who, pick.clone(), source).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => {
+                tracing::debug!(%project, error = %e.message, "card.assign spawn deferred");
+                if pick.card.is_some() {
+                    return;
                 }
             }
         }
@@ -327,7 +375,7 @@ pub fn perform(
             board::add_comment(t, actor, &card.id, &body)?;
             changed(json!({"card": card.id, "text": body}))
         }
-        "card.assign" => card_assign(t, actor, ctx, &a)?,
+        "card.assign" => card_assign(t, actor, ctx, &a, &mut effects)?,
         "card.prepend" => card_prepend(t, actor, ctx, &a)?,
         "mail" => send_mail(t, actor, ctx, &a)?,
         "card.blocked_mail" | "card.done_mail" => move_mail(t, actor, ctx, verb)?,
@@ -526,7 +574,16 @@ fn card_label(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
     ))
 }
 
-fn card_assign(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
+fn card_assign(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    ctx: &RunCtx,
+    a: &Args<'_>,
+    effects: &mut Vec<Effect>,
+) -> ApiResult<Done> {
+    if a.action.args.get("who").is_none_or(Value::is_null) {
+        return assign_new(t, actor, ctx, a, effects);
+    }
     let card = the_card(ctx, "card.assign")?;
     let raw = a.raw("who").unwrap_or_default().trim();
     let who = a.text("who").unwrap_or_default().trim().to_owned();
@@ -550,6 +607,95 @@ fn card_assign(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> Api
     } else {
         changed(detail)
     })
+}
+
+/// `card.assign` with `template` or `templates` (TER-1115, D6): a new bound
+/// agent from a template claims the card, as the `card_dispatcher` setting
+/// does. The owner's spawn rights and caps are used. This write selects
+/// the card and reports it; the spawn runs after the commit
+/// ([`Effect::Dispatch`]). No room, no eligible card, a paused owner, or an
+/// owner at a spawn cap is a no-op with the reason.
+fn assign_new(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    ctx: &RunCtx,
+    a: &Args<'_>,
+    effects: &mut Vec<Effect>,
+) -> ApiResult<Done> {
+    policy::admin_project(
+        actor,
+        &ctx.project,
+        "starting an agent for a card of the project",
+    )?;
+    let owner = a.text("owner").unwrap_or_default().trim().to_owned();
+    if owner.is_empty() {
+        return Err(ApiError::invalid("card.assign needs `owner` for a new agent"));
+    }
+    let templates = match a.text("template").map(|t| t.trim().to_owned()) {
+        Some(one) if !one.is_empty() => Templates::One(one),
+        Some(_) => return Err(ApiError::invalid("card.assign: `template` is empty")),
+        None => {
+            let mut map = Vec::new();
+            for e in a.list("templates") {
+                let (label, template) = rules_file::assign_template_entry(&e).ok_or_else(|| {
+                    ApiError::invalid(format!(
+                        "card.assign.templates entry `{e}` is not `<label>=<template>`"
+                    ))
+                })?;
+                map.push((label.to_owned(), template.to_owned()));
+            }
+            if map.is_empty() {
+                return Err(ApiError::invalid(
+                    "card.assign needs `who`, `template` or `templates`",
+                ));
+            }
+            Templates::ByLabel(map)
+        }
+    };
+    let room = a.raw("room").map(|r| column_name(ctx, r)).transpose()?;
+    let (from, card, limit) = match a.raw("from") {
+        Some(r) => (
+            column_name(ctx, r)?,
+            None,
+            a.count("limit")
+                .unwrap_or(1)
+                .clamp(1, rules_file::MAX_ASSIGN_LIMIT),
+        ),
+        None => {
+            let c = the_card(ctx, "card.assign")?;
+            (c.column.clone(), Some(c.id.clone()), 1)
+        }
+    };
+    let Some(who) = card_dispatcher::named_owner(t, &ctx.project, &owner, "card.assign owner")?
+    else {
+        return Ok(noop(json!({"owner": owner, "reason": "the owner is paused"})));
+    };
+    if let Some(reason) = card_dispatcher::project_limit(t, &who)? {
+        return Ok(noop(json!({"owner": owner, "reason": reason})));
+    }
+    let pick = Pick {
+        from,
+        room,
+        templates,
+        card,
+    };
+    match card_dispatcher::select(t, &ctx.project, &pick)? {
+        Err(reason) => Ok(noop(
+            json!({"from": pick.from, "card": pick.card, "reason": reason}),
+        )),
+        Ok((first, template)) => {
+            let detail = json!({"card": first, "template": template, "owner": owner,
+                                "from": pick.from, "limit": limit,
+                                "spawn": "after the commit"});
+            effects.push(Effect::Dispatch {
+                project: ctx.project.clone(),
+                owner,
+                pick,
+                limit,
+            });
+            Ok(changed(detail))
+        }
+    }
 }
 
 fn card_prepend(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {

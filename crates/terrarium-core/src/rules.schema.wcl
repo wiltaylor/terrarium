@@ -137,6 +137,8 @@ type IfCard {
   not_column: list<utf8>?
   // Has every one of these labels.
   has_labels: list<utf8>?
+  // Has at least one of these labels.
+  any_labels: list<utf8>?
   // Has none of these labels.
   lacks_labels: list<utf8>?
   assigned: bool?
@@ -186,10 +188,22 @@ type CardComment {
   text: utf8
 }
 
-// `who`: an agent name, a template, or `none`.
+// Exactly one of: `who` (an agent name or `none`); `template` (a new bound
+// agent from this template claims the card); `templates` (entries
+// `<label>=<template>`: the card's one matching label picks the template).
+// A new agent needs `owner`, the project admin whose spawn rights and caps
+// are used. `from`: take the top eligible cards of this column, up to
+// `limit` (1); else the run's card. `room`: the column that must be under
+// its WIP limit (absent: `@working`).
 @block("card_assign")
 type CardAssign {
-  who: utf8
+  who: utf8?
+  template: utf8?
+  templates: list<utf8>?
+  owner: utf8?
+  from: utf8?
+  room: utf8?
+  limit: i64?
 }
 
 // Put text at the top of the card body.

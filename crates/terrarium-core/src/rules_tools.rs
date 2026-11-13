@@ -82,6 +82,7 @@ fn card_fields(c: &CardCondition) -> Vec<(String, String)> {
         ("column", &c.column),
         ("not_column", &c.not_column),
         ("has_labels", &c.has_labels),
+        ("any_labels", &c.any_labels),
         ("lacks_labels", &c.lacks_labels),
     ] {
         if !v.is_empty() {

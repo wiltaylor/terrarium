@@ -9573,7 +9573,8 @@ rule "note-review" {
 
 `if_card` (on the run's card; a rule with one runs only for events with a
 card): `column` (in one of these), `not_column`, `has_labels` (every
-one), `lacks_labels` (none), `assigned`, `archived`. `if_job` (on the job
+one), `any_labels` (at least one, TER-1115), `lacks_labels` (none),
+`assigned`, `archived`. `if_job` (on the job
 of a `job` event, `data.id`, or of a `job.verdict` event, `data.job`; a
 rule with one runs only for those events): `state` (`queued`, `running`,
 `passed`, `failed`, `cancelled`), `outcome` (`red`, `conflict`, `error`,
@@ -9700,9 +9701,28 @@ expression. No manual close endpoint exists.
   is left out. `remove` takes globs (`by:*`); a label that `add` names
   stays. No change: a no-op.
 - `card_comment`: a comment on the run's card.
-- `card_assign`: assign the run's card to `who` (an agent name or a
-  template), or unassign it with `none`. A template that fills to nothing
-  fails the action (only `none` unassigns). The same assignee: a no-op.
+- `card_assign`: exactly one of `who`, `template` or `templates`.
+  - `who`: assign the run's card to an agent name, or unassign it with
+    `none`. A placeholder that fills to nothing fails the action (only
+    `none` unassigns). The same assignee: a no-op.
+  - `template` or `templates` (TER-1115, kanban rework C4 D6): a new bound
+    agent from a template claims the card, as the ready-card dispatcher
+    does (docs/card-dispatcher.md). `templates` is a list of
+    `<label>=<template>`: the card must have exactly one of the labels,
+    and that label picks the template. `owner` (required) is a
+    non-ephemeral project admin of the project: its spawn rights and caps
+    are used, and pausing it pauses the action. `from` (a column): take the
+    top eligible cards of that column in board order, up to `limit` (1 to
+    16, default 1), for a rule with no card (a `timer`). Without `from`,
+    the run's card, in the column it is in. `room` (a column, default the
+    `working` role) must be under its WIP limit; a column with no limit
+    starts nothing. Eligible: no assignee, no open bound agent, its
+    dependencies met, not held, not cooling down after a failed spawn, and
+    a matching template. The run's write picks the card and reports it
+    (`changed`); the spawn runs after the commit and checks the owner and
+    the card again. No room, no eligible card, a paused owner, or an owner
+    at a spawn cap: a no-op with the reason. A failed spawn gives the card
+    the dispatcher's cooldown, comment and owner mail.
 - `card_prepend`: put `text` at the top of the card body. A body that
   starts with the text already: a no-op.
 - `mail`: mail from `project:<project>` to each of `to` (`operator`,
