@@ -1031,10 +1031,15 @@ mod cleanup_tests {
             request(state.clone(), w.id.clone()),
             request(state.clone(), w.id.clone())
         );
-        let response = a.unwrap().0;
+        let first = a.unwrap().0;
+        let response = view(&state, &w.id).await;
         assert_eq!(response["state"], "cancelled");
         assert_eq!(response["cleanup"]["status"], "unknown");
         assert_eq!(response["cleanup"]["reason"], "control_sent_no_report");
+        assert_eq!(
+            first["cleanup"]["operation_id"],
+            response["cleanup"]["operation_id"]
+        );
         assert_eq!(
             b.unwrap().0["cleanup"]["operation_id"],
             response["cleanup"]["operation_id"]
