@@ -658,6 +658,13 @@ fn project_rules(
 ///   with no column to take it. Refused, not rewritten: `@x` follows the
 ///   role, so there is no column to rewrite it to.
 ///
+/// A reference `@x` that resolves after the change, but by name to
+/// another column than before (the role `x` was cleared while another
+/// column is named `x`), is refused the same way (TER-1246): the rule
+/// would act on a different column. `@x` may follow the role `x` to
+/// another column, and it may keep its own column by name (renamed or
+/// not). A plain name is checked only for a dangling reference.
+///
 /// Nothing is written.
 pub(super) fn check_refs(
     t: &Tx<'_>,
@@ -695,10 +702,21 @@ pub(super) fn check_refs(
                 ..Default::default()
             }];
             rules_file::rename_columns(&mut probe, &mut [], renames, &roles_after);
-            if rules_file::resolve_column(after, &probe[0].column[0]).is_some() {
-                continue;
+            let left = &probe[0].column[0];
+            let gone = removed.iter().any(|c| c.name == target.name);
+            if let Some(now) = rules_file::resolve_column(after, left) {
+                // `@x` may follow its role to another column, or keep
+                // its column (renamed or not). It may not fall back to
+                // another column by name (TER-1246).
+                let by_role = left
+                    .strip_prefix('@')
+                    .is_none_or(|x| now.role.as_deref() == Some(x));
+                let same = !gone && renames.get(&target.name).unwrap_or(&target.name) == &now.name;
+                if by_role || same {
+                    continue;
+                }
             }
-            if removed.iter().any(|c| c.name == target.name) {
+            if gone {
                 let g = target.name.clone();
                 if !col_named.contains(&g) {
                     col_named.push(g.clone());
@@ -738,7 +756,9 @@ pub(super) fn check_refs(
     }
     if !role_users.is_empty() {
         return Err(ApiError::conflict(format!(
-            "the role `{}` is named by the column rule(s) {}, and no column has it after this              change; keep the role on a column, or change those rules first",
+            "the role `{}` is named by the column rule(s) {}, and after this change no column has it \
+             (the reference would name no column or another column); keep the role on a column, \
+             or change those rules first",
             role_named.join("`, `"),
             list(&role_users)
         ))
