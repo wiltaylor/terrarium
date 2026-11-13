@@ -23,6 +23,7 @@ vi.mock("../../stores", async () => {
     bookmarks: createBookmarksStore(null, window.location.origin),
     api, events: { on: (fn: (e: AgentEvent) => void) => { listeners.add(fn); return () => listeners.delete(fn); }, status: () => ({ lastSeq: 1 }), state: () => "live" },
     agents: { inProject: () => [], byId: () => undefined, state: { loading: false, error: null }, refresh: async () => {} },
+    repos: { inProject: () => [], refresh: async () => {}, refreshProject: async () => {} },
     leases: { loadAll: async () => {} }, pins: { isPinned: () => false, toggle: async () => {} },
     inbox: { refresh: async () => {} }, projects: { projects: () => [], prefixes: () => ({}) },
     cardPeek: { open: () => {}, close: () => {} },
