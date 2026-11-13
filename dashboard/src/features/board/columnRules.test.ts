@@ -42,6 +42,12 @@ describe("column rules in plain words (TER-1116)", () => {
     expect(cardConditionText({ any_labels: ["bug"] })).toBe("it has the label bug");
   });
 
+  it("says card.comment with the daemon arg text, and mail to a list (TER-1242)", () => {
+    expect(actionText({ verb: "card.comment", args: { text: "Merge failed: {{job.state}}" } })).toBe('comment "Merge failed: {{job.state}}"');
+    expect(actionText({ verb: "mail", args: { to: ["lead", "operator"], subject: "red" } })).toBe('mail lead and operator "red"');
+    expect(actionText({ verb: "mail", args: { to: "lead", subject: "red" } })).toBe('mail lead "red"');
+  });
+
   it("says the queue", () => {
     expect(queueText(read.queue)).toBe("Cards are released in batches of 4, or when the oldest has waited 30 minutes, at most 8 cards in a batch.");
     expect(queueText({ release: "wip" })).toBe("Cards enter when the WIP limit has room.");
