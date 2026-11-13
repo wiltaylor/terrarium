@@ -54,32 +54,9 @@ type Reply = (u16, Vec<(&'static str, String)>, String);
 struct Hook {
     seen: Arc<Mutex<Vec<Seen>>>,
     replies: Arc<Mutex<VecDeque<Reply>>>,
-    gate: Gate,
-}
-
-/// Open by default. While it is shut, the receiver holds each request
-/// before it keeps or answers it, so the delivery of that request stays
-/// `pending` in the daemon (TER-1243).
-#[derive(Clone)]
-struct Gate(Arc<tokio::sync::watch::Sender<bool>>);
-
-impl Default for Gate {
-    fn default() -> Self {
-        Self(Arc::new(tokio::sync::watch::channel(true).0))
-    }
 }
 
 impl Hook {
-    /// Hold the next requests until [`Hook::open`].
-    fn hold(&self) {
-        self.gate.0.send_replace(false);
-    }
-
-    /// Let the held and the next requests through.
-    fn open(&self) {
-        self.gate.0.send_replace(true);
-    }
-
     fn reply(&self, status: u16, headers: Vec<(&'static str, String)>, body: &str) {
         self.replies
             .lock()
@@ -99,8 +76,6 @@ async fn receive(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let mut open = h.gate.0.subscribe();
-    open.wait_for(|o| *o).await.unwrap();
     h.seen.lock().unwrap().push(Seen {
         method: method.to_string(),
         path: uri.path().to_owned(),
@@ -560,18 +535,18 @@ async fn a_pending_delivery_survives_a_restart() {
     setup(&td).await;
     let (hook, base, _) = serve().await;
     let sid = create(&td, "page", json!({"type": "webhook", "url": base})).await;
+    // The retry is due 10 s after attempt 1. Under load the worker of the
+    // old or the new daemon could send it before the read below, so no
+    // worker starts a retry of this trigger until the hold drops.
+    let hold = webhooks::hold_retries(&sid);
     hook.reply(502, vec![], "bad gateway");
     emit(&td, "monitor.status", json!({"to": "crit"})).await;
     wait_for(&td, &sid, |d| d.iter().any(|x| x["attempt"] == 1)).await;
-    // The retry is due 10 s after attempt 1. Under load the new daemon's
-    // worker can send it before the read below, so hold it at the
-    // receiver: the row stays `pending` until the test opens the gate.
-    hook.hold();
     td.boot(None, None).await;
     let d = deliveries(&td, &sid).await;
     assert_eq!(status(&d[0]), "pending");
     assert_eq!(d[0]["attempt"], 1);
-    hook.open();
+    drop(hold);
     // This pass sends the retry, or finds it in flight from the worker.
     drop(pass_at(&td, 15).await);
     let d = wait_for(&td, &sid, |d| status(&d[0]) == "ok").await;
