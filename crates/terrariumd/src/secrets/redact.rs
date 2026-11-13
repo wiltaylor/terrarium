@@ -513,6 +513,11 @@ mod tests {
             r.redact_str("xai-at-N4eW8tOk3nV6yU2c"),
             "[secret:subscription/x-super]"
         );
+        // The daemon replaced the file: the old token stays (TER-1257).
+        assert_eq!(
+            r.redact_str("xai-at-Q7w9Zk2LmP4rT8vB"),
+            "[secret:subscription/x-super]"
+        );
         // A transcript block: the text, the tool input, and the result.
         use terrarium_core::transcript::{BlockKind, BlockRole, ToolCall, ToolResult};
         let mut b = Block::new(

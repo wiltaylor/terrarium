@@ -4502,3 +4502,103 @@ async fn a_failed_register_drops_the_grok_import() {
         "the Grok credential of a failed register stays"
     );
 }
+
+/// The tokens of the TER-1257 Grok logins: long enough for the matcher.
+const GROK_TOKEN_C: &str = "grok-access-TOKEN-C-2468013579";
+const GROK_TOKEN_D: &str = "grok-access-TOKEN-D-1357924680";
+const GROK_TOKEN_E: &str = "grok-access-TOKEN-E-1122334455";
+
+/// Assert that a new card shows `token` as the secret of `name`. A
+/// failure names `what`, never the token value.
+async fn assert_redacted(td: &TestDaemon, token: &str, name: &str, what: &str) {
+    let body = card_body(td, token).await;
+    assert!(
+        body == format!("t=[secret:subscription/{name}]"),
+        "{what}: the token is not redacted"
+    );
+}
+
+/// TER-1257 (rev-1239b minor 1): a Grok token that the daemon replaces (a
+/// second login) or removes (`drop_grok_import` after a failed register,
+/// for a new and for an existing account) stays in the redaction matcher:
+/// an agent that started with it may still run. The asserts name the case,
+/// never a token value.
+#[tokio::test]
+async fn replaced_and_removed_grok_tokens_stay_in_the_redaction_matcher() {
+    let env = boot(
+        |_| {},
+        |u, bin| {
+            u.programs
+                .insert(HarnessId::Grok, fake_grok_login(bin, GROK_TOKEN_A, false));
+        },
+    )
+    .await;
+    let td = &env.td;
+    td.project("p").await;
+    let bin = td.dir.path().join("bin");
+    // The next login writes `token`.
+    let next_token = |token: &str| {
+        fake_grok_login(&bin, token, false);
+    };
+    let fault = |name: &str, on: bool| {
+        let mut f = terrariumd::login_session::FAIL_REGISTER.lock().unwrap();
+        f.retain(|n| n != name);
+        if on {
+            f.push(name.to_owned());
+        }
+    };
+    let login = |name: &'static str, end: &'static str| async move {
+        let r = td
+            .post(
+                "/api/subscriptions/login",
+                json!({"kind": "grok", "name": name}),
+            )
+            .await;
+        let id = r.ok()["id"].as_str().unwrap().to_owned();
+        wait_login(td, &id, end).await;
+    };
+    let grok_file = |name: &str| {
+        terrariumd::accounts::credential_path(
+            &terrariumd::accounts::store_dir(&td.state, name),
+            HarnessId::Grok,
+        )
+    };
+
+    // A second login replaces the token of the account: both stay.
+    xai_plan_row(td, "x-relogin").await;
+    login("x-relogin", "done").await;
+    assert_redacted(td, GROK_TOKEN_A, "x-relogin", "first login").await;
+    next_token(GROK_TOKEN_B);
+    login("x-relogin", "done").await;
+    let raw = std::fs::read_to_string(grok_file("x-relogin")).unwrap();
+    assert!(
+        raw.contains(GROK_TOKEN_B) && !raw.contains(GROK_TOKEN_A),
+        "the second login did not replace the Grok credential"
+    );
+    assert_redacted(td, GROK_TOKEN_B, "x-relogin", "second login").await;
+    assert_redacted(td, GROK_TOKEN_A, "x-relogin", "replaced token").await;
+
+    // A failed register on a new account: the account goes, its token
+    // stays in the matcher.
+    xai_plan_row(td, "x-drop-new").await;
+    next_token(GROK_TOKEN_C);
+    fault("x-drop-new", true);
+    login("x-drop-new", "failed").await;
+    fault("x-drop-new", false);
+    assert!(!terrariumd::accounts::exists(&td.state, "x-drop-new"));
+    assert_redacted(td, GROK_TOKEN_C, "x-drop-new", "dropped new account").await;
+
+    // A failed register on an existing account: its Grok credential goes,
+    // the old and the imported token stay in the matcher.
+    xai_plan_row(td, "x-drop-old").await;
+    next_token(GROK_TOKEN_D);
+    login("x-drop-old", "done").await;
+    next_token(GROK_TOKEN_E);
+    fault("x-drop-old", true);
+    login("x-drop-old", "failed").await;
+    fault("x-drop-old", false);
+    assert!(terrariumd::accounts::exists(&td.state, "x-drop-old"));
+    assert!(!grok_file("x-drop-old").exists());
+    assert_redacted(td, GROK_TOKEN_D, "x-drop-old", "token before it").await;
+    assert_redacted(td, GROK_TOKEN_E, "x-drop-old", "token of the failed login").await;
+}
