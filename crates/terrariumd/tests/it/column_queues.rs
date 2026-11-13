@@ -238,7 +238,10 @@ async fn a_full_column_queues_and_lands_runs_when_the_card_gets_its_slot() {
     let kb = card(&td, &b).await;
     assert!(kb.get("queued").is_none(), "{kb}");
     assert_eq!(bodies(&td, &b).await, vec!["landed in review"]);
-    assert_eq!(bodies(&td, &a).await, vec!["landed in review", "left review"]);
+    assert_eq!(
+        bodies(&td, &a).await,
+        vec!["landed in review", "left review"]
+    );
     assert!(bodies(&td, &c).await.is_empty());
     assert!(bodies(&td, &d).await.is_empty());
     assert_eq!(queue_rows(&td).await, 0);

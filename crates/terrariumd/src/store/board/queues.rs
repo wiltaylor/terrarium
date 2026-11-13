@@ -275,12 +275,7 @@ pub(crate) fn of_card(conn: &Connection, card: &str) -> ApiResult<Option<CardQue
 /// Keep ETA `eta` (as given: a time or a duration) of waiting card `card`
 /// for its admission; `None` drops a held ETA. `false`: the card does not
 /// wait.
-pub(super) fn hold_eta(
-    t: &mut Tx<'_>,
-    card: &str,
-    eta: Option<&str>,
-    by: &str,
-) -> ApiResult<bool> {
+pub(super) fn hold_eta(t: &mut Tx<'_>, card: &str, eta: Option<&str>, by: &str) -> ApiResult<bool> {
     let n = t.execute(
         "UPDATE card_queue SET held_eta = ?2, held_eta_by = ?3
           WHERE card = ?1 AND admitted_at IS NULL",
