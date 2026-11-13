@@ -576,9 +576,7 @@ async fn review_start_is_refused_outside_a_columns_board() {
         );
     }
     let text = "rule \"r\" {\n  on = [\"card\"]\n  review_start { owner = \"lead\" }\n}\n";
-    let r = td
-        .put("/api/projects/r/rules", json!({"text": text}))
-        .await;
+    let r = td.put("/api/projects/r/rules", json!({"text": text})).await;
     assert_eq!(r.status.as_u16(), 422, "{}", r.body);
     assert!(
         r.body.to_string().contains("board_flow = columns only"),
