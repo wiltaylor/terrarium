@@ -39,6 +39,9 @@ pub mod client;
 pub mod config;
 pub mod display;
 pub mod docker;
+pub mod git_checkout;
+#[cfg(windows)]
+pub mod git_checkout_windows;
 pub mod labcheck;
 pub mod limits;
 pub mod logging;

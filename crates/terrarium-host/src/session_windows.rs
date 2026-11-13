@@ -110,6 +110,7 @@ pub fn spawn(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
         terrarium_winapi::SpawnContext {
             holder: plan.windows_holder.as_deref(),
             identity: plan.windows_identity.as_ref(),
+            remove_env: &[],
         },
     )
     .map_err(|source| SpawnError::Io {

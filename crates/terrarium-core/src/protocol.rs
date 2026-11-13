@@ -204,6 +204,11 @@ pub struct HostCapabilities {
     /// for native `host` targets on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_gpu: Option<NativeGpuCapability>,
+    /// A managed `git.checkout` into a Windows account workspace (TER-274):
+    /// the host file names a protected Git for Windows root, and workspaces
+    /// are on. Older hosts and every other host send none: false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub windows_git_checkout: bool,
 }
 
 /// What the host agent can do for native GPU enforcement.

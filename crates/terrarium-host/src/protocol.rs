@@ -427,6 +427,68 @@ pub struct CpPull {
     pub path: PathBuf,
 }
 
+/// A managed git checkout into a Windows account workspace (TER-274). The
+/// host runs its trusted Git for Windows as the run-as account and answers
+/// with a `result` frame (`action`, `head`, `branch`, `path`, `note`), then
+/// `exit`. Never persist or log `credential` or `windows_run_as`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitCheckout {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_run_as: Option<WindowsRunAs>,
+    pub session: SessionId,
+    /// The clone URL: `https://`, `http://`, `ssh://` or `user@host:path`.
+    pub url: String,
+    /// The checkout directory, strictly inside one workspace.
+    pub dest: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+    /// Required for an agent checkout: the provenance and push-deny hooks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<ManagedHooks>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<GitCredential>,
+    /// Seeds the session's `known_hosts` for SSH (the daemon's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_hosts: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// The managed hooks and repo config of an agent checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedHooks {
+    /// `prepare-commit-msg`.
+    pub commit_hook: String,
+    /// `pre-push`, from `git::push_deny_hook`.
+    pub push_hook: String,
+    pub name: String,
+    pub email: String,
+    pub provenance: bool,
+    pub warn_only: bool,
+    pub repo_id: String,
+}
+
+/// The repo credential for one checkout. Debug is redacted.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GitCredential {
+    Token { username: String, password: String },
+    SshKey { key: String },
+}
+
+impl std::fmt::Debug for GitCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Token { .. } => "GitCredential::Token([redacted])",
+            Self::SshKey { .. } => "GitCredential::SshKey([redacted])",
+        })
+    }
+}
+
 /// An agent workspace to attach to a target: `path` is `<project>/<agent>`,
 /// relative to the host agent's `work_dir`. The target sees it at
 /// `/work/<path>`, the same path as in the agent's sandbox
@@ -1057,6 +1119,8 @@ pub enum DaemonFrame {
         sha256: String,
     },
     CpPull(CpPull),
+    #[serde(rename = "git.checkout")]
+    GitCheckout(Box<GitCheckout>),
     #[serde(rename = "docker.run")]
     DockerRun(DockerRun),
     #[serde(rename = "resource.apply")]
@@ -1126,6 +1190,7 @@ impl DaemonFrame {
             | F::CpEnd { session, .. } => *session,
             F::CpPush(r) => r.session,
             F::CpPull(r) => r.session,
+            F::GitCheckout(r) => r.session,
             F::DockerRun(r) => r.session,
             F::ResourceApply(r) => r.session,
             F::ResourceStop(r) => r.session,
@@ -1468,6 +1533,7 @@ mod tests {
                 }),
                 no_workspaces: true,
                 native_gpu: None,
+                windows_git_checkout: false,
             },
             max_sessions: 32,
             max_running_targets: Some(4),

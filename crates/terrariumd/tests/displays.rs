@@ -95,6 +95,7 @@ impl Lab {
             capacity: None,
             reservations: false,
             native_gpu: None,
+            windows_git_checkout: false,
         };
         o.display.enabled = desktop;
         o.docker_bin = self.bins.path().join("docker").display().to_string();

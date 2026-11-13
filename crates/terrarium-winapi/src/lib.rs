@@ -8,7 +8,9 @@ mod policy_file;
 pub use policy_file::read_host_policy_file;
 mod diagnostics;
 mod workspace;
-pub use workspace::{BASE as WORKSPACE_BASE, Dir, TempFile, Workspace, check_name};
+pub use workspace::{BASE as WORKSPACE_BASE, Dir, Entry, TempFile, Workspace, check_name};
+mod git_runtime;
+pub use git_runtime::{GIT_SESSIONS, PrivateDir, SecretFile, TrustedFiles};
 pub use diagnostics::{TokenSnapshot, current_token_snapshot};
 
 use std::collections::BTreeMap;
@@ -396,7 +398,7 @@ pub fn spawn_in_holder(
         limits,
         SpawnContext {
             holder,
-            identity: None,
+            ..SpawnContext::default()
         },
     )
 }
@@ -406,6 +408,9 @@ pub fn spawn_in_holder(
 pub struct SpawnContext<'a> {
     pub holder: Option<&'a Job>,
     pub identity: Option<&'a std::sync::Arc<Identity>>,
+    /// Names removed from the child environment (case-insensitive), after
+    /// `env` is merged. For the managed checkout's `GIT_*` list (TER-274).
+    pub remove_env: &'a [&'a str],
 }
 
 /// CreateProcessAsUser keeps the exact same atomic job/handle/ConPTY boundary
@@ -419,7 +424,11 @@ pub fn spawn_with_context(
     limits: Limits,
     context: SpawnContext<'_>,
 ) -> io::Result<Child> {
-    let SpawnContext { holder, identity } = context;
+    let SpawnContext {
+        holder,
+        identity,
+        remove_env,
+    } = context;
     let mut job = Job::new(limits)?;
     job.2 = identity.cloned();
     let user_cwd = identity
@@ -475,6 +484,9 @@ pub fn spawn_with_context(
                 .collect(),
             (key, value),
         );
+    }
+    for name in remove_env {
+        merged.remove(&name.to_uppercase().encode_utf16().collect::<Vec<u16>>());
     }
     let mut environment = Vec::new();
     for (_, (k, v)) in merged {

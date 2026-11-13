@@ -24,23 +24,23 @@ use windows_sys::Win32::Storage::FileSystem::*;
 
 /// The workspace base. It must exist: the host never creates it.
 pub const BASE: &str = r"C:\Terrarium\work";
-const ANCESTORS: [&str; 2] = [r"C:\", r"C:\Terrarium"];
+pub(crate) const ANCESTORS: [&str; 2] = [r"C:\", r"C:\Terrarium"];
 
 /// Ancestors may let users create unrelated children, but not delete,
 /// replace or re-permission the directory (the `policy_file` rule).
-const ANCESTOR_FORBIDDEN: u32 =
+pub(crate) const ANCESTOR_FORBIDDEN: u32 =
     DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_ALL | GENERIC_WRITE | FILE_DELETE_CHILD;
 /// The base and project directories also refuse untrusted child creation, so
 /// no user can pre-create a project or agent directory that it owns.
-const STRICT_FORBIDDEN: u32 = ANCESTOR_FORBIDDEN
+pub(crate) const STRICT_FORBIDDEN: u32 = ANCESTOR_FORBIDDEN
     | FILE_ADD_FILE
     | FILE_ADD_SUBDIRECTORY
     | FILE_WRITE_EA
     | FILE_WRITE_ATTRIBUTES;
-const DIR_ACCESS: u32 = READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
-const INNER_ACCESS: u32 = FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+pub(crate) const DIR_ACCESS: u32 = READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+pub(crate) const INNER_ACCESS: u32 = FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 
-fn refused(what: &str) -> io::Error {
+pub(crate) fn refused(what: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
         format!("workspace path refused: {what}"),
@@ -75,7 +75,7 @@ pub fn check_name(name: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn info(handle: &impl AsRawHandle) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
+pub(crate) fn info(handle: &impl AsRawHandle) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
     // SAFETY: valid all-zero POD, then filled by the call.
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
     // SAFETY: live handle and writable POD output.
@@ -119,7 +119,7 @@ fn same_path(final_path: &str, want: &Path) -> bool {
 }
 
 /// Check an opened handle: not a reparse point, the right type, no alias.
-fn verify(
+pub(crate) fn verify(
     handle: &impl AsRawHandle,
     path: &Path,
     dir: bool,
@@ -142,7 +142,7 @@ fn verify(
 }
 
 /// Open an existing directory component itself and hold it against rename.
-fn open_dir(path: &Path, access: u32) -> io::Result<OwnedHandle> {
+pub(crate) fn open_dir(path: &Path, access: u32) -> io::Result<OwnedHandle> {
     let wide_path = wide(path.as_os_str())?;
     // SAFETY: NUL-terminated path. OPEN_REPARSE_POINT opens the component
     // itself, never a target. No FILE_SHARE_DELETE: no rename while held.
@@ -163,7 +163,7 @@ fn open_dir(path: &Path, access: u32) -> io::Result<OwnedHandle> {
 
 /// Create a directory with an optional security descriptor. An existing
 /// entry is not an error: the caller opens and checks it next.
-fn create_dir(path: &Path, descriptor: Option<&Local>) -> io::Result<()> {
+pub(crate) fn create_dir(path: &Path, descriptor: Option<&Local>) -> io::Result<()> {
     let wide_path = wide(path.as_os_str())?;
     let attributes = descriptor.map(|d| SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -192,10 +192,19 @@ fn create_dir(path: &Path, descriptor: Option<&Local>) -> io::Result<()> {
 fn agent_descriptor(account_sid: Option<&str>) -> io::Result<Local> {
     // Protected DACL: SYSTEM, Administrators, and the run-as account, all
     // inherited by files and directories below. Nothing from the parent.
-    let mut sddl = String::from("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+    protected_descriptor(&["SY", "BA"], account_sid)
+}
+
+/// A protected DACL with full control for `trustees` (SDDL aliases) and the
+/// optional account SID, inherited by files and directories below.
+pub(crate) fn protected_descriptor(trustees: &[&str], account_sid: Option<&str>) -> io::Result<Local> {
+    let mut sddl = String::from("D:P");
+    for trustee in trustees {
+        sddl.push_str(&format!("(A;OICI;FA;;;{trustee})"));
+    }
     if let Some(sid) = account_sid {
-        if !sid.starts_with("S-1-") || !sid[4..].bytes().all(|b| b.is_ascii_digit() || b == b'-')
-        {
+        let digits = sid.strip_prefix("S-1-").unwrap_or_default();
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
             return Err(refused("invalid account SID"));
         }
         sddl.push_str(&format!("(A;OICI;FA;;;{sid})"));
@@ -306,22 +315,16 @@ impl Workspace {
     /// under the account's impersonation so each open uses its rights.
     /// With `mkdirs`, a missing directory is created (it inherits the DACL).
     pub fn into_dir(self, rest: &[&str], mkdirs: bool) -> io::Result<Dir> {
-        let Self { mut held, root } = self;
-        let mut path = root;
-        for name in rest {
-            check_name(name)?;
-            path.push(name);
-            let handle = match open_dir(&path, INNER_ACCESS) {
-                Err(e) if mkdirs && e.kind() == io::ErrorKind::NotFound => {
-                    create_dir(&path, None)?;
-                    open_dir(&path, INNER_ACCESS)?
-                }
-                other => other?,
-            };
-            held.push(handle);
-        }
-        Ok(Dir { held, path })
+        let Self { held, root } = self;
+        Dir { held, path: root }.descend(rest, mkdirs)
     }
+}
+
+/// What a directory entry is, opened by itself (no reparse following).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entry {
+    Dir,
+    File,
 }
 
 /// A checked directory in a workspace, with its whole chain held.
@@ -344,6 +347,106 @@ static TEMP: AtomicU64 = AtomicU64::new(0);
 impl Dir {
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Walk further below this directory, with the same checks and holds as
+    /// [`Workspace::into_dir`]. Run it as the account.
+    pub fn descend(self, rest: &[&str], mkdirs: bool) -> io::Result<Dir> {
+        let Self { mut held, path } = self;
+        let sub = Dir {
+            held: Vec::new(),
+            path,
+        }
+        .open_below(rest, mkdirs)?;
+        held.extend(sub.held);
+        Ok(Dir {
+            held,
+            path: sub.path,
+        })
+    }
+
+    /// Like [`Dir::descend`], but holds only the new components. Keep `self`
+    /// alive while the result is used: it holds the chain above.
+    pub fn sub(&self, rest: &[&str], mkdirs: bool) -> io::Result<Dir> {
+        Dir {
+            held: Vec::new(),
+            path: self.path.clone(),
+        }
+        .open_below(rest, mkdirs)
+    }
+
+    fn open_below(self, rest: &[&str], mkdirs: bool) -> io::Result<Dir> {
+        let Self { mut held, mut path } = self;
+        for name in rest {
+            check_name(name)?;
+            path.push(name);
+            let handle = match open_dir(&path, INNER_ACCESS) {
+                Err(e) if mkdirs && e.kind() == io::ErrorKind::NotFound => {
+                    create_dir(&path, None)?;
+                    open_dir(&path, INNER_ACCESS)?
+                }
+                other => other?,
+            };
+            held.push(handle);
+        }
+        Ok(Dir { held, path })
+    }
+
+    /// The kind of the entry `name`, or `None` when it does not exist.
+    /// A reparse point, an alias or a hard-linked file is refused.
+    pub fn entry(&self, name: &str) -> io::Result<Option<Entry>> {
+        check_name(name)?;
+        let path = self.path.join(name);
+        let wide_path = wide(path.as_os_str())?;
+        // SAFETY: NUL-terminated path; opens the entry itself, never a target.
+        let opened = owned(unsafe {
+            CreateFileW(
+                wide_path.as_ptr(),
+                FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                null_mut(),
+            )
+        });
+        let handle = match opened {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            other => other?,
+        };
+        let info = info(&handle)?;
+        let dir = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+        verify(&handle, &path, dir)?;
+        if !dir && info.nNumberOfLinks != 1 {
+            return Err(refused("file has more than one hard link"));
+        }
+        Ok(Some(if dir { Entry::Dir } else { Entry::File }))
+    }
+
+    /// Rename the regular file `from` to `to` in this directory, by handle.
+    /// Fails when `to` exists: nothing is replaced.
+    pub fn rename_no_replace(&self, from: &str, to: &str) -> io::Result<()> {
+        check_name(from)?;
+        check_name(to)?;
+        let path = self.path.join(from);
+        let wide_path = wide(path.as_os_str())?;
+        // SAFETY: NUL-terminated path; opens the entry itself, never a target.
+        let handle = owned(unsafe {
+            CreateFileW(
+                wide_path.as_ptr(),
+                DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        })?;
+        let info = verify(&handle, &path, false)?;
+        if info.nNumberOfLinks != 1 {
+            return Err(refused("file has more than one hard link"));
+        }
+        rename_by_handle(&handle, to, false)
     }
 
     /// Open a regular file of this directory for reading. Refuses a reparse
@@ -401,18 +504,55 @@ impl Dir {
     }
 }
 
+/// Rename an open file to `name` in its own directory. A bare name with a
+/// null root renames within the same directory: no path is resolved again.
+pub(crate) fn rename_by_handle(handle: &impl AsRawHandle, name: &str, replace: bool) -> io::Result<()> {
+    let name: Vec<u16> = OsStr::new(name).encode_wide().collect();
+    let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let bytes = offset + (name.len() + 1) * size_of::<u16>();
+    let mut buffer = vec![0u64; bytes.div_ceil(size_of::<u64>())];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: the u64 buffer is aligned for FILE_RENAME_INFO and holds the
+    // header plus the name and a terminator (zero-initialized).
+    unsafe {
+        (*info).Anonymous.ReplaceIfExists = replace;
+        (*info).RootDirectory = null_mut();
+        (*info).FileNameLength = (name.len() * size_of::<u16>()) as u32;
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            buffer.as_mut_ptr().cast::<u8>().add(offset).cast::<u16>(),
+            name.len(),
+        );
+    }
+    // SAFETY: live handle with DELETE access and the buffer built above.
+    checked(unsafe {
+        SetFileInformationByHandle(
+            handle.as_raw_handle(),
+            FileRenameInfo,
+            buffer.as_ptr().cast(),
+            bytes as u32,
+        )
+    })
+}
+
 fn delete_on_close(file: File) {
+    dispose(&file);
+    drop(file);
+}
+
+/// Mark an entry opened with DELETE access for deletion when it closes.
+/// Best effort: a non-empty directory stays.
+pub(crate) fn dispose(handle: &impl AsRawHandle) {
     let info = FILE_DISPOSITION_INFO { DeleteFile: true };
     // SAFETY: live handle opened with DELETE access; POD of the documented class.
     unsafe {
         SetFileInformationByHandle(
-            file.as_raw_handle(),
+            handle.as_raw_handle(),
             FileDispositionInfo,
             (&info as *const FILE_DISPOSITION_INFO).cast(),
             size_of::<FILE_DISPOSITION_INFO>() as u32,
         )
     };
-    drop(file);
 }
 
 /// A temporary file that is published by handle, or deleted by handle.
@@ -439,33 +579,7 @@ impl TempFile {
         let _held = dir;
         let file = self.file.as_ref().expect("live temporary file");
         file.sync_all()?;
-        let name: Vec<u16> = OsStr::new(name).encode_wide().collect();
-        let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
-        let bytes = offset + (name.len() + 1) * size_of::<u16>();
-        let mut buffer = vec![0u64; bytes.div_ceil(size_of::<u64>())];
-        let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-        // SAFETY: the u64 buffer is aligned for FILE_RENAME_INFO and holds the
-        // header plus the name and a terminator. A bare name with a null root
-        // renames within the file's own directory; no path is resolved again.
-        unsafe {
-            (*info).Anonymous.ReplaceIfExists = true;
-            (*info).RootDirectory = null_mut();
-            (*info).FileNameLength = (name.len() * size_of::<u16>()) as u32;
-            std::ptr::copy_nonoverlapping(
-                name.as_ptr(),
-                buffer.as_mut_ptr().cast::<u8>().add(offset).cast::<u16>(),
-                name.len(),
-            );
-        }
-        // SAFETY: live handle with DELETE access and the buffer built above.
-        checked(unsafe {
-            SetFileInformationByHandle(
-                file.as_raw_handle(),
-                FileRenameInfo,
-                buffer.as_ptr().cast(),
-                bytes as u32,
-            )
-        })?;
+        rename_by_handle(file, name, true)?;
         drop(self.file.take());
         Ok(())
     }

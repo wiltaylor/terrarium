@@ -44,6 +44,8 @@ pub async fn detect_with(
         no_workspaces: false,
         // The caller sets it when `[native_gpu]` is on (`crate::native::capability`).
         native_gpu: None,
+        // The caller sets it from `[windows_git]` (TER-274).
+        windows_git_checkout: false,
     };
     #[cfg(windows)]
     let caps = HostCapabilities {
