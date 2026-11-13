@@ -3828,3 +3828,364 @@ async fn an_unmapped_cloud_model_is_refused_at_start_and_sync() {
         .unwrap_err();
     assert!(error.to_string().contains("cloud.models.custom"), "{error}");
 }
+
+/// The tokens of the fake Grok Build logins: long enough for the matcher.
+const GROK_TOKEN_A: &str = "grok-access-TOKEN-A-0123456789";
+const GROK_TOKEN_B: &str = "grok-access-TOKEN-B-9876543210";
+
+/// A fake `grok login --device-auth`: it shows a device code, waits for
+/// `go` in `bin` when `wait` is set, and writes `token` into the
+/// `~/.grok/auth.json` of the home it gets. Its env goes to
+/// `bin/grok-login.env`. No real sign-in.
+fn fake_grok_login(bin: &Path, token: &str, wait: bool) -> String {
+    let go = bin.join("go");
+    let gate = if wait {
+        format!("while [ ! -f '{}' ]; do sleep 0.05; done", go.display())
+    } else {
+        String::new()
+    };
+    script(
+        bin,
+        "grok",
+        &format!(
+            r#"env > '{env}'
+echo 'Visit https://accounts.x.ai/device and enter the code: ABCD-1234'
+{gate}
+mkdir -p "$HOME/.grok"
+printf '%s' '{{"session": {{"access_token": "{token}"}}}}' > "$HOME/.grok/auth.json""#,
+            env = bin.join("grok-login.env").display(),
+        ),
+    )
+}
+
+/// An xai plan row (X Subscription, tier Super) for Grok Build.
+async fn xai_plan_row(td: &TestDaemon, name: &str) {
+    td.post(
+        "/api/subscriptions",
+        json!({"name": name, "provider": "xai", "plan": "Super", "harnesses": ["grok"]}),
+    )
+    .await
+    .ok();
+}
+
+/// The body of a new card that carries `text`, as the daemon stored it.
+async fn card_body(td: &TestDaemon, text: &str) -> String {
+    let c = td
+        .post(
+            "/api/projects/p/cards",
+            json!({"title": "grok", "body": format!("t={text}")}),
+        )
+        .await;
+    c.ok()["body"].as_str().unwrap().to_owned()
+}
+
+/// TER-1191 R7, TER-1205: no API key goes on an xai plan row, of xai or of
+/// another provider. The row keeps no key and does not read as logged in.
+#[tokio::test]
+async fn an_api_key_never_goes_on_an_xai_plan_row() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    xai_plan_row(td, "x-super").await;
+    for provider in ["xai", "openai", "anthropic"] {
+        let r = td
+            .post(
+                "/api/subscriptions/x-super/api-key",
+                json!({"provider": provider, "key": "sk-not-for-this-row-0042"}),
+            )
+            .await;
+        r.err(422, "invalid");
+        let msg = r.body["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains(&format!("cannot store a {provider} API key")) && msg.contains("Super"),
+            "{provider}: {msg}"
+        );
+    }
+    let s = td.get("/api/subscriptions/x-super").await;
+    assert_ne!(s.ok()["login_status"], "api_key", "{}", s.body);
+    assert_ne!(s.body["login_status"], "logged_in", "{}", s.body);
+    assert!(s.body["env_var"].is_null(), "{}", s.body);
+    assert!(
+        !terrariumd::login_session::key_path(&td.state, "x-super").exists(),
+        "no key file"
+    );
+    // An xai key still goes on an xai API-key row.
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "x-key", "provider": "xai", "plan": "API key", "harnesses": ["pi"]}),
+    )
+    .await
+    .ok();
+    let r = td
+        .post(
+            "/api/subscriptions/x-key/api-key",
+            json!({"provider": "xai", "key": "xai-key-for-pi-0042"}),
+        )
+        .await;
+    assert_eq!(r.ok()["has_api_key"], true, "{}", r.body);
+    assert_eq!(r.body["env_var"], "XAI_API_KEY", "{}", r.body);
+}
+
+/// TER-1205: `finish` checks the row again before it imports the tokens. A
+/// row that is no longer an xai plan row with grok when the login ends gets
+/// no tokens, and no account.
+#[tokio::test]
+async fn a_grok_login_into_a_row_edited_meanwhile_stores_nothing() {
+    let env = boot(
+        |_| {},
+        |u, bin| {
+            u.programs
+                .insert(HarnessId::Grok, fake_grok_login(bin, GROK_TOKEN_A, true));
+        },
+    )
+    .await;
+    let td = &env.td;
+    let bin = td.dir.path().join("bin");
+    xai_plan_row(td, "x-super").await;
+    let r = td
+        .post(
+            "/api/subscriptions/login",
+            json!({"kind": "grok", "name": "x-super"}),
+        )
+        .await;
+    let id = r.ok()["id"].as_str().unwrap().to_owned();
+    wait_login(td, &id, "waiting").await;
+    // While the operator signs in, the row becomes an xai API-key row.
+    td.delete("/api/subscriptions/x-super").await.ok();
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "x-super", "provider": "xai", "plan": "API key", "harnesses": ["pi"]}),
+    )
+    .await
+    .ok();
+    std::fs::write(bin.join("go"), "").unwrap();
+    let f = wait_login(td, &id, "failed").await;
+    let error = f["error"].as_str().unwrap();
+    assert!(
+        error.contains("the login is not stored") && error.contains("is not an xai plan"),
+        "{f}"
+    );
+    assert!(
+        !terrariumd::accounts::exists(&td.state, "x-super"),
+        "the tokens went into the account of an edited row"
+    );
+    let s = td.get("/api/subscriptions/x-super").await;
+    assert_eq!(s.ok()["plan"], "API key", "{}", s.body);
+    assert_eq!(s.body["harnesses"], json!(["pi"]), "{}", s.body);
+    assert_ne!(s.body["login_status"], "logged_in", "{}", s.body);
+    assert_login_dir_gone(&id);
+}
+
+/// TER-1191 R6, TER-1205: a verify and a logout of a Grok Build account
+/// build the redaction matcher again. A refreshed token is redacted from
+/// the verify on, and a logged-out login leaves the matcher.
+#[tokio::test]
+async fn grok_verify_and_logout_rebuild_the_redaction_matcher() {
+    let env = boot(
+        |_| {},
+        |u, bin| {
+            u.programs
+                .insert(HarnessId::Grok, fake_grok_login(bin, GROK_TOKEN_A, false));
+        },
+    )
+    .await;
+    let td = &env.td;
+    td.project("p").await;
+    xai_plan_row(td, "x-super").await;
+    let label = "[secret:subscription/x-super]";
+    let r = td
+        .post(
+            "/api/subscriptions/login",
+            json!({"kind": "grok", "name": "x-super"}),
+        )
+        .await;
+    let id = r.ok()["id"].as_str().unwrap().to_owned();
+    let done = wait_login(td, &id, "done").await;
+    assert_eq!(done["subscription"], "x-super", "{done}");
+    assert_eq!(card_body(td, GROK_TOKEN_A).await, format!("t={label}"));
+
+    // Grok refreshes its login in the account: the matcher does not know
+    // the new token until a verify.
+    let file = terrariumd::accounts::credential_path(
+        &terrariumd::accounts::store_dir(&td.state, "x-super"),
+        HarnessId::Grok,
+    );
+    std::fs::write(
+        &file,
+        json!({"session": {"access_token": GROK_TOKEN_B}}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        card_body(td, GROK_TOKEN_B).await,
+        format!("t={GROK_TOKEN_B}")
+    );
+    let v = td.post_empty("/api/subscriptions/x-super/verify").await;
+    assert_eq!(
+        v.ok()["subscription"]["login_status"],
+        "logged_in",
+        "{}",
+        v.body
+    );
+    assert_eq!(card_body(td, GROK_TOKEN_B).await, format!("t={label}"));
+    // The old token is no longer in the file, nor in the matcher.
+    assert_eq!(
+        card_body(td, GROK_TOKEN_A).await,
+        format!("t={GROK_TOKEN_A}")
+    );
+
+    // A logout removes the account, and its token leaves the matcher.
+    td.post_empty("/api/subscriptions/x-super/logout")
+        .await
+        .ok();
+    assert!(!terrariumd::accounts::exists(&td.state, "x-super"));
+    assert_eq!(
+        card_body(td, GROK_TOKEN_B).await,
+        format!("t={GROK_TOKEN_B}")
+    );
+}
+
+const XAI_ENV_CHILD: &str = "TERRARIUM_TEST_XAI_ENV_CHILD";
+const XAI_ENV_MARK: &str = "TERRARIUM_TEST_XAI_ENV_MARK";
+
+/// TER-1205: a daemon that has `XAI_API_KEY` in its env does not pass it to
+/// the login command or to a status check command: Grok Build would take
+/// the key as a login. The env cannot change in a test, so this test runs
+/// the binary again with the key set.
+#[test]
+fn login_and_check_commands_run_without_the_xai_api_key() {
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "subscriptions::child_login_and_check_commands_get_no_xai_api_key",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(XAI_ENV_CHILD, "1")
+        .env(XAI_ENV_MARK, "seen")
+        .env("XAI_API_KEY", "xai-daemon-env-key-0042")
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("1 passed"), "the child test ran: {text}");
+}
+
+#[tokio::test]
+async fn child_login_and_check_commands_get_no_xai_api_key() {
+    if std::env::var_os(XAI_ENV_CHILD).is_none() {
+        return;
+    }
+    assert!(
+        std::env::var_os("XAI_API_KEY").is_some(),
+        "the parent set it"
+    );
+    let env = boot(
+        |_| {},
+        |u, bin| {
+            u.programs
+                .insert(HarnessId::Grok, fake_grok_login(bin, GROK_TOKEN_A, false));
+            u.programs.insert(
+                HarnessId::Claude,
+                script(
+                    bin,
+                    "claude-env",
+                    &format!(
+                        r#"env > '{}'
+echo '{{"loggedIn": false, "authMethod": "none"}}'; exit 1"#,
+                        bin.join("claude-check.env").display()
+                    ),
+                ),
+            );
+        },
+    )
+    .await;
+    let td = &env.td;
+    let bin = td.dir.path().join("bin");
+
+    // The login command.
+    xai_plan_row(td, "x-super").await;
+    let r = td
+        .post(
+            "/api/subscriptions/login",
+            json!({"kind": "grok", "name": "x-super"}),
+        )
+        .await;
+    let id = r.ok()["id"].as_str().unwrap().to_owned();
+    wait_login(td, &id, "done").await;
+    // A status check command.
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "anthropic-max", "provider": "anthropic", "harnesses": ["claude"]}),
+    )
+    .await
+    .ok();
+    td.post_empty("/api/subscriptions/anthropic-max/verify")
+        .await
+        .ok();
+
+    for f in ["grok-login.env", "claude-check.env"] {
+        let text = std::fs::read_to_string(bin.join(f)).unwrap();
+        let names: Vec<&str> = text.lines().filter_map(|l| l.split('=').next()).collect();
+        // The dump is the command's env: the daemon's other vars are there.
+        assert!(names.contains(&XAI_ENV_MARK), "{f}: {names:?}");
+        assert!(!names.contains(&"XAI_API_KEY"), "{f} has XAI_API_KEY");
+        assert!(!text.contains("xai-daemon-env-key-0042"), "{f} has the key");
+    }
+}
+
+/// TER-1205 (rev-1205, major): a file that turns an xai API-key row into an
+/// xai plan row drops the key. The row loses its variable and its key
+/// login, the key file goes, and the key leaves the redaction matcher, so
+/// no grok agent can get `XAI_API_KEY` from it.
+#[tokio::test]
+async fn a_file_that_makes_an_xai_key_row_a_plan_row_drops_the_key() {
+    const KEY_ROW: &str = "provider = \"xai\"\nplan = \"API key\"\nharnesses = [\"pi\"]\n";
+    const PLAN_ROW: &str = "provider = \"xai\"\nplan = \"Super\"\nharnesses = [\"grok\"]\n";
+    const KEY: &str = "xai-file-row-key-0123456789";
+    let env = boot(
+        |c| write(c, "subscriptions/x-file.toml", KEY_ROW),
+        |_, _| {},
+    )
+    .await;
+    let td = &env.td;
+    td.project("p").await;
+    let r = td
+        .post(
+            "/api/subscriptions/x-file/api-key",
+            json!({"provider": "xai", "key": KEY}),
+        )
+        .await;
+    assert_eq!(r.ok()["env_var"], "XAI_API_KEY", "{}", r.body);
+    assert_eq!(card_body(td, KEY).await, "t=[secret:subscription/x-file]");
+
+    write(&td.config, "subscriptions/x-file.toml", PLAN_ROW);
+    td.post_empty("/api/reload").await.ok();
+    let s = td.get("/api/subscriptions/x-file").await;
+    assert_eq!(s.ok()["plan"], "Super", "{}", s.body);
+    assert_eq!(s.body["source"], "file", "{}", s.body);
+    assert!(s.body["env_var"].is_null(), "{}", s.body);
+    assert_eq!(s.body["has_api_key"], false, "{}", s.body);
+    assert_ne!(s.body["login_status"], "logged_in", "{}", s.body);
+    let key_file = terrariumd::login_session::key_path(&td.state, "x-file");
+    assert!(!key_file.exists(), "the key file stays");
+    let sub = td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(|c| terrariumd::store::subscriptions::get(c, "x-file"))
+        .await
+        .unwrap();
+    let vars = terrariumd::login_session::credential_env_for(&td.state, &sub);
+    assert!(vars.is_empty(), "a plan row gives an API key");
+    assert_eq!(card_body(td, KEY).await, format!("t={KEY}"));
+    let audit = td
+        .get("/api/audit?action=subscription.api_key_dropped")
+        .await;
+    assert!(audit.ok().to_string().contains("x-file"), "{}", audit.body);
+}

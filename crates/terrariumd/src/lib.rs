@@ -930,6 +930,9 @@ pub async fn apply_definitions(
         })
         .await?;
     report.errors.extend(changes.errors);
+    // A file that made an xai key row a plan row: its key file goes
+    // (TER-1205).
+    login_session::drop_plan_row_keys_in(state).await;
     // The stream limits of the self-hosted subscriptions.
     stream_limit::refresh(state).await;
     let target_defs = defs.targets.clone();

@@ -279,6 +279,9 @@ async fn apply(
         })
         .await?;
     drop(deleting);
+    // A fleet that made an xai key row a plan row: its key file goes
+    // (TER-1205).
+    crate::login_session::drop_plan_row_keys_in(&state).await;
     // Like `DELETE /api/agents/{id}`: each pruned agent dir goes to the
     // trash (`crate::trash`).
     for id in &applied.deleted_agents {

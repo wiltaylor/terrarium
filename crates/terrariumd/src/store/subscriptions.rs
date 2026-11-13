@@ -364,6 +364,26 @@ pub fn upsert_def(t: &mut Tx<'_>, def: &SubscriptionDef, source: &str) -> ApiRes
             cloud
         ],
     )?;
+    // R7 (TER-1191, TER-1205): an xai plan row holds no API key. A fleet or
+    // file definition that turns an xai API-key row into a plan row drops
+    // the key here: the row forgets its variable and its key login. The
+    // caller removes the key file (`login_session::drop_plan_row_keys`).
+    if terrarium_core::xai::is_plan_row(&def.provider, def.plan.as_deref()) {
+        let dropped = t.execute(
+            "UPDATE subscriptions SET env_var = NULL,
+                 login_status = CASE WHEN login_status IN (?2, ?3) THEN ?4 ELSE login_status END
+             WHERE name = ?1 AND env_var IS NOT NULL",
+            params![def.name, LOGGED_IN, API_KEY, MISSING],
+        )?;
+        if dropped > 0 {
+            t.audit(
+                "subscription.api_key_dropped",
+                &def.name,
+                None,
+                serde_json::json!({"plan": def.plan}),
+            )?;
+        }
+    }
     get(t, &def.name)
 }
 

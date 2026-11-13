@@ -1402,6 +1402,14 @@ async fn finish(state: &Shared, s: &LoginSession) -> Result<subs::Subscription, 
     let list = state.db.read(subs::list).await.map_err(|e| e.message)?;
     let name = login_name(&state.state_dir, &list, &st, s.name.as_deref());
     subs::check_name(&name).map_err(|e| e.message)?;
+    // A Grok login goes only into a row that is still an xai plan row with
+    // grok: the row can change while the operator signs in. Check it before
+    // the tokens leave the scratch home (TER-1205).
+    if s.kind == LoginKind::Grok
+        && let Some(why) = grok_login_refusal(&list, Some(&name))
+    {
+        return Err(format!("the login is not stored: {why}"));
+    }
     // Only the credential leaves the scratch home, into the account of
     // `name`.
     let (dir, n, h, provider) = (
@@ -1410,6 +1418,9 @@ async fn finish(state: &Shared, s: &LoginSession) -> Result<subs::Subscription, 
         s.kind.harness(),
         st.provider.clone(),
     );
+    // A Grok account that was not there before the import goes as a whole
+    // when the register fails; else only its Grok credential goes.
+    let had_account = crate::accounts::exists(&state.state_dir, &name);
     tokio::task::spawn_blocking(move || {
         crate::accounts::import_login(&dir, &n, h, &provider, &scratch)
     })
@@ -1420,9 +1431,15 @@ async fn finish(state: &Shared, s: &LoginSession) -> Result<subs::Subscription, 
     if h == HarnessId::Grok {
         crate::secrets::redact::rebuild(state).await;
     }
-    let sub = register(state, &st, Some(&name))
-        .await
-        .map_err(|e| e.message)?;
+    let sub = match register(state, &st, Some(&name)).await {
+        Ok(sub) => sub,
+        Err(e) => {
+            if h == HarnessId::Grok {
+                drop_grok_import(state, &name, had_account).await;
+            }
+            return Err(e.message);
+        }
+    };
     // The first plan account of a harness becomes its default (PLAN
     // §16.3). A second account keeps the default.
     crate::api::settle_account_defaults(state, Some(sub.name.clone())).await;
@@ -1430,6 +1447,26 @@ async fn finish(state: &Shared, s: &LoginSession) -> Result<subs::Subscription, 
         warn!(subscription = %sub.name, "first probe failed: {e}");
     }
     Ok(sub)
+}
+
+/// Remove the Grok tokens that a login imported into the account of
+/// `name` when its register failed (TER-1205): no orphan credential stays,
+/// and the tokens leave the redaction matcher.
+async fn drop_grok_import(state: &Shared, name: &str, had_account: bool) {
+    let (dir, n) = (state.state_dir.clone(), name.to_owned());
+    let removed = tokio::task::spawn_blocking(move || {
+        if had_account {
+            crate::accounts::remove_credential(&dir, &n, HarnessId::Grok)
+        } else {
+            crate::accounts::remove(&dir, &n)
+        }
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
+    if let Err(e) = removed {
+        warn!(subscription = %name, "cannot remove the Grok login of a failed register: {e}");
+    }
+    crate::secrets::redact::rebuild(state).await;
 }
 
 /// The state of a login session: live, or from the store.
@@ -1740,6 +1777,48 @@ pub fn store_key(state_dir: &Path, name: &str, key: &ApiKey) -> std::io::Result<
     std::fs::rename(&tmp, &path)
 }
 
+/// Remove the key file of each xai plan row in `list` (TER-1205): a fleet
+/// or file apply that turns an xai API-key row into a plan row drops the
+/// key (`store::subscriptions::upsert_def` clears the row). Returns the
+/// names whose key went. The caller rebuilds the redaction matcher.
+pub fn drop_plan_row_keys(state_dir: &Path, list: &[Subscription]) -> Vec<String> {
+    let mut out = Vec::new();
+    for s in list {
+        if !terrarium_core::xai::is_plan_row(&s.provider, s.plan.as_deref()) {
+            continue;
+        }
+        match std::fs::remove_file(key_path(state_dir, &s.name)) {
+            Ok(()) => out.push(s.name.clone()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                warn!(subscription = %s.name, "cannot remove the key of an xai plan row: {e}");
+            }
+        }
+    }
+    out
+}
+
+/// Drop the key files of the xai plan rows, then rebuild the redaction
+/// matcher when a key went (a delete, PLAN §16b.6). After a fleet apply
+/// and a file sync (TER-1205).
+pub async fn drop_plan_row_keys_in(state: &Shared) {
+    let list = match state.db.read(subs::list).await {
+        Ok(l) => l,
+        Err(e) => {
+            warn!("cannot list the subscriptions to drop xai plan keys: {e}");
+            return;
+        }
+    };
+    let dir = state.state_dir.clone();
+    let dropped = tokio::task::spawn_blocking(move || drop_plan_row_keys(&dir, &list))
+        .await
+        .unwrap_or_default();
+    if !dropped.is_empty() {
+        info!(subscriptions = ?dropped, "the API keys of xai plan rows are removed");
+        crate::secrets::redact::rebuild(state).await;
+    }
+}
+
 /// The stored key of a subscription with its provider and base URL. A
 /// secret: never log or return it.
 pub fn read_key(state_dir: &Path, name: &str) -> Option<ApiKey> {
@@ -1786,6 +1865,11 @@ pub fn stored_key(state_dir: &Path, name: &str) -> Option<String> {
 /// (PLAN §16b.4). The values never go into the launch spec or the runner
 /// spec file. They are secrets: never log them or write them to a file.
 pub fn credential_env_for(state_dir: &Path, sub: &Subscription) -> Vec<(String, String)> {
+    // An xai plan row spends its Grok Build login only, never an API key
+    // (TER-1191 R7, TER-1205), whatever the row or a key file still holds.
+    if terrarium_core::xai::is_plan_row(&sub.provider, sub.plan.as_deref()) {
+        return Vec::new();
+    }
     let Some(var) = sub.env_var.as_deref() else {
         return Vec::new();
     };
@@ -1884,6 +1968,42 @@ mod tests {
             "probe_status": "none", "created_at": "", "updated_at": ""
         }))
         .unwrap()
+    }
+
+    /// TER-1205: an xai plan row never gives an API key to an agent, even
+    /// with a variable and a key file left over; the sweep removes that
+    /// file and keeps the key of an xai API-key row.
+    #[test]
+    fn an_xai_plan_row_gives_no_api_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = |k: &str| ApiKey {
+            provider: "xai".into(),
+            key: k.into(),
+            plan: None,
+            base_url: None,
+            models: Vec::new(),
+            key_id: None,
+            cloud: None,
+        };
+        store_key(tmp.path(), "x-super", &key("xai-left-over-0042")).unwrap();
+        store_key(tmp.path(), "x-key", &key("xai-for-pi-0042")).unwrap();
+        let with_var = |name: &str, plan: &str, h: &str| {
+            let mut s = row(name, "xai", Some(plan), &[h]);
+            s.env_var = Some("XAI_API_KEY".into());
+            s
+        };
+        let plan_row = with_var("x-super", "Super", "grok");
+        let key_row = with_var("x-key", "API key", "pi");
+        assert!(credential_env_for(tmp.path(), &plan_row).is_empty());
+        assert_eq!(
+            credential_env_for(tmp.path(), &key_row),
+            [("XAI_API_KEY".to_owned(), "xai-for-pi-0042".to_owned())]
+        );
+        let list = [plan_row, key_row];
+        assert_eq!(drop_plan_row_keys(tmp.path(), &list), ["x-super"]);
+        assert!(!key_path(tmp.path(), "x-super").exists());
+        assert!(key_path(tmp.path(), "x-key").exists());
+        assert!(drop_plan_row_keys(tmp.path(), &list).is_empty());
     }
 
     /// TER-1191: the Grok login kind, and the rows that it may log into.
