@@ -3524,7 +3524,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         s.cloud = { ...input };
         return subView(s);
       }),
-      list: () => reply(() => w.subscriptions.map(subView)),
+      list: () => reply(() => w.subscriptions.map((s) => ({
+        ...subView(s),
+        assigned_agent_count: w.agents.filter((a) => (a.subscription ?? (a.harness !== "pi" ? w.subscriptions.find((d) => d.default && d.account?.harness === a.harness)?.name : undefined)) === s.name).length,
+        assigned_agent_count_scope: "all_projects" as const,
+      }))),
       get: (name) => reply(() => subView(sub(name))),
       create: (def) =>
         reply(() => {

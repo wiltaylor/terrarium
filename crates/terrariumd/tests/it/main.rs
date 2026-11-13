@@ -163,6 +163,7 @@ mod skills;
 mod spawn_rights;
 #[path = "../spawns.rs"]
 mod spawns;
+mod subscription_counts;
 #[path = "../subscriptions.rs"]
 mod subscriptions;
 #[path = "../system_prompts.rs"]

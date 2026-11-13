@@ -417,6 +417,24 @@ pub fn mark_alert(
     Ok(n == 1)
 }
 
+/// Effective stored assignments, restricted to readable projects. Includes
+/// every status and extant ephemeral agent, not just running agents.
+pub fn assigned_agent_counts(
+    conn: &Connection,
+    project: Option<&str>,
+) -> ApiResult<std::collections::BTreeMap<String, usize>> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(a.subscription, d.subscription), COUNT(*) FROM agents a
+         LEFT JOIN account_defaults d ON a.harness = d.harness
+           AND a.harness IN ('claude', 'codex', 'copilot')
+         WHERE (?1 IS NULL OR a.project = ?1)
+           AND COALESCE(a.subscription, d.subscription) IS NOT NULL
+         GROUP BY COALESCE(a.subscription, d.subscription)",
+    )?;
+    let rows = stmt.query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// The agents on a subscription: `(id, name, project)`.
 pub fn agents_on(
     conn: &Connection,
@@ -462,6 +480,37 @@ pub fn last_turn_seq(conn: &Connection, agent: &str) -> ApiResult<Option<i64>> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_assignments_scope_defaults_and_transitions() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE agents (id TEXT, project TEXT, harness TEXT, subscription TEXT, status TEXT, ephemeral INTEGER);
+            CREATE TABLE account_defaults (harness TEXT PRIMARY KEY, subscription TEXT);
+            INSERT INTO account_defaults VALUES ('claude','default'),('codex','default'),('copilot','other'),('pi','ignored');
+            INSERT INTO agents VALUES
+            ('1','p','claude',NULL,'working',0),
+            ('2','p','codex','explicit','stopped',1),
+            ('3','q','codex',NULL,'blocked',1),
+            ('4','p','pi',NULL,'idle',0),
+            ('5','p','claude','missing','failed',0),
+            ('6','p','copilot',NULL,'waiting',0);").unwrap();
+        let counts = assigned_agent_counts(&c, Some("p")).unwrap();
+        assert_eq!(counts.get("default"), Some(&1));
+        assert_eq!(counts.get("explicit"), Some(&1));
+        assert_eq!(counts.get("missing"), Some(&1));
+        assert_eq!(counts.get("other"), Some(&1));
+        assert!(!counts.contains_key("ignored"));
+        assert!(assigned_agent_counts(&c, Some("empty")).unwrap().is_empty());
+        assert_eq!(
+            assigned_agent_counts(&c, None).unwrap().get("default"),
+            Some(&2)
+        );
+        c.execute_batch("UPDATE agents SET status='idle'; UPDATE agents SET subscription='explicit' WHERE id='1'; DELETE FROM agents WHERE id='2'; UPDATE account_defaults SET subscription='new' WHERE harness='codex';").unwrap();
+        let counts = assigned_agent_counts(&c, None).unwrap();
+        assert_eq!(counts.get("explicit"), Some(&1));
+        assert_eq!(counts.get("new"), Some(&1));
+        assert!(!counts.contains_key("default"));
+    }
 
     #[test]
     fn per_card_totals_search_the_card_time_index_after_analyze() {
