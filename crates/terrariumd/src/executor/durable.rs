@@ -872,13 +872,35 @@ mod tests {
                     if kind.is_dir() {
                         continue;
                     }
-                    assert!(kind.is_file() || kind.is_fifo(), "{}", entry.path().display());
-                    assert_eq!(mode(&entry.path()), 0o600, "{umask}: {}", entry.path().display());
+                    assert!(
+                        kind.is_file() || kind.is_fifo(),
+                        "{}",
+                        entry.path().display()
+                    );
+                    assert_eq!(
+                        mode(&entry.path()),
+                        0o600,
+                        "{umask}: {}",
+                        entry.path().display()
+                    );
                     seen.push(entry.file_name().into_string().unwrap());
                 }
             }
-            for name in ["out", "err", "exit", "pid", "foreground", "ready", "live", "o", "e"] {
-                assert!(seen.iter().any(|s| s == name), "{umask}: {name} in {seen:?}");
+            for name in [
+                "out",
+                "err",
+                "exit",
+                "pid",
+                "foreground",
+                "ready",
+                "live",
+                "o",
+                "e",
+            ] {
+                assert!(
+                    seen.iter().any(|s| s == name),
+                    "{umask}: {name} in {seen:?}"
+                );
             }
         }
     }
