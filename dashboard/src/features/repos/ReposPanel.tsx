@@ -13,12 +13,16 @@ import { AddRepoForm } from "./AddRepoForm";
 
 export const repoHref = (project: string, repo: string) => `/p/${encodeURIComponent(project)}/repos/${encodeURIComponent(repo)}`;
 
-/** Project-local state is discarded only when the explicit project changes. */
-export function ReposPanel(props: { project: string }) {
-  return <Show when={props.project} keyed>{(project) => <ReposContent project={project} />}</Show>;
+/**
+ * Project-local state is discarded only when the explicit project changes.
+ * `canAttach` (project_admin) and `canCheckout` (write_project) hide the
+ * write controls; the route leaves them out and shows both (TER-1134).
+ */
+export function ReposPanel(props: { project: string; canAttach?: boolean; canCheckout?: boolean }) {
+  return <Show when={props.project} keyed>{(project) => <ReposContent project={project} canAttach={props.canAttach !== false} canCheckout={props.canCheckout !== false} />}</Show>;
 }
 
-function ReposContent(props: { project: string }) {
+function ReposContent(props: { project: string; canAttach: boolean; canCheckout: boolean }) {
   const { api, repos: reposStore } = useInstance();
   const project = () => props.project;
   const [repos, { refetch }] = createResource(() => project(), (p) => api.projects.repos(p));
@@ -30,11 +34,13 @@ function ReposContent(props: { project: string }) {
   return (
     <>
       <PageHead title="Repos" level={2}>
-        <button class="primary" onClick={() => setAdding(!adding())} aria-expanded={adding()}>
-          {adding() ? "Close" : "Add repo"}
-        </button>
+        <Show when={props.canAttach}>
+          <button class="primary" onClick={() => setAdding(!adding())} aria-expanded={adding()}>
+            {adding() ? "Close" : "Add repo"}
+          </button>
+        </Show>
       </PageHead>
-      <Show when={adding()}>
+      <Show when={adding() && props.canAttach}>
         <AddRepoForm
           project={project()}
           onAdded={() => setAdding(false)}
@@ -43,14 +49,14 @@ function ReposContent(props: { project: string }) {
       <ErrorBanner error={repos.error} />
       <Show when={repos()?.length} fallback={<Empty>{repos.loading ? "Loading…" : "No repos yet. Add one: the daemon clones it into a workspace at a checkout."}</Empty>}>
         <div class="stack" style={{ gap: "8px" }}>
-          <For each={repos()}>{(r) => <RepoRow repo={r} targets={targets() ?? []} />}</For>
+          <For each={repos()}>{(r) => <RepoRow repo={r} targets={targets() ?? []} canCheckout={props.canCheckout} />}</For>
         </div>
       </Show>
     </>
   );
 }
 
-function RepoRow(props: { repo: Repo; targets: Target[] }) {
+function RepoRow(props: { repo: Repo; targets: Target[]; canCheckout: boolean }) {
   const { api } = useInstance();
   const [open, setOpen] = createSignal(false);
   const [branch, setBranch] = createSignal(props.repo.default_branch ?? "");
@@ -92,11 +98,13 @@ function RepoRow(props: { repo: Repo; targets: Target[] }) {
         <A class="small" href={repoHref(props.repo.project, props.repo.name)}>
           Browse files, changes, and commits
         </A>
-        <button class="small" onClick={() => setOpen(!open())} aria-expanded={open()}>
-          Check out…
-        </button>
+        <Show when={props.canCheckout}>
+          <button class="small" onClick={() => setOpen(!open())} aria-expanded={open()}>
+            Check out…
+          </button>
+        </Show>
       </div>
-      <Show when={open()}>
+      <Show when={open() && props.canCheckout}>
         <div class="row" style={{ "flex-wrap": "wrap" }}>
           <label class="row small">
             Branch

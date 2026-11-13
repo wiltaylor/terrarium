@@ -20,7 +20,8 @@ function fieldErrors(e: unknown): Record<string, string> | null {
   return f && typeof f === "object" ? (f as Record<string, string>) : null;
 }
 
-export function RecordModal(props: { project: string; type: DbType; record?: DbRecord; onClose: () => void; onSaved: (r: DbRecord) => void; onDeleted: () => void }) {
+/** `readOnly` (no write_db, TER-1134): the record shows without Save and Delete record. */
+export function RecordModal(props: { project: string; type: DbType; record?: DbRecord; readOnly?: boolean; onClose: () => void; onSaved: (r: DbRecord) => void; onDeleted: () => void }) {
   const { api } = useInstance();
   const [record, setRecord] = createSignal<DbRecord | undefined>(props.record);
   const [form, setForm] = createSignal<FormState>(props.record ? recordForm(props.type.fields, props.record.data) : newForm(props.type.fields));
@@ -80,7 +81,7 @@ export function RecordModal(props: { project: string; type: DbType; record?: DbR
         noValidate
         onSubmit={(e) => {
           e.preventDefault();
-          void save();
+          if (!props.readOnly) void save();
         }}
       >
         <Show when={record()}>
@@ -121,14 +122,16 @@ export function RecordModal(props: { project: string; type: DbType; record?: DbR
           </For>
         </div>
         <div class="row db-actions">
-          <button type="submit" class="primary" disabled={busy()}>
-            {record() ? "Save" : "Create record"}
-          </button>
+          <Show when={!props.readOnly}>
+            <button type="submit" class="primary" disabled={busy()}>
+              {record() ? "Save" : "Create record"}
+            </button>
+          </Show>
           <button type="button" onClick={props.onClose}>
-            Cancel
+            {props.readOnly ? "Close" : "Cancel"}
           </button>
           <span style={{ flex: 1 }} />
-          <Show when={record()}>
+          <Show when={record() && !props.readOnly}>
             <ConfirmButton label="Delete record" onConfirm={remove} />
           </Show>
         </div>
