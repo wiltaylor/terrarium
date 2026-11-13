@@ -6,6 +6,7 @@ import { useInstance } from "../../instance";
 // events, and the events that a source adds to the log, read the list again.
 
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
 import { ConfirmButton, CopyButton, Empty, ErrorBanner, Modal, useNow } from "../../components/ui";
 import { ApiError } from "../../api/http";
 import type { EventSource, EventSourceKind, EventSourceWithSecret } from "../../api/types";
@@ -16,9 +17,17 @@ import { emptySourceForm, sortSources, SOURCE_KINDS, sourceBody, sourceFieldOf, 
 
 const COLS = 8;
 
-export function EventSourcesSection(props: { project: string | null }) {
+type EventSourcesProps = { project: string | null; canCreate?: boolean; canManage?: (source: EventSource) => boolean };
+
+export function EventSourcesSection(props: EventSourcesProps) {
+  return <Show when={{ project: props.project }} keyed>{(scope) => <EventSourcesBody {...props} project={scope.project} />}</Show>;
+}
+
+function EventSourcesBody(props: EventSourcesProps) {
   const { api, events } = useInstance();
-  const [items, setItems] = createSignal<EventSource[]>([]);
+  const [data, setData] = createStore<{ items: EventSource[] }>({ items: [] });
+  const items = () => data.items;
+  const setItems = (next: EventSource[] | ((previous: EventSource[]) => EventSource[])) => setData("items", reconcile(typeof next === "function" ? next(items()) : next));
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<unknown>(null);
   const [rowError, setRowError] = createSignal<{ id: string; error: unknown } | null>(null);
@@ -29,6 +38,7 @@ export function EventSourcesSection(props: { project: string | null }) {
   const [revealed, setRevealed] = createSignal<{ source: EventSourceWithSecret; rotated: boolean } | null>(null);
   const now = useNow(15_000);
   let generation = 0;
+  onCleanup(() => { generation++; });
 
   const load = async () => {
     const gen = ++generation;
@@ -50,6 +60,11 @@ export function EventSourcesSection(props: { project: string | null }) {
       () => {
         setLoading(true);
         setItems([]);
+        setCreating(false);
+        setSetupOf(null);
+        setRevealed(null);
+        setRowError(null);
+        setBusy(null);
         void load();
       },
     ),
@@ -110,9 +125,9 @@ export function EventSourcesSection(props: { project: string | null }) {
           <span class="small muted">Webhook senders (GitHub, Forgejo, or a script). Each good request becomes one event in the log; a trigger acts on it.</span>
         </div>
         <span class="row">
-          <button class="primary small" onClick={() => setCreating(true)}>
+          <Show when={props.canCreate !== false}><button class="primary small" onClick={() => setCreating(true)}>
             New event source
-          </button>
+          </button></Show>
           <button class="small" onClick={() => void load()}>
             Refresh
           </button>
@@ -167,15 +182,15 @@ export function EventSourcesSection(props: { project: string | null }) {
                         </Show>
                       </td>
                       <td>
-                        <input type="checkbox" aria-label={`Enable ${s.name}`} checked={s.enabled} disabled={busy() === `${s.id}:toggle`} onChange={(e) => void toggle(s, e.currentTarget)} />
+                        <Show when={!props.canManage || props.canManage(s)} fallback={<span>{s.enabled ? "On" : "Off"}</span>}><input type="checkbox" aria-label={`Enable ${s.name}`} checked={s.enabled} disabled={busy() === `${s.id}:toggle`} onChange={(e) => void toggle(s, e.currentTarget)} /></Show>
                       </td>
                       <td>
                         <span class="row" style={{ "flex-wrap": "wrap" }}>
                           <button class="small" aria-expanded={setupOf() === s.id} onClick={() => setSetupOf((cur) => (cur === s.id ? null : s.id))}>
                             {setupOf() === s.id ? "Hide setup" : "Setup"}
                           </button>
-                          <ConfirmButton class="small" label="Rotate" confirmLabel="Yes, rotate: the old secret stops now" disabled={busy() === `${s.id}:rotate`} onConfirm={() => rotate(s)} />
-                          <ConfirmButton class="small danger" label="Delete" disabled={busy() === `${s.id}:delete`} onConfirm={() => remove(s)} />
+                          <Show when={!props.canManage || props.canManage(s)}><ConfirmButton class="small" label="Rotate" confirmLabel="Yes, rotate: the old secret stops now" disabled={busy() === `${s.id}:rotate`} onConfirm={() => rotate(s)} />
+                          <ConfirmButton class="small danger" label="Delete" disabled={busy() === `${s.id}:delete`} onConfirm={() => remove(s)} /></Show>
                         </span>
                       </td>
                     </tr>

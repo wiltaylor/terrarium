@@ -10,7 +10,8 @@ import { useInstance } from "../../instance";
 // `calendar.*` event.
 
 import { useParams } from "@solidjs/router";
-import { createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
 import type { CalendarEvent, CalendarOccurrence, CalendarView } from "../../api/types";
 import { Markdown } from "../../components/Markdown";
 import { ConfirmButton, Empty, ErrorBanner, Modal, PageHead, Tabs, useNow } from "../../components/ui";
@@ -20,7 +21,7 @@ import { EventDialog } from "./EventDialog";
 import { agenda, DAY_LABELS, dayKey, isRunning, kindClass, kindLabel, monthGrid, monthRange, scopeLabel, timeLabel, weekDays, weekStart } from "./model";
 import { DAYS } from "./recur";
 
-type ViewMode = "month" | "week" | "agenda";
+export type ViewMode = "month" | "week" | "agenda";
 const MODES: { id: ViewMode; label: string }[] = [
   { id: "month", label: "Month" },
   { id: "week", label: "Week" },
@@ -142,17 +143,33 @@ function EventDetail(props: { event: CalendarEvent; occurrence: CalendarOccurren
 }
 
 export default function CalendarPage() {
-  const { api, events } = useInstance();
   const params = useParams<{ project?: string }>();
-  const project = () => params.project ?? null;
+  return <Show when={{ project: params.project ?? null }} keyed>{(scope) => <CalendarBody project={scope.project} legacy />}</Show>;
+}
+
+export function CalendarPanel(props: { project: string; view?: ViewMode; onViewChange?: (view: ViewMode) => void; onSelectionChange?: (occurrence: CalendarOccurrence | null) => void }) {
+  return <Show when={props.project} keyed>{(project) => <CalendarBody project={project} view={props.view} onViewChange={props.onViewChange} onSelectionChange={props.onSelectionChange} />}</Show>;
+}
+
+function CalendarBody(props: { project: string | null; legacy?: boolean; view?: ViewMode; onViewChange?: (view: ViewMode) => void; onSelectionChange?: (occurrence: CalendarOccurrence | null) => void }) {
+  const { api, events } = useInstance();
+  const project = () => props.project;
   const now = useNow(30_000);
   const phone = typeof matchMedia === "function" ? matchMedia(PHONE) : undefined;
-  const [mode, setMode] = createSignal<ViewMode>(phone?.matches ? "agenda" : "month");
+  const [mode, updateMode] = createSignal<ViewMode>(props.view ?? (props.legacy && phone?.matches ? "agenda" : "month"));
+  const setMode = (value: ViewMode) => { updateMode(value); props.onViewChange?.(value); };
+  createEffect(on(() => props.view, (value) => { if (value) updateMode(value); }));
   const [anchor, setAnchor] = createSignal(Date.now());
   const [filter, setFilter] = createSignal<string>("");
   const [error, setError] = createSignal<unknown>(null);
-  const [open, setOpen] = createSignal<CalendarOccurrence | null>(null);
+  const [open, updateOpen] = createSignal<CalendarOccurrence | null>(null);
+  const setOpen = (value: CalendarOccurrence | null) => { updateOpen(value); props.onSelectionChange?.(value); };
   const [editing, setEditing] = createSignal<{ event?: CalendarEvent; day?: number } | null>(null);
+  createEffect(on(project, () => {
+    updateOpen(null);
+    setEditing(null);
+    setError(null);
+  }));
 
   const range = createMemo(() => {
     const a = anchor();
@@ -193,12 +210,18 @@ export default function CalendarPage() {
       clearTimeout(t);
       t = setTimeout(() => void refetch(), 400);
     });
-    const onPhone = () => phone?.matches && mode() === "month" && setMode("agenda");
+    const onPhone = () => props.legacy && phone?.matches && mode() === "month" && setMode("agenda");
     phone?.addEventListener?.("change", onPhone);
     onCleanup(() => (off(), clearTimeout(t), phone?.removeEventListener?.("change", onPhone)));
   });
 
   const occ = () => view.latest?.occurrences ?? [];
+  const [days, setDays] = createStore<{ month: ReturnType<typeof monthGrid>; week: ReturnType<typeof weekDays>; agenda: ReturnType<typeof agenda> }>({ month: [], week: [], agenda: [] });
+  createEffect(() => {
+    setDays("month", reconcile(monthGrid(anchor(), occ(), now()), { key: "key" }));
+    setDays("week", reconcile(weekDays(anchor(), occ(), now()), { key: "key" }));
+    setDays("agenda", reconcile(agenda(occ(), range().from), { key: "day" }));
+  });
   const eventOf = (id: string) => view.latest?.events.find((e) => e.id === id);
   const canWrite = () => (project() ? !!view.latest?.can_write : true);
 
@@ -290,7 +313,7 @@ export default function CalendarPage() {
               )}
             </For>
           </div>
-          <For each={monthGrid(anchor(), occ(), now())}>
+          <For each={days.month}>
             {(week) => (
               <div class="cal-row" role="row">
                 <For each={week}>
@@ -326,7 +349,7 @@ export default function CalendarPage() {
       </Show>
       <Show when={mode() === "week"}>
         <div class="cal-week">
-          <For each={weekDays(anchor(), occ(), now())}>
+          <For each={days.week}>
             {(d) => (
               <section class="cal-week-day" classList={{ "cal-today": d.today }} aria-label={d.key}>
                 <h3 class="small">
@@ -343,7 +366,7 @@ export default function CalendarPage() {
       <Show when={mode() === "agenda"}>
         <Show when={occ().length} fallback={<Empty>{view.loading ? "Loading…" : "Nothing on the calendar in these 31 days."}</Empty>}>
           <div class="cal-agenda">
-            <For each={agenda(occ(), range().from)}>
+            <For each={days.agenda}>
               {(g) => (
                 <section aria-label={g.key} classList={{ "cal-today": g.key === dayKey(now()) }}>
                   <h3 class="cal-agenda-day">{new Date(g.day).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" })}</h3>

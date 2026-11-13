@@ -15,9 +15,10 @@ import { useInstance } from "../../instance";
 import { useParams, useSearchParams } from "@solidjs/router";
 import { A } from "../../instance/navigation";
 import { createEffect, createSignal, For, Index, on, onCleanup, onMount, Show } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
 import { MockOnlyNote } from "../../components/MockOnly";
 import { ConfirmButton, Empty, ErrorBanner, LoadMore, PageHead, Tabs, useNow } from "../../components/ui";
-import type { Schedule } from "../../api/types";
+import type { EventSource, Schedule } from "../../api/types";
 
 import { SCOPE_FILTERS, type ScopeFilter } from "../../lib/target-scope";
 import { actionWords, dayStartMarkWords, guardWords, matchesWords, nextRunWords, specWords } from "../../lib/schedule";
@@ -32,28 +33,49 @@ import { ownerText } from "../dashboard/model";
 const COLS = 8;
 
 export default function SchedulesPage() {
-  const { api, events } = useInstance();
   const params = useParams<{ project?: string }>();
   const [search, setSearch] = useSearchParams<{ scope?: string; open?: string; tab?: string }>();
-  const project = () => params.project ?? null;
-  const kind = (): ScheduleKind => tabOf(search.tab);
+  return <ScheduleListPanel project={params.project ?? null} kind={tabOf(search.tab)} scope={search.scope === "project" || search.scope === "global" ? search.scope : "all"} initialOpen={search.open} onKindChange={(k) => setSearch({ tab: tabParam(k), open: undefined }, { replace: true })} onScopeChange={(f) => setSearch({ scope: f === "all" ? undefined : f }, { replace: true })} legacy />;
+}
+
+export function SchedulesPanel(props: { project: string; part: "schedules" | "triggers" | "event_sources"; scope?: ScopeFilter; search?: string; canCreate?: boolean; canManageSchedule?: (schedule: Schedule) => boolean; canManageSource?: (source: EventSource) => boolean; onScopeChange?: (scope: ScopeFilter) => void; onSelectionChange?: (ids: ReadonlySet<string>) => void }) {
+  return <Show when={props.part !== "event_sources"} fallback={<EventSourcesSection project={props.project} canCreate={props.canCreate ?? false} canManage={(source) => props.canManageSource?.(source) ?? false} />}>
+    <ScheduleListPanel project={props.project} kind={props.part === "triggers" ? "trigger" : "time"} scope={props.scope} search={props.search} canCreate={props.canCreate} canManage={props.canManageSchedule} onScopeChange={props.onScopeChange} onSelectionChange={props.onSelectionChange} />
+  </Show>;
+}
+
+type ScheduleListProps = { project: string | null; kind: ScheduleKind; scope?: ScopeFilter; search?: string; initialOpen?: string; legacy?: boolean; canCreate?: boolean; canManage?: (schedule: Schedule) => boolean; onKindChange?: (kind: ScheduleKind) => void; onScopeChange?: (scope: ScopeFilter) => void; onSelectionChange?: (ids: ReadonlySet<string>) => void };
+
+function ScheduleListPanel(props: ScheduleListProps) {
+  return <Show when={{ project: props.project }} keyed>{(scope) => <ScheduleListBody {...props} project={scope.project} />}</Show>;
+}
+
+function ScheduleListBody(props: ScheduleListProps) {
+  const { api, events } = useInstance();
+  const project = () => props.project;
+  const kind = () => props.kind;
+  const canManage = (s: Schedule) => !!props.legacy || !!props.canManage?.(s);
   const triggers = () => kind() === "trigger";
   const actions = () => kind() === "action";
-  const setTab = (k: ScheduleKind) => setSearch({ tab: tabParam(k), open: undefined }, { replace: true });
+  const setTab = (k: ScheduleKind) => props.onKindChange?.(k);
   const view = () => ({ project: project(), kind: kind() });
-  const filter = (): ScopeFilter => (search.scope === "project" || search.scope === "global" ? search.scope : "all");
-  const setFilter = (f: ScopeFilter) => setSearch({ scope: f === "all" ? undefined : f }, { replace: true });
+  const [localScope, setLocalScope] = createSignal<ScopeFilter>("all");
+  const filter = (): ScopeFilter => props.scope ?? localScope();
+  const setFilter = (f: ScopeFilter) => { setLocalScope(f); props.onScopeChange?.(f); };
 
-  const [state, setState] = createSignal<ScheduleListState>({ items: [], running: {} });
+  const [data, setData] = createStore<{ value: ScheduleListState }>({ value: { items: [], running: {} } });
+  const state = () => data.value;
+  const setState = (next: ScheduleListState | ((previous: ScheduleListState) => ScheduleListState)) => setData("value", reconcile(typeof next === "function" ? next(state()) : next));
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<unknown>(null);
-  const [open, setOpen] = createSignal<ReadonlySet<string>>(new Set(search.open ? [search.open] : []));
+  const [open, setOpen] = createSignal<ReadonlySet<string>>(new Set(props.initialOpen ? [props.initialOpen] : []));
   const [dialog, setDialog] = createSignal<{ schedule?: Schedule } | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
   const [rowError, setRowError] = createSignal<{ id: string; error: unknown } | null>(null);
   const [busy, setBusy] = createSignal<string | null>(null);
   const now = useNow(15_000);
   let generation = 0;
+  onCleanup(() => { generation++; });
 
   const load = async () => {
     const gen = ++generation;
@@ -74,6 +96,10 @@ export default function SchedulesPage() {
     on([project, kind], () => {
       setLoading(true);
       setState({ items: [], running: {} });
+      setDialog(null);
+      setRowError(null);
+      setNotice(null);
+      setBusy(null);
       void load();
     }),
   );
@@ -101,6 +127,7 @@ export default function SchedulesPage() {
       const next = new Set(cur);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      props.onSelectionChange?.(next);
       return next;
     });
 
@@ -150,7 +177,7 @@ export default function SchedulesPage() {
     });
 
   const groups = () => {
-    const list = state().items;
+    const list = state().items.filter((s) => !props.search || s.name.toLowerCase().includes(props.search.toLowerCase()));
     if (project()) return [{ key: project()!, label: "", items: filterSchedules(list, filter()) }];
     return groupSchedules(list);
   };
@@ -168,14 +195,14 @@ export default function SchedulesPage() {
     <>
       {/* In a project it is a project tab, under the project tab row. */}
       <PageHead title={project() ? "Schedules" : "Schedules · all"} level={project() ? 2 : 1}>
-        <button class="primary" onClick={() => setDialog({})}>
+        <Show when={props.legacy || props.canCreate}><button class="primary" onClick={() => setDialog({})}>
           {triggers() ? "New trigger" : actions() ? "New action" : "New schedule"}
-        </button>
+        </button></Show>
         <button onClick={() => void load()}>Refresh</button>
       </PageHead>
-      <div style={{ "margin-bottom": "12px" }}>
+      <Show when={props.legacy}><div style={{ "margin-bottom": "12px" }}>
         <Tabs tabs={SCHEDULE_TABS} active={kind()} onChange={setTab} />
-      </div>
+      </div></Show>
       <div class="spread" style={{ "margin-bottom": "12px", "flex-wrap": "wrap", gap: "8px" }}>
         <div class="row" style={{ gap: "8px", "flex-wrap": "wrap" }}>
           <Show when={project()} fallback={<span class="small muted">All {noun()}, by scope.</span>}>
@@ -295,17 +322,17 @@ export default function SchedulesPage() {
                                 </button>
                               </td>
                               <td>
-                                <input
+                                <Show when={canManage(s)} fallback={<span>{s.enabled ? "On" : "Off"}</span>}><input
                                   type="checkbox"
                                   aria-label={`Enable ${s.name}`}
                                   title={s.source === "file" ? "From a file: edit the file" : undefined}
                                   checked={s.enabled}
                                   disabled={s.source === "file" || busy() === `${s.id}:toggle`}
                                   onChange={(e) => void toggle(s, e.currentTarget)}
-                                />
+                                /></Show>
                               </td>
                               <td>
-                                <span class="row" style={{ "flex-wrap": "wrap" }}>
+                                <Show when={canManage(s)}><span class="row" style={{ "flex-wrap": "wrap" }}>
                                   <button class="small" disabled={running() || busy() === `${s.id}:run`} onClick={() => void runNow(s)}>
                                     {running() || busy() === `${s.id}:run` ? "Running…" : "Run now"}
                                   </button>
@@ -313,7 +340,7 @@ export default function SchedulesPage() {
                                     Edit
                                   </button>
                                   <ConfirmButton class="small danger" label="Delete" disabled={s.source === "file"} onConfirm={() => remove(s)} />
-                                </span>
+                                </span></Show>
                               </td>
                             </tr>
                             <Show when={rowError()?.id === s.id ? rowError()!.error : null}>
@@ -364,7 +391,7 @@ export default function SchedulesPage() {
           />
         )}
       </Show>
-      <Show when={triggers()}>
+      <Show when={props.legacy && triggers()}>
         <EventSourcesSection project={project()} />
       </Show>
       <MockOnlyNote label="new API">
