@@ -1009,8 +1009,8 @@ pub async fn apply_definitions(
         })
         .await?;
     rule_errors.extend(stored);
-    // TER-243: merge_queue into the wait overrides of older migrations.
-    rule_errors.extend(store::rules::add_merge_queue(&state.db).await);
+    // TER-1090: restore the built-ins over exact generated legacy wait overrides.
+    rule_errors.extend(store::rules::retire_legacy_wait_overrides(&state.db).await);
     report.errors.extend(rule_errors);
     // The template files, before the fleets: a fleet agent may name one.
     match template_files::refresh(state).await {
