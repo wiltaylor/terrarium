@@ -2358,7 +2358,6 @@ async fn drive_link(
     let mut journal_retry = tokio::time::interval(JOURNAL_RETRY_TICK);
     let mut journal_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut nonce = 0u64;
-    let mut last_tick = Instant::now();
     let why = loop {
         tokio::select! {
             _ = journal_retry.tick() => {
@@ -2423,11 +2422,7 @@ async fn drive_link(
                 if reg.journal_backpressured(host) {
                     last_rx = Instant::now();
                 }
-                let tick_gap = last_tick.elapsed();
-                last_tick = Instant::now();
                 if last_rx.elapsed() > hb * MISSED_HEARTBEATS {
-                    let ready = futures_util::FutureExt::now_or_never(stream.next()).is_some();
-                    eprintln!("DIAG timeout: since_rx={:?} tick_gap={tick_gap:?} frame_ready={ready} paused={}", last_rx.elapsed(), reg.journal_backpressured(host));
                     break "heartbeat timeout";
                 }
                 nonce += 1;
