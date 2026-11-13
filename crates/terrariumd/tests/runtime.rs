@@ -2944,6 +2944,8 @@ async fn a_parked_pointer_survives_a_daemon_restart() {
 async fn a_parked_reservation_pointer_survives_a_daemon_restart() {
     let mut td = Td::start().await;
     let id = td.agent("demo", "bob", json!({})).await;
+    // Stopped, so the pointer parks: a stop needs the harness up first.
+    td.wait_status(&id, "idle").await;
     td.post(&format!("/api/agents/{id}/stop"), None).await;
     td.wait_status(&id, "stopped").await;
     let line = "Reservation R-1123 on gpu-host ended. State: ended.";
