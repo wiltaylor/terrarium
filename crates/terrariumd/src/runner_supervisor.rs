@@ -4656,6 +4656,10 @@ impl RunnerSupervisor {
 /// each read ([`RunnerSupervisor::reload_pointer`]).
 const RELOAD_TRIES: usize = 8;
 
+/// How long a launch waits for the runner process of the last launch to
+/// end. It lingers up to 2 s after the harness exits.
+const OLD_RUNNER_WAIT: Duration = Duration::from_secs(5);
+
 /// The handled events the push listener keeps, behind the newest one
 /// ([`HubSeen`]). More than the hub holds (4096), so that an event that
 /// comes late on the hub is still known.
@@ -4713,10 +4717,6 @@ impl HubSeen {
         self.floor = floor;
     }
 }
-
-/// How long a launch waits for the runner process of the last launch to
-/// end. It lingers up to 2 s after the harness exits.
-const OLD_RUNNER_WAIT: Duration = Duration::from_secs(5);
 
 /// Resolves when the shutdown flag is set.
 async fn stopped(rx: &mut watch::Receiver<bool>) {
