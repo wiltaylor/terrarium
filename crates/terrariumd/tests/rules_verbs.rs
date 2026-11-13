@@ -4827,3 +4827,141 @@ async fn column_rules_run_a_merge_group_and_a_version_cut_without_the_pack() {
     // Nothing ran from the pack.
     assert!(runs(&td, "p").await.iter().all(|r| r["column"].is_string()));
 }
+
+// ------------------------------------------- merge_queue parity (TER-1204)
+//
+// C5 converts the `merge-queue-batch` rule to the merge_queue column with
+// the batch release 4/1800/8 and one `lands` rule that queues the batch
+// merge. On a `columns` board that column does what the rule does: no
+// batch below 4 cards, one batch of the first 4 in order, the next cards
+// wait while the batch is in the column (the merge lane), and one card
+// goes alone after 30 minutes. `pick_batch` leaves out the cards that
+// wait in the column queue (rev-1114 finding 5).
+
+/// The cards of the merge_queue column that `pick_batch` leaves out
+/// because they wait in the column queue.
+async fn waiting_in_queue(td: &TestDaemon) -> Vec<String> {
+    let pick = state(td)
+        .db
+        .read(|c| terrariumd::rules_verbs::pick_batch(c, "p", "merge_queue", Some(8)))
+        .await
+        .unwrap();
+    pick.left_out
+        .iter()
+        .filter(|x| x["reason"] == "waits in the column queue")
+        .map(|x| x["card"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_batch_merge_queue_column_does_what_merge_queue_batch_does() {
+    let td = queue_lab().await;
+    let path = "/api/projects/p/board/columns/merge_queue/options";
+    let o = td.get(path).await.ok().clone();
+    td.put(
+        path,
+        json!({"base_version": o["version"], "checks": o["checks"],
+               "queue": {"release": "batch", "batch_size": 4, "max_wait_seconds": 1800,
+                         "max_batch_cards": 8},
+               "rules": [{"name": "batch", "trigger": {"kind": "lands"},
+                          "actions": [{"verb": "job.queue",
+                                       "args": {"kind": "batch", "from": "@merge_queue",
+                                                "limit": 8}}]}]}),
+    )
+    .await
+    .ok();
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        ids.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review"}),
+            )
+            .await,
+        );
+    }
+    settle(&td).await;
+    state(&td)
+        .db
+        .write("operator", |t| {
+            terrariumd::store::projects::set_columns_flow(t, "p")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    // 3 cards wait in the column queue: no batch, and `pick_batch` leaves
+    // them out.
+    for id in &ids[..3] {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    assert!(open_jobs(&td).await.is_empty(), "3 cards wait: no batch");
+    for (i, id) in ids[..3].iter().enumerate() {
+        assert_eq!(card(&td, id).await["queued"]["place"], i + 1);
+    }
+    assert_eq!(waiting_in_queue(&td).await, ids[..3].to_vec());
+
+    // The 4th card: one batch merge of the 4, in order, by the column rule.
+    move_to(&td, &ids[3], "merge_queue").await;
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    let cards: Vec<&str> = open[0].batch.iter().map(|x| x.card.as_str()).collect();
+    let want: Vec<&str> = ids[..4].iter().map(String::as_str).collect();
+    assert_eq!(cards, want);
+    assert_eq!(open[0].kind, JobKind::Merge);
+    assert_eq!(open[0].created_by, "rule:p/merge_queue/batch");
+
+    // A 5th card waits while the batch is in the column (the merge lane).
+    move_to(&td, &ids[4], "merge_queue").await;
+    settle(&td).await;
+    assert_eq!(card(&td, &ids[4]).await["queued"]["place"], 1);
+    assert_eq!(waiting_in_queue(&td).await, vec![ids[4].clone()]);
+    assert_eq!(open_jobs(&td).await.len(), 1);
+
+    // The batch ends and its cards leave: 1 of 4 waits, no batch yet.
+    let lane = open[0].id.clone();
+    state(&td)
+        .db
+        .write("operator", move |t| {
+            jobs::cancel(t, &lane)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for id in &ids[..4] {
+        move_to(&td, id, "accepted").await;
+    }
+    state(&td)
+        .db
+        .write("system", terrariumd::store::board::queues::sweep_all)
+        .await
+        .unwrap();
+    settle(&td).await;
+    assert_eq!(card(&td, &ids[4]).await["queued"]["place"], 1);
+    assert!(open_jobs(&td).await.is_empty());
+
+    // 30 minutes after it came, the card goes alone.
+    state(&td)
+        .db
+        .write("operator", |t| {
+            let at = (chrono::Utc::now() - chrono::Duration::minutes(30))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            t.execute(
+                "UPDATE card_queue SET queued_at = ?1 WHERE admitted_at IS NULL",
+                [at],
+            )?;
+            terrariumd::store::board::queues::sweep_all(t)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    settle(&td).await;
+    assert!(card(&td, &ids[4]).await.get("queued").is_none());
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].card, ids[4]);
+    assert!(open[0].batch.is_empty(), "{open:?}");
+}

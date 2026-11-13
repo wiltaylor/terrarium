@@ -1985,8 +1985,14 @@ fn apply_move(
     // A move to another column ends the idle mark (TER-67) and clears the
     // ETA (TER-155 D1): an ETA is for the work of one column. The
     // `clear_eta_on_enter` option of the target (TER-1112, on by default)
-    // can keep it. The `moved` event keeps the old ETA.
-    let keep_eta = same || !to.checks.clear_eta_on_enter;
+    // can keep it. The `moved` event keeps the old ETA. A card that waits
+    // in the queue of the target has no ETA (no `eta_overdue` while it
+    // waits): a kept ETA is held and set again at its admission
+    // (TER-1204).
+    let keep_eta = same || (!to.checks.clear_eta_on_enter && !queued);
+    let hold_kept = (!same && queued && !to.checks.clear_eta_on_enter)
+        .then(|| card.eta_at.clone())
+        .flatten();
     t.execute(
         "UPDATE cards SET column_id = ?2, position = ?3, updated_at = ?4,
             done_at = CASE WHEN ?5 THEN done_at WHEN ?6 THEN ?4 ELSE NULL END,
@@ -1999,6 +2005,10 @@ fn apply_move(
     )?;
     if queued {
         queues::enqueue(t, &card.id, to.id)?;
+        if let Some(eta) = &hold_kept {
+            let by = card.eta_set_by.clone().unwrap_or_else(|| actor.address());
+            queues::hold_eta(t, &card.id, Some(eta), &by)?;
+        }
     } else if !same {
         queues::landed(t, &card.id, to.id)?;
     }
@@ -2872,12 +2882,14 @@ pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> Ap
             // (TER-1114): the ETA is for the work of the column, which
             // starts with the slot (TER-155 D1).
             if queues::hold_eta(t, &card.id, Some(v.trim()), &actor.address())? {
+                audit_held_eta(t, actor, &card, Some(v.trim()))?;
                 card_event(t, &card, "eta_held", json!({"held_eta": v.trim()}))?;
                 return get_card(t, &card.id);
             }
             Some(crate::time_param::stored(at))
         }
         None if queues::hold_eta(t, &card.id, None, &actor.address())? => {
+            audit_held_eta(t, actor, &card, None)?;
             return get_card(t, &card.id);
         }
         None if card.eta_at.is_none() => return get_card(t, &card.id),
@@ -2910,6 +2922,21 @@ pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> Ap
         json!({"eta_at": at, "previous": card.eta_at, "labels": json_col::<Vec<String>>(&card.labels)}),
     )?;
     get_card(t, &card.id)
+}
+
+/// The audit of [`set_eta`] for the held ETA of a waiting card (TER-1204):
+/// a change to the ETA of a card that is not the actor's is audited, as
+/// for an admitted card.
+fn audit_held_eta(t: &mut Tx<'_>, actor: &Actor, card: &CardRow, eta: Option<&str>) -> ApiResult<()> {
+    if owns(actor, card) {
+        return Ok(());
+    }
+    t.audit(
+        "card.eta",
+        &card.id,
+        Some(&card.project),
+        json!({"held_eta": eta}),
+    )
 }
 
 /// Set or clear the ETA of a card for its job (TER-155 D2), as the

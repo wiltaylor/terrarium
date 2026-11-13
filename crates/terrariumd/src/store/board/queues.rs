@@ -18,9 +18,12 @@
 //!   - `wip`: admit while the admitted cards are fewer than the limit.
 //!   - `job`: one job at a time in the column (TER-1112 Q4). A card admitted
 //!     by `job` holds the job slot from its admission until a job of the
-//!     card has ended after it (passed, failed, or cancelled) and it has no
-//!     open job, or it leaves the column. Then the next card is admitted.
-//!   - `batch`: when no card of the last batch is still in the column, and
+//!     card that was queued after it has ended (passed, failed, or
+//!     cancelled) and it has no open job, or it leaves the column. Then the
+//!     next card is admitted. A job from the previous column does not free
+//!     the slot (TER-1204).
+//!   - `batch`: when no admitted card is in the column (the last batch, or
+//!     a card that was there before the `batch` release), and
 //!     `batch_size` cards wait or the first one has waited
 //!     `max_wait_seconds`: admit up to `max_batch_cards` (default
 //!     `batch_size`) in queue order. The last batch out means the lane is
@@ -148,6 +151,16 @@ pub(crate) fn queued_by_column(
 const JOB_OF_CARD: &str = "(j.card = q.card OR EXISTS (SELECT 1 FROM json_each(j.batch)
                             WHERE json_extract(value, '$.card') = q.card))";
 
+/// A job of card `q.card` that was queued at or after its admission and
+/// has ended: it frees the `job` slot. An older job (one still running
+/// from the previous column) does not (TER-1204).
+const SLOT_JOB_ENDED: &str = "EXISTS (SELECT 1 FROM jobs j
+                            WHERE j.state IN ('passed', 'failed', 'cancelled')
+                              AND j.created_at >= q.admitted_at
+                              AND j.ended_at >= q.admitted_at
+                              AND (j.card = q.card OR EXISTS (SELECT 1 FROM json_each(j.batch)
+                                     WHERE json_extract(value, '$.card') = q.card)))";
+
 /// Does a card of column `column_id` hold its job slot (release `job`)?
 fn job_slot_busy(conn: &Connection, column_id: i64) -> ApiResult<bool> {
     let sql = format!(
@@ -156,22 +169,18 @@ fn job_slot_busy(conn: &Connection, column_id: i64) -> ApiResult<bool> {
             AND c.column_id = q.column_id
             AND (EXISTS (SELECT 1 FROM jobs j WHERE j.state IN ('queued', 'running')
                            AND {JOB_OF_CARD})
-                 OR NOT EXISTS (SELECT 1 FROM jobs j
-                           WHERE j.state IN ('passed', 'failed', 'cancelled')
-                             AND j.ended_at >= q.admitted_at AND {JOB_OF_CARD})))"
+                 OR NOT {SLOT_JOB_ENDED}))"
     );
     Ok(conn.query_row(&sql, [column_id], |r| r.get(0))?)
 }
 
-/// Is a card of the last batch of column `column_id` still in it?
+/// Is a card of the last batch of column `column_id` still in it? Every
+/// admitted card of the column counts: a card enters a `batch` column only
+/// with a batch, so an admitted card that has no batch row came in before
+/// the column had the `batch` release (a change from `wip`, or the
+/// conversion of the board), and it holds the lane the same (TER-1204).
 fn batch_open(conn: &Connection, column_id: i64) -> ApiResult<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM card_queue q JOIN cards c ON c.id = q.card
-          WHERE q.column_id = ?1 AND q.admitted_at IS NOT NULL AND c.archived = 0
-            AND c.column_id = q.column_id)",
-        [column_id],
-        |r| r.get(0),
-    )?)
+    Ok(admitted_count(conn, column_id)? > 0)
 }
 
 /// The free places of the column: `None` without a WIP limit.
@@ -371,9 +380,7 @@ pub fn release(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
                   AND (c.archived = 1 OR c.column_id <> q.column_id
                        OR (?2 AND NOT EXISTS (SELECT 1 FROM jobs j
                                 WHERE j.state IN ('queued', 'running') AND {JOB_OF_CARD})
-                              AND EXISTS (SELECT 1 FROM jobs j
-                                WHERE j.state IN ('passed', 'failed', 'cancelled')
-                                  AND j.ended_at >= q.admitted_at AND {JOB_OF_CARD}))))"
+                              AND {SLOT_JOB_ENDED})))"
         ),
         params![s.id, s.release == QueueRelease::Job],
     )?;
