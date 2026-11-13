@@ -94,12 +94,14 @@ pub fn classify(path: &str) -> Class {
         return Class::Other;
     }
     let bytes = slashed.as_bytes();
-    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        if slashed.split('/').any(|part| part.contains('~')) {
-            return Class::Refused(format!(
-                "{path}: short (8.3) names are refused while workspaces are on"
-            ));
-        }
+    if bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && slashed.split('/').any(|part| part.contains('~'))
+    {
+        return Class::Refused(format!(
+            "{path}: short (8.3) names are refused while workspaces are on"
+        ));
     }
     Class::Other
 }
