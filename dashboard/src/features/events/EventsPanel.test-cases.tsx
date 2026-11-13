@@ -51,8 +51,8 @@ it("retains rows, focus and filter state on live arrival and cleans subscription
     }
     return nativeRect.call(this);
   });
-  const scrollBy = vi.spyOn(window, "scrollBy").mockImplementation((options, y) => {
-    document.documentElement.scrollTop += typeof options === "number" ? y ?? 0 : options?.top ?? 0;
+  const scrollBy = vi.spyOn(window, "scrollBy").mockImplementation((_x, y) => {
+    document.documentElement.scrollTop += y;
   });
   const [project, setProject] = createSignal("alpha");
   const root = document.createElement("div"); document.body.append(root);

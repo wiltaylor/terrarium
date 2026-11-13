@@ -48,8 +48,8 @@ it("keeps duplicate filters and open rows local and retains a reply draft throug
     }
     return nativeRect.call(this);
   });
-  const scrollBy = vi.spyOn(window, "scrollBy").mockImplementation((options, y) => {
-    document.documentElement.scrollTop += typeof options === "number" ? y ?? 0 : options?.top ?? 0;
+  const scrollBy = vi.spyOn(window, "scrollBy").mockImplementation((_x, y) => {
+    document.documentElement.scrollTop += y;
   });
   document.documentElement.scrollTop = 50;
   window.dispatchEvent(new Event("scroll"));
