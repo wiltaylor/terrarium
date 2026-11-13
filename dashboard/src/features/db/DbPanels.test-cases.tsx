@@ -34,6 +34,7 @@ it("requires a local type, isolates drafts, retains focused inputs on a DB event
   const selects = root.querySelectorAll<HTMLSelectElement>('[aria-label="Record type"]');
   for (const select of selects) { select.value = "items"; select.dispatchEvent(new Event("change", { bubbles: true })); }
   await waitFor(() => expect(query).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(root.querySelectorAll(".db-table tbody tr")).toHaveLength(4));
   const inputs = root.querySelectorAll<HTMLInputElement>('[aria-label="Query"]');
   inputs[0]!.value = "type:items unsaved"; inputs[0]!.dispatchEvent(new Event("input", { bubbles: true })); inputs[0]!.focus();
   const row = root.querySelectorAll(".db-table tbody tr")[1]!;
