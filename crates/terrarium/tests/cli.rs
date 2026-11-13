@@ -327,6 +327,72 @@ fn run(socket: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn run_kill_reports_cleanup_and_keeps_json_before_nonzero_exit() {
+    let dir = temp_dir("run-cleanup");
+    let socket = dir.join("api.sock");
+    let app = axum::Router::new().route(
+        "/api/waits/{id}",
+        axum::routing::delete(
+            |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                let mut v = json!({"id":id,"state":"cancelled"});
+                if id != "old-server" {
+                    v["cleanup"] =
+                        json!({"operation_id":"same-operation","status":id,"evidence_kind":"none"});
+                }
+                Json(v)
+            },
+        ),
+    );
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = std::thread::spawn(move || {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = stopped.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+    });
+    for status in [
+        "pending",
+        "unknown",
+        "unavailable",
+        "remaining",
+        "verified_terminated",
+        "unexpected",
+        "old-server",
+    ] {
+        let out = run(&socket, &["--json", "run", "kill", status]);
+        assert!(!out.status.success(), "{}", text(&out.stderr));
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        if status != "old-server" {
+            assert_eq!(v["cleanup"]["operation_id"], "same-operation");
+        }
+        let out = run(&socket, &["run", "kill", status]);
+        assert!(!out.status.success());
+        let output = text(&out.stdout);
+        assert!(output.contains("cancelled"));
+        assert!(output.contains("cleanup:"));
+        assert!(!output.contains("killed the run"));
+        assert!(!output.contains("no process of the run is left"));
+        let wait_kill = run(&socket, &["--json", "wait", "cancel", status, "--kill"]);
+        assert!(!wait_kill.status.success());
+        let _: Value = serde_json::from_slice(&wait_kill.stdout).unwrap();
+    }
+    let ordinary = run(&socket, &["wait", "cancel", "unknown"]);
+    assert!(ordinary.status.success(), "{}", text(&ordinary.stderr));
+    stop.send(()).unwrap();
+    server.join().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn update_jobs_drain_reports_timeout_and_resumes_against_daemon_api() {
     let dir = temp_dir("update-jobs");
     let socket = dir.join("api.sock");

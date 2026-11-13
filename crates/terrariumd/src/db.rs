@@ -4809,6 +4809,41 @@ mod tests {
     }
 
     #[test]
+    fn run_cleanup_migration_never_backfills_legacy_success() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
+        let before: Vec<_> = NAMED_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|(name, _)| *name != "ter-1059-run-cleanup.sql")
+            .collect();
+        migrate_named(&mut conn, &before).unwrap();
+        conn.execute("INSERT INTO waits (id,agent,project,kind,spec,summary,state,result,created_by,created_at) VALUES ('legacy','owner','p','process','{}','old run','cancelled','{\"outcome\":\"cancelled\"}','operator','old')", []).unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), 1);
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM run_cleanup", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(migrate(&mut conn).unwrap(), 0);
+        let result: String = conn
+            .query_row("SELECT result FROM waits WHERE id='legacy'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(result, "{\"outcome\":\"cancelled\"}");
+        conn.execute("INSERT INTO run_cleanup (operation_id,wait_id,project,owner,requester,schema_version,requested_at,updated_at,phase,status,reason) VALUES ('op','legacy','p','owner','operator',1,'t','t','queued','pending','intent_recorded')", []).unwrap();
+        assert!(
+            conn.execute("UPDATE run_cleanup SET status='verified_terminated'", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute("UPDATE run_cleanup SET phase='replayed'", [])
+                .is_err()
+        );
+        assert!(conn.execute("INSERT INTO run_cleanup SELECT 'duplicate',wait_id,project,owner,requester,session,target,schema_version,requested_at,updated_at,phase,status,reason,diagnostic FROM run_cleanup", []).is_err());
+    }
+
+    #[test]
     fn migration_30_keeps_questions_and_releases_old_held_mail() {
         let mut conn = Connection::open_in_memory().unwrap();
         for (i, sql) in MIGRATIONS.iter().enumerate().take(29) {

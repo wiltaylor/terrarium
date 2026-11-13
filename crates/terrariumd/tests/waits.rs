@@ -1112,12 +1112,9 @@ async fn kill_ends_the_child(td: &TestDaemon, agent: &str, target: &str, dir: &s
         .await;
     let k = k.ok();
     assert_eq!(k["state"], "cancelled", "{k}");
-    let report = &k["kill"];
-    assert!(
-        report["term"].as_array().unwrap().contains(&json!(child)),
-        "{k}"
-    );
-    assert_eq!(report["left"], json!([]), "{k}");
+    assert_eq!(k["cleanup"]["status"], "unknown", "{k}");
+    assert!(k["cleanup"]["operation_id"].is_string(), "{k}");
+    // The physical check below is separate from the untrusted legacy report.
     assert!(
         !alive(child),
         "the child {child} still runs on {target}: {k}"

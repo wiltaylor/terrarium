@@ -11,6 +11,7 @@ mod live_workspace;
 mod pages;
 mod read_positions;
 mod remotes;
+mod run_cancel;
 mod ssh_restart;
 mod ter221_latency;
 #[path = "../trouble.rs"]

@@ -540,6 +540,13 @@ async fn activate(
     reconcile(&state)
         .await
         .map_err(|e| anyhow::anyhow!("reconcile failed: {e}"))?;
+    // Reporting reconciliation must finish before new cleanup requests can
+    // arrive. Never race startup recovery against a live dispatch.
+    state
+        .db
+        .write_full("system", store::run_cleanup::recover)
+        .await
+        .map_err(|e| anyhow::anyhow!("cleanup reporting recovery failed: {e}"))?;
 
     warn_direct_push_deny(&state).await;
     tasks.push(spawn_prune_timer(state.clone()));

@@ -6790,11 +6790,20 @@ async fn waits_runs_and_watches() {
         out.contains("W1") && out.contains("agent terra/w1"),
         "{out}"
     );
+    let args = &["wait", "cancel", "W1", "--kill"];
+    let r = exec(true, args, vec![(200, wait.clone())], None).await;
+    assert!(r.result.is_err()); // old-server HTTP success is not termination proof
+    assert!(r.out.contains("cleanup: unknown"));
+    check(
+        args,
+        &r.reqs,
+        &[(Delete, "/api/waits/W1", vec![("kill", "true")], None)],
+    );
     ok(
         true,
-        &["wait", "cancel", "W1", "--kill"],
+        &["wait", "cancel", "W1"],
         vec![(200, wait.clone())],
-        vec![(Delete, "/api/waits/W1", vec![("kill", "true")], None)],
+        vec![(Delete, "/api/waits/W1", vec![], None)],
     )
     .await;
     // The operator names the waiter.
@@ -6866,13 +6875,16 @@ async fn waits_runs_and_watches() {
         )],
     )
     .await;
-    ok(
-        true,
-        &["run", "kill", "W2"],
-        vec![(200, json!({"id": "W2"}))],
-        vec![(Delete, "/api/waits/W2", vec![("kill", "true")], None)],
-    )
-    .await;
+    let args = &["run", "kill", "W2"];
+    let r = exec(true, args, vec![(200, json!({"id": "W2"}))], None).await;
+    assert!(r.result.is_err());
+    assert!(r.out.contains("cleanup: unknown"));
+    assert!(!r.out.contains("killed the run"));
+    check(
+        args,
+        &r.reqs,
+        &[(Delete, "/api/waits/W2", vec![("kill", "true")], None)],
+    );
     let r = exec(true, &["run", "box"], vec![], None).await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
 
