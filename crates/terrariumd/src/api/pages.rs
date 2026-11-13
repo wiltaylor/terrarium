@@ -60,8 +60,23 @@ async fn list(
     // The caller's existing rights, for the controls of the page widgets
     // (TER-1077). Each is the result of the policy check that the domain
     // endpoint runs; the endpoints still check every write.
+    let write = policy::write_project(&actor, &project).is_ok();
+    // The wiki review check (`store::wiki::review`): write_project, then
+    // `review_page`. `review_wiki` is its admin path, for any page.
+    // `review_as` lists the `reviewer` values that name the caller, so the
+    // client runs the reviewer path for a page (TER-1157). It is the
+    // caller's own identity only.
+    let review_wiki = write && policy::review_page(&actor, &project, None).is_ok();
+    let review_as = match &actor {
+        Actor::Agent(a) if write => {
+            vec![a.name.clone(), a.id.clone(), format!("{}/{}", a.project, a.name)]
+        }
+        _ => Vec::new(),
+    };
     let rights = json!({
-        "write_project": policy::write_project(&actor, &project).is_ok(),
+        "write_project": write,
+        "review_wiki": review_wiki,
+        "review_as": review_as,
         "admin_project": can_edit,
         "manage_schedules": policy::schedule_scope(&actor, Some(&project)).is_ok(),
         "manage_global": policy::sysadmin(&actor, "managing global schedules and event sources").is_ok(),

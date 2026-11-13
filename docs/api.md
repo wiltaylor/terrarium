@@ -11671,6 +11671,8 @@ project, for the controls of the page widgets:
 | Field | The check it reports | Widget controls |
 |---|---|---|
 | `write_project` | `write_project` (own project, sysadmin, operator) | Board New card, moves and the card drawer |
+| `review_wiki` | `write_project` and the admin path of `review_page` (project_admin, sysadmin, operator) | wiki Approve and Comment on any page |
+| `review_as` | the `reviewer` values that name the caller: its name, ID and `project/name`; empty for the operator and without `write_project` | wiki Approve and Comment on a page whose `reviewer` is in the list |
 | `admin_project` | `admin_project` (same as `can_edit`) | Board columns, New agent, project event sources, rules, pipelines |
 | `manage_schedules` | `schedule_scope` of the project | New schedule or trigger, edit of a project schedule |
 | `manage_global` | `sysadmin` | global schedules and event sources |

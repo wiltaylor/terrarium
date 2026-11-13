@@ -825,6 +825,7 @@ async fn page_list_reports_the_existing_domain_rights() {
     td.project("p").await;
     td.project("q").await;
     let member = td.agent("p", "member", json!({})).await;
+    let reviewer = td.agent("p", "rev", json!({})).await;
     let lead = td
         .agent("p", "lead", json!({"roles":["project_admin"]}))
         .await;
@@ -832,33 +833,38 @@ async fn page_list_reports_the_existing_domain_rights() {
     let sys = td.agent("q", "sys", json!({"roles":["sysadmin"]})).await;
     let path = "/api/projects/p/pages";
     let rights = |body: &Value| body["rights"].clone();
+    // The `reviewer` values that name an agent (policy::review_page).
+    let names = |a: &Value, project: &str| {
+        let name = a["name"].as_str().unwrap();
+        json!([name, a["id"], format!("{project}/{name}")])
+    };
     let operator = td.get(path).await;
     assert_eq!(
         rights(operator.ok()),
-        json!({"write_project":true,"admin_project":true,"manage_schedules":true,
-            "manage_global":true,"operator":true})
+        json!({"write_project":true,"review_wiki":true,"review_as":[],"admin_project":true,
+            "manage_schedules":true,"manage_global":true,"operator":true})
     );
     for (agent, expect) in [
         (
             &member,
-            json!({"write_project":true,"admin_project":false,"manage_schedules":false,
-            "manage_global":false,"operator":false}),
+            json!({"write_project":true,"review_wiki":false,"review_as":names(&member, "p"),
+            "admin_project":false,"manage_schedules":false,"manage_global":false,"operator":false}),
         ),
         (
             &lead,
-            json!({"write_project":true,"admin_project":true,"manage_schedules":true,
-            "manage_global":false,"operator":false}),
+            json!({"write_project":true,"review_wiki":true,"review_as":names(&lead, "p"),
+            "admin_project":true,"manage_schedules":true,"manage_global":false,"operator":false}),
         ),
-        // A cross-project reader reads, but has no write right in `p`.
+        // A cross-project reader reads, but has no write right in `p` and no identity.
         (
             &architect,
-            json!({"write_project":false,"admin_project":false,"manage_schedules":false,
-            "manage_global":false,"operator":false}),
+            json!({"write_project":false,"review_wiki":false,"review_as":[],
+            "admin_project":false,"manage_schedules":false,"manage_global":false,"operator":false}),
         ),
         (
             &sys,
-            json!({"write_project":true,"admin_project":true,"manage_schedules":true,
-            "manage_global":true,"operator":false}),
+            json!({"write_project":true,"review_wiki":true,"review_as":names(&sys, "q"),
+            "admin_project":true,"manage_schedules":true,"manage_global":true,"operator":false}),
         ),
     ] {
         let got = td.get_as(agent["id"].as_str().unwrap(), path).await;
@@ -873,6 +879,28 @@ async fn page_list_reports_the_existing_domain_rights() {
     )
     .await
     .err(403, "forbidden");
+    // TER-1157: the review rights match the review endpoint. A member that the
+    // page does not name is refused, the named member reviews.
+    let page = td
+        .post(
+            "/api/projects/p/wiki",
+            json!({"path":"perf","summary":"new",
+                "body":"---\nstatus: ready_for_review\nreviewer: rev\n---\n# Perf\n"}),
+        )
+        .await;
+    let review = format!("/api/wiki/{}/review", page.ok()["id"].as_str().unwrap());
+    let got = td.get_as(member["id"].as_str().unwrap(), path).await;
+    assert!(!rights(got.ok())["review_as"].as_array().unwrap().contains(&json!("rev")));
+    td.post_as(member["id"].as_str().unwrap(), &review, json!({"decision":"approve"}))
+        .await
+        .err(403, "forbidden");
+    let got = td.get_as(reviewer["id"].as_str().unwrap(), path).await;
+    assert_eq!(rights(got.ok())["review_wiki"], false);
+    assert!(rights(&got.body)["review_as"].as_array().unwrap().contains(&json!("rev")));
+    let done = td
+        .post_as(reviewer["id"].as_str().unwrap(), &review, json!({"decision":"approve"}))
+        .await;
+    assert_eq!(done.ok()["status"], "reviewed");
 }
 
 #[tokio::test]
