@@ -407,11 +407,7 @@ async fn rule_rows(td: &TestDaemon) -> i64 {
         .unwrap()
         .state
         .db
-        .read(|c| {
-            Ok(c.query_row("SELECT count(*) FROM board_column_rules", [], |r| {
-                r.get(0)
-            })?)
-        })
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM board_column_rules", [], |r| r.get(0))?))
         .await
         .unwrap()
 }
@@ -443,9 +439,7 @@ async fn a_board_patch_that_drops_rules_needs_the_options_right() {
     assert_eq!(rule_rows(&td).await, 1);
     assert_eq!(count(&td, audits).await, a0);
     // The project_admin may; the audit row keeps the dropped rules.
-    td.patch_as("proj/lead", board, board_with(None))
-        .await
-        .ok();
+    td.patch_as("proj/lead", board, board_with(None)).await.ok();
     assert_eq!(rule_rows(&td).await, 0);
     assert_eq!(count(&td, audits).await, a0 + 1);
     let audit = td.get(audits).await.ok().clone();
@@ -486,7 +480,9 @@ async fn a_project_has_at_most_300_column_rules() {
     assert_eq!(options(&td, "accepted").await["rules"], json!([]));
     // 51 in one column is the column limit.
     let o = options(&td, "blocked").await;
-    let r = td.put(&path("blocked"), with_rules(&o, full("b", 51))).await;
+    let r = td
+        .put(&path("blocked"), with_rules(&o, full("b", 51)))
+        .await;
     r.err(422, "invalid");
     assert_eq!(r.body["error"]["details"]["path"], "rules");
     // Room again after one column gives up a rule.

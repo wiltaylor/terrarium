@@ -826,10 +826,7 @@ mod tests {
                 with(&|r| r["actions"][1]["args"] = json!({})),
                 "rules[0].actions[1]",
             ),
-            (
-                with(&|r| r["trigger"] = json!("lands")),
-                "rules[0].trigger",
-            ),
+            (with(&|r| r["trigger"] = json!("lands")), "rules[0].trigger"),
             // A missing field or a wrong type is named at its own path.
             (
                 with(&|r| {
@@ -894,10 +891,8 @@ mod tests {
             // The limits of one rule: actions, and bytes.
             (
                 with(&|r| {
-                    r["actions"] = Value::from(vec![
-                        json!({"verb": "card.done_mail"});
-                        MAX_ACTIONS + 1
-                    ])
+                    r["actions"] =
+                        Value::from(vec![json!({"verb": "card.done_mail"}); MAX_ACTIONS + 1])
                 }),
                 "rules[0].actions",
             ),
