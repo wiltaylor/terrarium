@@ -552,6 +552,181 @@ async fn a_rerun_keeps_the_job_slot_until_it_ends() {
     assert!(card(&td, &b).await.get("queued").is_none());
 }
 
+/// End job `id` as failed; `verdict`: also write its `job.verdict`.
+async fn fail_job(td: &TestDaemon, id: &'static str, verdict: bool) {
+    state(td)
+        .db
+        .write("system", move |t| {
+            let end = terrariumd::store::jobs::JobEnd {
+                passed: false,
+                outcome: Some("failed".into()),
+                exit_code: Some(1),
+                tail: None,
+                head: None,
+                batch: None,
+            };
+            let j = terrariumd::store::jobs::finish(t, id, &end)?.unwrap();
+            if verdict {
+                terrariumd::jobs::emit_verdicts(t, &j)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// Run `before`, the sweep, then `after` in one write, so the rule engine
+/// cannot act in between. Does card `waiter` still wait after the sweep?
+async fn waits_after_sweep<B, A>(td: &TestDaemon, waiter: &str, before: B, after: A) -> bool
+where
+    B: FnOnce(&rusqlite::Connection) -> rusqlite::Result<()> + Send + 'static,
+    A: FnOnce(&rusqlite::Connection) -> rusqlite::Result<()> + Send + 'static,
+{
+    let waiter = waiter.to_owned();
+    state(td)
+        .db
+        .write("system", move |t| {
+            before(t)?;
+            terrariumd::store::board::queues::sweep_all(t)?;
+            let waits: bool = t.query_row(
+                "SELECT coalesce((SELECT admitted_at IS NULL FROM card_queue WHERE card = ?1), 0)",
+                [&waiter],
+                |r| r.get(0),
+            )?;
+            after(t)?;
+            Ok(waits)
+        })
+        .await
+        .unwrap()
+}
+
+/// Move the end of job `JA` and the admission of the admitted card 11 and
+/// 20 minutes back: past the 10-minute limit of `RERUN_SETTLED`.
+fn age_ja(c: &rusqlite::Connection) -> rusqlite::Result<()> {
+    c.execute_batch(
+        "UPDATE jobs SET ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-660 seconds')
+          WHERE id = 'JA';
+         UPDATE card_queue SET admitted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1200 seconds')
+          WHERE admitted_at IS NOT NULL;",
+    )
+}
+
+/// A failed job with no `job.verdict` (a daemon stop between `finish` and
+/// `after_end`) frees the `job` slot 10 minutes after its end (TER-1254).
+#[tokio::test]
+async fn a_failed_job_without_a_verdict_frees_the_job_slot_after_10_minutes() {
+    let td = setup().await;
+    set_options(
+        &td,
+        "validating",
+        json!({"release": "job"}),
+        json!([note("in", "lands", "landed in validating")]),
+    )
+    .await;
+    switch(&td).await;
+    let a = new_card(&td, "a").await;
+    let b = new_card(&td, "b").await;
+    assert!(move_to(&td, &a, "validating").await.get("queued").is_none());
+    assert_eq!(move_to(&td, &b, "validating").await["queued"]["place"], 1);
+
+    job(&td, "JA", &a, "running").await;
+    fail_job(&td, "JA", false).await;
+    settle(&td).await;
+    sweep(&td).await;
+    // The rules have read the end, but no verdict exists: A holds the slot.
+    assert_eq!(card(&td, &b).await["queued"]["place"], 1);
+
+    // 10 minutes after the end: B gets the slot.
+    assert!(!waits_after_sweep(&td, &b, age_ja, |_| Ok(())).await);
+    assert!(card(&td, &b).await.get("queued").is_none());
+}
+
+/// An event of a failed job after the rule cursor, or a pending rule run
+/// of it, holds the `job` slot; 10 minutes after the end it does not
+/// (TER-1254), so a stalled or lost rule run cannot hold it for ever.
+#[tokio::test]
+async fn an_unread_event_or_a_pending_rule_run_holds_the_job_slot_up_to_10_minutes() {
+    let td = setup().await;
+    set_options(
+        &td,
+        "validating",
+        json!({"release": "job"}),
+        json!([note("in", "lands", "landed in validating")]),
+    )
+    .await;
+    switch(&td).await;
+    let a = new_card(&td, "a").await;
+    let b = new_card(&td, "b").await;
+    assert!(move_to(&td, &a, "validating").await.get("queued").is_none());
+    assert_eq!(move_to(&td, &b, "validating").await["queued"]["place"], 1);
+
+    job(&td, "JA", &a, "running").await;
+    fail_job(&td, "JA", true).await;
+    settle(&td).await;
+
+    // The `job` event of the end, the first event the rules read for JA.
+    let first: i64 = state(&td)
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT min(seq) FROM events WHERE kind IN ('job', 'job.verdict')
+                   AND coalesce(json_extract(payload, '$.job'),
+                                json_extract(payload, '$.id')) = 'JA'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    let cursor = |seq: i64| {
+        move |c: &rusqlite::Connection| {
+            c.execute("UPDATE rule_cursor SET seq = ?1 WHERE id = 1", [seq])
+                .map(|_| ())
+        }
+    };
+    let read_to: i64 = state(&td)
+        .db
+        .read(|c| Ok(rules_engine::cursor(c)?.unwrap()))
+        .await
+        .unwrap();
+    assert!(read_to >= first);
+
+    // The cursor is before the end: A holds the slot.
+    assert!(waits_after_sweep(&td, &b, cursor(first - 1), cursor(read_to)).await);
+
+    // A rule run of the end is pending: A holds the slot.
+    let pending = move |c: &rusqlite::Connection| {
+        c.execute(
+            "INSERT INTO rule_runs (id, project, rule, rule_hash, ord, event_seq, card, lane,
+                                    rule_json, cause, state, created_at, updated_at)
+             VALUES ('RR-TER-1254', 'flow', 'held', 'h', 0, ?1, NULL, 'flow', '{}', '{}',
+                     'pending', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            [first],
+        )
+        .map(|_| ())
+    };
+    let done = |c: &rusqlite::Connection| {
+        c.execute("DELETE FROM rule_runs WHERE id = 'RR-TER-1254'", [])
+            .map(|_| ())
+    };
+    assert!(waits_after_sweep(&td, &b, pending, done).await);
+    assert_eq!(card(&td, &b).await["queued"]["place"], 1);
+
+    // Both still hold, but the end is 10 minutes old: B gets the slot.
+    let held = move |c: &rusqlite::Connection| {
+        pending(c)?;
+        cursor(first - 1)(c)?;
+        age_ja(c)
+    };
+    let restore = move |c: &rusqlite::Connection| {
+        done(c)?;
+        cursor(read_to)(c)
+    };
+    assert!(!waits_after_sweep(&td, &b, held, restore).await);
+    assert!(card(&td, &b).await.get("queued").is_none());
+}
+
 /// Insert job `id` of card `card` in state `state`.
 async fn job(td: &TestDaemon, id: &'static str, card: &str, state_: &'static str) {
     let card = card.to_owned();
