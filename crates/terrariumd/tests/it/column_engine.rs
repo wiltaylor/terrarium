@@ -643,19 +643,21 @@ async fn no_entry_but_the_upgrade_sets_columns() {
         td.get("/api/projects/flow").await.ok()["board_flow"],
         "code"
     );
-    // The fleet import: `rules` is a file value, `columns` is not.
-    let fleet = |flow: &str| {
-        json!({"content": format!(
-            "name = \"colfleet\"\n[[projects]]\nname = \"fc\"\nboard_flow = \"{flow}\"\n\
-             [[projects.agents]]\nname = \"a\"\nharness = \"claude\"\n"
-        )})
-    };
-    td.post("/api/fleet/apply", fleet("columns"))
-        .await
-        .err(422, "invalid");
+    // The fleet import: a fleet file gives no `board_flow` at all (only a
+    // project file does, and there `columns` does not read: the core test
+    // `a_project_file_cannot_give_the_columns_flow`).
+    let fleet = "name = \"colfleet\"\n[[projects]]\nname = \"fc\"\nboard_flow = \"columns\"\n\
+                 [[projects.agents]]\nname = \"a\"\nharness = \"claude\"\n";
+    let r = td.post("/api/fleet/apply", json!({"content": fleet})).await;
+    r.err(422, "invalid");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("board_flow")),
+        "{}",
+        r.body
+    );
     td.get("/api/projects/fc").await.err(404, "not_found");
-    td.post("/api/fleet/apply", fleet("rules")).await.ok();
-    assert_eq!(td.get("/api/projects/fc").await.ok()["board_flow"], "rules");
     // The legacy migrate tool on a converted board.
     switch(&td, "flow").await;
     let r = td
