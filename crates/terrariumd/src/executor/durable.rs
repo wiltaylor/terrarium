@@ -734,16 +734,43 @@ mod tests {
         )
     }
 
-    /// A default base that no user may create, also root: sysfs refuses a
-    /// mkdir (EROFS, EPERM or EACCES), like a root-owned `/` without `/src`.
-    fn uncreatable_spool(fallback: bool) -> Spool {
-        Spool {
-            root: format!("/sys/terrarium-{}/terrarium", ulid::Ulid::new()),
+    /// A default base that the test user may not create, like a root-owned
+    /// `/` without `/src`. A non-root user gets a mode 0500 temp directory,
+    /// on any host. Root ignores modes, so it takes the first pseudo file
+    /// system that refuses a mkdir (EACCES, EPERM or EROFS). The probe makes
+    /// the same mkdir the helper makes first, so the helper is refused too.
+    fn uncreatable_spool(fallback: bool) -> (tempfile::TempDir, Spool) {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let locked = temp.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let name = format!("terrarium-{}", ulid::Ulid::new());
+        let base = [
+            locked.as_path(),
+            std::path::Path::new("/sys"),
+            std::path::Path::new("/proc"),
+        ]
+        .into_iter()
+        .find(|base| match std::fs::create_dir(base.join(&name)) {
+            Ok(()) => {
+                std::fs::remove_dir(base.join(&name)).unwrap();
+                false
+            }
+            Err(error) => matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ),
+        })
+        .expect("no base refuses a mkdir for this user");
+        let spool = Spool {
+            root: base.join(&name).join("terrarium").to_str().unwrap().into(),
             owner: "test-owner".into(),
             card: false,
             fallback,
             target: "box".into(),
-        }
+        };
+        (temp, spool)
     }
 
     #[tokio::test]
@@ -752,7 +779,7 @@ mod tests {
         // TER-1129: without work_root the spool uses ~/.terrarium-work when
         // the agent user may not create the default base.
         let home = tempfile::tempdir().unwrap();
-        let spool = uncreatable_spool(true);
+        let (_base, spool) = uncreatable_spool(true);
         let path = format!("{}/.terrarium-runs/claim", spool.root);
         let cmd = RemoteCmd {
             argv: vec!["true".into()],
@@ -909,7 +936,7 @@ mod tests {
     async fn durable_set_work_root_names_the_flag() {
         // A work_root that is set never falls back: its error names it.
         let home = tempfile::tempdir().unwrap();
-        let spool = uncreatable_spool(false);
+        let (_base, spool) = uncreatable_spool(false);
         let path = format!("{}/.terrarium-runs/claim", spool.root);
         let cmd = RemoteCmd {
             argv: vec!["true".into()],
@@ -931,7 +958,10 @@ mod tests {
         assert!(!output.status.success());
         let message = String::from_utf8_lossy(&output.stdout);
         assert!(
-            message.starts_with("Bspool error: work_root /sys/"),
+            message.starts_with(&format!(
+                "Bspool error: work_root {} is not writable",
+                spool.root
+            )),
             "{message}"
         );
         assert!(

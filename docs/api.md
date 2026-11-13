@@ -7049,7 +7049,7 @@ all projects. Targets are project targets by default: a global target
 
 | Field | Meaning |
 |---|---|
-| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Without `work_root`, when the agent user cannot create `/src/terrarium` (permission denied or a read-only file system), the root falls back to `~/.terrarium-work/<project>/<agent-name>` of that user, with one daemon warning per target; the root keeps that base until cleanup. The run spool of other callers (`<work_root>/.terrarium-runs`, below) falls back the same way, to `~/.terrarium-work/.terrarium-runs`, and a run keeps the spool it started in. A `work_root` that is set never falls back: its failure names it and `--work-root`. Set it with `terrarium admin target edit <t> --work-root <path>`. Keep project shared caches outside each agent root. |
+| `work_root` | Optional absolute parent of card-agent build roots. Default `/src/terrarium`, giving `<work_root>/<project>/<agent-name>`. Without `work_root`, when the agent user cannot create `/src/terrarium` (permission denied or a read-only file system), the root falls back to `~/.terrarium-work/<project>/<agent-name>` of that user, with one daemon warning per target; the root keeps that base until cleanup. The run spool of other callers (`<work_root>/.terrarium-runs`, below) falls back the same way, to `~/.terrarium-work/.terrarium-runs`, and a run keeps the spool it started in. A `work_root` that is set never falls back: when it is not writable, a symlink, foreign-owned or group/other writable, the error names it and `--work-root`. A default root in one of those last three states fails closed the same way, without the fallback. A symlinked component of `$HOME` (for example `/home -> var/home`) blocks the fallback, and the error names that component: set `work_root` on such a target. Set it with `terrarium admin target edit <t> --work-root <path>`. Keep project shared caches outside each agent root. |
 | `scope` | `global` (no `project`) or `project`. Every target view has it, also in `GET /api/projects/{name}/targets`. |
 | `state` | `running`, `stopped`, `absent`, or `unknown`: what the last lifecycle verb saw. |
 | `snapshots` | The snapshot names that `POST .../snapshot` or `snapshot_before_task` took. A destroy (the state `absent`) clears them. A snapshot delete removes a name. A snapshot list removes the names that the host no longer has (§17.3, "Snapshots"). |
@@ -7741,7 +7741,7 @@ has a daemon-owned marker. Without `work_root` it is
 `/src/terrarium/.terrarium-runs`, else `~/.terrarium-work/.terrarium-runs`
 when the remote user may not create `/src/terrarium` (permission denied, a
 read-only file system, or a missing parent); a spool that is not usable either
-way fails at once with a `spool error` that names `--work-root` (TER-1129). No-follow directory-FD checks reject symlinks,
+way fails at once with a `spool error` that names `--work-root` (TER-1129, TER-1141): also a root that is a symlink, foreign-owned or group/other writable, which never falls back, and a fallback below a symlinked `$HOME` component, which the error names. No-follow directory-FD checks reject symlinks,
 foreign ownership and group/other writable components. Python 3 is required
 for these checks; missing tools are terminal errors, never installed. The spool
 retains the first 64 MiB per stream, and is removed after 24 hours of result

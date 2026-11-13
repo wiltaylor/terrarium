@@ -137,6 +137,75 @@ class SpoolFallback(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "group/other writable"):
             self.fs.resolve()
 
+    def test_no_absolute_home_names_the_flag(self):
+        with mock.patch.dict(os.environ, {"HOME": "relative/home"}):
+            with self.assertRaises(RuntimeError) as caught:
+                self.fs.resolve()
+        message = str(caught.exception)
+        self.assertIn("cannot use /src/terrarium", message)
+        self.assertIn("no absolute home for the fallback", message)
+        self.assertIn("--work-root <absolute path>", message)
+        self.assertFalse(self.home.exists())
+
+    def test_missing_roots_outside_a_run_create_nothing(self):
+        self.fs.locked.clear()
+        for mode in ("cancel", "read"):
+            with self.assertRaises(RuntimeError) as caught:
+                self.fs.resolve(mode=mode)
+            message = str(caught.exception)
+            self.assertIn("/src/terrarium", message)
+            self.assertIn("/home/build/.terrarium-work", message)
+            self.assertIn("--work-root", message)
+        self.assertFalse((self.fs.path / "src").exists())
+        self.assertFalse(self.home.exists())
+
+    def test_missing_set_work_root_outside_a_run_stays_enoent(self):
+        with self.assertRaises(OSError) as caught:
+            self.fs.resolve(mode="cancel", fallback="0")
+        self.assertEqual(caught.exception.errno, errno.ENOENT)
+
+    def test_symlinked_home_component_is_named(self):
+        # /home -> var/home, as on Fedora Atomic or FreeBSD.
+        (self.fs.path / "var").mkdir()
+        (self.fs.path / "home").rename(self.fs.path / "var/home")
+        (self.fs.path / "home").symlink_to("var/home")
+        with self.assertRaises(RuntimeError) as caught:
+            self.fs.resolve()
+        message = str(caught.exception)
+        self.assertIn("/home is a symlink and the fallback refuses symlinked components", message)
+        self.assertIn("--work-root", message)
+        self.assertFalse((self.fs.path / "var/home/build/.terrarium-work").exists())
+
+    def assert_refused(self, label, reason, fallback):
+        with self.assertRaises(RuntimeError) as caught:
+            self.fs.resolve(fallback=fallback)
+        message = str(caught.exception)
+        self.assertIn(label + " is refused", message)
+        self.assertIn(reason, message)
+        self.assertIn("terrarium admin target edit box --work-root <absolute path>", message)
+        self.assertFalse(self.home.exists())
+
+    def test_refused_roots_never_fall_back_and_name_the_flag(self):
+        outside = self.fs.path / "outside"
+        outside.mkdir(mode=0o700)
+        src = self.fs.path / "src"
+        src.mkdir()
+        for fallback, label in (("1", "/src/terrarium"), ("0", "work_root /src/terrarium")):
+            with self.subTest(fallback=fallback, case="symlink"):
+                (src / "terrarium").symlink_to(outside)
+                self.assert_refused(label, "terrarium'", fallback)
+                (src / "terrarium").unlink()
+            (src / "terrarium").mkdir(mode=0o700)
+            with self.subTest(fallback=fallback, case="group writable"):
+                os.chmod(src / "terrarium", 0o770)
+                self.assert_refused(label, "terrarium: group/other writable", fallback)
+            with self.subTest(fallback=fallback, case="foreign owner"):
+                os.chmod(src / "terrarium", 0o700)
+                with mock.patch.object(self.fs.module.os, "geteuid", lambda: os.getuid() + 1):
+                    self.assert_refused(label, "terrarium: foreign owner", fallback)
+            (src / "terrarium").rmdir()
+        self.assertEqual(list(outside.iterdir()), [])
+
     def test_card_roots_never_fall_back(self):
         with self.assertRaises(OSError) as caught:
             self.fs.resolve(card="1")
