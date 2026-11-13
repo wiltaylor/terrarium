@@ -98,29 +98,21 @@ async fn runs(td: &TestDaemon, sid: &str) -> Vec<Value> {
 /// after a short pause, so a late extra run shows too. The runs of a
 /// trigger start after the pass that moves the cursor, and the runs of one
 /// trigger go one after another, so `settle` alone does not mean each run
-/// has a row, or that a row has its output. Returns the last read after the
+/// has a row, or that a row has its output. Each check and the returned
+/// runs come from one read: a separate count of `running` rows can miss a
+/// run that starts between the two reads, and that run then shows as
+/// `running` with no output (TER-1227). Returns the last read after the
 /// deadline, so the assertion of the caller shows it.
 async fn settled_runs(td: &TestDaemon, sid: &str, want: usize) -> Vec<Value> {
-    let st = state(td);
-    let owned = sid.to_owned();
+    let done = |v: &[Value]| v.len() >= want && v.iter().all(|r| r["status"] != "running");
     let start = std::time::Instant::now();
     while start.elapsed() < WAIT {
-        let s = owned.clone();
-        let running: i64 = st
-            .db
-            .read(move |c| {
-                Ok(c.query_row(
-                    "SELECT count(*) FROM schedule_runs WHERE schedule = ?1 AND status = 'running'",
-                    [s],
-                    |r| r.get(0),
-                )?)
-            })
-            .await
-            .unwrap();
-        let now = runs(td, sid).await;
-        if now.len() >= want && running == 0 {
+        if done(&runs(td, sid).await) {
             tokio::time::sleep(Duration::from_millis(150)).await;
-            return runs(td, sid).await;
+            let now = runs(td, sid).await;
+            if done(&now) {
+                return now;
+            }
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -653,7 +645,7 @@ async fn card_actions_open_comment_and_close() {
     let o = settled_runs(&td, &open, 2).await;
     assert_eq!(o.len(), 2, "{o:?}");
     assert_eq!(o[0]["output"]["op"], "open", "{o:?}");
-    assert_eq!(o[1]["output"]["op"], "comment");
+    assert_eq!(o[1]["output"]["op"], "comment", "{o:?}");
     let card_id = o[0]["output"]["card"].as_str().unwrap().to_owned();
     assert_eq!(o[1]["output"]["card"], card_id.as_str());
     let card = td.get(&format!("/api/cards/{card_id}")).await;
