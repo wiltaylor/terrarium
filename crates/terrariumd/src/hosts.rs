@@ -3720,7 +3720,9 @@ mod tests {
         let mut final_ack = false;
         let mut final_release = false;
         let mut pong = false;
-        tokio::time::timeout(Duration::from_secs(10), async {
+        // 120 journal commits after the writer lets go. Under a host-wide
+        // stall (load 55 on 32 cores) this took over 10 s (TER-1132).
+        tokio::time::timeout(Duration::from_secs(30), async {
             while !final_ack || !final_release || !pong {
                 match ws.next().await.unwrap().unwrap() {
                     Message::Text(text) => match decode_control::<DaemonFrame>(&text).unwrap() {
