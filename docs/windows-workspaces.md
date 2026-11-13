@@ -95,8 +95,18 @@ While `[windows_workspaces]` is on, the host refuses these before it opens
 anything, so they never reach the TER-272 handling, which follows links:
 a verbatim or device prefix (`\\?\`, `\\.\`), a component with `~` on a
 drive path (8.3 short names), a UNC path to an administrative drive share
-(`\\host\C$`), and any path whose existing prefix resolves into
-`C:\Terrarium\work` (a junction or link), checked as the account.
+(`\\host\C$`), any path that the TER-969 path rules reject (a trailing dot
+or space, a `:` stream, a device name, an empty, `.` or `..` component,
+non-ASCII), and any path whose existing prefix resolves into
+`C:\Terrarium\work` (a junction or link), checked as the account. A path
+inside the base is never handed to the TER-272 handling: it takes the
+no-reparse walk or is refused.
+
+The link check of the last case is a point-in-time check: it resolves the
+path as the account, and the TER-272 handling then opens it by path. A
+process of the same account can turn a component into a junction between
+the two steps. The workspace DACL limits that to the account's own
+workspaces, so it stays inside R1.
 
 ## Limits
 
@@ -127,3 +137,9 @@ window, fixture accounts and roots, and a matching deployment:
   diverged, local changes, config injection refused, hooks installed and
   enforced, repo hook kept, pin missing or mismatched, unprotected or
   reparse runtime refused, cancel leaves no key file and no git process
+- N11: a session file still held by Defender, or by an ssh or git child
+  that has not exited, makes the session directory delete fail, so a
+  successful clone is reported as a failure (exit 2). Measure how often
+- N12: the path decision under impersonation sees the account's `subst`
+  and mapped drives, and `C:\Terrarium.\work\...` or
+  `C:\Terrarium\work.\...` with an existing tail is refused

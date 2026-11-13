@@ -81,6 +81,16 @@ pub fn classify(path: &str) -> Class {
             Err(m) => Class::Refused(m),
         };
     }
+    // F12: a path that the TER-969 rules reject (a trailing dot or space, a
+    // `:` stream, a device name, an empty or `.`/`..` component, non-ASCII)
+    // can name a path under the base without matching it lexically. Win32
+    // strips or reinterprets those parts, so refuse it and never fall back.
+    if PathKind::Windows.key(path).is_none() {
+        return Class::Refused(format!(
+            "{path}: invalid Windows path component (trailing dot or space, \
+             stream, device name or non-ASCII) while workspaces are on"
+        ));
+    }
     let slashed = path.replace('\\', "/");
     if slashed.starts_with("//?/") || slashed.starts_with("//./") {
         return Class::Refused(format!("{path}: verbatim and device paths are refused"));
@@ -152,6 +162,23 @@ pub fn canonical_alias(
         .then(|| format!("{path} leads into {BASE}: use the workspace path itself"))
 }
 
+/// The decision for a path while workspaces are on: the workspace, a
+/// refusal, or `None` for the TER-272 handling. `canonicalize` resolves an
+/// existing path (as the account on the host).
+pub fn decide_with(
+    path: &str,
+    canonicalize: impl Fn(&std::path::Path) -> Option<String>,
+) -> Result<Option<Location>, String> {
+    match classify(path) {
+        Class::Workspace(location) => Ok(Some(location)),
+        Class::Refused(m) => Err(m),
+        Class::Other => match canonical_alias(path, canonicalize) {
+            Some(m) => Err(m),
+            None => Ok(None),
+        },
+    }
+}
+
 #[cfg(windows)]
 mod native {
     use super::*;
@@ -167,14 +194,7 @@ mod native {
     /// refusal, or `None` for the TER-272 handling. Run it as the account,
     /// so that the canonical check sees what the account would open.
     pub fn decide(path: &str) -> Result<Option<Location>, String> {
-        match classify(path) {
-            Class::Workspace(location) => Ok(Some(location)),
-            Class::Refused(m) => Err(m),
-            Class::Other => match canonical_alias(path, canonical) {
-                Some(m) => Err(m),
-                None => Ok(None),
-            },
-        }
+        decide_with(path, canonical)
     }
 
     /// Provision the workspace with service authority, then walk `dirs` as
@@ -320,6 +340,55 @@ mod tests {
         assert!(canonical_alias(r"C:\link", fake).is_some());
         assert!(canonical_alias(r"C:\elsewhere\x", fake).is_none());
         assert!(canonical_alias(r"C:\missing\x", fake).is_none());
+    }
+
+    /// F12: trailing dots and spaces, `::$DATA` and `:name` streams, in an
+    /// existing or a new component, anywhere on the path: always refused,
+    /// never `Ok(None)` (the TER-272 fallback).
+    #[test]
+    fn invalid_components_never_fall_back() {
+        // `C:\Terrarium\work\p\a` and its file `f` exist; `new` does not.
+        let fake = |p: &std::path::Path| match p.to_str()? {
+            r"C:\" | r"C:\Terrarium" | r"C:\Terrarium\work" | r"C:\Terrarium\work\p" => {
+                Some(format!(r"\\?\{}", p.to_str()?))
+            }
+            r"C:\Terrarium\work\p\a" | r"C:\Terrarium\work\p\a\f" => {
+                Some(format!(r"\\?\{}", p.to_str()?))
+            }
+            _ => None,
+        };
+        for tail in [r"f.", r"f ", r"f::$DATA", r"f:name", r"new.", r"new ", r"new::$DATA", r"new:s"] {
+            for path in [
+                format!(r"C:\Terrarium\work\p\a\{tail}"),
+                format!(r"C:\Terrarium\work\p\a\{tail}\below.txt"),
+                format!(r"C:\Terrarium\work\p\a\new\{tail}"),
+            ] {
+                assert!(
+                    matches!(classify(&path), Class::Refused(_)),
+                    "classify {path}"
+                );
+                assert!(decide_with(&path, fake).is_err(), "decide {path}");
+            }
+        }
+        for path in [
+            r"C:\Terrarium.\work\p\a\f",
+            r"C:\Terrarium\work.\p\a\f",
+            r"C:\Terrarium\work \p\a",
+            r"C:\Terrarium \work\p\a",
+            r"C:\Terrarium\work\p.\a\f",
+            r"C:\Terrarium\work\p\a \f",
+            r"C:\Terrarium\work\p\a\AUX.txt",
+            r"C:\Terrarium\work\p\a\x\..\f",
+            r"C:\Terrarium\work\p\a\\f",
+        ] {
+            assert!(decide_with(path, fake).is_err(), "{path}");
+        }
+        // Valid workspace paths, existing or new, take the walk.
+        for path in [r"C:\Terrarium\work\p\a\f", r"C:\Terrarium\work\p\a\new\g.txt"] {
+            assert!(matches!(decide_with(path, fake), Ok(Some(_))), "{path}");
+        }
+        // Other valid paths still use the TER-272 handling.
+        assert_eq!(decide_with(r"D:\data\x", fake), Ok(None));
     }
 
     #[test]
