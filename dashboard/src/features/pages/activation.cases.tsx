@@ -18,7 +18,9 @@ vi.mock("../../components/Leases", () => ({ LeaseChips: () => null }));
 vi.mock("../../components/HoldBadge", () => ({ HoldBadge: () => null }));
 vi.mock("../../stores", async () => {
   const { instanceTestStores } = await import("../../test/instance");
+  const { createBookmarksStore } = await import("../../stores/bookmarks");
   return instanceTestStores({
+    bookmarks: createBookmarksStore(null, window.location.origin),
     api, events: { on: (fn: (e: AgentEvent) => void) => { listeners.add(fn); return () => listeners.delete(fn); } },
     agents: { inProject: () => [], byId: () => undefined, state: { loading: false, error: null }, refresh: async () => {} },
     leases: { loadAll: async () => {} }, pins: { isPinned: () => false, toggle: async () => {} },
