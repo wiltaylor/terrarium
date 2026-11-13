@@ -844,35 +844,61 @@ mod tests {
 
     #[tokio::test]
     async fn bundle_cache_is_bounded_and_never_persists_missing_or_partial_downloads() {
+        use std::time::Duration;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::time::timeout;
+        // Each wait is bounded, so a bug fails the test instead of hanging it
+        // (TER-1165).
+        const WAIT: Duration = Duration::from_secs(30);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
+        // One connection per request. Every response says `Connection: close`:
+        // without it the client pools the connection of the 404, can reuse it
+        // after the server has closed it, and the request then fails without
+        // a new connection, so the server waited in `accept()` for ever
+        // (TER-1165).
         let server = tokio::spawn(async move {
             for _ in 0..4 {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = [0; 4096];
-                let n = socket.read(&mut request).await.unwrap();
-                let request = String::from_utf8_lossy(&request[..n]);
+                let (mut socket, _) = timeout(WAIT, listener.accept())
+                    .await
+                    .unwrap_or_else(|_| panic!("the client did not connect"))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let mut buf = [0; 4096];
+                    let n = timeout(WAIT, socket.read(&mut buf))
+                        .await
+                        .unwrap_or_else(|_| panic!("the client did not send its request"))
+                        .unwrap();
+                    assert!(n > 0, "the client closed before the end of its request");
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let request = String::from_utf8_lossy(&request);
                 let response = if request.contains("/missing ") {
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
+                    b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                        .to_vec()
                 } else if request.contains("/partial ") {
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort".to_vec()
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 100\r\n\r\nshort"
+                        .to_vec()
                 } else if request.contains("/large ") {
                     let body = vec![b'x'; terrarium_host::update_signature::MAX_BUNDLE_BYTES + 1];
-                    let mut response =
-                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len())
-                            .into_bytes();
+                    let mut response = format!(
+                        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                        body.len()
+                    )
+                    .into_bytes();
                     response.extend(body);
                     response
                 } else {
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nbundle".to_vec()
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 6\r\n\r\nbundle"
+                        .to_vec()
                 };
-                let _ = socket.write_all(&response).await;
+                let _ = timeout(WAIT, socket.write_all(&response)).await;
             }
         });
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cached");
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().timeout(WAIT).build().unwrap();
         for route in ["missing", "partial", "large"] {
             assert!(
                 fetch_bundle(&client, &format!("{base}/{route}"), &path)
@@ -885,7 +911,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(read_bundle(&path).await.unwrap(), b"bundle");
-        server.await.unwrap();
+        timeout(WAIT, server)
+            .await
+            .unwrap_or_else(|_| panic!("the test server did not serve 4 connections"))
+            .unwrap();
     }
 
     #[test]
