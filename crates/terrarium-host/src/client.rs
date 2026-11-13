@@ -247,12 +247,14 @@ enum PushMsg {
 
 struct Entry {
     outbox: Arc<Outbox>,
-    input: Option<mpsc::UnboundedSender<SessionInput>>,
+    input: Option<crate::session::InputSender>,
     push: Option<mpsc::Sender<PushMsg>>,
     detached_since: Option<Instant>,
 }
 
 struct Shared {
+    #[cfg(windows)]
+    windows_jobs: Mutex<HashMap<(String, String), Arc<terrarium_winapi::Job>>>,
     sessions: Mutex<HashMap<SessionId, Entry>>,
     resume_token: Mutex<Option<String>>,
     /// The bearer token for the next dial. It starts as the configured
@@ -307,6 +309,8 @@ pub struct Client {
 impl Client {
     pub fn new(opts: ClientOptions) -> Self {
         let shared = Shared {
+            #[cfg(windows)]
+            windows_jobs: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             resume_token: Mutex::new(None),
             bearer: Mutex::new(opts.token.clone()),
@@ -517,7 +521,7 @@ impl Client {
             su.supervised,
             failed.as_deref(),
         ) {
-            tracing::warn!(offered = %offer.version, own = %self.opts.version, "self-update: not updating: {why}");
+            tracing::warn!(offered = %offer.version, asset = %offer.path, own = %self.opts.version, "self-update: not updating: {why}");
             self.refuse_update(&offer.version);
             return;
         }
@@ -1390,28 +1394,60 @@ impl Client {
         l.limits
             .host_support(self.opts.capabilities.limits.as_ref())
             .map_err(refuse)?;
-        let slice = crate::limits::slice_name(&l.target, &l.holder);
-        let applied = if let Some(reservation) = &l.reservation {
-            reservation
-                .host_support(self.opts.capabilities.limits.as_ref())
-                .map_err(refuse)?;
-            crate::limits::apply_reservation(&l.target, &l.holder, reservation).await
-        } else {
-            crate::limits::apply_slice(&slice, &l.limits).await
-        };
-        applied.map_err(|e| BuildError {
-            code: ErrorCode::SpawnFailed,
-            message: format!("cannot set the resource limits on {slice}: {e}"),
-        })?;
-        #[allow(clippy::cast_possible_truncation)]
-        let scope = crate::limits::scope_name(&self.opts.name, session, random_u64() as u32);
-        tracing::info!(session, %slice, %scope, limits = %l.limits.summary(), "limited session");
-        crate::limits::wrap(&mut plan.exec, &slice, &scope);
-        Ok(plan)
+        #[cfg(windows)]
+        {
+            let _ = session;
+            if l.reservation.is_some() {
+                return Err(refuse(
+                    "Windows resource reservations are unsupported".into(),
+                ));
+            }
+            let limits = crate::session_windows::budget(&l.limits).map_err(refuse)?;
+            let mut jobs = self
+                .shared
+                .windows_jobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let key = (l.target.clone(), l.holder.clone());
+            let job = if let Some(job) = jobs.get(&key) {
+                job.set_limits(limits).map_err(|e| refuse(e.to_string()))?;
+                job.clone()
+            } else {
+                let job = Arc::new(
+                    terrarium_winapi::Job::new(limits).map_err(|e| refuse(e.to_string()))?,
+                );
+                jobs.insert(key, job.clone());
+                job
+            };
+            plan.exec.windows_holder = Some(job);
+            Ok(plan)
+        }
+        #[cfg(unix)]
+        {
+            let slice = crate::limits::slice_name(&l.target, &l.holder);
+            let applied = if let Some(reservation) = &l.reservation {
+                reservation
+                    .host_support(self.opts.capabilities.limits.as_ref())
+                    .map_err(refuse)?;
+                crate::limits::apply_reservation(&l.target, &l.holder, reservation).await
+            } else {
+                crate::limits::apply_slice(&slice, &l.limits).await
+            };
+            applied.map_err(|e| BuildError {
+                code: ErrorCode::SpawnFailed,
+                message: format!("cannot set the resource limits on {slice}: {e}"),
+            })?;
+            #[allow(clippy::cast_possible_truncation)]
+            let scope = crate::limits::scope_name(&self.opts.name, session, random_u64() as u32);
+            tracing::info!(session, %slice, %scope, limits = %l.limits.summary(), "limited session");
+            crate::limits::wrap(&mut plan.exec, &slice, &scope);
+            Ok(plan)
+        }
     }
 
     /// The helper, when `[native_gpu]` is on and the helper answered with
     /// enforcement at the last `hello`.
+    #[cfg(unix)]
     fn native_live(&self) -> Option<&crate::native::NativeOptions> {
         self.opts.native.as_ref().filter(|_| {
             self.shared
@@ -1427,6 +1463,7 @@ impl Client {
         &self,
         r: &crate::protocol::ResourceApply,
     ) -> Result<VerbPlan, BuildError> {
+        #[cfg(unix)]
         if let Some(native) = self.native_live() {
             r.limits.validate().map_err(BuildError::bad)?;
             return crate::native::verb_plan(
@@ -1456,6 +1493,15 @@ impl Client {
         &self,
         r: &crate::protocol::ResourceStop,
     ) -> Result<VerbPlan, BuildError> {
+        #[cfg(windows)]
+        if self.opts.native.is_some() {
+            return Err(BuildError::bad(
+                "native GPU isolation is unavailable on Windows",
+            ));
+        }
+        #[cfg(windows)]
+        return crate::limits::reservation_stop_plan(&r.target, &r.holder);
+        #[cfg(unix)]
         match self.opts.native.as_ref() {
             Some(native) => crate::native::stop_plan(
                 native,
@@ -1472,6 +1518,7 @@ impl Client {
     /// marked it with `native_gpu`. A host agent without `[native_gpu]`, or
     /// whose helper did not answer with enforcement at the last `hello`,
     /// refuses it: the session never runs without its device policy.
+    #[cfg(unix)]
     pub(crate) fn native(
         &self,
         mut plan: VerbPlan,
@@ -1499,6 +1546,19 @@ impl Client {
             crate::native::shim_plan(native, &crate::native::Request::Start(req), plan.exec)
                 .map_err(BuildError::bad)?;
         Ok(plan)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn native(
+        &self,
+        _plan: VerbPlan,
+        _limits: &crate::protocol::ExecLimits,
+        _session: SessionId,
+    ) -> Result<VerbPlan, BuildError> {
+        Err(BuildError {
+            code: ErrorCode::Unsupported,
+            message: "native GPU isolation is unavailable on Windows".into(),
+        })
     }
 
     fn prepare_ctx(&self) -> crate::prepare::Ctx {

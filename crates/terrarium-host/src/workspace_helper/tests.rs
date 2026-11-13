@@ -151,6 +151,27 @@ fn durable_order_and_exact_retry() {
 }
 
 #[test]
+fn explicit_service_fence_survives_restart_and_never_reaches_backend() {
+    let (dir, mut h) = helper(Fake::default());
+    let calls = h.backend.calls.borrow().len();
+    h.fence().unwrap();
+    assert!(h.store.load().unwrap().quarantined);
+    assert_eq!(
+        h.apply(&bytes(&envelope(1, Kind::Grant))),
+        Err(Reply::Quarantined)
+    );
+    assert_eq!(h.backend.calls.borrow().len(), calls);
+    drop(h);
+    let mut recovered = Helper::open(Store::fixture(dir.path()).unwrap(), Fake::default()).unwrap();
+    let calls = recovered.backend.calls.borrow().len();
+    assert_eq!(
+        recovered.apply(&bytes(&envelope(1, Kind::Grant))),
+        Err(Reply::Quarantined)
+    );
+    assert_eq!(recovered.backend.calls.borrow().len(), calls);
+}
+
+#[test]
 fn every_kernel_failure_quarantines_and_never_replays() {
     for failure in [
         "runtime", "stage", "private", "publish", "verify", "unmount", "detach", "remove",
@@ -613,7 +634,7 @@ fn destination_substitution_and_nonempty_scaffold_are_refused() {
 }
 
 #[test]
-fn unsafe_exception_is_confined_to_sys_crate() {
+fn unsafe_exception_is_confined_to_audited_syscall_crates() {
     fn walk(
         path: &std::path::Path,
         manifests: &mut Vec<std::path::PathBuf>,
@@ -621,7 +642,12 @@ fn unsafe_exception_is_confined_to_sys_crate() {
     ) {
         for entry in std::fs::read_dir(path).unwrap() {
             let path = entry.unwrap().path();
-            if path.file_name().unwrap() == "terrarium-sys" {
+            // Both exact exceptions were approved by the operator. All other
+            // crates must inherit forbid, including future platform ports.
+            if matches!(
+                path.file_name().unwrap().to_str(),
+                Some("terrarium-sys" | "terrarium-winapi")
+            ) {
                 continue;
             }
             if path.is_dir() {

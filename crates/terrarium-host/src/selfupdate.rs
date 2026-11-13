@@ -24,6 +24,7 @@
 //! `hello.update_failed`.
 
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -102,11 +103,49 @@ pub fn failed_version(bin: &Path) -> Option<String> {
 /// `<binary>.failed`). Returns the version that was pending, if any.
 /// `<binary>.prev` stays, for a manual roll back.
 pub fn confirm(bin: &Path) -> Option<String> {
-    let pending = sidecar(bin, PENDING);
-    let text = std::fs::read_to_string(&pending).ok()?;
-    let _ = std::fs::remove_file(&pending);
-    let _ = std::fs::remove_file(sidecar(bin, FAILED));
-    Some(first_line(&text).unwrap_or_default())
+    #[cfg(windows)]
+    return crate::windows_update::confirm(bin);
+    #[cfg(unix)]
+    {
+        let pending = sidecar(bin, PENDING);
+        let text = std::fs::read_to_string(&pending).ok()?;
+        // A crash before the replacement can restart the old build. Its welcome
+        // must not confirm a different executable's pending transaction.
+        #[cfg(windows)]
+        if first_line(&text).as_deref() != Some(terrarium_version::FULL) {
+            return None;
+        }
+        let _ = std::fs::remove_file(&pending);
+        let _ = std::fs::remove_file(sidecar(bin, FAILED));
+        Some(first_line(&text).unwrap_or_default())
+    }
+}
+
+/// Fail closed on foreign or unidentified Windows assets, before any I/O.
+/// Legacy offers are Linux-only. Windows releases must carry release checksums.
+pub fn platform_support(offer: &UpdateOffer, os: &str, arch: &str) -> Result<(), String> {
+    let offered_os = offer.os.as_deref().unwrap_or("linux");
+    let offered_arch = offer.arch.as_deref().or_else(|| {
+        offer
+            .path
+            .split_once('?')?
+            .1
+            .split('&')
+            .find_map(|part| part.strip_prefix("arch="))
+    });
+    if offered_os != os || offered_arch != Some(arch) {
+        return Err(format!(
+            "foreign asset {} ({offered_os}/{offered_arch:?}), need {os}/{arch}",
+            offer.path
+        ));
+    }
+    if os == "windows" && offer.release_sha256.is_none() {
+        return Err(format!(
+            "Windows asset {} has no release checksum",
+            offer.path
+        ));
+    }
+    Ok(())
 }
 
 /// Whether to take an offer. `Err` holds the reason not to.
@@ -117,6 +156,7 @@ pub fn decide(
     supervised: bool,
     failed: Option<&str>,
 ) -> Result<(), String> {
+    platform_support(offer, std::env::consts::OS, std::env::consts::ARCH)?;
     if !enabled {
         return Err("auto_update = false in the config".into());
     }
@@ -372,17 +412,19 @@ pub async fn stage(bin: &Path, data: &[u8], want_version: &str) -> Result<PathBu
 }
 
 fn write_file(path: &Path, data: &[u8], mode: u32) -> Result<(), UpdateError> {
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(mode)
-        .open(path)
-        .map_err(io_err(path))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(mode);
+    #[cfg(windows)]
+    let _ = mode;
+    let mut f = options.open(path).map_err(io_err(path))?;
     f.write_all(data).map_err(io_err(path))?;
     f.sync_all().map_err(io_err(path))?;
     drop(f);
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(io_err(path))
+    #[cfg(unix)]
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(io_err(path))?;
+    Ok(())
 }
 
 /// Run `<path> --version`: it must exit 0 and print the version `want`
@@ -446,8 +488,7 @@ async fn run_version(path: &Path) -> std::io::Result<std::process::Output> {
             .await;
         match r {
             Err(e)
-                if e.raw_os_error() == Some(nix::errno::Errno::ETXTBSY as i32)
-                    && began.elapsed() < BUSY_RETRY =>
+                if cfg!(unix) && e.raw_os_error() == Some(26) && began.elapsed() < BUSY_RETRY =>
             {
                 tokio::time::sleep(BUSY_PAUSE).await;
             }
@@ -458,6 +499,7 @@ async fn run_version(path: &Path) -> std::io::Result<std::process::Output> {
 
 /// Put `<binary>.new` in place: keep the running binary as `.prev`, write
 /// `.pending` with the new version, and rename `.new` over the binary.
+#[cfg(unix)]
 pub fn swap(bin: &Path, version: &str) -> Result<(), UpdateError> {
     let new = sidecar(bin, NEW);
     let prev = sidecar(bin, PREV);
@@ -492,6 +534,11 @@ pub fn swap(bin: &Path, version: &str) -> Result<(), UpdateError> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub fn swap(bin: &Path, version: &str) -> Result<(), UpdateError> {
+    crate::windows_update::activate(bin, version).map_err(io_err(bin))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -501,6 +548,8 @@ mod tests {
 
     fn offer(version: &str, data: &[u8]) -> UpdateOffer {
         UpdateOffer {
+            os: None,
+            arch: None,
             version: version.into(),
             path: "/install/terrarium-host?arch=x86_64".into(),
             sha256: sha256_hex(data),

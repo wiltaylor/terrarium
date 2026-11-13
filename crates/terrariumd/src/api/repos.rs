@@ -338,11 +338,11 @@ async fn checkout_inner(
         .status(agent.agent.id)
         .await
         .is_some_and(terrarium_core::AgentStatus::is_live);
-    let workspace =
-        crate::workspace::ensure(&state.state_dir, &state.work_dir, &agent.agent, !live)
-            .ok_or_else(|| {
-                ApiError::internal(format!("cannot create {}", agent.agent.workspace.display()))
-            })?;
+    let workspace = crate::workspace::ensure_generic(state, &agent.agent, !live)
+        .await?
+        .ok_or_else(|| {
+            ApiError::internal(format!("cannot create {}", agent.agent.workspace.display()))
+        })?;
     // An update of a proxied repo fetches from the daemon's mirror, so
     // the token never goes to git in the agent's repo (review P4).
     let has_git = std::fs::symlink_metadata(workspace.join(&dir).join(".git")).is_ok();

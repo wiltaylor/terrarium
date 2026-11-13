@@ -17,6 +17,7 @@
 //! kills the scopes that a run before it left ([`kill_leftovers`]).
 
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::path::Path;
 use std::time::Duration;
 
@@ -175,7 +176,11 @@ pub fn wrap(plan: &mut ExecPlan, slice: &str, scope: &str) {
 /// find the user manager. A host agent in a system unit (`User=`) does not
 /// have it. Then it is `/run/user/<uid>`, when that exists.
 pub fn user_bus_env() -> BTreeMap<String, String> {
+    #[cfg(unix)]
     let mut env = BTreeMap::new();
+    #[cfg(windows)]
+    let env = BTreeMap::new();
+    #[cfg(unix)]
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
         let dir = format!("/run/user/{}", nix::unistd::getuid());
         if Path::new(&dir).is_dir() {
@@ -377,6 +382,25 @@ pub fn parse_units(text: &str, prefix: &str) -> Vec<String> {
 /// `systemd-run --user --scope -p MemoryMax=64M true` works. `controllers`
 /// comes from the `cgroup.controllers` of the user manager's cgroup.
 /// `docker` is the caller's part.
+#[cfg(windows)]
+pub async fn detect() -> LimitsCapability {
+    match terrarium_winapi::Job::new(terrarium_winapi::Limits {
+        memory_bytes: Some(64 * 1024 * 1024),
+        processes: Some(1),
+        cpu_rate: Some(10000),
+    }) {
+        Ok(_) => LimitsCapability {
+            job_objects: true,
+            ..Default::default()
+        },
+        Err(e) => LimitsCapability {
+            reason: Some(format!("Job Object limits unavailable: {e}")),
+            ..Default::default()
+        },
+    }
+}
+
+#[cfg(unix)]
 pub async fn detect() -> LimitsCapability {
     let mut cap = LimitsCapability::default();
     if !cfg!(target_os = "linux") {

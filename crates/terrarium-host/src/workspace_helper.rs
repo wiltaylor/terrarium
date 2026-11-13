@@ -4,12 +4,16 @@
 //! B4 must admit and serialize daemon operations before forwarding them here.
 //! No kernel backend is selected by this module and hello never enables B4.
 
+pub mod bootstrap;
 mod confinement;
 pub mod kernel;
 pub mod mountinfo;
 pub mod mounts;
 mod paths;
+pub mod receiver;
+pub mod registration_roots;
 pub mod runtime;
+pub mod scaffold;
 pub mod service;
 mod store;
 
@@ -71,6 +75,12 @@ impl<B: Backend> Helper<B> {
 
     pub fn journal(&self) -> &Journal {
         &self.journal
+    }
+
+    pub(super) fn fence(&mut self) -> Result<(), Reply> {
+        self.fenced = true;
+        self.journal.quarantined = true;
+        self.save()
     }
 
     fn save(&mut self) -> Result<(), Reply> {

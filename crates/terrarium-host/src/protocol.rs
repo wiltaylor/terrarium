@@ -250,6 +250,11 @@ pub struct Welcome {
 /// The update offer in `welcome`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateOffer {
+    /// Explicit asset identity. Absent only for legacy Linux offers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
     /// The build version of the offered binary: the daemon's own.
     pub version: String,
     /// The path of the binary on the host listener, for example
@@ -1245,20 +1250,39 @@ impl HostFrame {
 }
 
 /// Parse a signal name from a `signal` frame.
-pub fn parse_signal(name: &str) -> Option<nix::sys::signal::Signal> {
-    use nix::sys::signal::Signal as S;
+#[cfg(unix)]
+pub use nix::sys::signal::Signal as SessionSignal;
+
+/// Windows has no POSIX signals. Only termination requests are accepted.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSignal {
+    SIGINT = 2,
+    SIGKILL = 9,
+    SIGTERM = 15,
+}
+
+pub fn parse_signal(name: &str) -> Option<SessionSignal> {
+    use SessionSignal as S;
     let upper = name.trim().to_ascii_uppercase();
     let name = upper.strip_prefix("SIG").unwrap_or(&upper);
     Some(match name {
         "INT" => S::SIGINT,
         "TERM" => S::SIGTERM,
         "KILL" => S::SIGKILL,
+        #[cfg(unix)]
         "HUP" => S::SIGHUP,
+        #[cfg(unix)]
         "QUIT" => S::SIGQUIT,
+        #[cfg(unix)]
         "USR1" => S::SIGUSR1,
+        #[cfg(unix)]
         "USR2" => S::SIGUSR2,
+        #[cfg(unix)]
         "WINCH" => S::SIGWINCH,
+        #[cfg(unix)]
         "CONT" => S::SIGCONT,
+        #[cfg(unix)]
         "STOP" => S::SIGSTOP,
         _ => return None,
     })
@@ -1436,6 +1460,7 @@ mod tests {
                 },
                 metrics: true,
                 limits: Some(LimitsCapability {
+                    job_objects: false,
                     systemd: true,
                     controllers: vec!["cpu".into(), "memory".into()],
                     reason: None,
@@ -1590,6 +1615,8 @@ mod tests {
             token: None,
             metrics: false,
             update: Some(UpdateOffer {
+                os: None,
+                arch: None,
                 version: "0.3.0+abc1234".into(),
                 path: "/install/terrarium-host?arch=x86_64".into(),
                 sha256: "ab".repeat(32),

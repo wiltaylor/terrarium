@@ -21,6 +21,7 @@ bitflags::bitflags! {
 
 #[repr(C)]
 #[derive(Debug, Default)]
+#[cfg(any(target_os = "linux", test))]
 struct MountAttr {
     set: u64,
     clear: u64,
@@ -28,6 +29,7 @@ struct MountAttr {
     userns_fd: u64,
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn attributes(set: MountAttributes, clear: MountAttributes) -> std::io::Result<MountAttr> {
     if set.intersects(clear) || (set.bits() | clear.bits()) & !MountAttributes::all().bits() != 0 {
         return Err(std::io::Error::new(

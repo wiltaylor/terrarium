@@ -1,12 +1,12 @@
 //! B3 scaffolding only. No host verb, registration RPC or enabled admission.
 //! Docker inspect is configuration evidence, never proof of an attachment.
-#[cfg(test)]
 use crate::workspace_helper::mountinfo;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-#[cfg(test)]
 use terrarium_core::live_workspace::MountEvidence;
-use terrarium_core::live_workspace::{Activation, Reply, RuntimeIdentity};
+use terrarium_core::live_workspace::{
+    Activation, OperationId, RegistrationId, Reply, RuntimeId, RuntimeIdentity,
+};
 
 /// Exact versions and topology must be measured again by B5 on any change.
 /// There is deliberately no production profile or default approved version.
@@ -25,7 +25,7 @@ pub struct Profile {
 }
 
 impl Profile {
-    fn check(&self, pinned: &Self) -> Result<(), Reply> {
+    pub(crate) fn check(&self, pinned: &Self) -> Result<(), Reply> {
         if self != pinned
             || !self.rootful
             || !self.same_mount_namespace
@@ -66,60 +66,97 @@ pub struct Create {
     pub command: Vec<String>,
 }
 
+// Included verbatim in the versioned protected receiver configuration digest.
+pub(crate) const RECEIVER_SECURITY_OPTIONS: &[&str] = &[
+    "--restart=no",
+    "--pull=never",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges:true",
+    "--network=none",
+    "--ipc=private",
+    "--cgroupns=private",
+];
+pub(crate) const RECEIVER_BIND_POLICY: &str = "dst=/work,readonly,bind-propagation=rslave";
+
 fn create_flags(
     req: &Create,
     registration: &Registration,
     pinned: &Profile,
 ) -> Result<Vec<String>, Reply> {
-    registration.profile.check(pinned)?;
+    fixed_create_flags(
+        req,
+        &registration.publisher,
+        registration.runtime.registration,
+        registration.runtime.incarnation,
+        &registration.profile,
+        pinned,
+    )
+}
+
+fn fixed_create_flags(
+    req: &Create,
+    publisher: &str,
+    registration: RegistrationId,
+    incarnation: RuntimeId,
+    profile: &Profile,
+    pinned: &Profile,
+) -> Result<Vec<String>, Reply> {
+    profile.check(pinned)?;
     if req.name.is_empty()
         || req.name.starts_with('-')
         || req.image.is_empty()
         || req.image.starts_with('-')
-        || !safe_publisher(&registration.publisher)
-        || registration.publisher.rsplit('/').next()
-            != Some(registration.runtime.registration.0.to_string().as_str())
+        || !safe_publisher(publisher)
+        || publisher.rsplit('/').next() != Some(registration.0.to_string().as_str())
     {
         return Err(Reply::Unauthorized);
     }
-    let mut args: Vec<String> = [
-        "create",
-        "--name",
-        &req.name,
-        "--restart=no",
-        "--cap-drop=ALL",
-        "--security-opt=no-new-privileges:true",
-        "--network=none",
-        "--ipc=private",
-        "--cgroupns=private",
-        "--mount",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect();
+    let mut args: Vec<String> = ["create", "--name", &req.name]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    args.extend(RECEIVER_SECURITY_OPTIONS.iter().map(|s| (*s).to_owned()));
+    args.push("--mount".into());
     // Admission must reject userns-remap engines. The pinned default seccomp
     // profile must deny namespace creation. No caller security opts are allowed.
     args.push(format!(
-        "type=bind,src={},dst=/work,readonly,bind-propagation=rslave",
-        registration.publisher
+        "type=bind,src={},{RECEIVER_BIND_POLICY}",
+        publisher
     ));
     args.extend([
         "--label".into(),
-        format!(
-            "terrarium.workspace.registration={}",
-            registration.runtime.registration.0
-        ),
+        format!("terrarium.workspace.registration={}", registration.0),
     ]);
     args.extend([
         "--label".into(),
-        format!(
-            "terrarium.workspace.runtime={}",
-            registration.runtime.incarnation.0
-        ),
+        format!("terrarium.workspace.runtime={}", incarnation.0),
     ]);
     args.push(req.image.clone());
     args.extend(req.command.clone());
     Ok(args)
+}
+
+/// Helper-only bootstrap planning before a full container ID exists. No
+/// invented runtime identity and no caller-selected administrative path.
+pub(crate) fn bootstrap_create_flags(
+    req: &Create,
+    publisher: &str,
+    registration: RegistrationId,
+    incarnation: RuntimeId,
+    operation: OperationId,
+    profile: &Profile,
+    pinned: &Profile,
+) -> Result<Vec<String>, Reply> {
+    let mut flags = fixed_create_flags(req, publisher, registration, incarnation, profile, pinned)?;
+    let before_image = flags.len() - req.command.len() - 1;
+    flags.splice(
+        before_image..before_image,
+        [
+            "--label".into(),
+            format!("terrarium.workspace.bootstrap={}", operation.0),
+        ],
+    );
+    Ok(flags)
 }
 
 fn safe_publisher(path: &str) -> bool {
@@ -153,10 +190,38 @@ pub struct VerifiedScaffold {
     publisher: String,
 }
 
-/// Verification primitive for a newly created, empty scaffold. Not a grant or
-/// registration entry point. Kept test-only until B4 supplies serialized fresh
-/// acquisition from the helper's pinned runtime and protected publisher FD.
-#[cfg(test)]
+/// Fresh acquisition from helper-created scaffold FDs and a pinned runtime.
+/// This checks empty propagation topology only. Configuration inspection and
+/// renewed daemon authority remain required before runtime/attachment commit.
+pub fn acquire_empty_scaffold(
+    registration: &Registration,
+    mounted: &crate::workspace_helper::scaffold::Mounted,
+    runtime: &crate::workspace_helper::runtime::PinnedRuntime,
+    inspector: &mut impl crate::workspace_helper::runtime::Inspector,
+) -> Result<VerifiedScaffold, Reply> {
+    if runtime.identity() != &registration.runtime
+        || mounted.registration() != registration.runtime.registration
+        || registration.publisher
+            != format!(
+                "/var/lib/terrarium-workspace-helper/publishers/{}",
+                registration.runtime.registration.0
+            )
+    {
+        return Err(Reply::Quarantined);
+    }
+    runtime.recheck(inspector, &registration.runtime)?;
+    let host = mounted.recheck_empty()?;
+    let receiver = runtime.mountinfo(inspector)?;
+    verify_empty_scaffold(registration, &host, &receiver)?;
+    let host = mounted.recheck_empty()?;
+    let receiver = runtime.mountinfo(inspector)?;
+    let evidence = verify_empty_scaffold(registration, &host, &receiver)?;
+    runtime.recheck(inspector, &registration.runtime)?;
+    Ok(evidence)
+}
+
+/// Pure topology check. Only fresh acquisition above exposes a production
+/// constructor. Arbitrary deserialized mount records are not a public proof.
 fn verify_empty_scaffold(
     registration: &Registration,
     host: &[MountEvidence],

@@ -17,6 +17,9 @@ use clap::{Parser, Subcommand};
 use terrarium_host::config::{self, Config, DEFAULT_CONFIG_PATH};
 use terrarium_host::{Client, ClientOptions, SelfUpdateOptions, capabilities, tls};
 
+#[cfg(windows)]
+mod windows_service_host;
+
 /// The Terrarium host agent.
 #[derive(Debug, Parser)]
 #[command(
@@ -54,6 +57,9 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Run under the Windows Service Control Manager as LocalSystem.
+    #[cfg(windows)]
+    Service,
     /// Connect to the daemon and serve sessions (the default).
     Run,
     /// Print the detected capabilities and the resolved settings, then exit.
@@ -384,7 +390,8 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let token = cfg.resolve_token()?;
     let name = cfg.resolve_name();
     let mut caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
-    caps.no_workspaces = !terrarium_host::workspace::available(&cfg.paths().work_dir);
+    caps.no_workspaces =
+        cfg!(windows) || !terrarium_host::workspace::available(&cfg.paths().work_dir);
     if caps.no_workspaces {
         tracing::warn!(
             work_dir = %cfg.paths().work_dir.display(),
@@ -402,6 +409,9 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         );
     }
     match &caps.limits {
+        Some(l) if l.job_objects => {
+            tracing::info!("resource limits: Windows Job Objects work");
+        }
         Some(l) if l.systemd => {
             tracing::info!(controllers = %l.controllers.join(" "), "resource limits: systemd-run --user works");
             terrarium_host::limits::kill_leftovers(&name).await;
@@ -473,7 +483,10 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     opts.display = cfg.display.clone();
     match std::env::current_exe() {
         Ok(binary) => {
+            #[cfg(unix)]
             let supervised = std::env::var_os("INVOCATION_ID").is_some();
+            #[cfg(windows)]
+            let supervised = matches!(Args::parse().command, Some(Cmd::Service));
             tracing::info!(binary = %binary.display(), auto_update = cfg.auto_update, systemd = supervised, "self-update settings");
             opts.self_update = Some(SelfUpdateOptions {
                 binary,
@@ -486,24 +499,48 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         Err(e) => tracing::warn!(error = %e, "self-update is off: cannot find the running binary"),
     }
     let client = Client::new(opts);
+    #[cfg(unix)]
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("install the SIGTERM handler")?;
+    let terminated = async {
+        #[cfg(unix)]
+        term.recv().await;
+        #[cfg(windows)]
+        std::future::pending::<()>().await;
+    };
     tokio::select! {
         () = client.run() => {}
         _ = tokio::signal::ctrl_c() => tracing::info!("interrupted"),
-        _ = term.recv() => tracing::info!("terminated"),
+        _ = terminated => tracing::info!("terminated"),
     }
     Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let writer = tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stderr);
+    #[cfg(windows)]
+    let writer = if matches!(args.command, Some(Cmd::Service)) {
+        let dir = terrarium_host::config::data_dir().join("host");
+        terrarium_host::session::private_dir(&dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("service.log"))?;
+        tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::sync::Mutex::new(file))
+    } else {
+        writer
+    };
     use tracing_subscriber::util::SubscriberInitExt;
     terrarium_host::logging::subscriber(
-        std::io::stderr,
+        writer,
         std::io::IsTerminal::is_terminal(&std::io::stderr()),
     )
     .init();
+    #[cfg(windows)]
+    if matches!(args.command, Some(Cmd::Service)) {
+        return windows_service_host::dispatch();
+    }
     match &args.command {
         Some(Cmd::TokenFile { path }) => return write_token_file(path),
         Some(Cmd::Cert { names, out, force }) => return write_cert(names, out, *force),
@@ -527,6 +564,8 @@ fn main() -> anyhow::Result<()> {
     }
     let rt = tokio::runtime::Runtime::new().context("start the runtime")?;
     match args.command {
+        #[cfg(windows)]
+        Some(Cmd::Service) => unreachable!("handled by the service dispatcher"),
         Some(Cmd::Check { json, probe }) => rt.block_on(check(&cfg, json, probe)),
         Some(Cmd::Run) | None => rt.block_on(run(cfg)),
         Some(

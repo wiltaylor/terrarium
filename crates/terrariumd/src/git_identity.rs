@@ -667,6 +667,8 @@ mod tests {
 
     #[test]
     fn target_checkout_installs_identity_and_hook_without_running_it() {
+        use base64::Engine as _;
+
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let origin = root.join("origin");
@@ -684,7 +686,7 @@ mod tests {
             &p,
         );
         let dest = root.join("dest");
-        let cmd = crate::executor::checkout_cmd(
+        let mut cmd = crate::executor::checkout_cmd(
             &format!("file://{}", origin.display()),
             dest.to_str().unwrap(),
             None,
@@ -692,6 +694,9 @@ mod tests {
             None,
         )
         .unwrap();
+        cmd.argv[8] = "managed-required".into();
+        let push_hook =
+            base64::engine::general_purpose::STANDARD.encode(crate::git::push_deny_hook(&[]));
         let run = || {
             let out = Command::new(&cmd.argv[0])
                 .args(&cmd.argv[1..])
@@ -701,6 +706,10 @@ mod tests {
                 .env("TERRARIUM_COMMIT_HOOK", p.hook())
                 .env("TERRARIUM_COMMIT_NAME", &p.identity.name)
                 .env("TERRARIUM_COMMIT_EMAIL", &p.identity.email)
+                .env("TERRARIUM_PUSH_HOOK_B64", &push_hook)
+                .env("TERRARIUM_PROVENANCE", "true")
+                .env("TERRARIUM_PROVENANCE_WARN_ONLY", "false")
+                .env("TERRARIUM_REPO_ID", "test")
                 .output()
                 .unwrap();
             assert!(out.status.success(), "{out:?}");

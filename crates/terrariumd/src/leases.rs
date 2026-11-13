@@ -364,6 +364,18 @@ pub async fn expire(state: &Shared) -> ApiResult<Vec<LeaseRow>> {
 /// policy lists the target; then bring the target down when the agent ran
 /// and no other running agent holds it.
 pub async fn after_end(state: &Shared, l: &LeaseRow) {
+    // Live attachment authority is fenced before either legacy shortcut below.
+    // A stopped/deleted holder still needs ordered path-revoke processing.
+    let (holder, target) = (l.agent.clone(), l.target.clone());
+    if let Err(e) = state
+        .db
+        .write_full("system", move |t| {
+            crate::store::live_workspaces::end_holder_authority(t, &holder, Some(&target), false)
+        })
+        .await
+    {
+        warn!(agent = %l.agent, target = %l.target, "cannot fence live workspace authority after lease end: {e}");
+    }
     let a = l.agent.clone();
     let agent = match state.db.read(move |c| agents::get(c, &a)).await {
         Ok(v) => Some(v),

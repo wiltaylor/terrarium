@@ -967,6 +967,7 @@ pub fn deliver(library: &Path, assigned: &[String], dest: &Path) -> Result<Deliv
 
 /// Write `files` under `dir` (made when missing).
 pub fn write_files(dir: &Path, files: &Files) -> Result<(), String> {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     for (rel, bytes) in files {
@@ -978,6 +979,7 @@ pub fn write_files(dir: &Path, files: &Files) -> Result<(), String> {
         }
         std::fs::write(&path, bytes)
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        #[cfg(unix)]
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
     }
     Ok(())
@@ -1031,6 +1033,23 @@ mod tests {
             .iter()
             .map(|(p, b)| ((*p).to_owned(), b.to_vec()))
             .collect()
+    }
+
+    #[test]
+    fn write_files_creates_nested_files_with_public_read_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("skill");
+        write_files(&root, &files(&[("nested/example.md", b"example")])).unwrap();
+        let path = root.join("nested/example.md");
+        assert_eq!(std::fs::read(&path).unwrap(), b"example");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
     }
 
     #[test]
