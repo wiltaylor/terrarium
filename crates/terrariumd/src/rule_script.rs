@@ -618,7 +618,10 @@ impl Drop for SlotHold {
         let mut map = holds()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if map.get(&self.key).is_some_and(|g| Arc::ptr_eq(g, &self.gate)) {
+        if map
+            .get(&self.key)
+            .is_some_and(|g| Arc::ptr_eq(g, &self.gate))
+        {
             map.remove(&self.key);
         }
         self.gate.close();
