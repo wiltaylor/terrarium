@@ -4856,7 +4856,10 @@ async fn columns_merge_lab() -> TestDaemon {
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
-    // The pack's card rule as a `leaves` rule of the merge queue.
+    // The pack's card rule, unchanged, as a `lands` rule of ready, where
+    // a failed card returns. Not a `leaves` rule of the merge queue: a
+    // card that waited in its queue never landed, so it runs no `leaves`
+    // rule there (C3a), and a fix card waits there.
     let returned = terrarium_core::rules_file::default_pack()
         .rules
         .iter()
@@ -4878,9 +4881,15 @@ async fn columns_merge_lab() -> TestDaemon {
             pack_as_column_rule("merge-red-split-note"),
             pack_as_column_rule("merge-red-fix-note"),
             pack_as_column_rule("job-fail-red"),
-            {"name": "merge-group-returned", "trigger": {"kind": "leaves"}, "max_per_hour": 600,
-             "if_card": returned.if_card, "actions": returned.actions},
         ]),
+    )
+    .await;
+    put_column_rules(
+        &td,
+        "ready",
+        json!([{"name": "merge-group-returned", "trigger": {"kind": "lands"},
+                "max_per_hour": 600, "when": returned.when, "if_card": returned.if_card,
+                "actions": returned.actions}]),
     )
     .await;
     put_column_rules(
@@ -5006,7 +5015,7 @@ async fn only_rule_writes(td: &TestDaemon, id: &str) {
     let w = card_writes(td, id).await;
     assert!(!w.is_empty(), "{id}");
     for (actor, change) in &w {
-        let column_rule = ["rule:p/merge_queue/", "rule:p/accepted/"]
+        let column_rule = ["rule:p/merge_queue/", "rule:p/accepted/", "rule:p/ready/"]
             .iter()
             .any(|p| actor.starts_with(p));
         assert!(
@@ -5249,6 +5258,8 @@ async fn column_rules_fix_then_split_a_red_merge_batch() {
     assert!(x.get("group").is_none_or(Value::is_null), "{x}");
     let fail = runs_of(&td, "p", "merge_queue/job-fail-red").await;
     assert_eq!(fail.last().unwrap()["state"], "done", "{fail:?}");
+    let back = runs_of(&td, "p", "ready/merge-group-returned").await;
+    assert_eq!(states(&back), vec!["done"], "{back:?}");
 
     // The group's own cards pass: they go to accepted, the merge group
     // closes, and the version is cut and built.
