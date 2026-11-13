@@ -479,6 +479,7 @@ pub async fn fire_timers(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

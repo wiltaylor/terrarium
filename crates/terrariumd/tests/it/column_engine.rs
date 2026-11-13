@@ -220,7 +220,7 @@ async fn without_the_switch_the_column_rules_run_nothing() {
                 "flow",
                 terrarium_core::config::BoardFlow::Code,
             )?;
-            Ok(terrariumd::store::projects::board_flow(t, "flow")?)
+            terrariumd::store::projects::board_flow(t, "flow")
         })
         .await
         .unwrap();

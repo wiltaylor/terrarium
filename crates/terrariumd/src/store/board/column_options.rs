@@ -598,74 +598,6 @@ pub(super) fn carry_checks(
     record(t, project, &before, &after)
 }
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    fn queue(release: QueueRelease, b: Option<i64>, w: Option<i64>, m: Option<i64>) -> ColumnQueue {
-        ColumnQueue {
-            release,
-            batch_size: b,
-            max_wait_seconds: w,
-            max_batch_cards: m,
-        }
-    }
-
-    #[test]
-    fn queue_settings_are_checked() {
-        use QueueRelease::*;
-        assert!(check_queue(&queue(Wip, None, None, None)).is_ok());
-        assert!(check_queue(&queue(Job, None, None, None)).is_ok());
-        assert!(check_queue(&queue(Batch, Some(4), Some(1800), Some(8))).is_ok());
-        assert!(check_queue(&queue(Batch, Some(4), Some(1800), None)).is_ok());
-        let path = |q| {
-            check_queue(&q).unwrap_err().details.unwrap()["path"]
-                .as_str()
-                .unwrap()
-                .to_owned()
-        };
-        assert_eq!(path(queue(Wip, Some(4), None, None)), "queue.batch_size");
-        assert_eq!(
-            path(queue(Job, None, None, Some(2))),
-            "queue.max_batch_cards"
-        );
-        assert_eq!(path(queue(Batch, None, Some(60), None)), "queue.batch_size");
-        assert_eq!(
-            path(queue(Batch, Some(4), None, None)),
-            "queue.max_wait_seconds"
-        );
-        assert_eq!(
-            path(queue(Batch, Some(0), Some(60), None)),
-            "queue.batch_size"
-        );
-        assert_eq!(
-            path(queue(
-                Batch,
-                Some(4),
-                Some(QUEUE_WAIT_MAX_SECONDS + 1),
-                None
-            )),
-            "queue.max_wait_seconds"
-        );
-        assert_eq!(
-            path(queue(Batch, Some(4), Some(60), Some(3))),
-            "queue.max_batch_cards"
-        );
-    }
-
-    #[test]
-    fn defaults_are_todays_checks() {
-        let d = ColumnChecks::default_for;
-        assert!(d("in_progress", Some(WORKING)).require_dependencies_met);
-        assert!(d("blocked", Some(BLOCKED)).require_comment_on_enter);
-        assert!(d(DONE, None).terminal_for_members);
-        let review = d("review", Some("review"));
-        assert!(!review.require_comment_on_enter && !review.require_dependencies_met);
-        assert!(!review.terminal_for_members && review.clear_eta_on_enter);
-    }
-}
-
 /// Every column rule of `project`: (rule ID, column ID, column name, rule).
 fn project_rules(
     conn: &Connection,
@@ -805,4 +737,72 @@ pub(super) fn rename_in_rules(
         out.push(json!({"column": col, "rule": rule.name, "before": before, "after": rule}));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn queue(release: QueueRelease, b: Option<i64>, w: Option<i64>, m: Option<i64>) -> ColumnQueue {
+        ColumnQueue {
+            release,
+            batch_size: b,
+            max_wait_seconds: w,
+            max_batch_cards: m,
+        }
+    }
+
+    #[test]
+    fn queue_settings_are_checked() {
+        use QueueRelease::*;
+        assert!(check_queue(&queue(Wip, None, None, None)).is_ok());
+        assert!(check_queue(&queue(Job, None, None, None)).is_ok());
+        assert!(check_queue(&queue(Batch, Some(4), Some(1800), Some(8))).is_ok());
+        assert!(check_queue(&queue(Batch, Some(4), Some(1800), None)).is_ok());
+        let path = |q| {
+            check_queue(&q).unwrap_err().details.unwrap()["path"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(path(queue(Wip, Some(4), None, None)), "queue.batch_size");
+        assert_eq!(
+            path(queue(Job, None, None, Some(2))),
+            "queue.max_batch_cards"
+        );
+        assert_eq!(path(queue(Batch, None, Some(60), None)), "queue.batch_size");
+        assert_eq!(
+            path(queue(Batch, Some(4), None, None)),
+            "queue.max_wait_seconds"
+        );
+        assert_eq!(
+            path(queue(Batch, Some(0), Some(60), None)),
+            "queue.batch_size"
+        );
+        assert_eq!(
+            path(queue(
+                Batch,
+                Some(4),
+                Some(QUEUE_WAIT_MAX_SECONDS + 1),
+                None
+            )),
+            "queue.max_wait_seconds"
+        );
+        assert_eq!(
+            path(queue(Batch, Some(4), Some(60), Some(3))),
+            "queue.max_batch_cards"
+        );
+    }
+
+    #[test]
+    fn defaults_are_todays_checks() {
+        let d = ColumnChecks::default_for;
+        assert!(d("in_progress", Some(WORKING)).require_dependencies_met);
+        assert!(d("blocked", Some(BLOCKED)).require_comment_on_enter);
+        assert!(d(DONE, None).terminal_for_members);
+        let review = d("review", Some("review"));
+        assert!(!review.require_comment_on_enter && !review.require_dependencies_met);
+        assert!(!review.terminal_for_members && review.clear_eta_on_enter);
+    }
 }
