@@ -1443,6 +1443,9 @@ async fn verify(
             )
         })
         .await?;
+    // A plan that the check read may make an xai key row a plan row: its
+    // key file goes (TER-1239).
+    crate::login_session::drop_plan_row_keys_in(&state).await;
     Ok(Json(
         json!({"subscription": load(&state, name).await?, "status": st}),
     ))
