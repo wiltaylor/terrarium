@@ -150,6 +150,12 @@ pub fn is_plan(sub: &SubscriptionDef) -> bool {
     if terrarium_core::zai::is_zai(&sub.provider) {
         return false;
     }
+    // xAI (TER-1191): a tier (`Super`) is the X Subscription, a Grok Build
+    // login. Only `API key` or no plan (a row from before) is a key. Any
+    // other plan word is a plan too, so pi never spends API money for it.
+    if terrarium_core::xai::is_xai(&sub.provider) {
+        return terrarium_core::xai::is_plan_row(&sub.provider, sub.plan.as_deref());
+    }
     row(&sub.provider).is_some_and(|r| r.plan && (r.api_key.is_none() || !is_api_key(sub)))
 }
 
@@ -285,6 +291,31 @@ mod tests {
             assert_eq!(required_env(&s), None, "{p}");
         }
         assert!(PLAN_REFUSAL.starts_with("pi uses API keys only"));
+    }
+
+    /// TER-1191: an xai plan row (a tier of the X Subscription, or any
+    /// plan word that is not `API key`) never runs through pi. The key rows
+    /// (`API key`, or no plan from before) stay as they were.
+    #[test]
+    fn xai_plans_are_refused_and_xai_keys_are_not() {
+        for plan in ["Plus", "Premium", "Super", "Ultra", "super", "Heavy"] {
+            let s = sub("xai", Some(plan));
+            assert!(is_plan(&s), "{plan}");
+            assert_eq!(refusal(&s), Some(PLAN_REFUSAL), "{plan}");
+            assert_eq!(
+                start_refusal(&s, Some("grok-4.3")).as_deref(),
+                Some(PLAN_REFUSAL)
+            );
+            assert_eq!(provider_for(&s), None, "{plan}");
+            assert_eq!(required_env(&s), None, "{plan}");
+        }
+        for plan in [Some("API key"), Some("api key"), None] {
+            let s = sub("xai", plan);
+            assert!(!is_plan(&s), "{plan:?}");
+            assert_eq!(refusal(&s), None, "{plan:?}");
+            assert_eq!(provider_for(&s).as_deref(), Some("xai"));
+            assert_eq!(required_env(&s), Some("XAI_API_KEY"));
+        }
     }
 
     #[test]

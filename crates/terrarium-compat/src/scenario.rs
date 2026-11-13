@@ -106,6 +106,8 @@ pub async fn run_suite(settings: &Settings) -> Report {
                 }
                 run_one(&h, settings, &mut report).await;
             }
+            // Not in `HarnessId::ALL` yet: no adapter (TER-1192).
+            HarnessId::Grok => report.skip(id, "all", "no grok adapter yet (TER-1192)"),
         }
     }
     report
