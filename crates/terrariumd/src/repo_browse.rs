@@ -2346,9 +2346,13 @@ mod tests {
         std::fs::write(dir.join("p.txt"), &new).unwrap();
         std::fs::write(dir.join("q.txt"), &big).unwrap();
 
-        let start = Instant::now();
+        // The CPU time of this thread, not the wall clock (TER-1189): on a
+        // loaded host the thread waits, and the wait is not work. The
+        // diff's own deadline is wall clock, so its CPU time is at most
+        // that; without the deadline the search takes far longer.
+        let start = thread_cpu();
         let u = uncommitted(&git(), &open(&dir), &mut LineBudget::default()).unwrap();
-        let took = start.elapsed();
+        let took = thread_cpu() - start;
         assert!(took < DIFF_TOTAL_TIME + Duration::from_secs(4), "{took:?}");
         let p = u.unstaged.files.iter().find(|f| f.path == "p.txt").unwrap();
         // All lines changed: every old line out, every new line in.
@@ -2359,11 +2363,40 @@ mod tests {
 
         // Straight into `unified`: a deadline in the past ends the search
         // at once, and the diff says so.
-        let start = Instant::now();
         let (_, a, d, _, late) = unified(&old, &new, &mut LineBudget::default(), Instant::now());
-        assert!(start.elapsed() < Duration::from_secs(2));
         assert!(late);
         assert_eq!((a, d), (n as u64, n as u64));
+
+        // That the search ended is shown by the result, not by a time
+        // (TER-1189). The two texts differ in the first and the last line
+        // only. With time the diff finds the common middle: 2 lines out,
+        // 2 in. Past the deadline `similar` does not search and gives the
+        // fallback: every line out and every line in.
+        let k = 1000;
+        let mid: String = (0..k).map(|i| format!("{i}\n")).collect();
+        let old = format!("a\n{mid}b\n");
+        let new = format!("c\n{mid}d\n");
+        let later = Instant::now() + Duration::from_secs(3600);
+        let (_, a, d, _, late) = unified(&old, &new, &mut LineBudget::default(), later);
+        assert!(!late);
+        assert_eq!((a, d), (2, 2));
+        let (_, a, d, _, late) = unified(&old, &new, &mut LineBudget::default(), Instant::now());
+        assert!(late);
+        assert_eq!((a, d), (k + 2, k + 2));
+    }
+
+    /// The CPU time that this thread has used.
+    fn thread_cpu() -> Duration {
+        use nix::sys::resource::{UsageWho, getrusage};
+        #[cfg(target_os = "linux")]
+        let who = UsageWho::RUSAGE_THREAD;
+        #[cfg(not(target_os = "linux"))]
+        let who = UsageWho::RUSAGE_SELF;
+        let u = getrusage(who).unwrap();
+        let us = |t: nix::sys::time::TimeVal| {
+            Duration::from_secs(t.tv_sec() as u64) + Duration::from_micros(t.tv_usec() as u64)
+        };
+        us(u.user_time()) + us(u.system_time())
     }
 
     #[test]
