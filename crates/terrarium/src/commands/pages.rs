@@ -36,9 +36,9 @@ pub async fn run(ctx: &Ctx, cmd: &PageCmd) -> anyhow::Result<()> {
                 .api
                 .post(
                     &format!("{layout_path}/reset"),
-                    serde_json::json!({
+                    Some(serde_json::json!({
                         "builtin": builtin, "base_revision": base_revision
-                    }),
+                    })),
                 )
                 .await?;
             ctx.emit(&v, |out, v| {
@@ -51,9 +51,9 @@ pub async fn run(ctx: &Ctx, cmd: &PageCmd) -> anyhow::Result<()> {
             confirm,
         } => {
             anyhow::ensure!(*confirm, "copy requires --confirm");
-            let v = ctx.api.post(&format!("{layout_path}/copy"), serde_json::json!({
+            let v = ctx.api.post(&format!("{layout_path}/copy"), Some(serde_json::json!({
                 "source_project": source_project, "base_revision": base_revision, "confirm": true
-            })).await?;
+            }))).await?;
             ctx.emit(&v, |out, v| {
                 out.line(serde_json::to_string_pretty(v).unwrap_or_default())
             })
