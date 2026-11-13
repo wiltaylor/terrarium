@@ -995,9 +995,8 @@ async fn estimated_usage_admits_start_and_daemon_entrypoints() {
     let c = get(&td, &id).await;
     let worker = td
         .get(&format!("/api/agents/{}", c["agent"].as_str().unwrap()))
-        .await
-        .ok();
-    assert_eq!(worker["subscription"], "dispatch-estimated");
+        .await;
+    assert_eq!(worker.ok()["subscription"], "dispatch-estimated");
     td.post(&format!("/api/cards/{id}/move"), json!({"column":"review"}))
         .await
         .ok();
@@ -1010,8 +1009,8 @@ async fn estimated_usage_admits_start_and_daemon_entrypoints() {
             .unwrap()
     );
     let review_agent = reviewer(&td, &id).await;
-    let reviewer_view = td.get(&format!("/api/agents/{review_agent}")).await.ok();
-    assert_eq!(reviewer_view["subscription"], "dispatch-estimated");
+    let reviewer_view = td.get(&format!("/api/agents/{review_agent}")).await;
+    assert_eq!(reviewer_view.ok()["subscription"], "dispatch-estimated");
 }
 
 #[tokio::test]
