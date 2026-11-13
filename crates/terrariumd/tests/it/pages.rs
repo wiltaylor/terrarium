@@ -911,7 +911,10 @@ async fn v2_start_refuses_an_over_limit_project_and_initializes_the_others() {
     // The over-limit project: no built-ins, no revision, its pages unchanged.
     let big = td.get("/api/projects/big/page-layout").await.body;
     assert_eq!(big["revision"], 0);
-    assert_eq!(big["pages"].as_array().unwrap(), big_items.as_array().unwrap());
+    assert_eq!(
+        big["pages"].as_array().unwrap(),
+        big_items.as_array().unwrap()
+    );
     assert!(
         big["pages"]
             .as_array()
@@ -933,6 +936,9 @@ async fn v2_start_refuses_an_over_limit_project_and_initializes_the_others() {
     assert_eq!(layout_counts(&td).await, (counts.0 + 1, counts.1 + 1));
     // The daemon serves both projects.
     td.get("/api/projects").await.ok();
-    assert_eq!(td.get("/api/projects/big/pages").await.ok()["items"], big_items);
+    assert_eq!(
+        td.get("/api/projects/big/pages").await.ok()["items"],
+        big_items
+    );
     td.get("/api/projects/small/pages/board").await.ok();
 }
