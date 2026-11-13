@@ -1962,6 +1962,12 @@ fn apply_move(
     let same = to.id == card.column_id;
     // The column queues (TER-1114): the card leaves the queue of its old
     // column, and waits in the queue of the new one when it has no slot.
+    // A held ETA of the old queue goes with the card (TER-1204).
+    let held_before = if same {
+        None
+    } else {
+        queues::held_of(t, &card.id)?
+    };
     let from_queued = !same && queues::leave(t, &card.id)?;
     let queued = !same && queues::must_queue(t, &card.project, to.id)?;
     // Take the card out of its column, then put it in at the new place.
@@ -1990,8 +1996,11 @@ fn apply_move(
     // waits): a kept ETA is held and set again at its admission
     // (TER-1204).
     let keep_eta = same || (!to.checks.clear_eta_on_enter && !queued);
-    let hold_kept = (!same && queued && !to.checks.clear_eta_on_enter)
-        .then(|| card.eta_at.clone())
+    let kept = (!same && !to.checks.clear_eta_on_enter)
+        .then(|| match &card.eta_at {
+            Some(eta) => Some((eta.clone(), card.eta_set_by.clone())),
+            None => held_before.clone(),
+        })
         .flatten();
     t.execute(
         "UPDATE cards SET column_id = ?2, position = ?3, updated_at = ?4,
@@ -2005,12 +2014,18 @@ fn apply_move(
     )?;
     if queued {
         queues::enqueue(t, &card.id, to.id)?;
-        if let Some(eta) = &hold_kept {
-            let by = card.eta_set_by.clone().unwrap_or_else(|| actor.address());
+        if let Some((eta, by)) = &kept {
+            let by = by.clone().unwrap_or_else(|| actor.address());
             queues::hold_eta(t, &card.id, Some(eta), &by)?;
         }
     } else if !same {
         queues::landed(t, &card.id, to.id)?;
+        // A card that waited with a held ETA lands with it.
+        if card.eta_at.is_none()
+            && let Some((eta, by)) = &kept
+        {
+            queues::set_held(t, &card.id, eta, by.as_deref())?;
+        }
     }
     let author = author_of(t, actor);
     if let Some(c) = comment {
@@ -2955,11 +2970,19 @@ pub fn set_job_eta(t: &mut Tx<'_>, id: &str, at: Option<&str>, by: &str) -> ApiR
         Err(e) if e.code == Code::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
-    if card.archived || card.column == DONE || card.eta_at.as_deref() == at {
+    if card.archived || card.column == DONE {
+        return Ok(());
+    }
+    let by = by.strip_prefix("agent:").unwrap_or(by);
+    // A card that waits in a column queue has no ETA: the job's ETA is
+    // held for its admission, as `set_eta` does (TER-1204).
+    if queues::hold_eta(t, &card.id, at, by)? {
+        return Ok(());
+    }
+    if card.eta_at.as_deref() == at {
         return Ok(());
     }
     let stamp = now();
-    let by = by.strip_prefix("agent:").unwrap_or(by);
     let (set_at, set_by) = match at {
         Some(_) => (Some(stamp.as_str()), Some(by)),
         None => (None, None),

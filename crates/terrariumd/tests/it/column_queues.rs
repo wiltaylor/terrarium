@@ -703,11 +703,12 @@ async fn an_older_job_of_the_card_does_not_free_the_job_slot() {
     assert!(card(&td, &b).await.get("queued").is_none());
 }
 
-/// TER-1204 (rev-1114 finding 4): a column that changes from `wip` to
-/// `batch` while cards admitted under `wip` are in it admits no batch
-/// until those cards are out, as for the cards of a batch.
+/// TER-1204 (rev-1114 finding 4, rev-1204 finding 1): a column that
+/// changes from `wip` to `batch` with a card admitted under `wip` and no
+/// job puts that card back in its queue, first: it does not hold the lane,
+/// and it goes with the next batch.
 #[tokio::test]
-async fn a_change_from_wip_to_batch_waits_for_the_cards_already_in_the_column() {
+async fn a_change_from_wip_to_batch_puts_a_card_with_no_job_back_in_the_queue() {
     let td = setup().await;
     set_options(&td, "merge_queue", json!({"release": "wip"}), json!([])).await;
     switch(&td).await;
@@ -728,13 +729,42 @@ async fn a_change_from_wip_to_batch_waits_for_the_cards_already_in_the_column() 
         json!([]),
     )
     .await;
+    assert_eq!(card(&td, &a).await["queued"]["place"], 1);
+    // B makes the batch of two with A; C waits for the next one.
     move_to(&td, &b, "merge_queue").await;
     move_to(&td, &c, "merge_queue").await;
     sweep(&td).await;
-    assert_eq!(card(&td, &b).await["queued"]["place"], 1);
-    assert_eq!(card(&td, &c).await["queued"]["place"], 2);
-    // A leaves: B and C are the next batch.
-    move_to(&td, &a, "accepted").await;
+    assert!(card(&td, &a).await.get("queued").is_none());
     assert!(card(&td, &b).await.get("queued").is_none());
-    assert!(card(&td, &c).await.get("queued").is_none());
+    assert_eq!(card(&td, &c).await["queued"]["place"], 1);
+}
+
+/// TER-1204 (rev-1204 finding 3): the ETA of a job of a waiting card is
+/// held for its admission, so no `eta_overdue` fires while it waits.
+#[tokio::test]
+async fn a_job_eta_of_a_waiting_card_is_held() {
+    let td = setup().await;
+    set_wip(&td, "review", 1).await;
+    switch(&td).await;
+    let a = new_card(&td, "a").await;
+    let b = new_card(&td, "b").await;
+    move_to(&td, &a, "review").await;
+    assert_eq!(move_to(&td, &b, "review").await["queued"]["place"], 1);
+    let at = (chrono::Utc::now() + chrono::Duration::hours(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let (id, when) = (b.clone(), at.clone());
+    state(&td)
+        .db
+        .write("operator", move |t| {
+            terrariumd::store::board::set_job_eta(t, &id, Some(&when), "agent:w1")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (raw, _) = db_eta(&td, &b).await;
+    assert!(raw.is_none(), "{raw:?}");
+    assert_eq!(card(&td, &b).await["queued"]["held_eta"], json!(at));
+    move_to(&td, &a, "ready").await;
+    let (raw, _) = db_eta(&td, &b).await;
+    assert_eq!(raw.as_deref(), Some(at.as_str()));
 }
