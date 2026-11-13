@@ -5845,9 +5845,6 @@ pub fn parse_checkout(stdout: &str) -> Option<Value> {
     Some(Value::Object(out))
 }
 
-/// Clone or update a repo on a target, through an exec on the host agent
-/// (or ssh). The secret goes in the env of that one run.
-#[allow(clippy::too_many_arguments)]
 /// A Windows host without the `windows_git_checkout` capability (the
 /// default): copy files with `terrarium cp` into the workspace instead.
 pub const WINDOWS_CHECKOUT_REFUSED: &str = "a git checkout on this Windows host is not supported yet; \
@@ -5962,6 +5959,9 @@ async fn checkout_on_windows_host(
         .ok_or_else(|| ApiError::internal("the Windows host sent no checkout result"))
 }
 
+/// Clone or update a repo on a target, through an exec on the host agent
+/// (or ssh). The secret goes in the env of that one run.
+#[allow(clippy::too_many_arguments)]
 pub async fn checkout_on_target(
     state: &Shared,
     actor: &Actor,
