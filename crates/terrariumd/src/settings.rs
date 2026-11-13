@@ -93,6 +93,11 @@ pub struct Settings {
     )]
     pub ws_query_token: bool,
 
+    /// Staged project pages capability. Activation belongs to TER-1077.
+    #[arg(long, env = "TERRARIUM_PROJECT_PAGES_V2", default_value = "0",
+        action = clap::ArgAction::Set, value_parser = parse_switch)]
+    pub project_pages_v2: bool,
+
     /// The life of a dashboard session cookie (`POST /api/session`):
     /// seconds, or a number with `s`, `m`, `h`, or `d`. A cookie past half
     /// its life is renewed on the next request.
@@ -693,6 +698,7 @@ impl Default for InstallConfig {
 /// from the flags and the env; tests make it directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebConfig {
+    pub project_pages_v2: bool,
     /// [`ENV_PUBLIC_URL`], with no trailing `/`. `None`: not set.
     pub public_url: Option<String>,
     /// [`ENV_ARTIFACT_PUBLIC_URL`], with no trailing `/`. `None`: not set.
@@ -719,6 +725,7 @@ impl Default for WebConfig {
             public_url: None,
             artifact_public_url: None,
             ws_query_token: false,
+            project_pages_v2: false,
             session_ttl: std::time::Duration::from_secs(30 * 86_400),
             cli_session_ttl: std::time::Duration::from_secs(90 * 86_400),
             session_max_age: std::time::Duration::from_secs(90 * 86_400),
@@ -829,6 +836,7 @@ impl Settings {
             public_url: clean_url(self.public_url.as_deref()),
             artifact_public_url: clean_url(self.artifact_public_url.as_deref()),
             ws_query_token: self.ws_query_token,
+            project_pages_v2: self.project_pages_v2,
             session_ttl: self.session_ttl,
             cli_session_ttl: self.cli_session_ttl,
             session_max_age: self.session_max_age,
@@ -878,6 +886,10 @@ mod tests {
 
     #[test]
     fn switches_and_origins() {
+        assert!(!WebConfig::default().project_pages_v2);
+        assert!(!Settings::try_parse_from(["terrariumd", "--project-pages-v2", "0"]).unwrap().web().project_pages_v2);
+        assert!(Settings::try_parse_from(["terrariumd", "--project-pages-v2", "1"]).unwrap().web().project_pages_v2);
+        assert!(Settings::try_parse_from(["terrariumd", "--project-pages-v2", "maybe"]).is_err());
         assert!(parse_switch("1").unwrap());
         assert!(!parse_switch("off").unwrap());
         assert!(parse_switch("maybe").is_err());

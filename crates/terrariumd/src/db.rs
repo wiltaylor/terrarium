@@ -2575,6 +2575,7 @@ impl Drop for DatabaseScope {
 /// run on the blocking pool. Synchronous journal calls document their locks.
 #[derive(Clone)]
 pub struct Db {
+    project_pages_v2: bool,
     conn: Arc<Mutex<Connection>>,
     hub: EventHub,
     /// The redaction matcher (PLAN §16b.6). Each write transaction takes a
@@ -2593,11 +2594,18 @@ pub struct Db {
 impl Db {
     pub fn new(conn: Connection, hub: EventHub) -> Self {
         Self {
+            project_pages_v2: false,
             conn: Arc::new(Mutex::new(conn)),
             hub,
             redactor: RedactorHandle::default(),
             host_pins: Arc::default(),
         }
+    }
+
+    /// Carry the server capability into every compatibility writer.
+    pub fn with_project_pages_v2(mut self, enabled: bool) -> Self {
+        self.project_pages_v2 = enabled;
+        self
     }
 
     /// The lock of [`crate::jobs::prepare_hosts`] on this database.
@@ -2749,6 +2757,7 @@ impl Db {
     {
         let conn = self.conn.clone();
         let actor = actor.into();
+        let project_pages_v2 = self.project_pages_v2;
         // The link of the request (TER-61 review round 5, F9): the
         // task-local is gone inside the blocking task, so take it here. An
         // actor label `link:<id>` counts too.
@@ -2790,6 +2799,7 @@ impl Db {
                     // its first write; SQLite does not wait in that case.
                     let tx = guard.transaction_with_behavior(TransactionBehavior::Immediate)?;
                     let mut t = Tx {
+                        project_pages_v2,
                         tx,
                         actor,
                         link,
@@ -2862,6 +2872,7 @@ impl Db {
 
 /// A write transaction with the actor and the events and audit rows it made.
 pub struct Tx<'c> {
+    pub project_pages_v2: bool,
     tx: rusqlite::Transaction<'c>,
     /// `operator`, `agent:<ulid>`, `system`, or `schedule:<ulid>` (the
     /// writes of a trigger run).

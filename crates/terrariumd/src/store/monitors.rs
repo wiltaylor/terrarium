@@ -879,7 +879,7 @@ pub fn layout_of(
                         v["kind"] = json!("note");
                     }
                     let o = v.as_object_mut()?;
-                    for k in ["x", "y", "w", "h", "auto_height", "wiki"] {
+                    for k in ["x", "y", "w", "h", "auto_height", "wiki", "frame"] {
                         o.remove(k);
                     }
                     o.insert(
@@ -913,7 +913,7 @@ fn write_layout(t: &mut Tx<'_>, project: &str, l: &Layout, by: &str) -> ApiResul
                 .widgets
                 .iter()
                 .filter(|w| {
-                    matches!(
+                    w.kind.is_panel() || matches!(
                         w.kind,
                         WidgetKind::Actions
                             | WidgetKind::MonitorSummary

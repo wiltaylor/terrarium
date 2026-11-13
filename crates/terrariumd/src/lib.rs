@@ -310,7 +310,7 @@ async fn start_with_usage_and_executor(
         )),
         started: Instant::now(),
         started_at: chrono::Utc::now(),
-        db: Db::new(conn, EventHub::default()),
+        db: Db::new(conn, EventHub::default()).with_project_pages_v2(cfg.web.project_pages_v2),
         definitions: RwLock::new(Definitions::default()),
         supervisor: cfg.supervisor.clone(),
         state_dir: cfg.state_dir.clone(),

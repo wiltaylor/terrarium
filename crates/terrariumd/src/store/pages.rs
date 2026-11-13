@@ -11,6 +11,9 @@ use crate::error::{ApiError, ApiResult};
 use crate::events::EventDraft;
 use crate::monitors::layout::{self, Block, BlockKind, BlockOptions, Layout, Size};
 
+mod v2;
+pub use v2::*;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Widget {
@@ -32,7 +35,28 @@ pub struct Widget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor: Option<String>,
     #[serde(default)]
-    pub options: BlockOptions,
+    pub options: WidgetOptions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<Frame>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Frame { Grid, FullWidth, Viewport }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WidgetOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<layout::Range>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sparkline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decimals: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +73,45 @@ pub enum WidgetKind {
     MonitorSummary,
     JobQueue,
     EtaAccuracy,
+    Board,
+    Tests,
+    Schedules,
+    Rules,
+    Agents,
+    Repos,
+    WikiIndex,
+    Memory,
+    Db,
+    Pipelines,
+    Calendar,
+    Mail,
+    Events,
+}
+
+impl WidgetKind {
+    pub fn views(self) -> &'static [&'static str] {
+        match self {
+            Self::Board => &["lanes", "done", "columns"],
+            Self::Tests => &["runs"],
+            Self::Schedules => &["schedules", "triggers", "event_sources"],
+            Self::Rules => &["flow", "lint", "table", "last_runs"],
+            Self::Agents => &["agents", "card_agents"],
+            Self::Repos => &["list", "files"],
+            Self::WikiIndex => &["browser"],
+            Self::Memory => &["list", "graph"],
+            Self::Db => &["types", "records"],
+            Self::Pipelines => &["state", "runs"],
+            Self::Calendar => &["month", "week", "agenda"],
+            Self::Mail => &["messages"],
+            Self::Events => &["events"],
+            _ => &[],
+        }
+    }
+    pub fn is_panel(self) -> bool {
+        matches!(self, Self::Board | Self::Tests | Self::Schedules | Self::Rules
+            | Self::Agents | Self::Repos | Self::WikiIndex | Self::Memory | Self::Db
+            | Self::Pipelines | Self::Calendar | Self::Mail | Self::Events)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +130,8 @@ pub struct ProjectPage {
     pub content: PageInput,
     pub updated_at: String,
     pub updated_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<Builtin>,
 }
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectPage> {
@@ -84,10 +149,12 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectPage> {
         },
         updated_at: r.get(5)?,
         updated_by: r.get(6)?,
+        builtin: r.get::<_, Option<String>>(7)?.map(|s| serde_json::from_value(json!(s)))
+            .transpose().map_err(|e| rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e)))?,
     })
 }
 
-const COLS: &str = "project, slug, title, position, widgets, updated_at, updated_by";
+const COLS: &str = "project, slug, title, position, widgets, updated_at, updated_by, builtin";
 
 pub fn dashboard_slug(c: &Connection, project: &str) -> ApiResult<String> {
     Ok(c.query_row(
@@ -102,7 +169,7 @@ pub fn dashboard_slug(c: &Connection, project: &str) -> ApiResult<String> {
 pub fn list(c: &Connection, project: &str) -> ApiResult<Vec<ProjectPage>> {
     projects::get(c, project)?;
     let mut s = c.prepare(&format!(
-        "SELECT {COLS} FROM project_pages WHERE project=?1 ORDER BY position, slug LIMIT 11"
+        "SELECT {COLS} FROM project_pages WHERE project=?1 ORDER BY position, slug LIMIT 31"
     ))?;
     Ok(s.query_map([project], row)?
         .collect::<Result<Vec<_>, _>>()?)
@@ -126,7 +193,7 @@ fn identifier(s: &str, max: usize) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-fn check(c: &Connection, project: &str, slug: &str, input: &PageInput) -> ApiResult<()> {
+fn check(c: &Connection, project: &str, slug: &str, input: &PageInput, enabled: bool) -> ApiResult<()> {
     if !identifier(slug, 64)
         || slug.bytes().any(|b| b.is_ascii_uppercase())
         || !slug.as_bytes()[0].is_ascii_alphanumeric()
@@ -160,6 +227,21 @@ fn check(c: &Connection, project: &str, slug: &str, input: &PageInput) -> ApiRes
     let mut blocks = Vec::new();
     for (i, w) in input.widgets.iter().enumerate() {
         let bad = |message: &str| ApiError::invalid(format!("widgets[{i}]: {message}"));
+        if !enabled && (w.kind.is_panel() || w.frame.is_some() || w.options.search.is_some() || w.options.view.is_some()) {
+            return Err(bad("project pages v2 is disabled"));
+        }
+        if matches!(w.frame, Some(Frame::FullWidth | Frame::Viewport)) && (w.x != 0 || w.w != 12) {
+            return Err(bad("full-width frames require x=0,w=12"));
+        }
+        if w.kind.is_panel() {
+            if w.options.range.is_some() || w.options.sparkline.is_some() || w.options.decimals.is_some()
+                || w.options.search.as_ref().is_some_and(|s| s.len() > 256)
+                || w.options.view.as_deref().is_some_and(|v| !w.kind.views().contains(&v)) {
+                return Err(bad("panels accept only bounded search and a view belonging to their kind"));
+            }
+        } else if w.options.search.is_some() || w.options.view.is_some() {
+            return Err(bad("search/view are only valid for panels"));
+        }
         if !identifier(&w.id, 40) || !ids.insert(&w.id) {
             return Err(bad("invalid or duplicate id"));
         }
@@ -187,6 +269,11 @@ fn check(c: &Connection, project: &str, slug: &str, input: &PageInput) -> ApiRes
             return Err(bad("decimals must be 0-6"));
         }
         match w.kind {
+            kind if kind.is_panel() => {
+                if w.monitor.is_some() || w.wiki.is_some() || w.text.is_some() {
+                    return Err(bad("panels have no source override"));
+                }
+            }
             WidgetKind::Actions
             | WidgetKind::MonitorSummary
             | WidgetKind::JobQueue
@@ -238,7 +325,7 @@ fn check(c: &Connection, project: &str, slug: &str, input: &PageInput) -> ApiRes
                     size: Size::S,
                     title: w.title.clone(),
                     text: None,
-                    options: w.options.clone(),
+                    options: BlockOptions { range: w.options.range, sparkline: w.options.sparkline, decimals: w.options.decimals },
                 });
             }
         }
@@ -247,6 +334,18 @@ fn check(c: &Connection, project: &str, slug: &str, input: &PageInput) -> ApiRes
     let mut kinds = std::collections::HashMap::new();
     for b in &blocks {
         if let Some(id) = &b.monitor {
+            if enabled {
+                if !identifier(id, 128) { return Err(ApiError::invalid("invalid local monitor reference")); }
+                // Missing and foreign IDs are both local NotFound references. Never
+                // resolve foreign data, including while copying another layout.
+                match monitors::get(c, id) {
+                    Ok(m) if m.project == project => { kinds.insert(id.clone(), m.def.kind); }
+                    Ok(_) => { continue; }
+                    Err(e) if e.code == crate::error::Code::NotFound => { continue; }
+                    Err(e) => return Err(e),
+                }
+                continue;
+            }
             let m = monitors::get(c, id).map_err(|e| {
                 if e.code == crate::error::Code::NotFound {
                     ApiError::invalid("no such monitor in this project")
@@ -260,6 +359,12 @@ fn check(c: &Connection, project: &str, slug: &str, input: &PageInput) -> ApiRes
             kinds.insert(id.clone(), m.def.kind);
         }
     }
+    if enabled {
+        for b in &blocks {
+            if b.monitor.is_none() { return Err(ApiError::invalid("monitor widget requires monitor")); }
+        }
+        blocks.retain(|b| b.monitor.as_ref().is_some_and(|id| kinds.contains_key(id)));
+    }
     layout::check(&Layout { blocks }, &kinds)
         .map_err(|(f, m)| ApiError::invalid(format!("{f}: {m}")))
 }
@@ -272,14 +377,15 @@ pub fn set(
     actor: &str,
 ) -> ApiResult<ProjectPage> {
     projects::get(t, project)?;
-    check(t, project, slug, input)?;
+    check(t, project, slug, input, t.project_pages_v2)?;
     let exists: bool = t.query_row(
         "SELECT EXISTS(SELECT 1 FROM project_pages WHERE project=?1 AND slug=?2)",
         params![project, slug],
         |r| r.get(0),
     )?;
-    if !exists && list(t, project)?.len() >= 10 {
-        return Err(ApiError::invalid("at most 10 pages per project"));
+    let limit = if t.project_pages_v2 { 30 } else { 10 };
+    if !exists && list(t, project)?.len() >= limit {
+        return Err(ApiError::invalid(format!("at most {limit} pages per project")));
     }
     let widgets = serde_json::to_string(&input.widgets)?;
     t.execute("INSERT INTO project_pages(project,slug,title,position,widgets,updated_at,updated_by) VALUES(?1,?2,?3,?4,?5,?6,?7)
@@ -325,7 +431,11 @@ pub fn remove(t: &mut Tx<'_>, project: &str, slug: &str) -> ApiResult<()> {
 }
 
 fn changed(t: &mut Tx<'_>, project: &str, slug: &str, deleted: bool) -> ApiResult<()> {
-    let data = json!({"project":project,"slug":slug,"deleted":deleted});
+    let mut data = json!({"project":project,"slug":slug,"deleted":deleted});
+    if t.project_pages_v2 {
+        data["revision"] = json!(v2::advance(t, project)?);
+        data["operation"] = json!(if deleted { "remove" } else { "set" });
+    }
     t.audit(
         if deleted { "page.remove" } else { "page.set" },
         slug,
