@@ -2824,6 +2824,10 @@ rule "h-assign" {
   on = ["test.ping"]
   card_assign { who = "none" }
 }
+rule "h-review" {
+  on = ["test.ping"]
+  review_start { owner = "lead" }
+}
 rule "h-prepend" {
   on = ["test.ping"]
   card_prepend { text = "x" }
