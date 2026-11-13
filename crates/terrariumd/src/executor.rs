@@ -5538,6 +5538,10 @@ cleanup_hooks() {
 trap cleanup_hooks EXIT
 trap 'exit 2' HUP INT TERM
 if [ "$mode" = managed-required ]; then
+  # Private only for the staging of the hook. The checkout itself keeps the
+  # inherited umask (TER-1127): a 077 there made every tree 700, and the
+  # uid 1001 test pass could not read it.
+  tree_umask=$(umask)
   umask 077
   hook_stage=control
   [ -n "${TERRARIUM_COMMIT_HOOK:-}" ] && [ -n "${TERRARIUM_PUSH_HOOK_B64:-}" ] || fail_hook
@@ -5564,6 +5568,7 @@ if [ "$mode" = managed-required ]; then
   IFS= read -r first < "$hookdir/push" || fail_hook
   [ "$first" = '#!/bin/sh' ] || fail_hook
   grep -q '^# Written by terrariumd from the repo' "$hookdir/push" || fail_hook
+  umask "$tree_umask"
 fi
 unset TERRARIUM_PUSH_HOOK_B64 TERRARIUM_PUSH_HOOK
 case "$dest" in /*) ;; *) dest="$HOME/work/$dest" ;; esac
@@ -6789,6 +6794,80 @@ exit 0
         let message = git(&dest, &["show", "-s", "--format=%B"]);
         assert_eq!(message.matches("Repo-Note: yes").count(), 1);
         assert!(message.contains("Terrarium-Agent: test/worker"));
+    }
+
+    // TER-1127: a managed-required checkout keeps the inherited umask for the
+    // tree. Only the hook staging is private.
+    #[test]
+    fn managed_checkout_tree_follows_the_inherited_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir_all(origin.join("crates/x/fixtures")).unwrap();
+        std::fs::write(origin.join("crates/x/fixtures/data"), "x\n").unwrap();
+        let out = Command::new("sh")
+            .current_dir(&origin)
+            .args([
+                "-c",
+                "git init -q && git add -A && git commit -q -m one",
+            ])
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env_remove("TERRARIUM_GIT_TRAILERS")
+            .env_remove("TERRARIUM_GIT_TRAILERS_FILE")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let p = crate::git_identity::Provenance {
+            repo: None,
+            warn_only: false,
+            identity: crate::git_identity::Identity::from_env(),
+            trailers: String::new(),
+        };
+        for (umask, dir_mode, file_mode) in [("022", 0o755, 0o644), ("077", 0o700, 0o600)] {
+            let dest = tmp.path().join(format!("dest-{umask}"));
+            let mut c = checkout_cmd(
+                origin.to_str().unwrap(),
+                dest.to_str().unwrap(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            c.argv[8] = "managed-required".into();
+            let out = Command::new("sh")
+                .arg("-c")
+                .arg("umask \"$0\" && exec \"$@\"")
+                .arg(umask)
+                .args(&c.argv)
+                .envs(c.env)
+                .env("TERRARIUM_COMMIT_HOOK", p.hook())
+                .env("TERRARIUM_COMMIT_NAME", &p.identity.name)
+                .env("TERRARIUM_COMMIT_EMAIL", &p.identity.email)
+                .env(
+                    "TERRARIUM_PUSH_HOOK_B64",
+                    checkout_push_hook(&["protected".into()]).unwrap(),
+                )
+                .env("TERRARIUM_PROVENANCE", "false")
+                .env("TERRARIUM_PROVENANCE_WARN_ONLY", "false")
+                .env("TERRARIUM_REPO_ID", "test")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{umask}: {out:?}");
+            assert!(String::from_utf8_lossy(&out.stdout).contains("action=cloned"));
+            let mode = |p: &std::path::Path| {
+                std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+            };
+            for d in ["", "crates", "crates/x", "crates/x/fixtures"] {
+                assert_eq!(mode(&dest.join(d)), dir_mode, "{umask}: {d}");
+            }
+            assert_eq!(mode(&dest.join("crates/x/fixtures/data")), file_mode, "{umask}");
+            assert_eq!(mode(&dest.join(".git/hooks/pre-push")), 0o755, "{umask}");
+        }
     }
 
     #[test]

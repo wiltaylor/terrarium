@@ -186,7 +186,7 @@ cloned terrarium in work/terrarium of worker
 HEAD 3f2c1e0b9a0d... (main)
 ```
 
-`--target <name>` runs the clone or fetch on that target through its host agent. A vmlab target is refused (422).
+`--target <name>` runs the clone or fetch on that target through its host agent. A vmlab target is refused (422). The tree gets the umask of the host agent's command (usually `022`, so other users such as uid 1001 can read it). Only the staging of the managed hooks is private (`077`, TER-1127).
 
 `terrarium repo credential get` is hidden. git runs it as the credential
 helper that the daemon writes into each workspace clone. It reads git's
