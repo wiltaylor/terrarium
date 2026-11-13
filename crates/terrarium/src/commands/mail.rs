@@ -103,7 +103,9 @@ pub async fn mail(ctx: &Ctx, cmd: &MailCmd) -> anyhow::Result<()> {
                 ("state", state),
             ]);
             let v = Value::Array(ctx.api.list("/api/mail", q, None).await?);
-            ctx.emit(&v, |c, v| print_table(c, &mail_rows(as_items(v)), MAIL_COLS, "no mail"))
+            ctx.emit(&v, |c, v| {
+                print_table(c, &mail_rows(as_items(v)), MAIL_COLS, "no mail")
+            })
         }
         MailCmd::Check => {
             let me = ctx.me().await?;

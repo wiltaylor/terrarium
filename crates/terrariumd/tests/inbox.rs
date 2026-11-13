@@ -1253,7 +1253,11 @@ async fn held_seen(td: &TestDaemon, caller: Option<&str>, agent: &str) -> Option
         .cloned()
         .unwrap_or_else(|| panic!("{agent} is not in the list"));
     let shown = show.ok().clone();
-    assert_eq!(row.get("held_mail"), shown.get("held_mail"), "{row}\n{shown}");
+    assert_eq!(
+        row.get("held_mail"),
+        shown.get("held_mail"),
+        "{row}\n{shown}"
+    );
     shown.get("held_mail").map(|v| v.as_u64().expect("a count"))
 }
 
@@ -1284,7 +1288,13 @@ async fn held_mail_is_counted_apart_from_queued_work() {
     let other = id(&td.agent("ops", "other", json!({})).await);
 
     // T6: zero held mail is `0` for each reader that may see it.
-    for caller in [None, Some(w2.as_str()), Some(lead.as_str()), Some(sys.as_str()), Some(arch.as_str())] {
+    for caller in [
+        None,
+        Some(w2.as_str()),
+        Some(lead.as_str()),
+        Some(sys.as_str()),
+        Some(arch.as_str()),
+    ] {
         assert_eq!(held_seen(&td, caller, &w2).await, Some(0), "{caller:?}");
     }
     assert_eq!(held_seen(&td, Some(&w1), &w2).await, None);
@@ -1295,7 +1305,13 @@ async fn held_mail_is_counted_apart_from_queued_work() {
     assert_eq!(queued_of(&td, &w2).await, 6);
     // T5: who sees the count. The plain member gets no field, and its
     // own count stays visible to it.
-    for caller in [None, Some(w2.as_str()), Some(lead.as_str()), Some(sys.as_str()), Some(arch.as_str())] {
+    for caller in [
+        None,
+        Some(w2.as_str()),
+        Some(lead.as_str()),
+        Some(sys.as_str()),
+        Some(arch.as_str()),
+    ] {
         assert_eq!(held_seen(&td, caller, &w2).await, Some(1), "{caller:?}");
     }
     assert_eq!(held_seen(&td, Some(&w1), &w2).await, None);
@@ -1322,7 +1338,9 @@ async fn held_mail_is_counted_apart_from_queued_work() {
     assert_eq!(held_seen(&td, Some(&lead), &w2).await, Some(1));
 
     // T4: the operator releases it: it moves from held to queued.
-    td.post_empty(&format!("/api/mail/{hid}/release")).await.ok();
+    td.post_empty(&format!("/api/mail/{hid}/release"))
+        .await
+        .ok();
     assert_eq!(held_seen(&td, None, &w2).await, Some(0));
     assert_eq!(queued_of(&td, &w2).await, 7);
 }

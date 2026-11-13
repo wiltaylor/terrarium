@@ -8537,7 +8537,11 @@ async fn held_mail_shows_apart_from_queued() {
     assert!(head.contains("QUEUED") && head.contains("HELD"), "{out}");
     let col = |line: &str| -> String {
         let at = head.find("HELD").unwrap();
-        line[at..].split_whitespace().next().unwrap_or("").to_owned()
+        line[at..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_owned()
     };
     let rows: Vec<&str> = out.lines().skip(1).collect();
     assert_eq!(col(rows[0]), "3", "{out}");
