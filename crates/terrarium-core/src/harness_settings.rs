@@ -32,7 +32,10 @@ pub const DIR: &str = "harness";
 pub fn file_name(harness: HarnessId) -> &'static str {
     match harness {
         HarnessId::Codex => "config.toml",
-        HarnessId::Claude | HarnessId::Copilot | HarnessId::Pi => "settings.json",
+        // Grok: not read until its adapter (TER-1192) names its file.
+        HarnessId::Claude | HarnessId::Copilot | HarnessId::Pi | HarnessId::Grok => {
+            "settings.json"
+        }
     }
 }
 

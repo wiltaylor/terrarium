@@ -1384,6 +1384,14 @@ fn check_subscription(
     agent: &Agent,
     sub: Option<&SubscriptionCheck>,
 ) -> Result<Option<Subscription>, SupervisorError> {
+    // Grok Build is a value only until its adapter lands (TER-1192).
+    if agent.harness == terrarium_core::HarnessId::Grok {
+        return Err(SupervisorError::NotReady(
+            "the grok harness has no adapter yet (TER-1192); an xai plan row keeps its Grok \
+             Build login until then"
+                .into(),
+        ));
+    }
     // pi uses API keys only (PLAN §16.3): a plan login does not list pi,
     // so say why before the harness list does.
     if let Some(SubscriptionCheck::Found(s)) = sub

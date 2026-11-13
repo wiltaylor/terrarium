@@ -208,6 +208,8 @@ pub fn interrupt_keys(harness: HarnessId) -> Vec<Vec<u8>> {
         HarnessId::Codex => terrarium_adapter_codex::keys::interrupt(),
         HarnessId::Copilot => terrarium_adapter_copilot::keys::interrupt(),
         HarnessId::Pi => terrarium_adapter_pi::keys::interrupt(),
+        // No grok adapter yet (TER-1192): Escape, as most TUIs.
+        HarnessId::Grok => vec![b"\x1b".to_vec()],
     }
 }
 

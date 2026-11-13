@@ -50,6 +50,7 @@ pub mod tool;
 pub mod transcript;
 pub mod turn_tag;
 pub mod webhook;
+pub mod xai;
 pub mod zai;
 
 pub use adapter::{Adapter, Answer, ScreenHint};

@@ -55,6 +55,12 @@ pub fn select(spec: &RunnerSpec) -> Arc<dyn Adapter> {
             opts.host_agent_dir = o.host_config_dir.clone();
             Arc::new(PiAdapter::new(opts))
         }
+        // No grok adapter yet (TER-1192): the daemon refuses a grok start
+        // (`runner_supervisor::check_subscription`), so no grok runner comes
+        // here. The fake adapter reads no hook it does not know.
+        HarnessId::Grok => Arc::new(FakeAdapter {
+            harness: spec.harness,
+        }),
     }
 }
 

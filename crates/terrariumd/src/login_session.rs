@@ -77,6 +77,10 @@ pub enum LoginKind {
     Codex,
     Copilot,
     Pi,
+    /// Grok Build, the login of an xAI plan row (`terrarium_core::xai`).
+    /// It logs in only into a row that exists: provider `xai`, a tier
+    /// plan, harness `grok`.
+    Grok,
 }
 
 impl LoginKind {
@@ -90,6 +94,7 @@ impl LoginKind {
             Self::Codex => HarnessId::Codex,
             Self::Copilot => HarnessId::Copilot,
             Self::Pi => HarnessId::Pi,
+            Self::Grok => HarnessId::Grok,
         }
     }
 
@@ -100,6 +105,8 @@ impl LoginKind {
             Self::Codex => &["login", "--device-auth"],
             Self::Copilot => &["login", "--device-code"],
             Self::Pi => &[],
+            // The device login: the daemon has no browser.
+            Self::Grok => &["login", "--device-auth"],
         }
     }
 
@@ -109,7 +116,9 @@ impl LoginKind {
             Self::Claude => Some(&["auth", "logout"]),
             Self::Codex => Some(&["logout"]),
             Self::Copilot => Some(&["logout"]),
-            Self::Pi => None,
+            // Its login is only in an account: the logout removes the
+            // account. No `grok logout` runs.
+            Self::Pi | Self::Grok => None,
         }
     }
 
@@ -120,6 +129,7 @@ impl LoginKind {
             Self::Codex => "openai".into(),
             Self::Copilot => "github".into(),
             Self::Pi => pi_provider.unwrap_or("anthropic").into(),
+            Self::Grok => terrarium_core::xai::PROVIDER.into(),
         }
     }
 
@@ -127,7 +137,7 @@ impl LoginKind {
     pub fn instructions(self, provider: Option<&str>) -> String {
         match self {
             Self::Claude => "Open the URL, sign in, and paste the code that the page shows.".into(),
-            Self::Codex | Self::Copilot => {
+            Self::Codex | Self::Copilot | Self::Grok => {
                 "Open the URL, sign in, and enter the device code.".into()
             }
             Self::Pi => {
@@ -234,6 +244,12 @@ pub fn parse_output(kind: LoginKind, raw: &[u8]) -> Parsed {
         },
         // pi has no login: it uses API keys only.
         LoginKind::Pi => Parsed::default(),
+        // The output of `grok login --device-auth` is not captured yet
+        // (TER-1192): the first URL and code that the generic patterns find.
+        LoginKind::Grok => Parsed {
+            url: last(&p.any_url, &text, 0),
+            device_code: last(&p.any_code, &text, 1),
+        },
     }
 }
 
@@ -257,9 +273,12 @@ pub struct LoginStatus {
 /// Env var prefixes that would change which login a child process reads.
 const STRIP_PREFIXES: [&str; 2] = ["CLAUDE", "ANTHROPIC"];
 /// Also the daemon's own bearer token and the first operator password: a
-/// login command needs neither.
-const STRIP_VARS: [&str; 7] = [
+/// login command needs neither. `XAI_API_KEY`: Grok Build falls back to it
+/// when no session is stored, so a check would count an API key as a plan
+/// login.
+const STRIP_VARS: [&str; 8] = [
     "COPILOT_GITHUB_TOKEN",
+    "XAI_API_KEY",
     "GH_TOKEN",
     "GITHUB_TOKEN",
     "OPENAI_API_KEY",
@@ -421,6 +440,18 @@ fn account_home(state_dir: &Path, kind: LoginKind, sub: &str) -> Result<AccountC
         )
         .map_err(|e| format!("cannot link the account into the check dir: {e}"))?,
         HarnessId::Copilot => {}
+        // Grok reads `$HOME/.grok/auth.json`.
+        HarnessId::Grok => {
+            let dir = tmp.join(crate::accounts::GROK_HOME_DIR);
+            std::fs::create_dir(&dir)
+                .and_then(|()| {
+                    std::os::unix::fs::symlink(
+                        crate::accounts::credential_path(&store, HarnessId::Grok),
+                        dir.join(crate::accounts::AUTH_FILE),
+                    )
+                })
+                .map_err(|e| format!("cannot link the account into the check dir: {e}"))?;
+        }
     }
     Ok(AccountCheck {
         home: tmp,
@@ -611,6 +642,33 @@ pub async fn check_status_in(
                 Err(e) => st.detail = Some(e),
             }
         }
+        LoginKind::Grok => {
+            // Grok Build has no documented status command. The check reads
+            // the stored `auth.json` (the account's, or the scratch home's)
+            // and does not refresh it or ask xAI. The plan is the row's
+            // tier, which the operator gave.
+            let file = match at {
+                CheckHome::Account(_) => Some(cred_home.join(crate::accounts::AUTH_FILE)),
+                CheckHome::Scratch(p) => Some(
+                    p.join(crate::accounts::GROK_HOME_DIR)
+                        .join(crate::accounts::AUTH_FILE),
+                ),
+                CheckHome::Shared => None,
+            };
+            let Some(file) = file else {
+                st.detail = Some("a Grok Build login lives only in the account of its xai plan row".into());
+                return st;
+            };
+            let found = tokio::task::spawn_blocking(move || grok_login_in(&file))
+                .await
+                .unwrap_or(false);
+            st.logged_in = found;
+            st.detail = Some(if found {
+                "a stored Grok Build login (grok refreshes it; not checked with xAI)".into()
+            } else {
+                "no stored Grok Build login".into()
+            });
+        }
         LoginKind::Pi => {
             let provider = pi_provider.unwrap_or("anthropic");
             let args = [
@@ -638,6 +696,51 @@ pub async fn check_status_in(
         }
     }
     st
+}
+
+/// True when `file` is a Grok `auth.json` that holds a login. It follows
+/// a symlink: the check dir of an account links the account's file.
+pub fn grok_login_in(file: &Path) -> bool {
+    std::fs::read(file)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .is_some_and(|v| crate::accounts::grok_auth_usable(&v))
+}
+
+/// Why a Grok Build login into the subscription `name` is refused, or
+/// `None`. A Grok login goes only into a row that exists: provider `xai`,
+/// a tier plan, harness `grok` (`terrarium_core::xai`). Its relogin is a
+/// login with the same name.
+pub fn grok_login_refusal(list: &[Subscription], name: Option<&str>) -> Option<String> {
+    let tiers = terrarium_core::xai::TIERS.join(", ");
+    let Some(name) = name else {
+        return Some(format!(
+            "a Grok Build login needs `name`: an xai subscription with plan {tiers} and              harnesses [\"grok\"]; define it first"
+        ));
+    };
+    let Some(s) = list.iter().find(|s| s.name == name) else {
+        return Some(format!(
+            "subscription `{name}` does not exist; define it with provider xai, plan one of              {tiers}, and harnesses [\"grok\"] first"
+        ));
+    };
+    if !matches!(
+        terrarium_core::xai::plan(s.plan.as_deref()),
+        terrarium_core::xai::Plan::Tier(_)
+    ) || !terrarium_core::xai::is_xai(&s.provider)
+    {
+        return Some(format!(
+            "subscription `{name}` is not an xai plan (provider `{}`, plan `{}`); a Grok Build \
+             login needs provider xai and plan one of {tiers}",
+            s.provider,
+            s.plan.as_deref().unwrap_or("")
+        ));
+    }
+    if !s.harnesses.contains(&HarnessId::Grok) {
+        return Some(format!(
+            "subscription `{name}` does not list the grok harness; set harnesses to [\"grok\"]"
+        ));
+    }
+    None
 }
 
 /// The default subscription name for a login.
@@ -1025,6 +1128,12 @@ pub async fn start(state: &Shared, req: StartLogin) -> ApiResult<LoginView> {
             terrarium_adapter_pi::provider::PLAN_REFUSAL
         )));
     }
+    if req.kind == LoginKind::Grok {
+        let list = state.db.read(subs::list).await?;
+        if let Some(why) = grok_login_refusal(&list, req.name.as_deref()) {
+            return Err(ApiError::invalid(why));
+        }
+    }
     if state.usage.logins.len() >= MAX_LIVE_LOGINS {
         return Err(ApiError::conflict(format!(
             "{MAX_LIVE_LOGINS} login sessions are open; finish or cancel one first"
@@ -1303,6 +1412,11 @@ async fn finish(state: &Shared, s: &LoginSession) -> Result<subs::Subscription, 
     })
     .await
     .map_err(|e| e.to_string())??;
+    // The new Grok tokens join the redaction matcher before anything can
+    // show them (TER-1191).
+    if h == HarnessId::Grok {
+        crate::secrets::redact::rebuild(state).await;
+    }
     let sub = register(state, &st, Some(&name))
         .await
         .map_err(|e| e.message)?;
@@ -1407,6 +1521,12 @@ pub fn attach(state: &Shared, id: &str) -> ApiResult<PtyAttachment> {
 /// Run the harness's logout command for a subscription.
 pub async fn logout(state: &Shared, kind: LoginKind) -> ApiResult<String> {
     let Some(args) = kind.logout_args() else {
+        if kind == LoginKind::Grok {
+            return Err(ApiError::invalid(
+                "grok has no stored login here: a Grok Build login lives only in the account \
+                 of its xai plan row",
+            ));
+        }
         return Err(ApiError::invalid(format!(
             "{} has no logout: it uses API keys only; store another key, or delete the \
              subscription",
@@ -1436,6 +1556,7 @@ pub fn kind_for(h: HarnessId) -> LoginKind {
         HarnessId::Codex => LoginKind::Codex,
         HarnessId::Copilot => LoginKind::Copilot,
         HarnessId::Pi => LoginKind::Pi,
+        HarnessId::Grok => LoginKind::Grok,
     }
 }
 
@@ -1483,6 +1604,7 @@ pub fn kind_of(sub: &Subscription) -> Option<(LoginKind, Option<String>)> {
         HarnessId::Codex => (LoginKind::Codex, None),
         HarnessId::Copilot => (LoginKind::Copilot, None),
         HarnessId::Pi => (LoginKind::Pi, Some(sub.provider.clone())),
+        HarnessId::Grok => (LoginKind::Grok, None),
     })
 }
 
@@ -1746,6 +1868,77 @@ mod tests {
         }
     }
 
+    /// TER-1191: a Grok check never counts an API key as a plan login.
+    #[test]
+    fn child_env_strips_the_xai_api_key() {
+        assert!(STRIP_VARS.contains(&"XAI_API_KEY"));
+    }
+
+    fn row(name: &str, provider: &str, plan: Option<&str>, harnesses: &[&str]) -> Subscription {
+        serde_json::from_value(json!({
+            "name": name, "provider": provider, "plan": plan, "harnesses": harnesses,
+            "alert_at": 80, "source": "api", "login_status": "missing",
+            "probe_status": "none", "created_at": "", "updated_at": ""
+        }))
+        .unwrap()
+    }
+
+    /// TER-1191: the Grok login kind, and the rows that it may log into.
+    #[test]
+    fn grok_logins_go_only_into_an_xai_plan_row() {
+        let k = LoginKind::Grok;
+        assert_eq!(k.harness(), HarnessId::Grok);
+        assert_eq!(k.as_str(), "grok");
+        assert_eq!(k.login_args(), ["login", "--device-auth"]);
+        assert_eq!(k.logout_args(), None);
+        assert_eq!(k.provider(None), "xai");
+        assert_eq!(kind_for(HarnessId::Grok), k);
+        assert_eq!(
+            serde_json::to_value(k).unwrap(),
+            serde_json::Value::String("grok".into())
+        );
+        let list = vec![
+            row("x-super", "xai", Some("Super"), &["grok"]),
+            row("x-key", "xai", Some("API key"), &["pi"]),
+            row("x-nogrok", "xai", Some("Plus"), &["pi"]),
+            row("max", "anthropic", Some("Max"), &["claude"]),
+        ];
+        assert_eq!(grok_login_refusal(&list, Some("x-super")), None);
+        assert_eq!(kind_of(&list[0]), Some((LoginKind::Grok, None)));
+        for (name, want) in [
+            (None, "needs `name`"),
+            (Some("nope"), "does not exist"),
+            (Some("x-key"), "is not an xai plan"),
+            (Some("max"), "is not an xai plan"),
+            (Some("x-nogrok"), "does not list the grok harness"),
+        ] {
+            let why = grok_login_refusal(&list, name).unwrap();
+            assert!(why.contains(want), "{name:?}: {why}");
+        }
+    }
+
+    /// TER-1191: the Grok check reads the stored file only; no login, an
+    /// empty object, and a broken file are all "no login".
+    #[test]
+    fn grok_login_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("auth.json");
+        assert!(!grok_login_in(&f));
+        std::fs::write(&f, "{}").unwrap();
+        assert!(!grok_login_in(&f));
+        std::fs::write(&f, "not json").unwrap();
+        assert!(!grok_login_in(&f));
+        std::fs::write(&f, r#"{"session": {"token": "x"}}"#).unwrap();
+        assert!(grok_login_in(&f));
+        // The device login output: the generic URL and code patterns.
+        let p = parse_output(
+            LoginKind::Grok,
+            b"Visit https://accounts.x.ai/device and enter the code: ABCD-1234\r\n",
+        );
+        assert_eq!(p.url.as_deref(), Some("https://accounts.x.ai/device"));
+        assert_eq!(p.device_code.as_deref(), Some("ABCD-1234"));
+    }
+
     fn fixture(name: &str) -> Vec<u8> {
         std::fs::read(format!(
             "{}/tests/fixtures/login/{name}.raw",
@@ -1797,6 +1990,7 @@ mod tests {
             LoginKind::Codex,
             LoginKind::Copilot,
             LoginKind::Pi,
+            LoginKind::Grok,
         ] {
             assert_eq!(
                 parse_output(k, b"Opening browser to sign in...\r\n"),

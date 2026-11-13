@@ -150,6 +150,15 @@ pub fn plan_refusal(harness: HarnessId, sub: &Subscription) -> Option<String> {
         return terrarium_core::cloud::harness_refusal(&[harness])
             .map(|why| format!("subscription `{}`: {why}", sub.name));
     }
+    // xAI (TER-1191): grok on an xai tier row only, pi on an xai key row
+    // only. pi on a tier row gets pi's own refusal below.
+    if (harness == HarnessId::Grok || terrarium_core::xai::is_xai(&sub.provider))
+        && !(harness == HarnessId::Pi && sub.is_plan())
+        && let Some(why) =
+            terrarium_core::xai::refusal(&sub.provider, sub.plan.as_deref(), &[harness])
+    {
+        return Some(format!("subscription `{}`: {why}", sub.name));
+    }
     if sub.is_selfhosted() {
         let api = sub.selfhosted.as_ref().map(|s| s.api).unwrap_or_default();
         return (!api.harnesses().contains(&harness)).then(|| {
@@ -301,6 +310,16 @@ pub fn upsert_def(t: &mut Tx<'_>, def: &SubscriptionDef, source: &str) -> ApiRes
         terrarium_core::zai::parse_plan(def.plan.as_deref()).map_err(ApiError::invalid)?;
     }
     check_cloud(def)?;
+    // xAI (TER-1191): a tier row is for grok only, a key row for pi only,
+    // and grok spends only an xai tier row.
+    if let Some(why) =
+        terrarium_core::xai::refusal(&def.provider, def.plan.as_deref(), &def.harnesses)
+    {
+        return Err(ApiError::invalid(format!(
+            "subscription `{}`: {why}",
+            def.name
+        )));
+    }
     // Moonshot is for pi only (an operator decision; `docs/PLAN.md` §16).
     if terrarium_core::moonshot::is_moonshot(&def.provider) {
         terrarium_core::moonshot::parse_plan(def.plan.as_deref()).map_err(ApiError::invalid)?;
@@ -1410,6 +1429,83 @@ mod tests {
         let why = plan_refusal(HarnessId::Pi, &max).unwrap();
         assert!(why.contains("pi uses API keys only"), "{why}");
         assert_eq!(plan_refusal(HarnessId::Claude, &max), None);
+    }
+
+    fn xai(name: &str, plan: Option<&str>, harnesses: &[HarnessId]) -> SubscriptionDef {
+        SubscriptionDef {
+            name: name.into(),
+            provider: "xai".into(),
+            plan: plan.map(str::to_owned),
+            harnesses: harnesses.to_vec(),
+            probe: None,
+            alert_at: 80,
+            selfhosted: None,
+            cloud: None,
+        }
+    }
+
+    /// TER-1191: the X Subscription row (provider xai, plan = the tier,
+    /// harnesses = ["grok"]) is stored beside the xai API-key rows, which
+    /// stay as they are. Every other mix is refused, and an agent start
+    /// on a wrong row is refused.
+    #[tokio::test]
+    async fn xai_plan_and_key_rows() {
+        let (g, p) = (HarnessId::Grok, HarnessId::Pi);
+        let db = db();
+        db.write("system", |t| {
+            upsert_def(t, &xai("x-super", Some("Super"), &[g]), SOURCE_API)?;
+            upsert_def(t, &xai("x-key", Some("API key"), &[p]), SOURCE_API)?;
+            upsert_def(t, &xai("x-old", None, &[p]), SOURCE_API)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let s = db.read(|c| get(c, "x-super")).await.unwrap();
+        assert_eq!((s.provider.as_str(), s.plan.as_deref()), ("xai", Some("Super")));
+        assert_eq!(s.harnesses, [g]);
+        assert!(s.is_plan());
+        let k = db.read(|c| get(c, "x-key")).await.unwrap();
+        assert_eq!(k.harnesses, [p]);
+        assert!(!k.is_plan());
+        let old = db.read(|c| get(c, "x-old")).await.unwrap();
+        assert!(!old.is_plan());
+
+        for (d, want) in [
+            (xai("a", Some("Ultra"), &[p]), "grok harness only"),
+            (xai("b", Some("Plus"), &[g, p]), "not pi"),
+            (xai("c", Some("Premium"), &[]), "needs a harness"),
+            (xai("d", Some("API key"), &[g]), "pi harness only"),
+            (xai("e", Some("Heavy"), &[g]), "unknown xai plan"),
+            (
+                SubscriptionDef {
+                    harnesses: vec![HarnessId::Claude, g],
+                    ..def("f")
+                },
+                "only an xai plan",
+            ),
+        ] {
+            let name = d.name.clone();
+            let e = db
+                .write("system", move |t| upsert_def(t, &d, SOURCE_API).map(|_| ()))
+                .await
+                .unwrap_err();
+            assert!(e.message.contains(want), "{name}: {}", e.message);
+            assert!(e.message.contains(&format!("`{name}`")), "{}", e.message);
+        }
+
+        // An agent start: grok on the tier row, pi on the key rows.
+        assert_eq!(plan_refusal(g, &s), None);
+        assert_eq!(plan_refusal(p, &k), None);
+        assert_eq!(plan_refusal(p, &old), None);
+        let why = plan_refusal(p, &s).unwrap();
+        assert!(why.contains("pi uses API keys only"), "{why}");
+        assert!(plan_refusal(g, &k).unwrap().contains("pi harness only"));
+        assert!(plan_refusal(HarnessId::Claude, &s).unwrap().contains("grok harness only"));
+        let max = db
+            .write("system", |t| upsert_def(t, &def("max"), SOURCE_API))
+            .await
+            .unwrap();
+        assert!(plan_refusal(g, &max).unwrap().contains("only an xai plan"));
     }
 
     #[tokio::test]
