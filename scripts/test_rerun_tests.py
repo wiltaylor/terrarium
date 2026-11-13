@@ -57,15 +57,27 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 """
 
 
-def json_suite(passed=(), failed=(), inside=""):
-    """One binary's libtest JSON, with `inside` printed by one of its tests."""
-    lines = [json.dumps({"type": "suite", "event": "started",
-                         "test_count": len(passed) + len(failed)}) + "\n", inside]
-    lines += [json.dumps({"type": "test", "event": "ok", "name": n}) + "\n" for n in passed]
-    lines += [json.dumps({"type": "test", "event": "failed", "name": n, "stdout": "boom"}) + "\n"
+# NESTED cut in two: its `running` and test line, and its `test result`.
+INNER_START, INNER_END = NESTED.split("\n\n", 1)[0] + "\n", "\n" + NESTED.split("\n\n", 1)[1]
+
+
+def json_suite(passed=(), failed=(), inside="", at=0, count=None):
+    """One binary's libtest JSON: `inside` is printed before its test event
+    number `at` (passed first, then failed); `count` overrides `N failed`."""
+    tests = [json.dumps({"type": "test", "event": "ok", "name": n}) + "\n" for n in passed]
+    tests += [json.dumps({"type": "test", "event": "failed", "name": n, "stdout": "boom"}) + "\n"
               for n in failed]
-    lines.append(json.dumps({"type": "suite", "event": "failed" if failed else "ok"}) + "\n")
-    return "".join(lines)
+    tests.insert(at, inside)
+    end = {"type": "suite", "event": "failed" if failed else "ok", "passed": len(passed),
+           "failed": len(failed) if count is None else count}
+    return "".join([json.dumps({"type": "suite", "event": "started",
+                                "test_count": len(passed) + len(failed)}) + "\n", *tests,
+                    json.dumps(end) + "\n"])
+
+
+def failed_events(*names):
+    return "".join(json.dumps({"type": "test", "event": "failed", "name": n, "stdout": "boom"})
+                   + "\n" for n in names)
 
 
 def with_nested(out):
@@ -188,18 +200,55 @@ class Parse(unittest.TestCase):
         self.assertIn("timed out", o.failed["a::flaky"])
         self.assertIsNone(rerun_tests.why_not(o))
 
-    def test_a_failed_test_inside_a_nested_run_is_not_a_failure_of_the_step(self):
-        inner = NESTED.replace("... ok", "... FAILED").replace("result: ok", "result: FAILED")
-        o = parse(json_suite(passed=["p"], inside=inner) + json_suite(failed=["x"]),
-                  cargo(2, ["it"]))
-        self.assertEqual((list(o.failed), o.failed_suites), (["x"], 1))
+    def test_parent_failures_before_inside_and_after_a_nested_run_are_all_kept(self):
+        # Review rev-1222 finding 1: libtest runs tests in parallel, so the
+        # parent's own results come between the inner lines.
+        inner = INNER_START + failed_events("b") + INNER_END
+        out = json_suite(passed=["p"], failed=["a", "c"], inside=inner, at=2, count=3)
+        o = parse(out, cargo(1, ["lib"]))
+        self.assertEqual(sorted(o.failed), ["a", "b", "c"])
+        self.assertEqual((o.started, o.finished, o.miscounted), (1, 1, []))
         self.assertIsNone(rerun_tests.why_not(o))
-        # The inner run crashed after `running`: its parent's suite still ends.
-        cut = NESTED.split("test result")[0]
-        o = parse(json_suite(passed=["p"], inside=cut) + json_suite(failed=["x"]),
-                  cargo(2, ["it"]))
-        self.assertEqual((o.started, o.finished, list(o.failed)), (2, 2, ["x"]))
+        # Plain output, the uid 1001 pass.
+        out = ("running 4 tests\ntest a ... FAILED\n" + INNER_START + "test b ... FAILED\n"
+               + INNER_END + "test c ... FAILED\ntest p ... ok\n\n"
+               "test result: FAILED. 1 passed; 3 failed; 0 ignored\n")
+        o = parse(out)
+        o.ended(101)
+        self.assertEqual(sorted(o.failed), ["a", "b", "c"])
         self.assertIsNone(rerun_tests.why_not(o))
+
+    def test_six_failures_with_one_inside_a_nested_run_get_no_rerun(self):
+        inner = INNER_START + failed_events("t5") + INNER_END
+        out = json_suite(failed=[f"t{i}" for i in range(5)], inside=inner, at=2, count=6)
+        o = parse(out, cargo(1, ["lib"]))
+        self.assertEqual(len(o.failed), 6)
+        self.assertIn("6 tests failed, more than 5", rerun_tests.why_not(o))
+
+    def test_failures_after_a_crashed_nested_run_are_kept(self):
+        # The inner run printed `running` and no result: JSON closes the parent anyway.
+        out = json_suite(passed=["p"], failed=["a", "b"], inside=INNER_START, at=1)
+        o = parse(out, cargo(1, ["lib"]))
+        self.assertEqual((o.started, o.finished, sorted(o.failed)), (1, 1, ["a", "b"]))
+        self.assertIsNone(rerun_tests.why_not(o))
+        # Plain: the parent's result closes only the inner run, so no rerun.
+        o = parse("running 2 tests\n" + INNER_START + "test a ... FAILED\n"
+                  "test result: FAILED. 1 passed; 1 failed; 0 ignored\n")
+        o.ended(101)
+        self.assertIn("ended without a result", rerun_tests.why_not(o))
+
+    def test_a_result_that_names_fewer_or_more_failures_gets_no_rerun(self):
+        # A failed test that the parser did not see: the count says 2, one is named.
+        o = parse(json_suite(failed=["a"], count=2), cargo(1, ["lib"]))
+        self.assertIn("2 failed, but 1 failed tests named", rerun_tests.why_not(o))
+        # An inner run that fails another test than its parent's.
+        inner = INNER_START.replace("... ok", "... FAILED") + INNER_END
+        o = parse(json_suite(failed=["a"], inside=inner), cargo(1, ["lib"]))
+        self.assertIn("1 failed, but 2 failed tests named", rerun_tests.why_not(o))
+        # A plain result without its count.
+        o = parse("running 1 test\ntest a ... FAILED\n\ntest result: FAILED. odd\n")
+        o.ended(101)
+        self.assertIn("no count", rerun_tests.why_not(o))
 
     def test_refusals_stay_with_a_nested_run(self):
         nested = json_suite(passed=["p"], inside=NESTED)

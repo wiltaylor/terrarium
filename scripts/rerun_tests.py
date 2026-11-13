@@ -41,6 +41,8 @@ REPORT = "reruns.json"
 
 RUNNING = re.compile(r"^running \d+ tests?$")
 RESULT = re.compile(r"^test result: (ok|FAILED)\. ")
+# The count in a plain `test result:` line: `2 passed; 1 failed; ...`.
+FAILED_COUNT = re.compile(r"\b(\d+) failed\b")
 TEST = re.compile(r"^test (.+?) \.\.\. (ok|FAILED)$")
 SECTION = re.compile(r"^---- (.+?) std(?:out|err) ----$")
 # `src/lib.rs - item (line 12)`: a doctest, which cannot be run alone.
@@ -75,12 +77,19 @@ class Outcomes:
     starts each binary itself (`ended`). Any end that is not a failed test
     goes to `unexplained`.
 
-    Only the suites at the top level count. A test that runs a test binary
-    with the stdout inherited (its own binary again, as
-    git_identity::tests::instance_identity_from_env does) puts a whole
-    plain libtest run inside the suite of its parent: that inner `running`,
-    its `test` lines and its `test result` are output of the test, not a
-    started binary or a result (TER-1222).
+    Only the suites at the top level count as started and finished. A test
+    that runs a test binary with the stdout inherited (its own binary
+    again, as git_identity::tests::instance_identity_from_env does) puts a
+    whole plain libtest run inside the suite of its parent: that inner
+    `running` and `test result` are output of the test, not a started
+    binary or a result (TER-1222).
+
+    The names of failed tests count at every depth: libtest runs tests in
+    parallel, so the parent's own results come between the inner lines.
+    An inner FAILED line names the test that its parent runs (`--exact`),
+    so it adds no wrong rerun. Each top-level result must then name as many
+    failed tests as its `N failed`; a binary that does not goes to
+    `miscounted`, and the step gets no rerun (fail closed).
     """
 
     def __init__(self) -> None:
@@ -94,6 +103,10 @@ class Outcomes:
         self.runs = 0
         self.failed_runs = 0
         self.unexplained: list[str] = []
+        # Top-level results whose `N failed` differs from the names seen.
+        self.miscounted: list[str] = []
+        # The failed names seen in the open top-level suite.
+        self._suite_failed: set[str] = set()
         self._section: str | None = None
         self._lines: list[str] = []
         self._summary = False
@@ -126,10 +139,12 @@ class Outcomes:
                 # The end of the binary's own suite, even when a run inside
                 # one of its tests printed no result.
                 self._depth = min(self._depth, 1)
-                self._end(event == "failed")
-        elif kind == "test" and self._depth <= 1 and isinstance(e.get("name"), str):
+                count = e.get("failed")
+                self._end(event == "failed", count if isinstance(count, int) else None)
+        elif kind == "test" and isinstance(e.get("name"), str):
             if event == "failed":
                 self.failed[e["name"]] = str(e.get("stdout") or "")
+                self._suite_failed.add(e["name"])
             elif event == "ok":
                 self.passed.add(e["name"])
 
@@ -139,14 +154,14 @@ class Outcomes:
             self._open()
         elif m := RESULT.match(text):
             self._close()
-            self._end(m.group(1) == "FAILED")
-        elif self._depth > 1:
-            pass
+            count = FAILED_COUNT.search(text)
+            self._end(m.group(1) == "FAILED", int(count.group(1)) if count else None)
         elif m := TEST.match(text):
             if m.group(2) == "ok":
                 self.passed.add(m.group(1))
             else:
                 self.failed.setdefault(m.group(1), "")
+                self._suite_failed.add(m.group(1))
         elif m := SECTION.match(text):
             self._close()
             self._section = m.group(1)
@@ -186,17 +201,38 @@ class Outcomes:
             self.unexplained.append(f"a test binary ended with exit code {code}")
 
     def _open(self) -> None:
-        """A suite starts: a test binary at the top level, else a run inside a test."""
+        """A suite starts: a test binary at the top level, else a run inside a test.
+
+        Plain output cannot tell a binary from a run inside a test. When a
+        plain binary dies after `running`, each later binary of the same
+        stream reads as inner: cargo counts them as runs but they do not
+        count as started, so `runs != started` still refuses the step (the
+        uid 1001 pass has one Outcomes per binary, so it cannot leak there).
+        """
         if self._depth == 0:
             self.started += 1
+            self._suite_failed = set()
         self._depth += 1
 
-    def _end(self, failed: bool) -> None:
-        """A suite ends: the result of a test binary when it is the top level."""
+    def _end(self, failed: bool, count: int | None) -> None:
+        """A suite ends: the result of a test binary when it is the top level.
+
+        Plain output: when a run inside a test printed no result, the
+        parent's `test result` closes only that inner run, and the parent
+        counts as without a result. A false refusal, never a false rerun.
+        """
         self._depth = max(self._depth - 1, 0)
-        if self._depth == 0:
-            self.finished += 1
-            self.failed_suites += failed
+        if self._depth > 0:
+            return
+        self.finished += 1
+        self.failed_suites += failed
+        if count is None and not failed:
+            count = 0
+        named = len(self._suite_failed)
+        if count != named:
+            what = "no count" if count is None else f"{count} failed"
+            self.miscounted.append(f"a test result with {what}, but {named} failed tests named")
+        self._suite_failed = set()
 
     def _close(self) -> None:
         """End the captured output of a failed test (plain output)."""
@@ -217,6 +253,7 @@ class Outcomes:
         self.failed.update(other.failed)
         self.passed |= other.passed
         self.unexplained += other.unexplained
+        self.miscounted += other.miscounted
 
 
 def why_not(o: Outcomes) -> str | None:
@@ -230,6 +267,8 @@ def why_not(o: Outcomes) -> str | None:
     if o.runs != o.started or o.started != o.finished:
         return (f"a test run ended without a result (a crash, a signal, or a panic before the"
                 f" tests): {o.runs} runs, {o.started} started, {o.finished} with a result")
+    if o.miscounted:
+        return f"the failed tests do not match their result ({o.miscounted[0]})"
     if o.failed_runs != o.failed_suites:
         return (f"{o.failed_runs} test runs failed, but {o.failed_suites} of them have a failed"
                 f" test result")
@@ -250,7 +289,7 @@ def result(name: str, again: Outcomes) -> str:
 
 def green(names: list[str], again: Outcomes, code: int) -> bool:
     """Did the rerun pass: every rerun test ran and passed, nothing else failed."""
-    return (code == 0 and not again.failed and not again.unexplained
+    return (code == 0 and not again.failed and not again.unexplained and not again.miscounted
             and again.started == again.finished
             and all(result(n, again) == "ok" for n in names))
 
