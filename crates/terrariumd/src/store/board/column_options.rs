@@ -2,18 +2,26 @@
 //! checks that were fixed in the daemon, and the settings of the column's
 //! queue. `GET` and `PUT /api/projects/{name}/board/columns/{column}/options`.
 //!
+//! The options also hold the structured rules of the column (TER-1120,
+//! C1b): [`terrarium_core::board_rules`]. They are stored and checked only;
+//! the engine runs the legacy rules until C2 (TER-1113).
+//!
 //! The options belong to the column ID: a rename keeps them, and a role
 //! change does not move them. The queue settings are stored only; the
 //! queue itself is C3 (TER-1112 lead decision Q4). Own-card permissions,
 //! the GitHub hold, and the loop guards of the rules engine stay fixed.
 
+use std::collections::HashMap;
+
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
+use terrarium_core::board_rules::{self, ColumnRule};
+use terrarium_core::rules_file::{BoardColumn, Context};
 
-use super::{BLOCKED, ColumnRow, DONE, WORKING, column};
+use super::{BLOCKED, ColumnRow, DONE, WORKING, column, column_rows};
 use crate::actor::Actor;
-use crate::db::Tx;
+use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult, Code};
 use crate::events::EventDraft;
 use crate::policy;
@@ -116,6 +124,8 @@ pub struct ColumnOptions {
     pub version: i64,
     pub checks: ColumnChecks,
     pub queue: ColumnQueue,
+    /// The rules of the column, in order, each with its `id` (TER-1120).
+    pub rules: Vec<ColumnRule>,
 }
 
 /// The body of a `PUT`: the whole options, and the version that was read.
@@ -125,6 +135,13 @@ pub struct OptionsPut {
     pub base_version: i64,
     pub checks: ColumnChecks,
     pub queue: ColumnQueue,
+    /// The whole rule list of the column, in order (TER-1120). A rule with
+    /// an `id` replaces that rule; a rule without one is new; a rule that
+    /// is not in the list is removed. Absent: the rules stay as they are.
+    /// JSON values, so that each problem names its path
+    /// ([`board_rules::read_rules`]).
+    #[serde(default)]
+    pub rules: Option<Vec<Value>>,
 }
 
 fn check_queue(q: &ColumnQueue) -> ApiResult<()> {
@@ -210,7 +227,172 @@ fn read(conn: &Connection, project: &str, col: &ColumnRow) -> ApiResult<ColumnOp
             max_wait_seconds,
             max_batch_cards,
         },
+        rules: read_rules(conn, col.id)?,
     })
+}
+
+/// The rules of the column `column_id`, in order.
+fn read_rules(conn: &Connection, column_id: i64) -> ApiResult<Vec<ColumnRule>> {
+    let mut q = conn.prepare(
+        "SELECT id, name, definition_json FROM board_column_rules
+         WHERE column_id = ?1 ORDER BY position",
+    )?;
+    let rows = q
+        .query_map([column_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|(id, name, def)| {
+            let mut v: Value = serde_json::from_str(&def)
+                .map_err(|e| ApiError::internal(format!("column rule {id}: {e}")))?;
+            v["id"] = id.clone().into();
+            v["name"] = name.into();
+            serde_json::from_value(v)
+                .map_err(|e| ApiError::internal(format!("column rule {id}: {e}")))
+        })
+        .collect()
+}
+
+/// A `422 invalid` for the problems of a rule list: the first one in the
+/// message and `details.path`, all of them in `details.problems`.
+fn rule_problems(problems: Vec<board_rules::Problem>) -> ApiError {
+    let first = problems
+        .first()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let more = match problems.len() {
+        0 | 1 => String::new(),
+        n => format!(" (and {} more)", n - 1),
+    };
+    ApiError::invalid(format!("{first}{more}")).with_details(json!({
+        "path": problems.first().map(|p| p.path.clone()),
+        "problems": problems,
+    }))
+}
+
+/// Read and check the rule list of a `PUT` for the column `col`: the rule
+/// model ([`board_rules::read_rules`], with the columns of the board), the
+/// IDs (each one a rule of this column, once), and the cap of the project.
+/// The rules come back with the IDs that they keep; a new rule has none.
+fn check_rules(
+    t: &Tx<'_>,
+    project: &str,
+    col: &ColumnRow,
+    before: &[ColumnRule],
+    values: &[Value],
+) -> ApiResult<Vec<ColumnRule>> {
+    let columns = column_rows(t, project)?
+        .into_iter()
+        .map(|c| BoardColumn {
+            name: c.name,
+            role: c.role,
+        })
+        .collect();
+    let ctx = Context {
+        columns: Some(columns),
+        max_rules: board_rules::MAX_RULES_PER_COLUMN,
+    };
+    let rules = board_rules::read_rules(&ctx, values).map_err(rule_problems)?;
+    let mut problems = Vec::new();
+    for (i, r) in rules.iter().enumerate() {
+        let Some(id) = &r.id else { continue };
+        if !before.iter().any(|b| b.id.as_ref() == Some(id)) {
+            problems.push(board_rules::Problem {
+                path: format!("rules[{i}].id"),
+                message: format!(
+                    "column `{}` has no rule `{id}`; leave out the id for a new rule",
+                    col.name
+                ),
+            });
+        } else if rules[..i].iter().any(|o| o.id.as_ref() == Some(id)) {
+            problems.push(board_rules::Problem {
+                path: format!("rules[{i}].id"),
+                message: format!("the rule `{id}` twice"),
+            });
+        }
+    }
+    if !problems.is_empty() {
+        return Err(rule_problems(problems));
+    }
+    let others: i64 = t.query_row(
+        "SELECT count(*) FROM board_column_rules r JOIN board_columns c ON c.id = r.column_id
+         WHERE c.project = ?1 AND c.id != ?2",
+        params![project, col.id],
+        |r| r.get(0),
+    )?;
+    let total = others as usize + rules.len();
+    if total > board_rules::MAX_RULES_PER_PROJECT {
+        return Err(rule_problems(vec![board_rules::Problem {
+            path: "rules".into(),
+            message: format!(
+                "the board of `{project}` would have {total} column rules; a project has at \
+                 most {}",
+                board_rules::MAX_RULES_PER_PROJECT
+            ),
+        }]));
+    }
+    Ok(rules)
+}
+
+/// Replace the rules of the column `column_id` with `rules`, in order. A
+/// rule without an ID gets a new one. A rule that did not change keeps its
+/// times.
+fn write_rules(
+    t: &Tx<'_>,
+    column_id: i64,
+    before: &[ColumnRule],
+    rules: &[ColumnRule],
+) -> ApiResult<()> {
+    let times: HashMap<String, (String, String)> = {
+        let mut q = t.prepare(
+            "SELECT id, created_at, updated_at FROM board_column_rules WHERE column_id = ?1",
+        )?;
+        q.query_map([column_id], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
+            .collect::<Result<_, _>>()?
+    };
+    t.execute(
+        "DELETE FROM board_column_rules WHERE column_id = ?1",
+        [column_id],
+    )?;
+    let at = now();
+    for (position, r) in rules.iter().enumerate() {
+        let id =
+            r.id.clone()
+                .unwrap_or_else(|| ulid::Ulid::new().to_string());
+        let same = before.iter().any(|b| b == r);
+        let (created, updated) = match times.get(&id) {
+            Some((c, u)) if same => (c.clone(), u.clone()),
+            Some((c, _)) => (c.clone(), at.clone()),
+            None => (at.clone(), at.clone()),
+        };
+        let mut def = serde_json::to_value(r)
+            .map_err(|e| ApiError::internal(format!("column rule {id}: {e}")))?;
+        if let Some(o) = def.as_object_mut() {
+            o.remove("id");
+            o.remove("name");
+        }
+        t.execute(
+            "INSERT INTO board_column_rules
+               (id, column_id, name, position, model, definition_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                column_id,
+                r.name,
+                position as i64,
+                board_rules::MODEL_VERSION,
+                def.to_string(),
+                created,
+                updated
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 /// The options of column `name` (a role alias names the column with that
@@ -223,9 +405,10 @@ pub fn get_options(conn: &Connection, project: &str, name: &str) -> ApiResult<Co
 /// Replace the options of column `name`. Only the operator and a
 /// `project_admin` of the project ([`policy::edit_column_options`]). A
 /// `base_version` that is not the current version is 409 `stale_base`, with
-/// nothing written. A write that changes nothing writes nothing and keeps
-/// the version. A change writes one audit row `board.column_options` and
-/// one `board` event.
+/// nothing written. A bad rule list is `422 invalid` with the paths, and
+/// nothing is written. A write that changes nothing writes nothing and
+/// keeps the version. A change writes one audit row `board.column_options`
+/// and one `board` event.
 pub fn put_options(
     t: &mut Tx<'_>,
     actor: &Actor,
@@ -249,7 +432,12 @@ pub fn put_options(
         .with_details(json!({"column": col.name, "version": before.version})));
     }
     check_queue(&put.queue)?;
-    if before.checks == put.checks && before.queue == put.queue {
+    let rules = match &put.rules {
+        Some(values) => Some(check_rules(t, project, &col, &before.rules, values)?),
+        None => None,
+    };
+    let same_rules = rules.as_ref().is_none_or(|r| *r == before.rules);
+    if before.checks == put.checks && before.queue == put.queue && same_rules {
         return Ok(before);
     }
     let (c, q) = (&put.checks, &put.queue);
@@ -278,6 +466,9 @@ pub fn put_options(
             col.name
         )));
     }
+    if let Some(rules) = rules.filter(|_| !same_rules) {
+        write_rules(t, col.id, &before.rules, &rules)?;
+    }
     let col = column(t, project, &col.name)?;
     let after = read(t, project, &col)?;
     record(t, project, &before, &after)?;
@@ -297,19 +488,53 @@ fn record(
         project,
         Some(project),
         json!({"column": after.column, "version": after.version,
-               "before": {"checks": before.checks, "queue": before.queue},
-               "after": {"checks": after.checks, "queue": after.queue}}),
+               "before": {"checks": before.checks, "queue": before.queue, "rules": before.rules},
+               "after": {"checks": after.checks, "queue": after.queue, "rules": after.rules}}),
     )?;
     t.emit(
         EventDraft::new(
             "board",
             format!("{project}: options of column `{}` changed", after.column),
             json!({"column": after.column, "options_version": after.version,
-                   "checks": after.checks, "queue": after.queue}),
+                   "checks": after.checks, "queue": after.queue,
+                   "rule_count": after.rules.len()}),
         )
         .project(project),
     )?;
     Ok(())
+}
+
+/// The rules of column `col`, which the legacy board PATCH
+/// (`super::set_columns`) removes (TER-1120). No rules: `None`. With rules,
+/// the removal needs the options right ([`policy::edit_column_options`]):
+/// the board PATCH right alone (a `sysadmin`) gets `403`, and the caller's
+/// transaction writes nothing. Else the rules for the `board.columns` audit
+/// row: `{column, before, after}`, with `after` empty. The rows go with the
+/// column (`ON DELETE CASCADE`).
+pub(super) fn drop_rules(
+    t: &Tx<'_>,
+    actor: &Actor,
+    project: &str,
+    col: &ColumnRow,
+) -> ApiResult<Option<Value>> {
+    let rules = read_rules(t, col.id)?;
+    if rules.is_empty() {
+        return Ok(None);
+    }
+    let names: Vec<&str> = rules.iter().map(|r| r.name.as_str()).collect();
+    if let Err(e) = policy::edit_column_options(actor, project) {
+        return Err(ApiError::forbidden(format!(
+            "this board change removes column `{}` and its {} rule(s): {}; {}",
+            col.name,
+            rules.len(),
+            names.join(", "),
+            e.message
+        ))
+        .with_details(json!({"column": col.name, "rules": names})));
+    }
+    Ok(Some(
+        json!({"column": col.name, "before": rules, "after": []}),
+    ))
 }
 
 /// The role checks of the legacy board PATCH (`super::set_columns`): set the

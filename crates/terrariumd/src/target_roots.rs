@@ -97,6 +97,21 @@ fn base(def: &TargetDef) -> &str {
     def.work_root.as_deref().unwrap_or(DEFAULT_BASE)
 }
 
+/// The work root of an agent on a target, `<base>/<project>/<agent>`: the
+/// stored base when the agent has a root there (a home fallback), else the
+/// target's `work_root`, else [`DEFAULT_BASE`]. A target checkout without a
+/// path goes under it (TER-1109).
+pub async fn agent_root(
+    state: &Shared,
+    agent: &crate::actor::AgentActor,
+    def: &TargetDef,
+) -> ApiResult<String> {
+    let current = stored_base(state, &agent.id, &def.name)
+        .await?
+        .unwrap_or_else(|| base(def).to_owned());
+    root(&current, &agent.project, &agent.name)
+}
+
 /// The fallback base for a home directory, checked like a `work_root`.
 fn fallback_base(home: &str) -> ApiResult<String> {
     if !home.starts_with('/') {

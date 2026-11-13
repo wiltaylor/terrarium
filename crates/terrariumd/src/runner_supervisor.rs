@@ -1454,6 +1454,13 @@ struct PointerDeliveryPause {
 struct Inner {
     #[cfg(test)]
     pointer_delivery_pause: Mutex<Option<PointerDeliveryPause>>,
+    /// The next pointer delivery task panics at its start (TER-1146).
+    #[cfg(test)]
+    pointer_delivery_panic: std::sync::atomic::AtomicBool,
+    /// Each pointer reload read counts as a delivery that ran and ended
+    /// during it, so the reload gives up (TER-1146).
+    #[cfg(test)]
+    reload_read_races: std::sync::atomic::AtomicBool,
     cfg: RunnerSupervisorConfig,
     /// The installed harness versions ([`crate::harness_versions`]).
     versions: VersionCache,
@@ -1603,6 +1610,10 @@ impl RunnerSupervisor {
             inner: Arc::new(Inner {
                 #[cfg(test)]
                 pointer_delivery_pause: Mutex::new(None),
+                #[cfg(test)]
+                pointer_delivery_panic: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(test)]
+                reload_read_races: std::sync::atomic::AtomicBool::new(false),
                 cfg,
                 versions: VersionCache::default(),
                 slots: Mutex::new(HashMap::new()),
@@ -4127,8 +4138,13 @@ impl RunnerSupervisor {
             slot.deliveries_open == 0 && std::mem::take(&mut slot.reload_wanted)
         });
         if reload {
+            // The delivery guard can drop outside a runtime (a runtime that
+            // shuts down): then the next launch reads the store.
+            let Ok(rt) = tokio::runtime::Handle::try_current() else {
+                return;
+            };
             let me = self.clone();
-            tokio::spawn(async move { me.reload_pointer(id).await });
+            rt.spawn(async move { me.reload_pointer(id).await });
         }
     }
 
@@ -4189,6 +4205,14 @@ impl RunnerSupervisor {
                     return;
                 }
             };
+            #[cfg(test)]
+            {
+                if self.inner.reload_read_races.load(Ordering::SeqCst)
+                    && let Some(slot) = lock(&self.inner.slots).get_mut(&id)
+                {
+                    slot.deliveries_taken += 1;
+                }
+            }
             let mut fresh = Pointer::default();
             let (mail_n, rows_n) = (mail.len(), rows.len());
             for m in mail {
@@ -4223,7 +4247,11 @@ impl RunnerSupervisor {
             self.maybe_push(id);
             return;
         }
-        warn!(agent = %id, "the pointer reload gave up: deliveries ran during each read");
+        // TER-1146: the end of the next delivery runs the reload again.
+        if let Some(slot) = lock(&self.inner.slots).get_mut(&id) {
+            slot.reload_wanted = true;
+        }
+        warn!(agent = %id, tries = RELOAD_TRIES, "the pointer reload gave up: deliveries ran during each read, it runs again at the end of the next delivery");
     }
 
     /// Type the pending pointer when the agent is idle and no pointer is on
@@ -4272,6 +4300,21 @@ impl RunnerSupervisor {
         let upto = self.inner.pointer_seq.load(Ordering::SeqCst);
         let me = self.clone();
         tokio::spawn(async move {
+            // Ends the delivery also when this task panics (TER-1146).
+            let open = DeliveryOpen {
+                sup: me.clone(),
+                id,
+            };
+            #[cfg(test)]
+            {
+                if me
+                    .inner
+                    .pointer_delivery_panic
+                    .swap(false, Ordering::SeqCst)
+                {
+                    panic!("TER-1146: a test panic in a pointer delivery");
+                }
+            }
             // The board can change between the event and the idle: drop
             // the card lines that no longer apply.
             let pointer = me.still_current(id, pointer).await;
@@ -4281,7 +4324,7 @@ impl RunnerSupervisor {
                     slot.pointer_busy = false;
                     (slot.epoch, slot.seen.is_resting())
                 });
-                me.end_delivery(id);
+                drop(open);
                 // Items that came in meanwhile go out now.
                 me.maybe_push(id);
                 // No turn came of it, so no status change: a restart that
@@ -4334,7 +4377,7 @@ impl RunnerSupervisor {
                     (slot.swap_pending && ended).then_some(slot.epoch)
                 })
             };
-            me.end_delivery(id);
+            drop(open);
             if let Some(epoch) = swap {
                 me.take_pending_restart(id, epoch);
             }
@@ -4965,6 +5008,29 @@ impl RunnerSupervisor {
                 }
             }
         });
+    }
+}
+
+/// An open pointer delivery of agent `id` (TER-1146). Its drop ends the
+/// delivery ([`RunnerSupervisor::end_delivery`]), also when the delivery
+/// task panics or is cancelled: else `deliveries_open` stays set and each
+/// later reload of the agent waits for an end that never comes. On a panic
+/// it also frees `pointer_busy` and asks for a reload: the taken items are
+/// lost with the task, and the reload reads the stored ones again.
+struct DeliveryOpen {
+    sup: RunnerSupervisor,
+    id: AgentId,
+}
+
+impl Drop for DeliveryOpen {
+    fn drop(&mut self) {
+        if std::thread::panicking()
+            && let Some(slot) = lock(&self.sup.inner.slots).get_mut(&self.id)
+        {
+            slot.pointer_busy = false;
+            slot.reload_wanted = true;
+        }
+        self.sup.end_delivery(self.id);
     }
 }
 
@@ -6571,6 +6637,7 @@ fn is_terminal_report(bytes: &[u8]) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use tracing::instrument::WithSubscriber;
 
     fn workspace_state(root: &Path) -> Shared {
         let db = crate::db::Db::new(
@@ -9450,10 +9517,107 @@ mod tests {
             })
             .await
             .unwrap();
-        sup.reload_pointer(id).await;
+        let (log, capture) = capture_log();
+        sup.reload_pointer(id).with_subscriber(capture).await;
         settle(&sup, id).await;
         assert!(lock(&sup.inner.slots)[&id].pointer.is_empty());
         assert!(lock(&runner.typed).is_empty());
+        // TER-1146: one warn line with the agent id.
+        let log = lock(&log).clone();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 1, "{log}");
+        assert!(lines[0].contains("WARN"), "{log}");
+        assert!(lines[0].contains("cannot reload the pointer"), "{log}");
+        assert!(lines[0].contains(&format!("agent={id}")), "{log}");
+    }
+
+    /// A log writer for one future: its lines without time or colour.
+    fn capture_log() -> (Arc<Mutex<String>>, impl tracing::Subscriber + Send + Sync) {
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<String>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                lock(&self.0).push_str(&String::from_utf8_lossy(bytes));
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = Arc::new(Mutex::new(String::new()));
+        let capture = Capture(log.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || capture.clone())
+            .finish();
+        (log, subscriber)
+    }
+
+    /// TER-1146: a delivery task that panics still ends its delivery. A
+    /// reload that waited for it runs, and types the stored mail once.
+    #[tokio::test]
+    async fn a_panic_in_a_delivery_still_runs_the_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        let mid = store_mail(&state, id, false).await;
+        sup.inner
+            .pointer_delivery_panic
+            .store(true, Ordering::SeqCst);
+        let live = mid.clone();
+        sup.add_pointer(id, |p| {
+            p.add_mail(MailItem::new(live, "operator".into(), "T1".into()))
+        });
+        // The delivery is open and its task did not run yet: the reload
+        // waits for its end.
+        sup.reload_pointer(id).await;
+        assert!(lock(&sup.inner.slots)[&id].reload_wanted);
+        tokio::time::timeout(Duration::from_secs(5), runner.typed_ready.notified())
+            .await
+            .expect("the reload after the panic types the mail");
+        settle(&sup, id).await;
+        assert!(!sup.inner.pointer_delivery_panic.load(Ordering::SeqCst));
+        assert_eq!(mail_blocks(&runner), 1, "{:?}", lock(&runner.typed));
+        assert!(lock(&runner.typed)[0].contains(&mid));
+        assert_eq!(mail_state(&state, &mid).await, "read");
+        // Later reloads still merge: nothing stays open.
+        let second = store_mail(&state, id, false).await;
+        sup.reload_pointer(id).await;
+        settle(&sup, id).await;
+        assert_eq!(mail_blocks(&runner), 2, "{:?}", lock(&runner.typed));
+        assert_eq!(mail_state(&state, &second).await, "read");
+    }
+
+    /// TER-1146: a reload that gives up after `RELOAD_TRIES` reads asks
+    /// for a reload, which the end of the next delivery runs.
+    #[tokio::test]
+    async fn a_reload_that_gives_up_runs_at_the_next_delivery_end() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        let mid = store_mail(&state, id, false).await;
+        sup.inner.reload_read_races.store(true, Ordering::SeqCst);
+        let (log, capture) = capture_log();
+        sup.reload_pointer(id).with_subscriber(capture).await;
+        sup.inner.reload_read_races.store(false, Ordering::SeqCst);
+        {
+            let slots = lock(&sup.inner.slots);
+            assert!(slots[&id].pointer.is_empty(), "nothing merged");
+            assert!(slots[&id].reload_wanted);
+        }
+        let log = lock(&log).clone();
+        assert!(log.contains("the pointer reload gave up"), "{log}");
+        assert!(log.contains(&format!("tries={RELOAD_TRIES}")), "{log}");
+        assert!(lock(&runner.typed).is_empty());
+        // The end of a delivery runs the reload.
+        lock(&sup.inner.slots).get_mut(&id).unwrap().deliveries_open += 1;
+        sup.end_delivery(id);
+        tokio::time::timeout(Duration::from_secs(5), runner.typed_ready.notified())
+            .await
+            .expect("the reload types the mail");
+        settle(&sup, id).await;
+        assert_eq!(mail_blocks(&runner), 1, "{:?}", lock(&runner.typed));
+        assert!(lock(&runner.typed)[0].contains(&mid));
+        assert_eq!(mail_state(&state, &mid).await, "read");
     }
 
     /// TER-1103 T9: a `pending_pointers` row of an agent that runs is

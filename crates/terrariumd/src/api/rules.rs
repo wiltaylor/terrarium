@@ -37,6 +37,11 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             &[(axum::http::Method::GET, super::link_registry::Access::Link)],
         )
         .route(
+            "/rules/catalog",
+            get(catalog),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
             "/projects/{name}/rules",
             get(show).put(put).delete(remove),
             &[
@@ -63,6 +68,14 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             get(runs),
             &[(axum::http::Method::GET, super::link_registry::Access::Link)],
         )
+}
+
+/// `GET /api/rules/catalog` (TER-1120): the structured rule model of the
+/// column options: the triggers, the conditions, the verbs with their
+/// arguments, the placeholders, and the limits
+/// ([`terrarium_core::board_rules::catalog`]). Any caller.
+async fn catalog(_actor: Actor) -> Json<Value> {
+    Json(terrarium_core::board_rules::catalog())
 }
 
 /// `GET /api/rules/schema`: the schema that the daemon checks each rules

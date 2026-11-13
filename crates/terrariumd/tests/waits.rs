@@ -345,7 +345,13 @@ async fn chained_waits_propagate() {
     let a = new_wait(&td, &lead, json!({"kind": "agent", "agent": "w1"})).await;
     assert_eq!(a["spec"]["until"], "done");
     assert_eq!(a["summary"], "agent p/w1 (done)");
-    assert_eq!(status(&td, &lead).await, "waiting");
+    // The create writes the lead's `waiting` status in its own write, but A
+    // can end (B's 1 s timer, B's turn, the settle time) before a GET under
+    // load, and the lead is `idle` again: read it from the events (TER-1152).
+    until("lead waiting", || async {
+        statuses(&td, &lead).await.iter().any(|s| s == "waiting")
+    })
+    .await;
     // B's wait ends; A still waits until B has had its mail and its turn:
     // A ends after B's wake mail went out (the stored times, not a GET
     // in between).
