@@ -23,7 +23,8 @@ import {
  * The Edit columns dialog of the board (docs/api.md §8.1). Save sends the whole list, with `rename_from`
  * for a renamed column. `backlog` and `done` stay first and last, and take no WIP limit and no role.
  */
-type ColumnsEditorProps = { columns: Column[]; onSave: (edits: ReturnType<typeof toEdits>) => Promise<Board>; onClose: () => void };
+/** `autoFocus` (default true): the dialog takes focus. The page widget (TER-1077) does not, so a rights refresh never moves focus. */
+type ColumnsEditorProps = { columns: Column[]; onSave: (edits: ReturnType<typeof toEdits>) => Promise<Board>; onClose: () => void; autoFocus?: boolean };
 export function ColumnsEditor(props: ColumnsEditorProps) {
   return <Modal title="Edit columns" class="modal-full columns-editor-modal" onClose={() => props.onClose()}>
     <ColumnsEditorFields {...props} />
@@ -39,7 +40,7 @@ export function ColumnsEditorFields(props: ColumnsEditorProps) {
   const check = () => checkColumns(rows());
   const errorsOf = (key: string) => (checked() ? (check().rows[key] ?? {}) : {});
   let listEl: HTMLOListElement | undefined;
-  onMount(() => listEl?.querySelector<HTMLInputElement>("input:not([disabled])")?.focus());
+  onMount(() => { if (props.autoFocus !== false) listEl?.querySelector<HTMLInputElement>("input:not([disabled])")?.focus(); });
 
   const patch = (i: number, p: Partial<ColumnRow>) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...p } : r)));
 

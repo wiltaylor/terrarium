@@ -58,10 +58,15 @@ function LocalMail(props: { project: string; search?: string }) {
   createEffect(on(() => props.search, (search, old) => { if (search !== old) setParams((p) => ({ ...p, q: search || undefined })); }, { defer: true }));
   /** Message posts of this panel get ids of their own (see `mailPostId`). */
   const idScope = `panel-${createUniqueId()}`;
-  return <MailContent project={props.project} idScope={idScope} params={params()} onParams={(patch) => setParams((old) => ({ ...old, ...patch }))} />;
+  return <MailContent project={props.project} idScope={idScope} serverProject params={params()} onParams={(patch) => setParams((old) => ({ ...old, ...patch }))} />;
 }
 
-function MailContent(props: { project?: string; idScope?: string; params: LogParams; onParams: (patch: LogParams, options?: { replace: boolean }) => void }) {
+/**
+ * `serverProject`: the daemon filters the messages to the project too (the
+ * page widget, TER-1077), so no other project's mail reaches the browser. The
+ * route keeps its browser filter only.
+ */
+function MailContent(props: { project?: string; idScope?: string; serverProject?: boolean; params: LogParams; onParams: (patch: LogParams, options?: { replace: boolean }) => void }) {
   const { api, projects, events } = useInstance();
   const namesId = `mail-log-names-${createUniqueId()}`;
   /** The project of the route wins over the filter. */
@@ -77,7 +82,7 @@ function MailContent(props: { project?: string; idScope?: string; params: LogPar
   };
   const now = useNow(60_000);
   const live = createLive();
-  const feed = createMailFeed(api, () => serverQuery(filter()), { onNew: live.arrive });
+  const feed = createMailFeed(api, () => ({ ...serverQuery(filter()), ...(props.serverProject && props.project ? { project: props.project } : {}) }), { onNew: live.arrive });
   /** Every message that the filters let through, held ones too. */
   const matching = createMemo(() => applyFilter(feed.messages(), filter(), now(), projects.prefixes()));
   const shown = createMemo(() => live.shown(matching(), (m) => m.id));
