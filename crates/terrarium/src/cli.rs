@@ -1501,12 +1501,12 @@ pub enum ColumnCmd {
     /// version it read. The engine does not run these rules yet
     Rule {
         #[command(subcommand)]
-        command: RuleCmd,
+        command: ColumnRuleCmd,
     },
 }
 
 #[derive(Debug, Subcommand)]
-pub enum RuleCmd {
+pub enum ColumnRuleCmd {
     /// List the rules of a column, in order
     Ls {
         /// A column name, or a role alias (`working`, `blocked`)

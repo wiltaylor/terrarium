@@ -726,7 +726,10 @@ mod tests {
                 with(&|r| r["actions"][1]["args"] = json!({})),
                 "rules[0].actions[1]",
             ),
-            (with(&|r| r["trigger"] = json!("lands")), "rules[0]"),
+            (
+                with(&|r| r["trigger"] = json!("lands")),
+                "rules[0].trigger.kind",
+            ),
         ];
         for (rules, want) in cases {
             let got = paths(rules.clone());

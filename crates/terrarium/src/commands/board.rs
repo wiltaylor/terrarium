@@ -8,7 +8,7 @@ use super::{delimited, event_line, print_table, set_list, set_opt, set_replace_l
 use crate::api::{CliError, query};
 use crate::cli::{
     BoardCmd, CardCmd, CardEditArgs, CardFilesCmd, CardNewArgs, CardWaitArgs, CardWaitCmd,
-    ColumnCmd, RuleCmd,
+    ColumnCmd, ColumnRuleCmd,
 };
 use crate::commands::projects::project_path;
 use crate::commands::system::as_items;
@@ -307,30 +307,30 @@ fn print_options(ctx: &Ctx, o: &Value) {
 /// `board column rule` (TER-1120): read the options of the column, show a
 /// rule, or change the rule list and write the options back with the
 /// version that was read.
-async fn column_rule(ctx: &Ctx, board: &str, cmd: &RuleCmd) -> anyhow::Result<()> {
+async fn column_rule(ctx: &Ctx, board: &str, cmd: &ColumnRuleCmd) -> anyhow::Result<()> {
     let column = match cmd {
-        RuleCmd::Catalog => {
+        ColumnRuleCmd::Catalog => {
             let c = ctx.api.get("/api/rules/catalog", vec![]).await?;
             return ctx.emit(&c, print_catalog);
         }
-        RuleCmd::Ls { column }
-        | RuleCmd::Show { column, .. }
-        | RuleCmd::Set { column, .. }
-        | RuleCmd::Rm { column, .. }
-        | RuleCmd::Move { column, .. }
-        | RuleCmd::Enable { column, .. }
-        | RuleCmd::Disable { column, .. } => column,
+        ColumnRuleCmd::Ls { column }
+        | ColumnRuleCmd::Show { column, .. }
+        | ColumnRuleCmd::Set { column, .. }
+        | ColumnRuleCmd::Rm { column, .. }
+        | ColumnRuleCmd::Move { column, .. }
+        | ColumnRuleCmd::Enable { column, .. }
+        | ColumnRuleCmd::Disable { column, .. } => column,
     };
     let path = format!("{board}/columns/{}/options", encode(column));
     let current = ctx.api.get(&path, vec![]).await?;
     let rules = as_items(&current["rules"]).to_vec();
     let file = match cmd {
-        RuleCmd::Ls { .. } => return ctx.emit(&current["rules"], print_rules),
-        RuleCmd::Show { rule, .. } => {
+        ColumnRuleCmd::Ls { .. } => return ctx.emit(&current["rules"], print_rules),
+        ColumnRuleCmd::Show { rule, .. } => {
             let at = rule_index(&rules, rule, column)?;
             return ctx.emit(&rules[at], print_rule);
         }
-        RuleCmd::Set { from_file, .. } => Some(rule_from(ctx, from_file)?),
+        ColumnRuleCmd::Set { from_file, .. } => Some(rule_from(ctx, from_file)?),
         _ => None,
     };
     let new = edit_rules(&rules, cmd, file)?;
@@ -338,8 +338,8 @@ async fn column_rule(ctx: &Ctx, board: &str, cmd: &RuleCmd) -> anyhow::Result<()
                       "queue": current["queue"], "rules": new});
     let after = ctx.api.put(&path, body).await?;
     match cmd {
-        RuleCmd::Rm { .. } | RuleCmd::Move { .. } => ctx.emit(&after["rules"], print_rules),
-        RuleCmd::Set { rule, .. } | RuleCmd::Enable { rule, .. } | RuleCmd::Disable { rule, .. } => {
+        ColumnRuleCmd::Rm { .. } | ColumnRuleCmd::Move { .. } => ctx.emit(&after["rules"], print_rules),
+        ColumnRuleCmd::Set { rule, .. } | ColumnRuleCmd::Enable { rule, .. } | ColumnRuleCmd::Disable { rule, .. } => {
             let items = as_items(&after["rules"]);
             match items.iter().find(|r| r["name"] == rule.as_str()) {
                 Some(r) => ctx.emit(r, print_rule),
@@ -388,7 +388,7 @@ fn rule_from(ctx: &Ctx, arg: &str) -> anyhow::Result<Value> {
 
 /// The whole rule list of a column after one `board column rule` change.
 /// `file` is the rule of `set`. The daemon checks the rules.
-pub fn edit_rules(rules: &[Value], cmd: &RuleCmd, file: Option<Value>) -> anyhow::Result<Vec<Value>> {
+pub fn edit_rules(rules: &[Value], cmd: &ColumnRuleCmd, file: Option<Value>) -> anyhow::Result<Vec<Value>> {
     let mut rules = rules.to_vec();
     let place = |rules: &mut Vec<Value>, r: Value, before: &Option<String>, after: &Option<String>, column: &str| -> anyhow::Result<()> {
         match (before, after) {
@@ -405,7 +405,7 @@ pub fn edit_rules(rules: &[Value], cmd: &RuleCmd, file: Option<Value>) -> anyhow
         Ok(())
     };
     match cmd {
-        RuleCmd::Set {
+        ColumnRuleCmd::Set {
             column,
             rule,
             before,
@@ -441,11 +441,11 @@ pub fn edit_rules(rules: &[Value], cmd: &RuleCmd, file: Option<Value>) -> anyhow
                 None => place(&mut rules, r, before, after, column)?,
             }
         }
-        RuleCmd::Rm { column, rule } => {
+        ColumnRuleCmd::Rm { column, rule } => {
             let at = rule_index(&rules, rule, column)?;
             rules.remove(at);
         }
-        RuleCmd::Move {
+        ColumnRuleCmd::Move {
             column,
             rule,
             before,
@@ -458,11 +458,11 @@ pub fn edit_rules(rules: &[Value], cmd: &RuleCmd, file: Option<Value>) -> anyhow
             let r = rules.remove(at);
             place(&mut rules, r, before, after, column)?;
         }
-        RuleCmd::Enable { column, rule } | RuleCmd::Disable { column, rule } => {
+        ColumnRuleCmd::Enable { column, rule } | ColumnRuleCmd::Disable { column, rule } => {
             let at = rule_index(&rules, rule, column)?;
-            rules[at]["enabled"] = matches!(cmd, RuleCmd::Enable { .. }).into();
+            rules[at]["enabled"] = matches!(cmd, ColumnRuleCmd::Enable { .. }).into();
         }
-        RuleCmd::Ls { .. } | RuleCmd::Show { .. } | RuleCmd::Catalog => {}
+        ColumnRuleCmd::Ls { .. } | ColumnRuleCmd::Show { .. } | ColumnRuleCmd::Catalog => {}
     }
     Ok(rules)
 }
