@@ -504,6 +504,39 @@ fn record(
     Ok(())
 }
 
+/// The rules of column `col`, which the legacy board PATCH
+/// (`super::set_columns`) removes (TER-1120). No rules: `None`. With rules,
+/// the removal needs the options right ([`policy::edit_column_options`]):
+/// the board PATCH right alone (a `sysadmin`) gets `403`, and the caller's
+/// transaction writes nothing. Else the rules for the `board.columns` audit
+/// row: `{column, before, after}`, with `after` empty. The rows go with the
+/// column (`ON DELETE CASCADE`).
+pub(super) fn drop_rules(
+    t: &Tx<'_>,
+    actor: &Actor,
+    project: &str,
+    col: &ColumnRow,
+) -> ApiResult<Option<Value>> {
+    let rules = read_rules(t, col.id)?;
+    if rules.is_empty() {
+        return Ok(None);
+    }
+    let names: Vec<&str> = rules.iter().map(|r| r.name.as_str()).collect();
+    if let Err(e) = policy::edit_column_options(actor, project) {
+        return Err(ApiError::forbidden(format!(
+            "this board change removes column `{}` and its {} rule(s): {}; {}",
+            col.name,
+            rules.len(),
+            names.join(", "),
+            e.message
+        ))
+        .with_details(json!({"column": col.name, "rules": names})));
+    }
+    Ok(Some(
+        json!({"column": col.name, "before": rules, "after": []}),
+    ))
+}
+
 /// The role checks of the legacy board PATCH (`super::set_columns`): set the
 /// checks of column `old`, now named `name`, to `checks`. A change needs the
 /// options right ([`policy::edit_column_options`]): the board PATCH right

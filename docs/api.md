@@ -4960,7 +4960,12 @@ message}`), and nothing of the `PUT` is written. An `id` that is not a rule
 of this column, or an `id` twice, is a problem at `rules[i].id`. A rule
 write raises the version and is recorded as above; the audit row holds the
 rules before and after. A rename of the column keeps its rules; a removed
-column takes its rules with it.
+column takes its rules with it. A board `PATCH` (§8.3) that removes a
+column with rules needs the right to write the options: for another actor
+with the board `PATCH` right (a `sysadmin`) the whole `PATCH` is `403
+forbidden` with `details.column` and `details.rules`, and nothing changes.
+An allowed removal puts the rules in the `board.columns` audit row, as
+`dropped_rules: [{column, before, after}]`.
 
 `GET /api/rules/catalog` (any caller) lists the rule model for an editor:
 `model_version`, `triggers` (each with its fields), `conditions` (`when`

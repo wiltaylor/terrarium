@@ -146,39 +146,88 @@ impl std::fmt::Display for Problem {
     }
 }
 
-const RULE_KEYS: &[&str] = &[
-    "id",
-    "name",
-    "description",
-    "enabled",
-    "trigger",
-    "when",
-    "if_card",
-    "if_job",
-    "max_per_hour",
-    "actions",
+/// The JSON type of a field of the rule model.
+#[derive(Clone, Copy)]
+enum Ty {
+    Str,
+    Bool,
+    /// A whole number from 0 to the bound.
+    UInt(u64),
+    /// A list of texts.
+    StrList,
+    /// A list (its items are checked on their own).
+    List,
+    Object,
+    /// One of the words.
+    OneOf(&'static [&'static str]),
+    Any,
+}
+
+/// Whether a field must be there, and whether `null` is its absence.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Need {
+    Required,
+    /// May be absent; `null` is a wrong type.
+    Optional,
+    /// May be absent or `null`.
+    Nullable,
+}
+
+type Field = (&'static str, Ty, Need);
+
+const OPS: &[&str] = &["eq", "ne", "glob", "in"];
+const U32: u64 = u32::MAX as u64;
+
+const RULE_FIELDS: &[Field] = &[
+    ("id", Ty::Str, Need::Nullable),
+    ("name", Ty::Str, Need::Required),
+    ("description", Ty::Str, Need::Nullable),
+    ("enabled", Ty::Bool, Need::Optional),
+    ("trigger", Ty::Object, Need::Required),
+    ("when", Ty::List, Need::Optional),
+    ("if_card", Ty::List, Need::Optional),
+    ("if_job", Ty::List, Need::Optional),
+    ("max_per_hour", Ty::UInt(U32), Need::Nullable),
+    ("actions", Ty::List, Need::Required),
 ];
-const WHEN_KEYS: &[&str] = &["path", "op", "value"];
-const IF_CARD_KEYS: &[&str] = &[
-    "group_key_prefix",
-    "column",
-    "not_column",
-    "has_labels",
-    "lacks_labels",
-    "assigned",
-    "archived",
+const WHEN_FIELDS: &[Field] = &[
+    ("path", Ty::Str, Need::Required),
+    ("op", Ty::OneOf(OPS), Need::Optional),
+    ("value", Ty::Any, Need::Required),
 ];
-const IF_JOB_KEYS: &[&str] = &["state", "outcome", "split", "batch", "rerun", "halves"];
-const ACTION_KEYS: &[&str] = &["verb", "args"];
+const IF_CARD_FIELDS: &[Field] = &[
+    ("group_key_prefix", Ty::Str, Need::Nullable),
+    ("column", Ty::StrList, Need::Optional),
+    ("not_column", Ty::StrList, Need::Optional),
+    ("has_labels", Ty::StrList, Need::Optional),
+    ("lacks_labels", Ty::StrList, Need::Optional),
+    ("assigned", Ty::Bool, Need::Nullable),
+    ("archived", Ty::Bool, Need::Nullable),
+];
+const IF_JOB_FIELDS: &[Field] = &[
+    ("state", Ty::StrList, Need::Optional),
+    ("outcome", Ty::StrList, Need::Optional),
+    ("split", Ty::Bool, Need::Nullable),
+    ("batch", Ty::Bool, Need::Nullable),
+    ("rerun", Ty::Bool, Need::Nullable),
+    ("halves", Ty::Bool, Need::Nullable),
+];
+const ACTION_FIELDS: &[Field] = &[
+    ("verb", Ty::Str, Need::Required),
+    ("args", Ty::Object, Need::Optional),
+];
 
 /// The fields of a trigger of kind `kind`, after `kind`; `None`: no such
 /// kind.
-fn trigger_keys(kind: &str) -> Option<&'static [&'static str]> {
+fn trigger_fields(kind: &str) -> Option<&'static [Field]> {
     Some(match kind {
         "lands" | "leaves" | "wait_met" | "archived" => &[],
-        "job_result" => &["events", "job_kinds"],
-        "timer" => &["every_seconds"],
-        "count_reached" => &["count"],
+        "job_result" => &[
+            ("events", Ty::StrList, Need::Required),
+            ("job_kinds", Ty::StrList, Need::Optional),
+        ],
+        "timer" => &[("every_seconds", Ty::UInt(u64::MAX), Need::Required)],
+        "count_reached" => &[("count", Ty::UInt(U32), Need::Required)],
         _ => return None,
     })
 }
@@ -193,9 +242,37 @@ const TRIGGER_KINDS: &[&str] = &[
     "archived",
 ];
 
-/// A problem for each key of the object `v` (at `path`) that is not one
-/// of `known`, and for a value that is not an object.
-fn known_keys(v: &Value, path: &str, known: &[&str], out: &mut Vec<Problem>) {
+/// The problem of the value `v` for the type `ty`, if any.
+fn type_problem(v: &Value, ty: Ty) -> Option<String> {
+    let ok = match ty {
+        Ty::Str => v.is_string(),
+        Ty::Bool => v.is_boolean(),
+        Ty::UInt(max) => v.as_u64().is_some_and(|n| n <= max),
+        Ty::StrList => v.as_array().is_some_and(|a| a.iter().all(Value::is_string)),
+        Ty::List => v.is_array(),
+        Ty::Object => v.is_object(),
+        Ty::OneOf(words) => v.as_str().is_some_and(|s| words.contains(&s)),
+        Ty::Any => true,
+    };
+    if ok {
+        return None;
+    }
+    Some(match ty {
+        Ty::Str => "must be a text".into(),
+        Ty::Bool => "must be true or false".into(),
+        Ty::UInt(max) => format!("must be a whole number from 0 to {max}"),
+        Ty::StrList => "must be a list of texts".into(),
+        Ty::List => "must be a list".into(),
+        Ty::Object => "must be an object".into(),
+        Ty::OneOf(words) => format!("must be one of {}", words.join(", ")),
+        Ty::Any => unreachable!(),
+    })
+}
+
+/// A problem for each field of the object `v` (at `path`) that is not in
+/// `fields`, is missing though required, or has the wrong type; and for a
+/// value that is not an object.
+fn check_fields(v: &Value, path: &str, fields: &[Field], out: &mut Vec<Problem>) {
     let Some(o) = v.as_object() else {
         out.push(Problem {
             path: path.to_owned(),
@@ -203,11 +280,28 @@ fn known_keys(v: &Value, path: &str, known: &[&str], out: &mut Vec<Problem>) {
         });
         return;
     };
+    let known: Vec<&str> = fields.iter().map(|(k, _, _)| *k).collect();
     for k in o.keys().filter(|k| !known.contains(&k.as_str())) {
         out.push(Problem {
             path: format!("{path}.{k}"),
             message: format!("unknown field `{k}`; known: {}", known.join(", ")),
         });
+    }
+    for (k, ty, need) in fields {
+        let at = format!("{path}.{k}");
+        match o.get(*k) {
+            None if *need == Need::Required => out.push(Problem {
+                path: at,
+                message: "is missing".into(),
+            }),
+            None => {}
+            Some(Value::Null) if *need == Need::Nullable => {}
+            Some(v) => {
+                if let Some(message) = type_problem(v, *ty) {
+                    out.push(Problem { path: at, message });
+                }
+            }
+        }
     }
 }
 
@@ -223,21 +317,22 @@ fn items<'a>(o: &'a Map<String, Value>, key: &str, path: &str) -> Vec<(String, &
     }
 }
 
-/// The unknown fields of one rule, before it is read: serde would drop
-/// them, and a typo would then change what the rule does.
+/// The shape of one rule, before serde reads it: unknown fields (serde
+/// would drop them, and a typo would then change what the rule does),
+/// missing fields, and wrong types, each at its own path.
 fn shape(v: &Value, path: &str, out: &mut Vec<Problem>) {
-    known_keys(v, path, RULE_KEYS, out);
+    check_fields(v, path, RULE_FIELDS, out);
     let Some(o) = v.as_object() else {
         return;
     };
-    if let Some(t) = o.get("trigger") {
+    if let Some(t) = o.get("trigger").filter(|t| t.is_object()) {
         let tp = format!("{path}.trigger");
         match t.get("kind").and_then(Value::as_str) {
-            Some(kind) => match trigger_keys(kind) {
-                Some(keys) => {
-                    let mut known = vec!["kind"];
-                    known.extend_from_slice(keys);
-                    known_keys(t, &tp, &known, out);
+            Some(kind) => match trigger_fields(kind) {
+                Some(fields) => {
+                    let mut all: Vec<Field> = vec![("kind", Ty::Str, Need::Required)];
+                    all.extend_from_slice(fields);
+                    check_fields(t, &tp, &all, out);
                 }
                 None => out.push(Problem {
                     path: format!("{tp}.kind"),
@@ -253,14 +348,14 @@ fn shape(v: &Value, path: &str, out: &mut Vec<Problem>) {
             }),
         }
     }
-    for (key, known) in [
-        ("when", WHEN_KEYS),
-        ("if_card", IF_CARD_KEYS),
-        ("if_job", IF_JOB_KEYS),
-        ("actions", ACTION_KEYS),
+    for (key, fields) in [
+        ("when", WHEN_FIELDS),
+        ("if_card", IF_CARD_FIELDS),
+        ("if_job", IF_JOB_FIELDS),
+        ("actions", ACTION_FIELDS),
     ] {
         for (p, item) in items(o, key, path) {
-            known_keys(item, &p, known, out);
+            check_fields(item, &p, fields, out);
         }
     }
 }
@@ -733,7 +828,82 @@ mod tests {
             ),
             (
                 with(&|r| r["trigger"] = json!("lands")),
-                "rules[0].trigger.kind",
+                "rules[0].trigger",
+            ),
+            // A missing field or a wrong type is named at its own path.
+            (
+                with(&|r| {
+                    r.as_object_mut().unwrap().remove("trigger");
+                }),
+                "rules[0].trigger",
+            ),
+            (
+                with(&|r| {
+                    r["trigger"].as_object_mut().unwrap().remove("events");
+                }),
+                "rules[0].trigger.events",
+            ),
+            (
+                with(&|r| r["trigger"] = json!({"kind": "timer", "every_seconds": "1h"})),
+                "rules[0].trigger.every_seconds",
+            ),
+            (
+                with(&|r| r["trigger"] = json!({"kind": "count_reached", "count": -1})),
+                "rules[0].trigger.count",
+            ),
+            (with(&|r| r["enabled"] = "yes".into()), "rules[0].enabled"),
+            (with(&|r| r["name"] = 7.into()), "rules[0].name"),
+            (
+                with(&|r| r["max_per_hour"] = 1.5.into()),
+                "rules[0].max_per_hour",
+            ),
+            (with(&|r| r["actions"] = json!({})), "rules[0].actions"),
+            (
+                with(&|r| r["actions"][0]["args"] = json!(["to"])),
+                "rules[0].actions[0].args",
+            ),
+            (
+                with(&|r| {
+                    r["actions"][0].as_object_mut().unwrap().remove("verb");
+                }),
+                "rules[0].actions[0].verb",
+            ),
+            (
+                with(&|r| r["when"][0]["op"] = "like".into()),
+                "rules[0].when[0].op",
+            ),
+            (
+                with(&|r| {
+                    r["when"][0].as_object_mut().unwrap().remove("value");
+                }),
+                "rules[0].when[0].value",
+            ),
+            (
+                with(&|r| r["if_card"][0]["assigned"] = "no".into()),
+                "rules[0].if_card[0].assigned",
+            ),
+            (
+                with(&|r| r["if_card"][0]["has_labels"] = json!([1])),
+                "rules[0].if_card[0].has_labels",
+            ),
+            (
+                with(&|r| r["if_job"][0]["split"] = 1.into()),
+                "rules[0].if_job[0].split",
+            ),
+            (with(&|r| r["when"] = json!([3])), "rules[0].when[0]"),
+            // The limits of one rule: actions, and bytes.
+            (
+                with(&|r| {
+                    r["actions"] = Value::from(vec![
+                        json!({"verb": "card.done_mail"});
+                        MAX_ACTIONS + 1
+                    ])
+                }),
+                "rules[0].actions",
+            ),
+            (
+                with(&|r| r["description"] = "x".repeat(MAX_RULE_BYTES).into()),
+                "rules[0]",
             ),
         ];
         for (rules, want) in cases {
@@ -760,6 +930,26 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_at_the_limits_reads() {
+        let mut r = merge_pass();
+        r["actions"] = Value::from(vec![json!({"verb": "card.done_mail"}); MAX_ACTIONS]);
+        assert!(read_rules(&ctx(), &[r]).is_ok());
+        // Under the byte limit, a long description is refused only by its
+        // own limit.
+        let mut r = merge_pass();
+        r["description"] = "x".repeat(MAX_DESCRIPTION_CHARS + 1).into();
+        assert_eq!(paths(json!([r])), ["rules[0].description"]);
+        let rules: Vec<Value> = (0..MAX_RULES_PER_COLUMN)
+            .map(|i| {
+                let mut r = merge_pass();
+                r["name"] = format!("r{i}").into();
+                r
+            })
+            .collect();
+        assert!(read_rules(&ctx(), &rules).is_ok());
+    }
+
+    #[test]
     fn the_catalog_lists_every_trigger_and_verb() {
         let c = catalog();
         let kinds: Vec<&str> = c["triggers"]
@@ -770,7 +960,7 @@ mod tests {
             .collect();
         assert_eq!(kinds, TRIGGER_KINDS);
         for k in TRIGGER_KINDS {
-            assert!(trigger_keys(k).is_some(), "{k}");
+            assert!(trigger_fields(k).is_some(), "{k}");
         }
         assert_eq!(
             c["actions"].as_array().unwrap().len(),

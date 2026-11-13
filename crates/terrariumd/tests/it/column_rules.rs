@@ -378,3 +378,124 @@ async fn a_rename_keeps_the_rules_a_removed_column_drops_them_and_legacy_rules_s
     // The legacy rules of the project did not change.
     assert_eq!(td.get("/api/projects/proj/rules").await.ok(), &legacy);
 }
+
+/// The default board as a PATCH list, with the extra column `extra` before
+/// `review` when it is given.
+fn board_with(extra: Option<&str>) -> Value {
+    let mut c = vec![
+        json!({"name": "backlog"}),
+        json!({"name": "ready"}),
+        json!({"name": "in_progress", "role": "working"}),
+    ];
+    if let Some(n) = extra {
+        c.push(json!({"name": n}));
+    }
+    c.extend([
+        json!({"name": "review", "role": "review"}),
+        json!({"name": "validating", "role": "validating"}),
+        json!({"name": "merge_queue", "role": "merge_queue"}),
+        json!({"name": "accepted", "role": "accepted"}),
+        json!({"name": "blocked", "role": "blocked"}),
+        json!({"name": "done"}),
+    ]);
+    json!({"columns": c})
+}
+
+async fn rule_rows(td: &TestDaemon) -> i64 {
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(|c| {
+            Ok(c.query_row("SELECT count(*) FROM board_column_rules", [], |r| {
+                r.get(0)
+            })?)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_board_patch_that_drops_rules_needs_the_options_right() {
+    let td = setup().await;
+    let board = "/api/projects/proj/board";
+    let audits = "/api/audit?action=board.columns";
+    td.patch(board, board_with(Some("qa"))).await.ok();
+    // A column without rules: the board PATCH right is enough.
+    td.patch(board, board_with(Some("tmp"))).await.ok();
+    td.patch_as("ops/root", board, board_with(Some("qa")))
+        .await
+        .ok();
+    let o = options(&td, "qa").await;
+    td.put(&path("qa"), with_rules(&o, json!([mail_rule("note")])))
+        .await
+        .ok();
+    // The sysadmin may not drop the rules: 403, and nothing changes.
+    let a0 = count(&td, audits).await;
+    let r = td.patch_as("ops/root", board, board_with(None)).await;
+    r.err(403, "forbidden");
+    assert_eq!(r.body["error"]["details"]["column"], "qa", "{}", r.body);
+    assert_eq!(r.body["error"]["details"]["rules"], json!(["note"]));
+    let o = options(&td, "qa").await;
+    assert_eq!(names(&o), ["note"]);
+    assert_eq!(o["version"], 2);
+    assert_eq!(rule_rows(&td).await, 1);
+    assert_eq!(count(&td, audits).await, a0);
+    // The project_admin may; the audit row keeps the dropped rules.
+    td.patch_as("proj/lead", board, board_with(None))
+        .await
+        .ok();
+    assert_eq!(rule_rows(&td).await, 0);
+    assert_eq!(count(&td, audits).await, a0 + 1);
+    let audit = td.get(audits).await.ok().clone();
+    let row = audit.as_array().unwrap().last().unwrap().clone();
+    let text = row.to_string();
+    assert!(
+        text.contains("dropped_rules") && text.contains("\"note\"") && text.contains("\"qa\""),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_project_has_at_most_300_column_rules() {
+    let td = setup().await;
+    let full = |prefix: &str, n: usize| -> Value {
+        (0..n)
+            .map(|i| mail_rule(&format!("{prefix}{i}")))
+            .collect::<Vec<_>>()
+            .into()
+    };
+    for col in [
+        "backlog",
+        "ready",
+        "in_progress",
+        "review",
+        "validating",
+        "merge_queue",
+    ] {
+        let o = options(&td, col).await;
+        td.put(&path(col), with_rules(&o, full(col, 50))).await.ok();
+    }
+    let o = options(&td, "accepted").await;
+    let r = td
+        .put(&path("accepted"), with_rules(&o, full("a", 1)))
+        .await;
+    r.err(422, "invalid");
+    assert_eq!(r.body["error"]["details"]["path"], "rules", "{}", r.body);
+    assert_eq!(options(&td, "accepted").await["rules"], json!([]));
+    // 51 in one column is the column limit.
+    let o = options(&td, "blocked").await;
+    let r = td.put(&path("blocked"), with_rules(&o, full("b", 51))).await;
+    r.err(422, "invalid");
+    assert_eq!(r.body["error"]["details"]["path"], "rules");
+    // Room again after one column gives up a rule.
+    let b = options(&td, "backlog").await;
+    td.put(&path("backlog"), with_rules(&b, full("backlog", 49)))
+        .await
+        .ok();
+    let o = options(&td, "accepted").await;
+    td.put(&path("accepted"), with_rules(&o, full("a", 1)))
+        .await
+        .ok();
+}

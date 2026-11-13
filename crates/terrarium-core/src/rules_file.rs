@@ -1010,9 +1010,15 @@ fn text_list(fields: &Map<String, Value>, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Check the verb and the arguments of one action, as [`parse`] checks a
-/// verb block (TER-1120: the structured column rules use it). Each problem
-/// is the argument it is about (`None`: the action) and the message.
+/// Check the verb and the arguments of one action (TER-1120: the
+/// structured column rules use it). The checks of each argument, the
+/// required arguments, and the `job.queue`, `script.run` and `card.label`
+/// checks are those of a verb block in [`parse`]. Two differences: the
+/// messages name the verb by its API name (`card.label needs ...`), where
+/// [`parse`] names the block kind (`card_label needs ...`); and an unknown
+/// verb or argument is a problem here, where [`parse`] leaves it to the
+/// schema check. [`parse`] does not call this. Each problem is the
+/// argument it is about (`None`: the action) and the message.
 pub fn check_action(ctx: &Context, a: &Action) -> Vec<(Option<String>, String)> {
     let Some(verb) = VERBS.iter().find(|v| v.name == a.verb) else {
         let names: Vec<&str> = VERBS.iter().map(|v| v.name).collect();
