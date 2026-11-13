@@ -4884,8 +4884,12 @@ The options belong to the column: a rename or a reorder keeps them. The
 board `PATCH` (§8.3) does not carry them, with one exception that keeps
 today's behaviour: when a column gets or loses the role `working`, its
 `require_dependencies_met` follows the role, and the same for `blocked`
-and `require_comment_on_enter`. A new column from the board `PATCH` gets the
-defaults of its role. Migration `ter-1112-column-options.sql` sets the
+and `require_comment_on_enter`. Such a change needs the right to write the
+options (below): for another actor with the board `PATCH` right (a
+`sysadmin`), the whole `PATCH` is `403 forbidden` with `details.column` and
+`details.options`, and nothing changes. An allowed change raises the
+version and is recorded as a `PUT` is. A new column from the board `PATCH`
+gets the defaults of its role. Migration `ter-1112-column-options.sql` sets the
 defaults on each existing board from its roles and the name `done`.
 
 `GET /api/projects/{name}/board/columns/{column}/options` (a project

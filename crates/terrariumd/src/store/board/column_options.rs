@@ -280,6 +280,18 @@ pub fn put_options(
     }
     let col = column(t, project, &col.name)?;
     let after = read(t, project, &col)?;
+    record(t, project, &before, &after)?;
+    Ok(after)
+}
+
+/// The audit row `board.column_options` and the `board` event of one
+/// change of the options of a column.
+fn record(
+    t: &mut Tx<'_>,
+    project: &str,
+    before: &ColumnOptions,
+    after: &ColumnOptions,
+) -> ApiResult<()> {
     t.audit(
         "board.column_options",
         project,
@@ -297,7 +309,62 @@ pub fn put_options(
         )
         .project(project),
     )?;
-    Ok(after)
+    Ok(())
+}
+
+/// The role checks of the legacy board PATCH (`super::set_columns`): set the
+/// checks of column `old`, now named `name`, to `checks`. A change needs the
+/// options right ([`policy::edit_column_options`]): the board PATCH right
+/// alone (a `sysadmin`) gets `403`, and the caller's transaction writes
+/// nothing. A change raises the version and is recorded as a `PUT` is.
+pub(super) fn carry_checks(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    project: &str,
+    old: &ColumnRow,
+    name: &str,
+    checks: ColumnChecks,
+) -> ApiResult<()> {
+    if checks == old.checks {
+        return Ok(());
+    }
+    let changed: Vec<&str> = [
+        (
+            "require_comment_on_enter",
+            old.checks.require_comment_on_enter != checks.require_comment_on_enter,
+        ),
+        (
+            "require_dependencies_met",
+            old.checks.require_dependencies_met != checks.require_dependencies_met,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(k, c)| c.then_some(k))
+    .collect();
+    if let Err(e) = policy::edit_column_options(actor, project) {
+        return Err(ApiError::forbidden(format!(
+            "this board change gives column `{name}` a new role, and with it a new {}; {}",
+            changed.join(" and "),
+            e.message
+        ))
+        .with_details(json!({"column": name, "options": changed})));
+    }
+    let mut col = old.clone();
+    col.name = name.to_owned();
+    let before = read(t, project, &col)?;
+    t.execute(
+        "UPDATE board_columns SET require_comment_on_enter = ?2,
+            require_dependencies_met = ?3, options_version = options_version + 1
+         WHERE id = ?1",
+        params![
+            col.id,
+            checks.require_comment_on_enter,
+            checks.require_dependencies_met
+        ],
+    )?;
+    col.checks = checks;
+    let after = read(t, project, &col)?;
+    record(t, project, &before, &after)
 }
 
 #[cfg(test)]

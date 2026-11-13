@@ -1674,8 +1674,9 @@ fn may_edit(actor: &Actor, card: &CardRow) -> ApiResult<()> {
     }
     if card.column_terminal {
         return Err(ApiError::forbidden(format!(
-            "{}; only a project admin or the operator changes a done card",
-            final_state(card)
+            "{}; only a project admin or the operator changes {}",
+            final_state(card),
+            final_noun(card)
         )));
     }
     if owns(actor, card) || card.created_by == actor.address() {
@@ -1780,6 +1781,15 @@ fn final_state(card: &CardRow) -> String {
         format!("{} is done", card.id)
     } else {
         format!("{} is in `{}`, a final column", card.id, card.column)
+    }
+}
+
+/// "a done card", or "a card in a final column" for another final column.
+fn final_noun(card: &CardRow) -> &'static str {
+    if card.column == DONE {
+        "a done card"
+    } else {
+        "a card in a final column"
     }
 }
 
@@ -2769,8 +2779,9 @@ pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> Ap
         Some(v) => {
             if card.column_terminal {
                 return Err(ApiError::conflict(format!(
-                    "{}; a done card takes no new ETA",
-                    final_state(&card)
+                    "{}; {} takes no new ETA",
+                    final_state(&card),
+                    final_noun(&card)
                 )));
             }
             let at =
@@ -3197,9 +3208,16 @@ fn check_columns(current: &[ColumnRow], specs: &[ColumnSpec]) -> ApiResult<Vec<W
 /// The legacy board PATCH keeps today's behaviour (TER-1112): the check of
 /// a role goes with the role. A column that gets the role `working` needs
 /// met dependencies and one that loses it no longer does; the same for
-/// `blocked` and the comment. The other checks stay. A change raises the
-/// options version.
-fn carry_role_checks(t: &Tx<'_>, old: &ColumnRow, role: Option<&str>) -> ApiResult<()> {
+/// `blocked` and the comment. The other checks stay. A change needs the
+/// options right ([`column_options::carry_checks`]).
+fn carry_role_checks(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    project: &str,
+    old: &ColumnRow,
+    name: &str,
+    role: Option<&str>,
+) -> ApiResult<()> {
     let was = old.role.as_deref();
     if was == role {
         return Ok(());
@@ -3211,19 +3229,7 @@ fn carry_role_checks(t: &Tx<'_>, old: &ColumnRow, role: Option<&str>) -> ApiResu
     if was == Some(BLOCKED) || role == Some(BLOCKED) {
         c.require_comment_on_enter = role == Some(BLOCKED);
     }
-    if c != old.checks {
-        t.execute(
-            "UPDATE board_columns SET require_comment_on_enter = ?2,
-                require_dependencies_met = ?3, options_version = options_version + 1
-             WHERE id = ?1",
-            params![
-                old.id,
-                c.require_comment_on_enter,
-                c.require_dependencies_met
-            ],
-        )?;
-    }
-    Ok(())
+    column_options::carry_checks(t, actor, project, old, name, c)
 }
 
 /// Set the columns: the list is the whole board, in order (PLAN §13).
@@ -3310,7 +3316,7 @@ pub fn set_columns(
                     params![id, w.name, w.title, i as i64, w.wip_limit, w.role],
                 )?;
                 if let Some(old) = current.iter().find(|c| c.id == id) {
-                    carry_role_checks(t, old, w.role.as_deref())?;
+                    carry_role_checks(t, actor, project, old, &w.name, w.role.as_deref())?;
                 }
             }
             None => {

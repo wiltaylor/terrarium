@@ -393,6 +393,30 @@ async fn each_check_changes_only_its_own_path() {
     )
     .await
     .err(403, "forbidden");
+    let r = td
+        .patch_as("proj/w1", &format!("/api/cards/{d}"), json!({"eta_at": "1h"}))
+        .await;
+    r.err(403, "forbidden");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("changes a card in a final column"),
+        "{}",
+        r.body
+    );
+    let r = td
+        .patch_as("proj/lead", &format!("/api/cards/{d}"), json!({"eta_at": "1h"}))
+        .await;
+    r.err(409, "conflict");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("a card in a final column takes no new ETA"),
+        "{}",
+        r.body
+    );
     td.post_empty_as("proj/w1", &format!("/api/cards/{d}/claim"))
         .await
         .err(409, "conflict");
@@ -489,4 +513,90 @@ async fn the_board_patch_keeps_options_and_carries_role_checks() {
     assert_eq!(stuck["checks"]["require_comment_on_enter"], true);
     assert_eq!(stuck["version"], 1);
     assert_eq!(options(&td, "looking").await["version"], 2);
+}
+
+/// The board columns as a PATCH list: each name with its role.
+async fn board_list(td: &TestDaemon) -> Vec<Value> {
+    let b = td.get("/api/projects/proj/board").await.ok().clone();
+    b["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| json!({"name": c["name"], "role": c.get("role").cloned().unwrap_or(Value::Null)}))
+        .collect()
+}
+
+fn with_role(cols: &[Value], name: &str, role: Value) -> Vec<Value> {
+    let mut cols = cols.to_vec();
+    for c in &mut cols {
+        if c["name"] == name {
+            c["role"] = role.clone();
+        }
+    }
+    cols
+}
+
+#[tokio::test]
+async fn a_board_patch_that_changes_options_needs_the_options_right() {
+    let td = setup().await;
+    let board = "/api/projects/proj/board";
+    let events = "/api/events?kind=board&project=proj";
+    let audits = "/api/audit?action=board.column_options";
+    let cols = board_list(&td).await;
+    // A role change that moves no check: the board PATCH right is enough.
+    let swap = with_role(
+        &with_role(&cols, "validating", json!("review")),
+        "review",
+        json!("validating"),
+    );
+    td.patch_as("ops/root", board, json!({"columns": swap}))
+        .await
+        .ok();
+    td.patch_as("ops/root", board, json!({"columns": cols}))
+        .await
+        .ok();
+    // The `working` role moves to `ready`: the dependency check would move
+    // with it. A sysadmin is refused, and nothing changes.
+    let moved = with_role(
+        &with_role(&cols, "ready", json!("working")),
+        "in_progress",
+        Value::Null,
+    );
+    let (e0, a0) = (count(&td, events).await, count(&td, audits).await);
+    let r = td
+        .patch_as("ops/root", board, json!({"columns": moved}))
+        .await;
+    r.err(403, "forbidden");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("require_dependencies_met"),
+        "{}",
+        r.body
+    );
+    assert_eq!(board_list(&td).await, cols);
+    for (column, deps) in [("ready", false), ("in_progress", true)] {
+        let o = options(&td, column).await;
+        assert_eq!(o["checks"]["require_dependencies_met"], deps, "{column}");
+        assert_eq!(o["version"], 1, "{column}");
+    }
+    assert_eq!(count(&td, events).await, e0);
+    assert_eq!(count(&td, audits).await, a0);
+    // The project_admin may: each moved check is a recorded options change.
+    td.patch_as("proj/lead", board, json!({"columns": moved}))
+        .await
+        .ok();
+    for (column, deps) in [("ready", true), ("in_progress", false)] {
+        let o = options(&td, column).await;
+        assert_eq!(o["checks"]["require_dependencies_met"], deps, "{column}");
+        assert_eq!(o["version"], 2, "{column}");
+    }
+    assert_eq!(count(&td, audits).await, a0 + 2);
+    // Two options events and the event of the columns.
+    assert_eq!(count(&td, events).await, e0 + 3);
+    let audit = td.get(audits).await.ok().clone();
+    let rows = audit.as_array().unwrap().to_vec();
+    let text = serde_json::to_string(&rows).unwrap();
+    assert!(text.contains("\"before\"") && text.contains("\"ready\""), "{text}");
 }
