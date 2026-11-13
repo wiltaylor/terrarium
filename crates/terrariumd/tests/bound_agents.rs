@@ -591,6 +591,114 @@ async fn round_trip_claude_rules() {
     round_trip("claude", "rules").await;
 }
 
+/// TER-1090: ten no-op runs of a legacy generated unpark override do not
+/// consume the built-in budget after retirement. The original owner gets
+/// one return; another assignee still refuses the unpark.
+#[tokio::test]
+async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
+    let (td, lead) = setup_flow("rules").await;
+    let columns = state(&td)
+        .db
+        .read(|c| Ok(terrariumd::store::rules::context(c, "p")?.columns.unwrap()))
+        .await
+        .unwrap();
+    let old_pack = terrarium_core::rules_file::parse(
+        terrarium_core::rules_tools::PRE_TER_222_WAIT_RULES,
+        "old",
+        &terrarium_core::rules_file::Context::default(),
+    )
+    .unwrap();
+    let old = terrarium_core::rules_tools::migrate(
+        &old_pack,
+        "",
+        &terrarium_core::rules_file::RuleSet::default(),
+        &columns,
+    )
+    .text;
+    let r = td.put("/api/projects/p/rules", json!({"text": old})).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    let before = sessions(&td, &eph).await;
+    assert_eq!(before.len(), 1, "{before:?}");
+    let session = before[0]["id"].clone();
+
+    // These are ordinary non-wait moves: the legacy unpark runs, but the
+    // bound agent is not parked, so every run is a no-op.
+    for to in ["ready", "in_progress"].into_iter().cycle().take(10) {
+        mv(&td, &c, to, None).await;
+    }
+    until("ten legacy no-op runs", || async {
+        let runs = td
+            .get("/api/projects/p/rules/runs?rule=agent-unpark&limit=500")
+            .await
+            .ok()["runs"]
+            .as_array()
+            .unwrap()
+            .clone();
+        runs.len() == 10 && runs.iter().all(|r| r["state"] == "done")
+    })
+    .await;
+    td.post_empty("/api/reload").await.ok();
+
+    mv(&td, &c, "review", None).await;
+    parked(&td, &eph).await;
+    mv(&td, &c, "ready", Some("Review: changes.")).await;
+    td.wait_status(&eph, "idle").await;
+    until("the return after the old no-op budget", || async {
+        return_turns(&td, &eph, &c).len() == 1
+    })
+    .await;
+    assert!(spawn_row(&td, &eph).await["parked_at"].is_null());
+    let after = sessions(&td, &eph).await;
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0]["id"], session);
+    assert_eq!(after[0]["resumes"], 1, "{after:?}");
+    let unparked = td
+        .get(&format!("/api/agents/{eph}/events?kind=agent.unparked"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(unparked.as_array().unwrap().len(), 1, "{unparked}");
+    mv(&td, &c, "in_progress", None).await;
+    let r = td
+        .post(&format!("/api/cards/{c}/assign"), json!({"assignee": eph}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+
+    // The same restored built-in must not create a second writer.
+    mv(&td, &c, "review", None).await;
+    parked(&td, &eph).await;
+    let other = worker(&td, "other").await;
+    let r = td
+        .post(
+            &format!("/api/cards/{c}/assign"),
+            json!({"assignee": other}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    mv(&td, &c, "in_progress", None).await;
+    until("the different-assignee refusal", || async {
+        let events = td
+            .get(&format!(
+                "/api/agents/{eph}/events?kind=agent.unpark_refused"
+            ))
+            .await;
+        events.ok().as_array().unwrap().len() == 1
+    })
+    .await;
+    assert!(spawn_row(&td, &eph).await["parked_at"].is_string());
+    assert_eq!(return_turns(&td, &eph, &c).len(), 1);
+    let unparked = td
+        .get(&format!("/api/agents/{eph}/events?kind=agent.unparked"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(unparked.as_array().unwrap().len(), 1, "{unparked}");
+}
+
 both_flows!(forward_moves_stay_parked_and_returns_wake);
 /// Forward delivery moves never send a return turn. Review and merge
 /// failures still wake the same agent in both board flows.
