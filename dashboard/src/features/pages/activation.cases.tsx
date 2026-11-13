@@ -21,7 +21,7 @@ vi.mock("../../stores", async () => {
   const { createBookmarksStore } = await import("../../stores/bookmarks");
   return instanceTestStores({
     bookmarks: createBookmarksStore(null, window.location.origin),
-    api, events: { on: (fn: (e: AgentEvent) => void) => { listeners.add(fn); return () => listeners.delete(fn); } },
+    api, events: { on: (fn: (e: AgentEvent) => void) => { listeners.add(fn); return () => listeners.delete(fn); }, status: () => ({ lastSeq: 1 }), state: () => "live" },
     agents: { inProject: () => [], byId: () => undefined, state: { loading: false, error: null }, refresh: async () => {} },
     leases: { loadAll: async () => {} }, pins: { isPinned: () => false, toggle: async () => {} },
     inbox: { refresh: async () => {} }, projects: { projects: () => [], prefixes: () => ({}) },
