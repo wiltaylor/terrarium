@@ -193,11 +193,9 @@ pub fn select(
     let now = chrono::Utc::now().timestamp();
     if let Some(id) = &pick.card {
         let row = c
-            .query_row(
-                ONE_CANDIDATE,
-                params![project, pick.from, now, id],
-                |r| Ok((r.get::<_, String>(2)?, r.get::<_, String>(3)?)),
-            )
+            .query_row(ONE_CANDIDATE, params![project, pick.from, now, id], |r| {
+                Ok((r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+            })
             .optional()?;
         let Some((title, labels)) = row else {
             return Ok(Err("the card is not eligible"));

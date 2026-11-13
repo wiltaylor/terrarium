@@ -917,9 +917,7 @@ fn check_assign_args(args: &Map<String, Value>) -> Vec<String> {
         .filter(|k| set(k))
         .count();
     if modes != 1 {
-        out.push(
-            "card_assign needs exactly one of `who`, `template` or `templates`".to_owned(),
-        );
+        out.push("card_assign needs exactly one of `who`, `template` or `templates`".to_owned());
     }
     if set("who") {
         for key in ["owner", "from", "room", "limit"] {

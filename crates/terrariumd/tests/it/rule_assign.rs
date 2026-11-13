@@ -99,10 +99,7 @@ async fn card(td: &TestDaemon, id: &str) -> Value {
 
 /// The run log of `p`, oldest first.
 async fn runs(td: &TestDaemon) -> Vec<Value> {
-    let mut v = td
-        .get("/api/projects/p/rules/runs?limit=500")
-        .await
-        .ok()["runs"]
+    let mut v = td.get("/api/projects/p/rules/runs?limit=500").await.ok()["runs"]
         .as_array()
         .unwrap()
         .clone();
@@ -264,7 +261,11 @@ async fn from_takes_the_top_cards_while_the_working_column_has_room() {
     new_card(&td, "backlog", json!([])).await;
     settle(&td).await;
     let r = runs(&td).await;
-    let last = r.iter().rev().find(|r| r["rule"] == "backlog/kick").unwrap();
+    let last = r
+        .iter()
+        .rev()
+        .find(|r| r["rule"] == "backlog/kick")
+        .unwrap();
     assert_eq!(last["state"], "noop", "{last}");
     assert!(last.to_string().contains("no room"), "{last}");
 }

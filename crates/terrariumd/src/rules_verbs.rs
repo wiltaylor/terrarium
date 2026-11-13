@@ -36,8 +36,8 @@ use tracing::warn;
 
 use crate::actor::Actor;
 use crate::api::Shared;
-use crate::card_dispatcher::{self, Pick, Templates};
 use crate::api::jobs as api_jobs;
+use crate::card_dispatcher::{self, Pick, Templates};
 use crate::db::Tx;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::policy;
@@ -629,7 +629,9 @@ fn assign_new(
     )?;
     let owner = a.text("owner").unwrap_or_default().trim().to_owned();
     if owner.is_empty() {
-        return Err(ApiError::invalid("card.assign needs `owner` for a new agent"));
+        return Err(ApiError::invalid(
+            "card.assign needs `owner` for a new agent",
+        ));
     }
     let templates = match a.text("template").map(|t| t.trim().to_owned()) {
         Some(one) if !one.is_empty() => Templates::One(one),
@@ -668,7 +670,9 @@ fn assign_new(
     };
     let Some(who) = card_dispatcher::named_owner(t, &ctx.project, &owner, "card.assign owner")?
     else {
-        return Ok(noop(json!({"owner": owner, "reason": "the owner is paused"})));
+        return Ok(noop(
+            json!({"owner": owner, "reason": "the owner is paused"}),
+        ));
     };
     if let Some(reason) = card_dispatcher::project_limit(t, &who)? {
         return Ok(noop(json!({"owner": owner, "reason": reason})));
