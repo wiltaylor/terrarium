@@ -5324,6 +5324,19 @@ async fn column_rules_fix_then_split_a_red_merge_batch() {
         runs_of(&td, "p", "accepted/version-cut").await
     );
     assert_eq!(v["members"], json!([a, b]), "{v}");
+    // Each comment of a and b, from the column rules only: 4 queue
+    // comments, 3 fix notes, 2 split notes and the end of the pass. The
+    // move of `group built` below adds the lead's status comment.
+    for id in [&a, &b] {
+        assert_eq!(
+            comment_kinds(&td, id).await,
+            vec![
+                "queued", "fix", "queued", "fix", "queued", "fix", "queued", "split", "split",
+                "passed"
+            ],
+            "{id}"
+        );
+    }
     let built = td
         .post(
             &format!("/api/projects/p/version-groups/{key}/built"),
@@ -5334,19 +5347,6 @@ async fn column_rules_fix_then_split_a_red_merge_batch() {
     settle(&td).await;
     for id in [&a, &b] {
         assert_eq!(column_of(&td, id).await, "done");
-    }
-
-    // Each comment of a and b, from the column rules only: 4 queue
-    // comments, 3 fix notes, 2 split notes and the end of the pass.
-    for id in [&a, &b] {
-        assert_eq!(
-            comment_kinds(&td, id).await,
-            vec![
-                "queued", "fix", "queued", "fix", "queued", "fix", "queued", "split", "split",
-                "passed"
-            ],
-            "{id}"
-        );
     }
     for id in [&a, &b, &f1, &f2, &f3] {
         only_rule_writes(&td, id).await;
