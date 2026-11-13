@@ -67,7 +67,7 @@ pub(crate) fn resume_aad(id: &str) -> Vec<u8> {
 
 /// The heartbeat interval in `welcome`.
 pub const HEARTBEAT: Duration = Duration::from_secs(15);
-/// A link is dead after this many silent heartbeats.
+/// A link is dead after this many silent heartbeats, seen on two ticks.
 const MISSED_HEARTBEATS: u32 = 3;
 /// How long the daemon keeps the sessions of a host with no link.
 pub const RESUME_GRACE: Duration = Duration::from_secs(600);
@@ -2387,7 +2387,12 @@ async fn drive_link(
     let (mut sink, mut stream) = socket.split();
     let hb = reg.heartbeat.max(Duration::from_millis(10));
     let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + hb, hb);
+    // After a late wake-up, the next tick comes one heartbeat later, not in
+    // a burst: the stream gets a turn before the second overdue tick.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_rx = Instant::now();
+    // `last_rx` as the previous tick saw it overdue.
+    let mut overdue: Option<Instant> = None;
     let mut journal_retry = tokio::time::interval(JOURNAL_RETRY_TICK);
     let mut journal_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut nonce = 0u64;
@@ -2438,10 +2443,12 @@ async fn drive_link(
                 }
                 if last_rx.elapsed() > hb * MISSED_HEARTBEATS {
                     // A late wake-up of this task is not silence from the
-                    // host: under load the ticker and a frame that arrived
-                    // meanwhile become ready together, and `select!` may
-                    // pick the ticker first (TER-1132). Count a waiting
-                    // frame before closing the link.
+                    // host (TER-1132). Under load the ticker and a frame that
+                    // arrived meanwhile become ready together, and `select!`
+                    // may pick the ticker first, or the runtime has not yet
+                    // seen the socket readable. Count a waiting frame, and
+                    // close only when the next tick, one heartbeat later,
+                    // still sees no frame.
                     match futures_util::FutureExt::now_or_never(stream.next()) {
                         Some(msg) => {
                             last_rx = Instant::now();
@@ -2449,7 +2456,8 @@ async fn drive_link(
                                 break why;
                             }
                         }
-                        None => break "heartbeat timeout",
+                        None if overdue == Some(last_rx) => break "heartbeat timeout",
+                        None => overdue = Some(last_rx),
                     }
                 }
                 nonce += 1;
@@ -3450,6 +3458,21 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(why, "closed by the host");
+        // A host that stays silent still loses the link.
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            .await
+            .unwrap();
+        let why = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    why = ended.recv() => break why.unwrap(),
+                    _ = ws.next() => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(why, "heartbeat timeout");
         server.abort();
     }
 
