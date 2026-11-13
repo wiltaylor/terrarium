@@ -9,9 +9,9 @@ import type { AgentEvent, DetectedLogin, Subscription } from "../api/types";
 import type { EventsStore } from "./events";
 
 /** Events after which the list is stale. */
-export const REFRESH_KINDS = ["quota.sample", "quota.blocked", "quota.resumed", "subscription", "agent_removed", "status", "agent.create", "agent.delete", "agent.update", "agent.subscription"];
+export const REFRESH_KINDS = ["quota.sample", "quota.blocked", "quota.resumed", "subscription", "agent_removed", "status", "agent.swapped"];
 
-export function createSubscriptionsStore(api: Pick<Api, "subscriptions">, events?: Pick<EventsStore, "on">) {
+export function createSubscriptionsStore(api: Pick<Api, "subscriptions">, events?: Pick<EventsStore, "on"> & Partial<Pick<EventsStore, "onAudit">>) {
   const [list, setList] = createSignal<Subscription[]>([]);
   const [error, setError] = createSignal<unknown>(null);
   const [detected, setDetected] = createSignal<DetectedLogin[]>([]);
@@ -72,6 +72,9 @@ export function createSubscriptionsStore(api: Pick<Api, "subscriptions">, events
     if (e.kind === "subscription.offer") void detect();
     if (REFRESH_KINDS.includes(e.kind)) refreshSoon();
   });
+  const offAudit = events?.onAudit?.((a) => {
+    if (["agent.create", "agent.update", "agent.delete"].includes(a.action)) refreshSoon();
+  });
 
   return {
     list,
@@ -96,6 +99,7 @@ export function createSubscriptionsStore(api: Pick<Api, "subscriptions">, events
       clearTimeout(soon);
       timer = undefined;
       off?.();
+      offAudit?.();
     },
     replace(s: Subscription) {
       ++generation;

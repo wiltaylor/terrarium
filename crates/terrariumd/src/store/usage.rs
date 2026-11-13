@@ -501,7 +501,10 @@ mod tests {
         assert_eq!(counts.get("other"), Some(&1));
         assert!(!counts.contains_key("ignored"));
         assert!(assigned_agent_counts(&c, Some("empty")).unwrap().is_empty());
-        assert_eq!(assigned_agent_counts(&c, None).unwrap().get("default"), Some(&2));
+        assert_eq!(
+            assigned_agent_counts(&c, None).unwrap().get("default"),
+            Some(&2)
+        );
         c.execute_batch("UPDATE agents SET status='idle'; UPDATE agents SET subscription='explicit' WHERE id='1'; DELETE FROM agents WHERE id='2'; UPDATE account_defaults SET subscription='new' WHERE harness='codex';").unwrap();
         let counts = assigned_agent_counts(&c, None).unwrap();
         assert_eq!(counts.get("explicit"), Some(&1));

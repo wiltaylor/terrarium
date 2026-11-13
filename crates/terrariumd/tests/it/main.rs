@@ -164,6 +164,7 @@ mod spawn_rights;
 mod spawns;
 #[path = "../subscriptions.rs"]
 mod subscriptions;
+mod subscription_counts;
 #[path = "../system_prompts.rs"]
 mod system_prompts;
 #[path = "../target_keys.rs"]

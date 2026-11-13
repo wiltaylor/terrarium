@@ -605,7 +605,10 @@ async fn load(state: &Shared, name: String) -> ApiResult<SubscriptionView> {
 
 async fn list(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Vec<SubscriptionView>>> {
     policy::read_subscriptions(&actor)?;
-    let project = actor.agent().filter(|a| !a.reads_all()).map(|a| a.project.clone());
+    let project = actor
+        .agent()
+        .filter(|a| !a.reads_all())
+        .map(|a| a.project.clone());
     let dir = state.state_dir.clone();
     let st = state.clone();
     let v = state
@@ -618,7 +621,11 @@ async fn list(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Vec<S
                     let count = counts.get(&s.name).copied().unwrap_or(0);
                     let mut v = view(c, s, &dir, &st.usage.streams)?;
                     v.assigned_agent_count = Some(count);
-                    v.assigned_agent_count_scope = Some(if project.is_some() { "project" } else { "all_projects" });
+                    v.assigned_agent_count_scope = Some(if project.is_some() {
+                        "project"
+                    } else {
+                        "all_projects"
+                    });
                     v.assigned_agent_count_project = project.clone();
                     Ok(v)
                 })
