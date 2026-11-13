@@ -144,7 +144,10 @@ impl Git<'_> {
         drop(stdin);
         let out = std::thread::spawn(move || {
             let mut data = Vec::new();
+            // Keep at most 1 MiB, but drain the rest so git never fails on a
+            // closed pipe (F11).
             let _ = (&mut stdout).take(1 << 20).read_to_end(&mut data);
+            let _ = std::io::copy(&mut stdout, &mut std::io::sink());
             data
         });
         let code = std::thread::scope(|scope| {
@@ -203,6 +206,9 @@ pub fn run(
     stderr: &(dyn Fn(&[u8]) + Sync),
 ) -> Result<serde_json::Value, Failure> {
     check_request(req).map_err(|m| fail(2, m))?;
+    // F5: a checkout runs as the run-as account, never as the service.
+    let identity_arc =
+        identity.ok_or_else(|| fail(2, "a Windows git checkout needs windows_run_as"))?;
     let dest = req
         .dest
         .to_str()
@@ -409,7 +415,7 @@ pub fn run(
     if let CheckoutMode::Managed(managed) = &req.mode
         && action != "not_updated"
     {
-        install_hooks(&parent, name, managed, identity, u64::from(req.session))?;
+        install_hooks(&parent, name, managed, identity_arc, u64::from(req.session))?;
         for (key, value) in [
             ("user.name", managed.name.clone()),
             ("user.email", managed.email.clone()),
@@ -431,7 +437,11 @@ pub fn run(
         (0, out) => text(out),
         _ => String::new(),
     };
-    drop(private);
+    // The secret files go before their directory (F9).
+    drop(key_file);
+    private
+        .close()
+        .map_err(|e| fail(2, format!("git session directory cleanup failed: {e}")))?;
     drop(runtime);
     Ok(result(action, &head, &branch, dest, &note))
 }
@@ -442,9 +452,18 @@ fn install_hooks(
     parent: &Dir,
     name: &str,
     managed: &crate::protocol::ManagedHooks,
-    identity: Option<&Arc<Identity>>,
+    identity: &Arc<Identity>,
     session: u64,
 ) -> Result<(), Failure> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Step {
+        /// No hook: publish, failing if one appeared since (F10).
+        New,
+        /// A managed hook of ours: replace it.
+        Replace,
+        /// A repo hook: keep it as `.repo`, then publish, never replacing.
+        Keep,
+    }
     let install = || -> std::io::Result<Result<(), &'static str>> {
         let git_dir = parent.sub(&[name, ".git"], false)?;
         let hooks = git_dir.sub(&["hooks"], true)?;
@@ -452,7 +471,8 @@ fn install_hooks(
             ("prepare-commit-msg", managed.commit_hook.as_str()),
             ("pre-push", managed.push_hook.as_str()),
         ];
-        let mut keep = Vec::new();
+        // Every check comes before any change.
+        let mut steps = Vec::new();
         for (hook, _) in plan {
             let backup = format!("{hook}.repo");
             let current = hooks.entry(hook)?;
@@ -460,19 +480,23 @@ fn install_hooks(
             if current == Some(Entry::Dir) || saved == Some(Entry::Dir) {
                 return Ok(Err("install"));
             }
-            if current == Some(Entry::File) {
-                let mut content = String::new();
-                hooks
-                    .open_read(hook)?
-                    .take(1 << 20)
-                    .read_to_string(&mut content)?;
-                if !is_managed(hook, &content) {
-                    if saved.is_some() {
+            steps.push(match current {
+                None => Step::New,
+                Some(_) => {
+                    let mut content = String::new();
+                    hooks
+                        .open_read(hook)?
+                        .take(1 << 20)
+                        .read_to_string(&mut content)?;
+                    if is_managed(hook, &content) {
+                        Step::Replace
+                    } else if saved.is_some() {
                         return Ok(Err("install"));
+                    } else {
+                        Step::Keep
                     }
-                    keep.push((hook, backup));
                 }
-            }
+            });
         }
         let mut staged = Vec::new();
         for (hook, content) in plan {
@@ -480,18 +504,50 @@ fn install_hooks(
             temp.file().write_all(content.as_bytes())?;
             staged.push((hook, temp));
         }
-        for (hook, backup) in keep {
-            hooks.rename_no_replace(hook, &backup)?;
+        // Apply, and on a failure undo the earlier steps, so that a repo
+        // hook is never left only as `.repo` without a managed hook (F10).
+        let mut done: Vec<(&str, Step)> = Vec::new();
+        let mut failed = None;
+        for ((hook, temp), step) in staged.into_iter().zip(steps) {
+            let backup = format!("{hook}.repo");
+            let applied = match step {
+                Step::Replace => temp.publish(&hooks, hook),
+                Step::New => temp.publish_new(&hooks, hook),
+                Step::Keep => hooks.rename_no_replace(hook, &backup).and_then(|()| {
+                    temp.publish_new(&hooks, hook).inspect_err(|_| {
+                        let _ = hooks.rename_no_replace(&backup, hook);
+                    })
+                }),
+            };
+            match applied {
+                Ok(()) => done.push((hook, step)),
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
         }
-        for (hook, temp) in staged {
-            temp.publish(&hooks, hook)?;
+        if let Some(error) = failed {
+            for (hook, step) in done.into_iter().rev() {
+                match step {
+                    Step::New => {
+                        let _ = hooks.remove_file(hook);
+                    }
+                    Step::Keep => {
+                        if hooks.remove_file(hook).is_ok() {
+                            let _ = hooks.rename_no_replace(&format!("{hook}.repo"), hook);
+                        }
+                    }
+                    // Our own earlier managed hook is not restored.
+                    Step::Replace => {}
+                }
+            }
+            return Err(error);
         }
         Ok(Ok(()))
     };
-    match identity {
-        Some(identity) => identity.with_impersonation(install),
-        None => install(),
-    }
-    .map_err(|_| hook_failure("install"))?
-    .map_err(hook_failure)
+    identity
+        .with_impersonation(install)
+        .map_err(|_| hook_failure("install"))?
+        .map_err(hook_failure)
 }

@@ -55,6 +55,57 @@ pub fn locate(path: &str) -> Option<Result<Location, String>> {
     }))
 }
 
+/// How a host path relates to the workspace base, when workspaces are on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Class {
+    /// Inside one workspace: use the confined walk.
+    Workspace(Location),
+    /// Refused: under the base but not in one workspace, or a spelling that
+    /// can name the base without matching it lexically (F1).
+    Refused(String),
+    /// Not the base by any spelling this check knows: TER-272 handling.
+    Other,
+}
+
+/// Classify a path lexically. A path that could be an alias of the base is
+/// refused, never sent to the TER-272 handling, which follows links:
+/// - a verbatim or device prefix (`\\?\`, `\\.\`, `//?/`, `//./`);
+/// - a component with `~` on a drive path (an 8.3 short name);
+/// - a UNC path to an administrative drive share (`\\host\C$`).
+///
+/// [`canonical_alias`] covers links and other aliases on Windows.
+pub fn classify(path: &str) -> Class {
+    if let Some(found) = locate(path) {
+        return match found {
+            Ok(location) => Class::Workspace(location),
+            Err(m) => Class::Refused(m),
+        };
+    }
+    let slashed = path.replace('\\', "/");
+    if slashed.starts_with("//?/") || slashed.starts_with("//./") {
+        return Class::Refused(format!("{path}: verbatim and device paths are refused"));
+    }
+    if let Some(unc) = slashed.strip_prefix("//") {
+        let share = unc.split('/').nth(1).unwrap_or_default();
+        let bytes = share.as_bytes();
+        if bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b'$' {
+            return Class::Refused(format!(
+                "{path}: administrative drive shares are refused"
+            ));
+        }
+        return Class::Other;
+    }
+    let bytes = slashed.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        if slashed.split('/').any(|part| part.contains('~')) {
+            return Class::Refused(format!(
+                "{path}: short (8.3) names are refused while workspaces are on"
+            ));
+        }
+    }
+    Class::Other
+}
+
 /// [`locate`] for a file: the parent components and the file name.
 pub fn split_file(location: &Location) -> Result<(Vec<&str>, &str), String> {
     match location.rest.split_last() {
@@ -63,10 +114,68 @@ pub fn split_file(location: &Location) -> Result<(Vec<&str>, &str), String> {
     }
 }
 
+/// The longest existing prefix of `path`, canonicalized, with the rest
+/// appended, as a lexical Windows path without the `\\?\` prefix.
+fn resolved(
+    path: &str,
+    canonicalize: impl Fn(&std::path::Path) -> Option<String>,
+) -> Option<String> {
+    // Split the text: on Linux test hosts a `PathBuf` does not split on `\\`.
+    let parts: Vec<&str> = path.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
+    for keep in (1..=parts.len()).rev() {
+        let mut prefix = parts[..keep].join("\\");
+        if keep == 1 {
+            prefix.push('\\');
+        }
+        if let Some(real) = canonicalize(std::path::Path::new(&prefix)) {
+            let real = real.strip_prefix(r"\\?\").unwrap_or(&real);
+            let mut out = real.trim_end_matches('\\').to_owned();
+            for part in &parts[keep..] {
+                out.push('\\');
+                out.push_str(part);
+            }
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// F1, after [`classify`] said `Other`: does the path reach the base
+/// through a link, a junction or another alias? Then it is refused.
+pub fn canonical_alias(
+    path: &str,
+    canonicalize: impl Fn(&std::path::Path) -> Option<String>,
+) -> Option<String> {
+    let real = resolved(path, canonicalize)?;
+    PathKind::Windows
+        .inside(BASE, &real, true)
+        .then(|| format!("{path} leads into {BASE}: use the workspace path itself"))
+}
+
 #[cfg(windows)]
 mod native {
     use super::*;
     use terrarium_winapi::{Dir, Identity, Workspace};
+
+    fn canonical(path: &std::path::Path) -> Option<String> {
+        std::fs::canonicalize(path)
+            .ok()
+            .and_then(|p| p.to_str().map(str::to_owned))
+    }
+
+    /// The decision for a path while workspaces are on: the workspace, a
+    /// refusal, or `None` for the TER-272 handling. Run it as the account,
+    /// so that the canonical check sees what the account would open.
+    pub fn decide(path: &str) -> Result<Option<Location>, String> {
+        match classify(path) {
+            Class::Workspace(location) => Ok(Some(location)),
+            Class::Refused(m) => Err(m),
+            Class::Other => match canonical_alias(path, canonical) {
+                Some(m) => Err(m),
+                None => Ok(None),
+            },
+        }
+    }
 
     /// Provision the workspace with service authority, then walk `dirs` as
     /// the account. Never call it while impersonating.
@@ -95,9 +204,14 @@ mod native {
         if !policy.enabled {
             return Ok(());
         }
-        let location = match locate(cwd) {
-            None => return Ok(()),
-            Some(location) => location?,
+        let decided = match identity {
+            Some(identity) => identity
+                .with_impersonation(|| Ok(decide(cwd)))
+                .map_err(|_| "Windows path check impersonation failed".to_owned())?,
+            None => decide(cwd),
+        };
+        let Some(location) = decided? else {
+            return Ok(());
         };
         let dirs: Vec<&str> = location.rest.iter().map(String::as_str).collect();
         open_dir(&location, &dirs, identity, false)
@@ -111,7 +225,7 @@ mod native {
     }
 }
 #[cfg(windows)]
-pub use native::{base_ready, check_cwd, open_dir};
+pub use native::{base_ready, check_cwd, decide, open_dir};
 
 #[cfg(test)]
 mod tests {
@@ -161,6 +275,51 @@ mod tests {
         ] {
             assert!(locate(path).is_none(), "{path}");
         }
+    }
+
+    /// F1: every alias spelling of the base that this check knows is refused,
+    /// never handed to the TER-272 handling.
+    #[test]
+    fn alias_spellings_of_the_base_are_refused() {
+        for path in [
+            r"C:\TERRAR~1\work\p\a\f",
+            r"C:\Terrarium\WORK~1\p\a",
+            r"c:\terrar~1\work\p\a",
+            r"C:\Users\RUNNER~1\x",
+            r"\\?\C:\Terrarium\work\p\a\f",
+            r"\\?\UNC\localhost\C$\Terrarium\work\p\a",
+            r"\\.\C:\Terrarium\work\p\a",
+            "//?/C:/Terrarium/work/p/a",
+            r"\\localhost\C$\Terrarium\work\p\a",
+            r"\\127.0.0.1\c$\Terrarium\work\p\a",
+            r"C:\Terrarium\work",
+            r"C:\Terrarium\work\p",
+        ] {
+            assert!(matches!(classify(path), Class::Refused(_)), "{path}");
+        }
+        assert!(matches!(
+            classify(r"C:\Terrarium\work\p\a\f"),
+            Class::Workspace(_)
+        ));
+        for path in [r"C:\Users\a\x", r"D:\data", r"\\server\share\dir"] {
+            assert_eq!(classify(path), Class::Other, "{path}");
+        }
+    }
+
+    /// F1: a link or junction that resolves into the base is refused, also
+    /// when the path below it does not exist yet.
+    #[test]
+    fn links_into_the_base_are_refused() {
+        let fake = |p: &std::path::Path| match p.to_str()? {
+            r"C:\link" => Some(r"\\?\C:\Terrarium\work\p\a".to_owned()),
+            r"C:\elsewhere" => Some(r"\\?\C:\elsewhere".to_owned()),
+            r"C:\" => Some(r"\\?\C:\".to_owned()),
+            _ => None,
+        };
+        assert!(canonical_alias(r"C:\link\new\file.txt", fake).is_some());
+        assert!(canonical_alias(r"C:\link", fake).is_some());
+        assert!(canonical_alias(r"C:\elsewhere\x", fake).is_none());
+        assert!(canonical_alias(r"C:\missing\x", fake).is_none());
     }
 
     #[test]

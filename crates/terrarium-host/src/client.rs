@@ -2064,7 +2064,7 @@ impl Client {
             Err(m) => return send_error(tx, session, ErrorCode::PathDenied, m),
         };
         #[cfg(windows)]
-        let location = match self.workspace_location(&req.path) {
+        let location = match self.workspace_location(&req.path, identity.as_deref()) {
             Ok(l) => l,
             Err(m) => return send_error(tx, session, ErrorCode::PathDenied, m),
         };
@@ -2270,13 +2270,22 @@ impl Client {
     fn workspace_location(
         &self,
         path: &std::path::Path,
+        identity: Option<&terrarium_winapi::Identity>,
     ) -> Result<Option<crate::windows_workspace::Location>, String> {
         if !self.opts.windows_workspaces.enabled {
             return Ok(None);
         }
-        path.to_str()
-            .and_then(crate::windows_workspace::locate)
-            .transpose()
+        let Some(path) = path.to_str() else {
+            return Err("a non-UTF-8 path is refused while workspaces are on".into());
+        };
+        // F1: alias spellings are refused, links into the base too. The
+        // canonical check runs as the account, like the open itself.
+        match identity {
+            Some(identity) => identity
+                .with_impersonation(|| Ok(crate::windows_workspace::decide(path)))
+                .map_err(|_| "Windows path check impersonation failed".to_owned())?,
+            None => crate::windows_workspace::decide(path),
+        }
     }
 
     async fn start_pull(
@@ -2321,7 +2330,7 @@ impl Client {
             Err(m) => return send_error(tx, session, ErrorCode::PathDenied, m),
         };
         #[cfg(windows)]
-        let location = match self.workspace_location(&req.path) {
+        let location = match self.workspace_location(&req.path, identity.as_deref()) {
             Ok(l) => l,
             Err(m) => return send_error(tx, session, ErrorCode::PathDenied, m),
         };

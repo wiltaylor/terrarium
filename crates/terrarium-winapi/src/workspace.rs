@@ -192,14 +192,16 @@ pub(crate) fn create_dir(path: &Path, descriptor: Option<&Local>) -> io::Result<
 fn agent_descriptor(account_sid: Option<&str>) -> io::Result<Local> {
     // Protected DACL: SYSTEM, Administrators, and the run-as account, all
     // inherited by files and directories below. Nothing from the parent.
-    protected_descriptor(&["SY", "BA"], account_sid)
+    protected_descriptor(&["SY", "BA"], account_sid, "FA")
 }
 
 /// A protected DACL with full control for `trustees` (SDDL aliases) and the
-/// optional account SID, inherited by files and directories below.
+/// optional account SID with `account_rights` (SDDL rights, `FA` for full,
+/// `FRFX` for read and execute), inherited by files and directories below.
 pub(crate) fn protected_descriptor(
     trustees: &[&str],
     account_sid: Option<&str>,
+    account_rights: &str,
 ) -> io::Result<Local> {
     let mut sddl = String::from("D:P");
     for trustee in trustees {
@@ -210,7 +212,7 @@ pub(crate) fn protected_descriptor(
         if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
             return Err(refused("invalid account SID"));
         }
-        sddl.push_str(&format!("(A;OICI;FA;;;{sid})"));
+        sddl.push_str(&format!("(A;OICI;{account_rights};;;{sid})"));
     }
     let sddl = wide(OsStr::new(&sddl))?;
     let mut descriptor = null_mut();
@@ -433,6 +435,31 @@ impl Dir {
         Ok(Some(if dir { Entry::Dir } else { Entry::File }))
     }
 
+    /// Delete the regular file `name` of this directory, by handle. Refuses a
+    /// reparse point, an alias and a hard-linked file.
+    pub fn remove_file(&self, name: &str) -> io::Result<()> {
+        check_name(name)?;
+        let path = self.path.join(name);
+        let wide_path = wide(path.as_os_str())?;
+        // SAFETY: NUL-terminated path; opens the entry itself, never a target.
+        let handle = owned(unsafe {
+            CreateFileW(
+                wide_path.as_ptr(),
+                DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        })?;
+        let info = verify(&handle, &path, false)?;
+        if info.nNumberOfLinks != 1 {
+            return Err(refused("file has more than one hard link"));
+        }
+        dispose(&handle)
+    }
+
     /// Rename the regular file `from` to `to` in this directory, by handle.
     /// Fails when `to` exists: nothing is replaced.
     pub fn rename_no_replace(&self, from: &str, to: &str) -> io::Result<()> {
@@ -554,23 +581,24 @@ pub(crate) fn rename_by_handle(
 }
 
 fn delete_on_close(file: File) {
-    dispose(&file);
+    // Best effort in Drop: there is nobody to report to (F9).
+    let _ = dispose(&file);
     drop(file);
 }
 
 /// Mark an entry opened with DELETE access for deletion when it closes.
-/// Best effort: a non-empty directory stays.
-pub(crate) fn dispose(handle: &impl AsRawHandle) {
+/// A non-empty directory cannot be marked: that is an error (F9).
+pub(crate) fn dispose(handle: &impl AsRawHandle) -> io::Result<()> {
     let info = FILE_DISPOSITION_INFO { DeleteFile: true };
     // SAFETY: live handle opened with DELETE access; POD of the documented class.
-    unsafe {
+    checked(unsafe {
         SetFileInformationByHandle(
             handle.as_raw_handle(),
             FileDispositionInfo,
             (&info as *const FILE_DISPOSITION_INFO).cast(),
             size_of::<FILE_DISPOSITION_INFO>() as u32,
         )
-    };
+    })
 }
 
 /// A temporary file that is published by handle, or deleted by handle.
@@ -592,12 +620,22 @@ impl TempFile {
     /// Flush and rename the file to `name` in its own directory, replacing a
     /// regular file of that name. `dir` must be the directory it was made in,
     /// still held. A directory of that name makes the rename fail.
-    pub fn publish(mut self, dir: &Dir, name: &str) -> io::Result<()> {
+    pub fn publish(self, dir: &Dir, name: &str) -> io::Result<()> {
+        self.publish_as(dir, name, true)
+    }
+
+    /// [`TempFile::publish`] that fails when `name` exists (F10). On an error
+    /// the temporary file is still deleted by handle.
+    pub fn publish_new(self, dir: &Dir, name: &str) -> io::Result<()> {
+        self.publish_as(dir, name, false)
+    }
+
+    fn publish_as(mut self, dir: &Dir, name: &str, replace: bool) -> io::Result<()> {
         check_name(name)?;
         let _held = dir;
         let file = self.file.as_ref().expect("live temporary file");
         file.sync_all()?;
-        rename_by_handle(file, name, true)?;
+        rename_by_handle(file, name, replace)?;
         drop(self.file.take());
         Ok(())
     }

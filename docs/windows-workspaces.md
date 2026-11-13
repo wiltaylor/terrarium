@@ -70,18 +70,33 @@ root = 'C:\Program Files\Git'
   unsupported name, every directory and file protected against untrusted
   change (at most 100000 entries, depth 32). Each checkout audits it again.
 - The daemon sends the typed `git.checkout` frame only to such a host, only
-  for an agent, always in `managed` mode (provenance and push-deny hooks),
-  into that agent's workspace. Any other case is refused before a frame.
+  for an agent, only for a target with `windows_run_as`, always in `managed`
+  mode (provenance and push-deny hooks), into that agent's workspace. Any
+  other case is refused before a frame. The host refuses a checkout without
+  a run-as logon too: git never runs as the service.
 - Git runs from the root by exact path, as the run-as account, in a job
   object, with the `-c` overrides of the Linux checkout script, a pinned
   `PATH`, `GIT_CONFIG_NOSYSTEM=1` and hooks off during clone or fetch.
 - SSH uses `StrictHostKeyChecking=yes` with the daemon's pinned host keys
   only. No pin, no SSH checkout.
 - The token goes only into the git child env. The SSH key and host keys are
-  delete-on-close files in a session directory of `C:\Terrarium\git` with a
-  DACL for SYSTEM and the account. Cancel waits for the job to drain.
+  delete-on-close files in a session directory of `C:\Terrarium\git`.
+  SYSTEM has full control there, the account read and execute only, so it
+  cannot add a hook or replace the pinned host keys. Cancel waits for the
+  job to drain. A failed delete of the session directory fails the checkout.
 - Hooks are written by handle through the no-reparse walk. A repo hook that
-  is not managed is kept as `<name>.repo`.
+  is not managed is kept as `<name>.repo`. A new hook never replaces a file
+  that appeared after the check, and a failed install restores the repo
+  hook.
+
+## Paths that name the base another way
+
+While `[windows_workspaces]` is on, the host refuses these before it opens
+anything, so they never reach the TER-272 handling, which follows links:
+a verbatim or device prefix (`\\?\`, `\\.\`), a component with `~` on a
+drive path (8.3 short names), a UNC path to an administrative drive share
+(`\\host\C$`), and any path whose existing prefix resolves into
+`C:\Terrarium\work` (a junction or link), checked as the account.
 
 ## Limits
 
@@ -92,8 +107,9 @@ root = 'C:\Program Files\Git'
 - The checkout token is readable by the same account and administrators
   while git runs.
 - Unproven until native tests: msys `ssh.exe` reading a delete-on-close key
-  file, the hook `-x` test of Git for Windows `sh`, and crash cleanup (after
-  a host crash an empty session directory can stay in `C:\Terrarium\git`).
+  file, the hook `-x` test of Git for Windows `sh`, and crash cleanup. That
+  the kernel removes the credential files after a host crash is NOT proven,
+  and an empty session directory can stay in `C:\Terrarium\git`.
 
 ## Native acceptance (not yet run)
 

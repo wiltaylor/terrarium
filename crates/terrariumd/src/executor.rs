@@ -5929,7 +5929,13 @@ async fn checkout_on_windows_host(
         }),
         Some(Secret::Login { .. } | Secret::Other(_)) | None => None,
     };
-    let windows_run_as = windows_run_as(state, def)?;
+    // F5: the checkout runs as the run-as account, never as the host service.
+    let Some(windows_run_as) = windows_run_as(state, def)? else {
+        return Err(ApiError::invalid(
+            "a git checkout on a Windows host needs a target with windows_run_as",
+        ));
+    };
+    let windows_run_as = Some(windows_run_as);
     let _root_guard = crate::target_roots::lock_card(state, actor, &def.name).await?;
     let request = GitCheckout {
         windows_run_as,
@@ -6027,6 +6033,48 @@ pub async fn checkout_on_target(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    /// TER-274 F4: the Windows host keeps the config allowlist and the env
+    /// unset list of `CHECKOUT_SCRIPT`. A change to one side fails here.
+    #[test]
+    fn windows_checkout_rules_match_the_checkout_script() {
+        use terrarium_host::git_checkout::{ALLOW_PATTERNS, REJECT_PATTERNS, UNSET_ENV};
+        let script = super::CHECKOUT_SCRIPT;
+        let start = script.find("check_config() {").unwrap();
+        let body = &script[start..];
+        let body = &body[body.find("case \"$l\" in").unwrap()..body.find("esac").unwrap()];
+        let (mut allow, mut reject) = (Vec::new(), Vec::new());
+        for line in body.lines().skip(1) {
+            let line = line.trim();
+            let Some((patterns, action)) = line.split_once(')') else {
+                continue;
+            };
+            if patterns == "*" {
+                continue;
+            }
+            let list = if action.contains("echo") { &mut reject } else { &mut allow };
+            list.extend(patterns.split('|').map(str::to_owned));
+        }
+        let mut want: Vec<_> = ALLOW_PATTERNS.iter().map(|s| s.to_string()).collect();
+        let (mut got_allow, mut got_reject) = (allow.clone(), reject.clone());
+        want.sort();
+        got_allow.sort();
+        got_reject.sort();
+        assert_eq!(got_allow, want);
+        let mut want_reject: Vec<_> = REJECT_PATTERNS.iter().map(|s| s.to_string()).collect();
+        want_reject.sort();
+        assert_eq!(got_reject, want_reject);
+        let unset = &script[script.find("unset GIT_DIR").unwrap()..];
+        let unset = &unset[..unset.find("export GIT_CONFIG_GLOBAL").unwrap()];
+        let mut got: Vec<_> = unset
+            .split_whitespace()
+            .filter(|w| *w != "unset" && *w != "\\")
+            .collect();
+        let mut want: Vec<_> = UNSET_ENV.to_vec();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn cleanup_attempt_fakes_never_produce_verified_outcomes() {
         for value in [

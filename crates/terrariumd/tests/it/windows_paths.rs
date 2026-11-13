@@ -4,7 +4,9 @@ use crate::common::TestDaemon;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::time::Duration;
-use terrarium_host::protocol::{DaemonFrame, HostFrame, decode_control};
+use terrarium_host::protocol::{
+    CheckoutMode, DaemonFrame, GitCredential, HostFrame, decode_control,
+};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
 #[tokio::test]
@@ -244,17 +246,39 @@ async fn windows_round_trip(no_workspaces: bool) {
     listener.abort();
 }
 
-/// TER-274 D8, D16, D17: a host with `windows_git_checkout` gets one typed
-/// `git.checkout` frame in managed mode, inside the agent's workspace, and
-/// its `result` frame is the checkout answer.
+const TOKEN: &str = "ghp_ter274SentinelTokenQ7w2E9r4T6y8";
+const LOGIN: &str = "ter274-login-sentinel-Z3x5C7v9B1n";
+
+/// TER-274 D8, D16, D17, F2, F5: a host with `windows_git_checkout` gets one
+/// typed `git.checkout` frame in managed mode, inside the agent's workspace,
+/// with run-as. The token and the SSH key are only in the typed field: never
+/// in events, audit or error answers.
 #[tokio::test]
 async fn windows_git_checkout_goes_only_to_a_capable_host_in_managed_mode() {
     let td = TestDaemon::start().await;
     td.project("p").await;
     let agent = td
-        .agent("p", "worker", json!({"policy":{"targets":["p-win"]}}))
+        .agent(
+            "p",
+            "worker",
+            json!({"policy":{"targets":["p-win", "p-plain"]}}),
+        )
         .await;
     let aid = agent["id"].as_str().unwrap();
+    td.put(
+        "/api/secrets/p/win-login",
+        json!({"kind": "login", "fields": {"username": "ignored", "password": LOGIN}}),
+    )
+    .await
+    .ok();
+    td.put(
+        "/api/secrets/p/gh",
+        json!({"kind": "token", "fields": {"value": TOKEN}}),
+    )
+    .await
+    .ok();
+    let generated = td.post("/api/secrets/p/deploy/generate", json!({})).await;
+    assert_eq!(generated.status.as_u16(), 201, "{}", generated.body);
     let token = td.post("/api/hosts", json!({"name": "windows"})).await.ok()["token"]
         .as_str()
         .unwrap()
@@ -274,7 +298,8 @@ async fn windows_git_checkout_goes_only_to_a_capable_host_in_managed_mode() {
             "type": "hello", "protocol": 1, "host": "windows",
             "version": terrarium_version::FULL, "os": "windows", "arch": "x86_64",
             "path_kind": "windows",
-            "capabilities": {"no_workspaces": false, "windows_git_checkout": true},
+            "capabilities": {"no_workspaces": false, "windows_git_checkout": true,
+                "windows_run_as": true},
             "max_sessions": 16
         })
         .to_string()
@@ -296,6 +321,19 @@ async fn windows_git_checkout_goes_only_to_a_capable_host_in_managed_mode() {
             let frame: DaemonFrame = decode_control(&text).unwrap();
             let replies = match &frame {
                 DaemonFrame::Ping { nonce } => vec![HostFrame::Pong { nonce: *nonce }],
+                // A failing checkout: its error answer must not echo secrets.
+                DaemonFrame::GitCheckout(r) if r.url.contains("fail") => vec![
+                    HostFrame::Started {
+                        session: r.session,
+                        pid: None,
+                    },
+                    HostFrame::Exit {
+                        session: r.session,
+                        code: Some(2),
+                        signal: None,
+                        reason: terrarium_host::protocol::ExitReason::Exited,
+                    },
+                ],
                 DaemonFrame::GitCheckout(r) => vec![
                     HostFrame::Started {
                         session: r.session,
@@ -334,58 +372,116 @@ async fn windows_git_checkout_goes_only_to_a_capable_host_in_managed_mode() {
     .unwrap();
     td.post(
         "/api/targets",
-        json!({"name":"win", "kind":"host", "host":"windows", "project":"p"}),
+        json!({"name":"win", "kind":"host", "host":"windows", "project":"p",
+            "windows_run_as": {"account": "LAB\\worker", "password_secret": "win-login"}}),
     )
     .await
     .ok();
-    let repo = td
-        .post(
-            "/api/projects/p/repos",
-            json!({"url": "https://example.invalid/app.git", "name": "app"}),
-        )
-        .await;
-    let repo_id = repo.ok()["id"].as_str().unwrap().to_owned();
-    let url = format!("/api/repos/{repo_id}/checkout");
-    // An operator checkout has no workspace: refused, no frame.
     td.post(
-        &url,
+        "/api/targets",
+        json!({"name":"plain", "kind":"host", "host":"windows", "project":"p"}),
+    )
+    .await
+    .ok();
+    let mut repos = Vec::new();
+    for (name, url, credential) in [
+        ("app", "https://example.invalid/app.git", "gh"),
+        ("keyed", "https://example.invalid/keyed.git", "deploy"),
+        ("broken", "https://example.invalid/fail.git", "gh"),
+    ] {
+        let repo = td
+            .post(
+                "/api/projects/p/repos",
+                json!({"url": url, "name": name, "credential": credential}),
+            )
+            .await;
+        repos.push(repo.ok()["id"].as_str().unwrap().to_owned());
+    }
+    let url = |id: &str| format!("/api/repos/{id}/checkout");
+    // Operator: no workspace. Another agent's path. No run-as (F5).
+    td.post(
+        &url(&repos[0]),
         json!({"target": "p-win", "path": r"C:\Terrarium\work\p\worker\app"}),
     )
     .await
     .err(422, "invalid");
-    // A path outside the agent's own workspace: refused, no frame.
     td.post_as(
         aid,
-        &url,
+        &url(&repos[0]),
         json!({"target": "p-win", "path": r"C:\Terrarium\work\p\other\app"}),
     )
     .await
     .err(422, "invalid");
+    td.post_as(aid, &url(&repos[0]), json!({"target": "p-plain", "path": "app"}))
+        .await
+        .err(422, "invalid");
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(received.try_recv().is_err(), "no frame for a refusal");
+    let mut next_frame = async || {
+        let frame = tokio::time::timeout(Duration::from_secs(30), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let DaemonFrame::GitCheckout(r) = frame else {
+            panic!("{frame:?}")
+        };
+        r
+    };
+    // Token branch.
     let answer = td
-        .post_as(aid, &url, json!({"target": "p-win", "path": "app"}))
+        .post_as(aid, &url(&repos[0]), json!({"target": "p-win", "path": "app"}))
         .await;
     assert_eq!(answer.ok()["action"], "cloned", "{}", answer.body);
-    let frame = tokio::time::timeout(Duration::from_secs(30), received.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let DaemonFrame::GitCheckout(r) = frame else {
-        panic!("{frame:?}")
-    };
+    let r = next_frame().await;
     assert_eq!(r.dest.to_str(), Some(r"C:\Terrarium\work\p\worker\app"));
     assert_eq!(r.url, "https://example.invalid/app.git");
-    assert!(r.credential.is_none());
-    let terrarium_host::protocol::CheckoutMode::Managed(m) = &r.mode else {
+    assert!(
+        matches!(&r.credential, Some(GitCredential::Token { password, .. }) if password == TOKEN),
+        "the token goes in its typed field"
+    );
+    assert!(
+        r.windows_run_as.as_ref().is_some_and(|w| w.password == LOGIN),
+        "run-as is required (F5)"
+    );
+    let CheckoutMode::Managed(m) = &r.mode else {
         panic!("an agent checkout must be managed: {:?}", r.mode)
     };
-    assert!(
-        m.commit_hook
-            .contains("# terrarium managed provenance hook")
-    );
+    assert!(m.commit_hook.contains("# terrarium managed provenance hook"));
     terrarium_host::git_checkout::check_push_hook(&m.push_hook).unwrap();
-    assert_eq!(m.repo_id, repo_id);
+    assert_eq!(m.repo_id, repos[0]);
+    // SSH-key branch.
+    td.post_as(aid, &url(&repos[1]), json!({"target": "p-win", "path": "keyed"}))
+        .await
+        .ok();
+    let r = next_frame().await;
+    let Some(GitCredential::SshKey { key }) = &r.credential else {
+        panic!("the SSH key goes in its typed field")
+    };
+    assert!(key.contains("PRIVATE KEY"));
+    let key_line = key
+        .lines()
+        .find(|l| l.len() > 40 && !l.contains("PRIVATE KEY"))
+        .unwrap()
+        .to_owned();
+    // A failing checkout answers without the secrets.
+    let failed = td
+        .post_as(aid, &url(&repos[2]), json!({"target": "p-win", "path": "broken"}))
+        .await;
+    failed.err(422, "invalid");
+    next_frame().await;
+    let events = td.get("/api/events").await.body.to_string();
+    let audit = td.get("/api/audit").await.body.to_string();
+    for (place, text) in [
+        ("events", &events),
+        ("audit", &audit),
+        ("error", &failed.body.to_string()),
+        ("answer", &answer.body.to_string()),
+    ] {
+        for sentinel in [TOKEN, LOGIN, key_line.as_str()] {
+            assert!(!text.contains(sentinel), "a secret in the {place}");
+        }
+    }
+    assert!(events.contains("repo.checkout"), "checkout events were recorded");
     fake.abort();
     listener.abort();
 }

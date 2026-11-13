@@ -2889,6 +2889,76 @@ mod tests {
         reg
     }
 
+    /// TER-274 F3: the second guard. A `git.checkout` frame reaches only a
+    /// Windows host with the capability; otherwise nothing is sent, nothing
+    /// is persisted, and the session ID is given back.
+    #[tokio::test]
+    async fn git_checkout_frames_need_a_capable_windows_host() {
+        use terrarium_host::protocol::{CheckoutMode, GitCheckout, PathKind};
+        let frame = |id| {
+            DaemonFrame::GitCheckout(Box::new(GitCheckout {
+                windows_run_as: None,
+                session: id,
+                url: "https://example.invalid/r.git".into(),
+                dest: r"C:\Terrarium\work\p\a\r".into(),
+                mode: CheckoutMode::Unmanaged,
+                branch: None,
+                depth: None,
+                credential: None,
+                known_hosts: None,
+                timeout_secs: None,
+            }))
+        };
+        for (os, capable, allowed) in [
+            ("linux", true, false),
+            ("windows", false, false),
+            ("windows", true, true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = crate::db::open(&dir.path().join("terrarium.db")).unwrap();
+            crate::secrets::ensure_key(&db, dir.path()).unwrap();
+            let reg = Arc::new(HostRegistry::default());
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            reg.lock().insert(
+                "h".to_owned(),
+                Entry {
+                    conn: Some(Conn { id: 1, tx }),
+                    info: Some(LiveInfo {
+                        path_kind: PathKind::Windows,
+                        host_id: "h".into(),
+                        version: "v".into(),
+                        os: os.into(),
+                        arch: "x86_64".into(),
+                        capabilities: HostCapabilities {
+                            windows_git_checkout: capable,
+                            ..Default::default()
+                        },
+                        max_sessions: 4,
+                        max_running_targets: None,
+                        connected_at: String::new(),
+                    }),
+                    ..Entry::default()
+                },
+            );
+            reg.restore(dir.path()).unwrap();
+            let before = reg.lock()["h"].next_id;
+            let opened = reg.open_bound("h", None, frame);
+            if allowed {
+                assert!(opened.is_ok(), "{os} {capable}");
+                assert!(matches!(rx.try_recv(), Ok(Outgoing::Frame(f)) if matches!(*f, DaemonFrame::GitCheckout(_))));
+            } else {
+                assert!(
+                    matches!(opened, Err(HostError::GitCheckoutUnsupported)),
+                    "{os} {capable}"
+                );
+                assert!(rx.try_recv().is_err(), "no frame for {os} {capable}");
+                let g = reg.lock();
+                assert!(g["h"].sessions.is_empty());
+                assert_eq!(g["h"].next_id, before);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn reconnect_journal_bounds_output_tail_without_losing_exit_or_resume_offset() {
         let dir = tempfile::tempdir().unwrap();

@@ -10,9 +10,12 @@
 //! directories and the listed executables stay held for the whole checkout.
 //!
 //! Credential files live in `C:\Terrarium\git\<session>-<pid>-<n>`, with a
-//! protected DACL for SYSTEM and the run-as account. They are created with
-//! `FILE_FLAG_DELETE_ON_CLOSE`: the kernel deletes them when the host's
-//! handle closes, on success, cancel, or a crash of the host.
+//! protected DACL: SYSTEM full, the run-as account read and execute only, so
+//! the account cannot add a hook or replace `known_hosts` (F6). They are
+//! created with `FILE_FLAG_DELETE_ON_CLOSE`, so the kernel deletes them when
+//! the host's handle closes. On success and cancel this is the documented
+//! behaviour. After a host crash it is UNPROVEN until a native test (D20,
+//! F7), and an empty session directory can stay behind.
 
 use super::*;
 use crate::policy_file::{Local, audit_acl, sid_from_string, trusted_sids};
@@ -274,7 +277,7 @@ impl PrivateDir {
         let base = Path::new(GIT_SESSIONS);
         let handle = match open_dir(base, DIR_ACCESS) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                let descriptor = protected_descriptor(&["SY", "BA"], None)?;
+                let descriptor = protected_descriptor(&["SY", "BA"], None, "FA")?;
                 match create_new_dir(base, &descriptor) {
                     Err(e) if e.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) => {}
                     other => other?,
@@ -298,7 +301,7 @@ impl PrivateDir {
         let path = base.join(format!("{tag}-{}-{n}", std::process::id()));
         // SYSTEM and the account only: OpenSSH refuses a key file that other
         // principals can read.
-        let descriptor = protected_descriptor(&["SY"], account_sid.as_deref())?;
+        let descriptor = protected_descriptor(&["SY"], account_sid.as_deref(), "FRFX")?;
         create_new_dir(&path, &descriptor)?;
         let dir = open_own_dir(&path)?;
         let this = Self {
@@ -309,6 +312,16 @@ impl PrivateDir {
         };
         audit_acl(&this.dir, &trusted, &trusted[..1], &extra, u32::MAX, true)
             .map_err(|_| refused("the git session directory is not private"))?;
+        // F6: no trustee but SYSTEM may write, delete or add entries.
+        audit_acl(
+            &this.dir,
+            &trusted,
+            &trusted[..1],
+            &[],
+            FILE_FORBIDDEN | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD,
+            true,
+        )
+        .map_err(|_| refused("the account may change the git session directory"))?;
         Ok(this)
     }
 
@@ -354,12 +367,29 @@ impl PrivateDir {
     }
 }
 
+impl PrivateDir {
+    /// Delete the subdirectories and the directory, and report a failure
+    /// (F9). Drop its secret files first.
+    pub fn close(mut self) -> io::Result<()> {
+        let mut result = Ok(());
+        for handle in self.subdirs.drain(..).rev() {
+            if let Err(e) = dispose(&handle) {
+                result = result.and(Err(e));
+            }
+        }
+        let dir = dispose(&self.dir);
+        // Drop now only marks again, which is harmless.
+        result.and(dir)
+    }
+}
+
 impl Drop for PrivateDir {
     fn drop(&mut self) {
+        // Best effort when `close` was not called (an early error).
         for handle in self.subdirs.drain(..).rev() {
-            dispose(&handle);
+            let _ = dispose(&handle);
         }
-        dispose(&self.dir);
+        let _ = dispose(&self.dir);
     }
 }
 
