@@ -1031,9 +1031,9 @@ impl Client {
         match self
             .shared
             .pending_logons
-            .route(id, PendingEvent::Control(frame), bytes)
+            .route(id, PendingEvent::Control(Box::new(frame)), bytes)
         {
-            Routed::Absent(PendingEvent::Control(frame)) => Some(frame),
+            Routed::Absent(PendingEvent::Control(frame)) => Some(*frame),
             Routed::Absent(PendingEvent::Binary(_)) => {
                 unreachable!("control routing preserves type")
             }
@@ -1119,7 +1119,7 @@ impl Client {
                 }
                 match event {
                     PendingEvent::Control(frame) => {
-                        let _ = client.on_frame(frame, &tx, None, None).await;
+                        let _ = client.on_frame(*frame, &tx, None, None).await;
                     }
                     PendingEvent::Binary(bytes) => client.on_binary_ready(&bytes, &tx).await,
                 }
@@ -2522,7 +2522,7 @@ pub(crate) mod tests {
         }
         assert!(matches!(
             lease.pop_or_handoff(),
-            Some(PendingEvent::Control(DaemonFrame::CpEnd { bytes: 6, .. }))
+            Some(PendingEvent::Control(frame)) if matches!(*frame, DaemonFrame::CpEnd { bytes: 6, .. })
         ));
         assert!(lease.pop_or_handoff().is_none());
         assert!(rx.try_recv().is_err());

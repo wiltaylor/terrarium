@@ -10,7 +10,7 @@ const MAX_EVENTS: usize = 64;
 const MAX_BYTES: usize = 8 * crate::protocol::CHUNK_SIZE;
 
 pub(crate) enum Event {
-    Control(crate::protocol::DaemonFrame),
+    Control(Box<crate::protocol::DaemonFrame>),
     Binary(Vec<u8>),
 }
 
@@ -198,7 +198,7 @@ mod tests {
             Routed::Queued
         ));
         assert!(matches!(
-            registry.route(1, Event::Control(DaemonFrame::Eof { session: 1 }), 0),
+            registry.route(1, Event::Control(Box::new(DaemonFrame::Eof { session: 1 })), 0),
             Routed::Queued
         ));
         assert!(matches!(
@@ -208,7 +208,7 @@ mod tests {
         assert!(matches!(lease.pop_or_handoff(), Some(Event::Binary(data)) if data == vec![1]));
         assert!(matches!(
             lease.pop_or_handoff(),
-            Some(Event::Control(DaemonFrame::Eof { .. }))
+            Some(Event::Control(frame)) if matches!(*frame, DaemonFrame::Eof { .. })
         ));
         assert!(matches!(lease.pop_or_handoff(), Some(Event::Binary(data)) if data == vec![2]));
         assert!(lease.pop_or_handoff().is_none());
