@@ -5254,7 +5254,11 @@ impl RunnerSupervisor {
 /// task panics or is cancelled: else `deliveries_open` stays set and each
 /// later reload of the agent waits for an end that never comes. On a panic
 /// it also frees `pointer_busy` and asks for a reload: the taken items are
-/// lost with the task, and the reload reads the stored ones again.
+/// lost with the task, and the reload reads the stored ones again. While
+/// the agent still rests, a panic also frees the stream that
+/// [`RunnerSupervisor::maybe_push`] took (TER-1170): no turn started, so no
+/// status change frees it. A turn that started counts its stream again
+/// with its `working` status.
 struct DeliveryOpen {
     sup: RunnerSupervisor,
     id: AgentId,
@@ -5262,11 +5266,18 @@ struct DeliveryOpen {
 
 impl Drop for DeliveryOpen {
     fn drop(&mut self) {
+        let mut release = false;
         if std::thread::panicking()
             && let Some(slot) = lock(&self.sup.inner.slots).get_mut(&self.id)
         {
             slot.pointer_busy = false;
             slot.reload_wanted = true;
+            release = slot.seen.is_resting();
+        }
+        // The release types the work of the agents that get the stream,
+        // which needs a runtime. A runtime that shuts down types nothing.
+        if release && tokio::runtime::Handle::try_current().is_ok() {
+            self.sup.stream_release(self.id);
         }
         self.sup.end_delivery(self.id);
     }
@@ -9883,6 +9894,46 @@ mod tests {
         settle(&sup, id).await;
         assert_eq!(mail_blocks(&runner), 2, "{:?}", lock(&runner.typed));
         assert_eq!(mail_state(&state, &second).await, "read");
+    }
+
+    /// TER-1170: a delivery task that panics frees the stream that the
+    /// delivery took, and the agent that waits for it gets it, with no
+    /// status change of the agent.
+    #[tokio::test]
+    async fn a_panic_in_a_delivery_frees_its_stream() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, sup, runner, id) = reload_fixture(tmp.path()).await;
+        let streams = &state.usage.streams;
+        streams.set_limits(HashMap::from([("s".to_owned(), 1)]));
+        if let Some(slot) = lock(&sup.inner.slots).get_mut(&id) {
+            slot.agent.subscription = Some("s".into());
+        }
+        sup.inner
+            .pointer_delivery_panic
+            .store(true, Ordering::SeqCst);
+        // A mail with no stored row: the reload after the panic finds
+        // nothing, so no other delivery takes the stream.
+        let mid = ulid::Ulid::new().to_string();
+        sup.add_pointer(id, |p| {
+            p.add_mail(MailItem::new(mid, "operator".into(), "T1".into()))
+        });
+        // The delivery took the only stream; its task did not run yet.
+        assert_eq!(streams.usage("s").unwrap().in_use, 1);
+        let other = AgentId::new();
+        assert!(matches!(
+            streams.take(Some("s"), other),
+            crate::stream_limit::Take::Wait { new: true }
+        ));
+        settle(&sup, id).await;
+        assert!(!sup.inner.pointer_delivery_panic.load(Ordering::SeqCst));
+        assert!(lock(&runner.typed).is_empty());
+        assert_eq!(lock(&sup.inner.slots)[&id].seen, AgentStatus::Idle);
+        // The stream went to the agent that waited.
+        assert!(!streams.is_waiting(other));
+        let usage = streams.usage("s").unwrap();
+        assert_eq!((usage.in_use, usage.waiting), (1, 0));
+        streams.release(other);
+        assert_eq!(streams.usage("s").unwrap().in_use, 0);
     }
 
     /// TER-1146: a reload that gives up after `RELOAD_TRIES` reads asks
