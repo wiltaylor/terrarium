@@ -2350,6 +2350,8 @@ mod tests {
         // loaded host the thread waits, and the wait is not work. The
         // diff's own deadline is wall clock, so its CPU time is at most
         // that; without the deadline the search takes far longer.
+        // RUSAGE_THREAD does not count the git child processes
+        // (`cat-file`, `ls-files`): this bounds the Rust diff only.
         let start = thread_cpu();
         let u = uncommitted(&git(), &open(&dir), &mut LineBudget::default()).unwrap();
         let took = thread_cpu() - start;
@@ -2362,8 +2364,13 @@ mod tests {
         assert!(q.note.as_deref().unwrap().contains("too large"), "{q:?}");
 
         // Straight into `unified`: a deadline in the past ends the search
-        // at once, and the diff says so.
+        // at once, and the diff says so. The rest of `unified` on 40k
+        // changed lines (the changes, the hunks, the cap) stays under 2 s
+        // of this thread's CPU time.
+        let start = thread_cpu();
         let (_, a, d, _, late) = unified(&old, &new, &mut LineBudget::default(), Instant::now());
+        let took = thread_cpu() - start;
+        assert!(took < Duration::from_secs(2), "{took:?}");
         assert!(late);
         assert_eq!((a, d), (n as u64, n as u64));
 
@@ -2385,7 +2392,8 @@ mod tests {
         assert_eq!((a, d), (k + 2, k + 2));
     }
 
-    /// The CPU time that this thread has used.
+    /// The CPU time that this thread has used. Off Linux it is the CPU
+    /// time of the whole test process, so the limits are stricter there.
     fn thread_cpu() -> Duration {
         use nix::sys::resource::{UsageWho, getrusage};
         #[cfg(target_os = "linux")]
