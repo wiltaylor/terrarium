@@ -34,7 +34,7 @@ vi.mock("../../stores", async () => { const { instanceTestStores } = await impor
   api, agents: { inProject: () => [] },
   events: { on: (fn: (e: AgentEvent) => void) => { server.listeners.add(fn); return () => server.listeners.delete(fn); } },
 }); });
-const { default: ProjectScreen } = await import("./ProjectScreen");
+const { default: ProjectScreen, historyTarget, LEAVE_DRAFT } = await import("./ProjectScreen");
 const { default: CustomPage } = await import("../pages/CustomPage");
 
 let cleanup: (() => void) | undefined;
@@ -300,7 +300,7 @@ async function mountBrowser(path: string) {
   return host;
 }
 
-it("keeps the draft after a confirmed Back between tabs of the same project", async () => {
+it("keeps the draft without a prompt on Back between tabs of the same project", async () => {
   seed();
   const confirm = vi.fn(() => true);
   vi.stubGlobal("confirm", confirm);
@@ -309,13 +309,84 @@ it("keeps the draft after a confirmed Back between tabs of the same project", as
   input(host.querySelector<HTMLInputElement>('input[aria-label="Title of a"]')!, "Unsaved");
   link(host, "/p/demo/pages/b").click();
   await waitFor(() => expect(window.location.pathname).toBe("/p/demo/pages/b"));
-  expect(confirm).not.toHaveBeenCalled();
   window.history.back();
   await waitFor(() => expect(window.location.pathname).toBe("/p/demo/pages/a"));
-  await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(link(host, "/p/demo/pages/a").classList.contains("active")).toBe(true));
+  expect(confirm).not.toHaveBeenCalled();
   expect(host.querySelector<HTMLInputElement>('input[aria-label="Title of a"]')!.value).toBe("Unsaved");
   expect(tabOrder(host)).toEqual(["a", "b"]);
   expect(has(host, "Save pages")).toBe(true);
+});
+
+it("prompts on a Back that leaves the project and stays when it is refused", async () => {
+  seed();
+  const confirm = vi.fn(() => false);
+  vi.stubGlobal("confirm", confirm);
+  // A history entry outside the project, before the project page. The first
+  // push drops the forward entries of earlier tests, so `length - 1` is the
+  // real position of each entry, as the router's `_depth` needs.
+  window.history.pushState(null, "", "/p/other/board");
+  window.history.replaceState({ _depth: window.history.length - 1 }, "", "/p/other/board");
+  window.history.pushState({ _depth: window.history.length }, "", "/p/demo/pages/a");
+  const host = await mountBrowser("/p/demo/pages/a");
+  await startEdit(host);
+  input(host.querySelector<HTMLInputElement>('input[aria-label="Title of a"]')!, "Unsaved");
+  link(host, "/p/demo/pages/b").click();
+  await waitFor(() => expect(window.location.pathname).toBe("/p/demo/pages/b"));
+  window.history.go(-2);
+  await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+  expect(confirm).toHaveBeenCalledWith(LEAVE_DRAFT);
+  await waitFor(() => expect(window.location.pathname).toBe("/p/demo/pages/b"));
+  expect(host.querySelector<HTMLInputElement>('input[aria-label="Title of a"]')!.value).toBe("Unsaved");
+  expect(has(host, "Save pages")).toBe(true);
+});
+
+it("takes the Back target from the address bar only when it moved", () => {
+  const at = (path: string) => ({ pathname: path, search: "", hash: "" });
+  expect(historyTarget(-1, at("/p/demo/pages/b"), at("/p/demo/pages/a"))).toBe("/p/demo/pages/a");
+  expect(historyTarget(1, at("/p/demo/pages/a"), { pathname: "/p/demo/board", search: "?card=C1", hash: "#reply" })).toBe("/p/demo/board?card=C1#reply");
+  // A memory router does not move the address bar: the step stays unknown.
+  expect(historyTarget(-1, at("/p/demo/pages/b"), at("/p/demo/pages/b"))).toBe(-1);
+  expect(historyTarget("/p/demo/board", at("/p/demo/pages/b"), at("/x"))).toBe("/p/demo/board");
+});
+
+it("brings the widget controls back after a Retry of the page's own rights", async () => {
+  seed();
+  const { host } = await mount();
+  await startEdit(host);
+  await waitFor(() => expect(has(host, "Add widget")).toBe(true));
+  const list = api.pages.list.getMockImplementation()!;
+  // The tab row reads first and passes. Only the page's own read fails.
+  let calls = 0;
+  api.pages.list.mockImplementation(async () => { if (++calls === 2) throw new ApiError(503, "unavailable"); return list(); });
+  emit({ project: "demo", revision: 3, operation: "replace" });
+  await waitFor(() => expect(has(host, "Retry page rights")).toBe(true));
+  expect(has(host, "Add widget")).toBe(false);
+  expect(has(host, "Save pages")).toBe(true);
+  expect(has(host, "Retry")).toBe(false);
+  button(host, "Retry page rights").click();
+  await waitFor(() => expect(has(host, "Add widget")).toBe(true));
+  expect(has(host, "Retry page rights")).toBe(false);
+  api.pages.list.mockImplementation(list);
+});
+
+it("says why the draft stopped for a revoke and for v2 OFF, with no rights check text", async () => {
+  seed();
+  const { host } = await mount();
+  await startEdit(host);
+  input(host.querySelector<HTMLInputElement>('input[aria-label="Title of a"]')!, "Unsaved");
+  server.canEdit = false;
+  emit({ project: "demo", revision: 3, operation: "replace" });
+  await waitFor(() => expect(host.textContent).toContain("You can no longer edit these pages. Your unsaved draft is kept."));
+  expect(host.textContent).not.toContain("Could not check your rights");
+  expect(has(host, "Retry")).toBe(false);
+  expect(has(host, "Discard draft")).toBe(true);
+  server.canEdit = true; server.enabled = false;
+  emit({ project: "demo", revision: 3, operation: "replace" });
+  await waitFor(() => expect(host.textContent).toContain("Project pages are off for this project. Your unsaved draft is kept."));
+  expect(host.textContent).not.toContain("Could not check your rights");
+  expect(has(host, "Retry")).toBe(false);
+  expect(has(host, "Discard draft")).toBe(true);
 });
 
 it("keeps the draft and offers Retry when a refresh fails while editing", async () => {
