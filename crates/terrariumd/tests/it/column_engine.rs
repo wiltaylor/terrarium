@@ -564,12 +564,9 @@ async fn a_role_clear_that_moves_a_role_ref_to_another_column_by_name_is_refused
         }
     }
     td.patch(b, renamed).await.ok();
-    td.patch(
-        b,
-        board_qa(Some("review"), Some(json!({"name": "review"}))),
-    )
-    .await
-    .ok();
+    td.patch(b, board_qa(Some("review"), Some(json!({"name": "review"}))))
+        .await
+        .ok();
     let o = options(&td, "flow", "accepted").await;
     assert_eq!(o["rules"][0]["actions"][0]["args"]["to"], "@review");
     let before = td.get(b).await.ok().clone();
