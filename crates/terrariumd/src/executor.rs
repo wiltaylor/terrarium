@@ -6796,37 +6796,113 @@ exit 0
         assert!(message.contains("Terrarium-Agent: test/worker"));
     }
 
-    // TER-1127: a managed-required checkout keeps the inherited umask for the
-    // tree. Only the hook staging is private.
+    // TER-1127: a managed-required checkout gives the work tree the modes of
+    // a plain `git clone` under the same umask, as in 0.64. Only the hook
+    // staging and the SSH key file stay owner-only.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn managed_checkout_tree_follows_the_inherited_umask() {
+    fn managed_checkout_tree_has_the_modes_of_a_plain_clone() {
+        use std::collections::BTreeMap;
         use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
         use std::process::Command;
+        fn modes(root: &Path, dir: &Path, out: &mut BTreeMap<String, u32>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let e = e.unwrap();
+                if e.file_name() == ".git" {
+                    continue;
+                }
+                let path = e.path();
+                let meta = std::fs::symlink_metadata(&path).unwrap();
+                let rel = path.strip_prefix(root).unwrap().display().to_string();
+                out.insert(rel, meta.permissions().mode() & 0o777);
+                if meta.is_dir() {
+                    modes(root, &path, out);
+                }
+            }
+        }
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         let tmp = tempfile::tempdir().unwrap();
         let origin = tmp.path().join("origin");
+        let bin = tmp.path().join("bin");
+        let temps = tmp.path().join("temps");
+        let log = tmp.path().join("private.log");
         std::fs::create_dir_all(origin.join("crates/x/fixtures")).unwrap();
+        std::fs::create_dir_all(origin.join("docker")).unwrap();
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(&temps).unwrap();
         std::fs::write(origin.join("crates/x/fixtures/data"), "x\n").unwrap();
-        let out = Command::new("sh")
-            .current_dir(&origin)
-            .args(["-c", "git init -q && git add -A && git commit -q -m one"])
-            .env("GIT_AUTHOR_NAME", "t")
-            .env("GIT_AUTHOR_EMAIL", "t@t")
-            .env("GIT_COMMITTER_NAME", "t")
-            .env("GIT_COMMITTER_EMAIL", "t@t")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env_remove("TERRARIUM_GIT_TRAILERS")
-            .env_remove("TERRARIUM_GIT_TRAILERS_FILE")
-            .output()
+        let entry = origin.join("docker/entrypoint.sh");
+        std::fs::write(&entry, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sh = |dir: &Path, script: &str, args: &[&Path]| {
+            let out = Command::new("sh")
+                .current_dir(dir)
+                .arg("-c")
+                .arg(script)
+                .arg("sh")
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env_remove("TERRARIUM_GIT_TRAILERS")
+                .env_remove("TERRARIUM_GIT_TRAILERS_FILE")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{script}: {out:?}");
+        };
+        sh(
+            &origin,
+            "git init -q && git add -A && git commit -q -m one",
+            &[],
+        );
+        // A base64 that records the mode of the files it decodes into and
+        // from, and of their dirs: the hook staging and the SSH key file.
+        let real_base64 = ["/usr/bin/base64", "/bin/base64"]
+            .into_iter()
+            .find(|p| Path::new(p).exists())
             .unwrap();
-        assert!(out.status.success(), "{out:?}");
+        let spy = bin.join("base64");
+        std::fs::write(
+            &spy,
+            r#"#!/bin/sh
+if [ "${1:-}" = -d ]; then
+  for f in 0 1; do
+    p=$(readlink "/proc/$$/fd/$f") || continue
+    case "$p" in
+      /*)
+        printf '%s %s\n' "$(stat -L -c %a "/proc/$$/fd/$f")" "$p" >> "$PRIVATE_LOG"
+        printf '%s %s/\n' "$(stat -c %a "${p%/*}")" "${p%/*}" >> "$PRIVATE_LOG" ;;
+    esac
+  done
+fi
+exec "$REAL_BASE64" "$@"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&spy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
+        );
         let p = crate::git_identity::Provenance {
             repo: None,
             warn_only: false,
             identity: crate::git_identity::Identity::from_env(),
             trailers: String::new(),
         };
-        for (umask, dir_mode, file_mode) in [("022", 0o755, 0o644), ("077", 0o700, 0o600)] {
+        for (umask, exec_mode) in [("0002", 0o775), ("0022", 0o755)] {
+            let plain = tmp.path().join(format!("plain-{umask}"));
             let dest = tmp.path().join(format!("dest-{umask}"));
+            sh(
+                tmp.path(),
+                &format!("umask {umask} && git clone -q \"$1\" \"$2\""),
+                &[&origin, &plain],
+            );
             let mut c = checkout_cmd(
                 origin.to_str().unwrap(),
                 dest.to_str().unwrap(),
@@ -6836,12 +6912,18 @@ exit 0
             )
             .unwrap();
             c.argv[8] = "managed-required".into();
+            let _ = std::fs::remove_file(&log);
             let out = Command::new("sh")
                 .arg("-c")
                 .arg("umask \"$0\" && exec \"$@\"")
                 .arg(umask)
                 .args(&c.argv)
                 .envs(c.env)
+                .env("PATH", &path)
+                .env("TMPDIR", &temps)
+                .env("PRIVATE_LOG", &log)
+                .env("REAL_BASE64", real_base64)
+                .env("TERRARIUM_GIT_SSH_KEY", "c3ludGhldGljLWtleQo=")
                 .env("TERRARIUM_COMMIT_HOOK", p.hook())
                 .env("TERRARIUM_COMMIT_NAME", &p.identity.name)
                 .env("TERRARIUM_COMMIT_EMAIL", &p.identity.email)
@@ -6856,17 +6938,31 @@ exit 0
                 .unwrap();
             assert!(out.status.success(), "{umask}: {out:?}");
             assert!(String::from_utf8_lossy(&out.stdout).contains("action=cloned"));
-            let mode =
-                |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-            for d in ["", "crates", "crates/x", "crates/x/fixtures"] {
-                assert_eq!(mode(&dest.join(d)), dir_mode, "{umask}: {d}");
-            }
-            assert_eq!(
-                mode(&dest.join("crates/x/fixtures/data")),
-                file_mode,
-                "{umask}"
-            );
+            // The work tree: the modes of a plain clone, with the exec bit.
+            let (mut want, mut got) = (BTreeMap::new(), BTreeMap::new());
+            modes(&plain, &plain, &mut want);
+            modes(&dest, &dest, &mut got);
+            assert_eq!(got, want, "{umask}");
+            assert_eq!(mode(&dest), mode(&plain), "{umask}");
+            assert_eq!(got["docker/entrypoint.sh"], exec_mode, "{umask}");
             assert_eq!(mode(&dest.join(".git/hooks/pre-push")), 0o755, "{umask}");
+            // The hook staging and the key file: owner-only, and gone at exit.
+            let text = std::fs::read_to_string(&log).unwrap();
+            let private: Vec<(u32, &str)> = text
+                .lines()
+                .map(|l| {
+                    let (m, p) = l.split_once(' ').unwrap();
+                    (u32::from_str_radix(m, 8).unwrap(), p)
+                })
+                .collect();
+            assert!(private.iter().any(|(_, p)| p.ends_with("/input")), "{text}");
+            assert!(private.iter().any(|(_, p)| p.ends_with("/push")), "{text}");
+            assert!(private.iter().any(|(_, p)| p.ends_with("/key")), "{text}");
+            for (m, p) in &private {
+                let want = if p.ends_with('/') { 0o700 } else { 0o600 };
+                assert_eq!(*m, want, "{umask}: {p}");
+            }
+            assert_eq!(std::fs::read_dir(&temps).unwrap().count(), 0, "{umask}");
         }
     }
 
