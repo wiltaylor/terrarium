@@ -597,6 +597,20 @@ async fn round_trip_claude_rules() {
 #[tokio::test]
 async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
     let (td, lead) = setup_flow("rules").await;
+    // A board without `validating`, like the terrarium board: the old
+    // migration wrote the wait overrides only for a board that lacked a
+    // column of the old rules.
+    let r = td
+        .patch(
+            "/api/projects/p/board",
+            json!({"columns": [
+                {"name": "backlog"}, {"name": "ready"},
+                {"name": "in_progress", "role": "working"},
+                {"name": "review"}, {"name": "merge_queue"}, {"name": "accepted"},
+                {"name": "blocked", "role": "blocked"}, {"name": "done"}]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
     let columns = state(&td)
         .db
         .read(|c| Ok(terrariumd::store::rules::context(c, "p")?.columns.unwrap()))
@@ -615,8 +629,20 @@ async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
         &columns,
     )
     .text;
+    assert!(old.contains("rule \"agent-unpark\""), "{old}");
     let r = td.put("/api/projects/p/rules", json!({"text": old})).await;
     assert_eq!(r.status, 200, "{}", r.body);
+    let origin = |effective: &Value| {
+        effective["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "agent-unpark")
+            .unwrap()["origin"]
+            .clone()
+    };
+    let effective = td.get("/api/projects/p/rules/effective").await.ok().clone();
+    assert_eq!(origin(&effective), "override", "{effective}");
 
     let c = card(&td, "p", "in_progress").await;
     let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
@@ -647,6 +673,8 @@ async fn retired_legacy_unpark_ignores_the_old_noop_budget() {
         .await;
     }
     td.post_empty("/api/reload").await.ok();
+    let effective = td.get("/api/projects/p/rules/effective").await.ok().clone();
+    assert_eq!(origin(&effective), "pack", "{effective}");
 
     mv(&td, &c, "review", None).await;
     parked(&td, &eph).await;
