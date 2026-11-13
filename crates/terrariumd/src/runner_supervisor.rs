@@ -4134,7 +4134,11 @@ impl RunnerSupervisor {
             };
             #[cfg(test)]
             {
-                if me.inner.pointer_delivery_panic.swap(false, Ordering::SeqCst) {
+                if me
+                    .inner
+                    .pointer_delivery_panic
+                    .swap(false, Ordering::SeqCst)
+                {
                     panic!("TER-1146: a test panic in a pointer delivery");
                 }
             }
