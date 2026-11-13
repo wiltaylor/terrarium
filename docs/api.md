@@ -10172,6 +10172,13 @@ or `rules` does not change it back, and an older daemon reads it as
 | `timer` | a `rule.timer` event that the engine writes once in each slot of `every_seconds` (UTC epoch slots, no catch-up after downtime) | none |
 | `count_reached` | a card lands and the column then holds exactly `count` cards that are not archived (`data.to_count` of the event) | none |
 
+A `rule.timer` event of a `columns` project names the rule by its
+`rule_id`, and it runs only that rule, and only when its trigger is
+`timer` (TER-1199). The legacy batch and version timers (§19.8) do not
+scan the column rules: a column rule with a `version.cut` or a batch
+`job.queue` action runs on its own trigger only. The events `moved` and
+`created` carry `data.to_count` only on a `columns` project.
+
 Order in one event (TER-1112 Q3): the `leaves` rules of the source
 column, then the `lands` (or `job_result`) rules, then `count_reached`.
 With several cards, the cards go in board order (column, then position).
@@ -10195,7 +10202,12 @@ is a role and stays. Each column whose rules changed gets a new options
 version, and the `board.columns` audit row lists the changes
 (`renamed_in_rules`). A board change that removes a column while a rule
 of another column names it is `409 conflict` with `details.reason =
-column_in_use`, and nothing changes.
+column_in_use`, and nothing changes. A reference names the column that
+it resolves to before the change (`@x`: the column with the role `x`,
+else the column named `x`), and it holds that column when it does not
+resolve on the board after the change (TER-1199): `@x` holds the only
+column with the role `x`, unless another column has that role after the
+change.
 
 ## 20. Event sources and ingest
 

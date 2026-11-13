@@ -1786,7 +1786,10 @@ struct TimerRule {
 
 fn timer_rules(projects: &[ProjectRules]) -> Vec<TimerRule> {
     let mut out = Vec::new();
-    for p in projects {
+    // The column rules have their own `timer` trigger
+    // ([`columns::fire_timers`]): a `version.cut` or batch `job.queue` of a
+    // column rule gets no legacy timer (TER-1199).
+    for p in projects.iter().filter(|p| p.columns.is_none()) {
         for r in p.set.rules.iter().filter(|r| r.enabled) {
             for a in r
                 .actions

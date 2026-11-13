@@ -1356,16 +1356,30 @@ pub fn active_cards(
 
 // ---- events and notices ----
 
-/// The cards in column `column` of `project` that are not archived: the
-/// `to_count` of a `moved` or `created` event, for the `count_reached`
-/// trigger of the column rules (TER-1113).
-fn column_count(conn: &Connection, project: &str, column: &str) -> ApiResult<i64> {
-    Ok(conn.query_row(
+/// `extra` of a `moved` or `created` event with `to_count`: the cards in
+/// column `column` of `project` that are not archived, for the
+/// `count_reached` trigger of the column rules (TER-1113). Only a project
+/// with `board_flow = columns` counts (TER-1199): the others pay one read
+/// of their `projects` row by its key, not the count of the column.
+fn with_to_count(
+    conn: &Connection,
+    project: &str,
+    column: &str,
+    mut extra: Value,
+) -> ApiResult<Value> {
+    if crate::store::projects::board_flow(conn, project)?
+        != terrarium_core::config::BoardFlow::Columns
+    {
+        return Ok(extra);
+    }
+    let n: i64 = conn.query_row(
         "SELECT count(*) FROM cards c JOIN board_columns b ON b.id = c.column_id
           WHERE b.project = ?1 AND b.name = ?2 AND c.archived = 0",
         params![project, column],
         |r| r.get(0),
-    )?)
+    )?;
+    extra["to_count"] = n.into();
+    Ok(extra)
 }
 
 fn card_event(t: &mut Tx<'_>, card: &CardRow, change: &str, extra: Value) -> ApiResult<()> {
@@ -1963,10 +1977,14 @@ fn apply_move(
         t,
         &moved,
         "moved",
-        json!({"from": card.column, "to": to.name, "from_role": card.column_role,
-               "to_role": to.role, "comment": comment, "assignee": moved.assignee,
-               "previous_eta_at": card.eta_at, "author": author,
-               "to_count": column_count(t, &card.project, &to.name)?}),
+        with_to_count(
+            t,
+            &card.project,
+            &to.name,
+            json!({"from": card.column, "to": to.name, "from_role": card.column_role,
+                   "to_role": to.role, "comment": comment, "assignee": moved.assignee,
+                   "previous_eta_at": card.eta_at, "author": author}),
+        )?,
     )?;
     // The review accept opens a round of the reviewed commit; a move out
     // of the merge queue ends it (TER-553).
@@ -2425,8 +2443,12 @@ pub(crate) fn create_card_with_author(
         t,
         &row,
         "created",
-        json!({"from_mail": new.from_mail, "thread_id": thread,
-               "to_count": column_count(t, &row.project, &row.column)?}),
+        with_to_count(
+            t,
+            &row.project,
+            &row.column,
+            json!({"from_mail": new.from_mail, "thread_id": thread}),
+        )?,
     )?;
     card_waits::evaluate(t, &id, false)?;
     if let Some(agent) = &held_for {
@@ -3270,8 +3292,16 @@ pub fn set_columns(
     let backlog = column(t, project, BACKLOG)?;
     // A rule of a column that stays may not name a removed column
     // (TER-1159): refused before anything is written.
+    // The references resolve on the board after the change (TER-1199).
     let removed: Vec<&ColumnRow> = current.iter().filter(|c| !kept.contains(&c.id)).collect();
-    column_options::check_removal(t, project, &current, &removed)?;
+    let after: Vec<terrarium_core::rules_file::BoardColumn> = wanted
+        .iter()
+        .map(|w| terrarium_core::rules_file::BoardColumn {
+            name: w.name.clone(),
+            role: w.role.clone(),
+        })
+        .collect();
+    column_options::check_removal(t, project, &current, &after, &removed)?;
     let mut dropped_rules: Vec<Value> = Vec::new();
     for c in current.iter().filter(|c| !kept.contains(&c.id)) {
         let mut stmt = t.prepare(
