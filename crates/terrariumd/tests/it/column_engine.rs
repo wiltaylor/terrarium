@@ -625,10 +625,14 @@ async fn a_role_clear_with_a_rename_of_that_column_keeps_the_ref_on_it() {
 async fn a_new_role_that_moves_a_by_name_ref_to_another_column_is_refused() {
     let td = setup().await;
     let b = "/api/projects/flow/board";
-    // The column `review` loses its role, and a new column `qa` comes.
-    td.patch(b, board_qa(None, Some(json!({"name": "review"}))))
-        .await
-        .ok();
+    // The column `review` loses its role (an absent role is kept), and a
+    // new column `qa` comes.
+    td.patch(
+        b,
+        board_qa(None, Some(json!({"name": "review", "role": null}))),
+    )
+    .await
+    .ok();
     // `@review` now names the column `review` by name.
     set_rules(
         &td,
