@@ -445,7 +445,10 @@ fn admit(t: &mut Tx<'_>, card: &str, keep: bool) -> ApiResult<()> {
 }
 
 /// The held ETA of waiting card `card` and who set it.
-pub(super) fn held_of(conn: &Connection, card: &str) -> ApiResult<Option<(String, Option<String>)>> {
+pub(super) fn held_of(
+    conn: &Connection,
+    card: &str,
+) -> ApiResult<Option<(String, Option<String>)>> {
     Ok(conn
         .query_row(
             "SELECT held_eta, held_eta_by FROM card_queue

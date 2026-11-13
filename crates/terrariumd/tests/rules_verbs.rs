@@ -5035,9 +5035,7 @@ async fn left_out_cards_of_a_batch_do_not_hold_the_merge_lane() {
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
-    let mk = |title: &'static str, repo: &'static str| {
-        json!({"title": title, "column": "review", "repo": repo})
-    };
+    let mk = |title: &'static str, repo: &'static str| json!({"title": title, "column": "review", "repo": repo});
     let n = new_card(&td, "p", mk("n", "app")).await;
     let a = new_card(&td, "p", mk("a", "app")).await;
     let b = new_card(&td, "p", mk("b", "lib")).await;
