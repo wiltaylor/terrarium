@@ -224,10 +224,14 @@ import type {
 
 export interface Api {
   pages: {
-    list(project: string): Promise<{ items: import("./types").ProjectPage[]; can_edit: boolean; dashboard_slug?: string }>;
+    list(project: string): Promise<import("./types").ProjectPageList>;
     get(project: string, slug: string): Promise<import("./types").ProjectPage>;
     save(project: string, slug: string, body: import("./types").ProjectPageInput): Promise<import("./types").ProjectPage>;
     remove(project: string, slug: string): Promise<void>;
+    layout(project: string): Promise<import("./types").ProjectLayout>;
+    saveLayout(project: string, body: import("./types").ProjectLayoutInput): Promise<import("./types").ProjectLayout>;
+    resetLayout(project: string, body: { base_revision: number; builtin: import("./types").PageBuiltin }): Promise<import("./types").ProjectLayout>;
+    copyLayout(project: string, body: { base_revision: number; source_project: string; confirm: true }): Promise<import("./types").ProjectLayout>;
   };
   home: import("./home").HomeApi;
   health(): Promise<Health>;
@@ -1109,6 +1113,10 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
   return {
     pages: {
       list: (project) => get(`${p(project)}/pages`),
+      layout: (project) => get(`${p(project)}/pages/layout`),
+      saveLayout: (project, body) => put(`${p(project)}/pages/layout`, body),
+      resetLayout: (project, body) => post(`${p(project)}/pages/layout/reset`, body),
+      copyLayout: (project, body) => post(`${p(project)}/pages/layout/copy`, body),
       get: (project, slug) => get(`${p(project)}/pages/${seg(slug)}`),
       save: (project, slug, body) => put(`${p(project)}/pages/${seg(slug)}`, body),
       remove: (project, slug) => del(`${p(project)}/pages/${seg(slug)}`),

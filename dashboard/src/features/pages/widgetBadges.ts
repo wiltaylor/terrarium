@@ -10,8 +10,12 @@ export function pageWidgetBadge(
   blockedAgentCount: number,
   counts: ProjectCounts | null,
 ): TabBadge | null {
+  return combineWidgetBadges(sources, source => tabBadge(source, blockedAgentCount, counts));
+}
+
+export function combineWidgetBadges(sources: readonly WidgetBadgeSource[], resolve: (source: WidgetBadgeSource) => TabBadge | null): TabBadge | null {
   const badges = [...new Set(sources)]
-    .map(source => tabBadge(source, blockedAgentCount, counts))
+    .map(resolve)
     .filter((badge): badge is TabBadge => badge !== null);
   if (!badges.length) return null;
   return {

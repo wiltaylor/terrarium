@@ -30,6 +30,52 @@ function click(host: HTMLElement, text: string) {
   expect(button).toBeTruthy(); button!.click();
 }
 
+it("keeps the shipped picker and grid when capability is absent or false", async () => {
+  const { host, dispose } = await mount();
+  try {
+    await waitFor(() => expect(host.textContent).toContain("Edit page"));
+    click(host, "Edit page");
+    expect([...host.querySelectorAll("select option")].map(option => option.textContent)).not.toContain("board:lanes");
+    expect(host.querySelector(".snap-grid-document")).toBeNull();
+  } finally { dispose(); }
+});
+
+it("adds independent feature parts only when enabled and preserves their options on save", async () => {
+  const originalList = api.pages.list;
+  vi.spyOn(api.pages, "list").mockImplementation(async project => ({ ...await originalList(project), capabilities: { project_pages_v2: true } }));
+  const { host, dispose } = await mount();
+  try {
+    await waitFor(() => expect(host.textContent).toContain("Edit page"));
+    click(host, "Edit page");
+    const picker = host.querySelector("select")!;
+    picker.value = "board:lanes"; picker.dispatchEvent(new Event("change", { bubbles: true }));
+    click(host, "Add widget");
+    click(host, "Add widget");
+    const sections = [...host.querySelectorAll<HTMLElement>("section[data-widget-id]")];
+    expect(sections.length).toBe(2);
+    expect(sections[0]!.dataset.widgetId).not.toBe(sections[1]!.dataset.widgetId);
+    const search = [...host.querySelectorAll("label")].find(label => label.textContent?.startsWith("Search"))!.querySelector("input")!;
+    search.value = "second only"; search.dispatchEvent(new Event("input", { bubbles: true }));
+    const previous = await api.pages.get("terrarium", "overview");
+    const save = vi.spyOn(api.pages, "save").mockImplementation(async (_project, _slug, body) => ({ ...previous, ...body }));
+    click(host, "Save page");
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    const widgets = save.mock.calls[0]![2].widgets;
+    expect(widgets.map(widget => widget.options)).toEqual([{ view: "lanes" }, { view: "lanes", search: "second only" }]);
+  } finally { dispose(); }
+});
+
+it("renders an unresolved target-local monitor as Not Found without fetching source data", async () => {
+  const originalList = api.pages.list;
+  vi.spyOn(api.pages, "list").mockImplementation(async project => ({ ...await originalList(project), capabilities: { project_pages_v2: true } }));
+  const series = vi.spyOn(api.monitors, "series");
+  const { host, dispose } = await mount([{ id: "copied", kind: "chart", x: 0, y: 0, w: 12, h: 3, monitor: "missing-source-id" }]);
+  try {
+    await waitFor(() => expect(host.textContent).toContain("Not Found"));
+    expect(series).not.toHaveBeenCalled();
+  } finally { dispose(); }
+});
+
 it("keeps an edit draft when another editor emits page.updated", async () => {
   const { host, dispose } = await mount();
   try {

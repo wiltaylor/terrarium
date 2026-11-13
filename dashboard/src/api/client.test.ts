@@ -51,6 +51,20 @@ it("sets and clears a cloud budget without a credential", async () => {
 });
 
 describe("createHttpApi", () => {
+  it("uses literal layout routes and preserves revision and copy confirmation bodies", async () => {
+    const answer = { revision: 7, pages: [] };
+    const { api, calls } = recorder({}, answer);
+    expect(await api.pages.layout("demo")).toEqual(answer);
+    await api.pages.saveLayout("demo", { base_revision: 6, pages: [] });
+    await api.pages.resetLayout("demo", { base_revision: 7, builtin: "knowledge" });
+    await api.pages.copyLayout("demo", { base_revision: 8, source_project: "source", confirm: true });
+    expect(calls.map(call => [call.method, call.path, call.opts?.body])).toEqual([
+      ["GET", "/api/projects/demo/pages/layout", undefined],
+      ["PUT", "/api/projects/demo/pages/layout", { base_revision: 6, pages: [] }],
+      ["POST", "/api/projects/demo/pages/layout/reset", { base_revision: 7, builtin: "knowledge" }],
+      ["POST", "/api/projects/demo/pages/layout/copy", { base_revision: 8, source_project: "source", confirm: true }],
+    ]);
+  });
   it("reads Home JSON pages with the column, project and cursor", async () => {
     const answer = { items: [], next: "after" };
     const { api, calls } = recorder({}, answer);

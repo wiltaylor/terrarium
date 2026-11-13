@@ -37,6 +37,43 @@ function mount(editing = true) {
   return { root, widgets, setWidgets };
 }
 
+it("keeps viewport frames full width during keyboard movement without changing IDs or mounted content", async () => {
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  const [items, setItems] = createSignal<GridWidget[]>([{ ...widget("panel"), frame: "viewport", w: 12 }]);
+  const root = document.createElement("div"); document.body.append(root);
+  dispose = render(() => createComponent(SnapGrid<GridWidget>, {
+    get widgets() { return items(); }, documentFlow: true, editing: true, onChange: setItems,
+    renderLiveWidget: () => { const input = document.createElement("input"); return input; }, renderWidget: () => null,
+  }), root);
+  await Promise.resolve();
+  const section = root.querySelector("section")!;
+  const input = root.querySelector("input")!;
+  const move = root.querySelector("button")!;
+  move.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+  expect(items()[0]).toMatchObject({ id: "panel", x: 0, w: 12, frame: "viewport", h: 2 });
+  expect(root.querySelector("section")).toBe(section);
+  expect(root.querySelector("input")).toBe(input);
+  expect(section.dataset.frame).toBe("viewport");
+  expect(root.querySelector(".snap-grid-document")).not.toBeNull();
+});
+
+it("grows all v2 widget kinds to content while legacy fixed panels retain their cells", async () => {
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ height: 500 } as DOMRect);
+  const items = [widget("a"), widget("b", 0, 2)];
+  const [flow, setFlow] = createSignal(false);
+  dispose = render(() => createComponent(SnapGrid<GridWidget>, {
+    widgets: items, get documentFlow() { return flow(); }, renderWidget: item => item.id,
+  }), document.body);
+  await Promise.resolve();
+  expect(document.querySelector<HTMLElement>("section")!.style.gridRow).toBe("1 / span 2");
+  setFlow(true);
+  await Promise.resolve();
+  expect(document.querySelector<HTMLElement>("section")!.style.gridRow).toBe("1 / span 8");
+  expect(items[0]!.h).toBe(2);
+  expect(items[1]!.y).toBe(2);
+});
+
 it("moves with arrows and resizes with Shift+arrows, leaving read mode inert", () => {
   const { root, widgets } = mount();
   const button = root.querySelector('button')!;
