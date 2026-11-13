@@ -27,6 +27,11 @@ use terrarium_host::{Client, ClientOptions};
 /// only: each poll returns as soon as its state is there.
 const DEADLINE: Duration = Duration::from_secs(300);
 
+/// How long `a_cancelled_merge_job_does_not_push` waits for its killed
+/// probe (`sleep 300`) to end once the jobs are idle: well under the
+/// probe's own end, so a probe that the kill missed fails the test.
+const PROBE_GONE: Duration = Duration::from_secs(60);
+
 fn log_inode(path: &Path) -> String {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(path).unwrap();
@@ -5976,7 +5981,27 @@ async fn a_cancelled_merge_job_does_not_push() {
     let of = |id: &str| jobs.iter().find(|j| j["id"] == id).unwrap().clone();
     assert_eq!(of(&job)["state"], "cancelled", "{jobs:#?}");
     assert_eq!(of(&v)["state"], "passed", "{jobs:#?}");
-    assert!(!alive(held), "the probe {held} outlived the kill");
+    // The end of the probe on the target is not in the job's row: the
+    // job ends after the kill report, and under load the probe can still
+    // be in /proc for a moment (TER-1225, as TER-1137). Wait for it with a
+    // deadline well under its own `sleep 300`, so a probe that the kill
+    // missed still fails here.
+    let idle = Instant::now();
+    let late = alive(held);
+    while alive(held) {
+        assert!(
+            idle.elapsed() < PROBE_GONE,
+            "the probe {held} outlived the kill by {PROBE_GONE:?}: {}",
+            std::fs::read_to_string(format!("/proc/{held}/stat")).unwrap_or_default()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    if late {
+        eprintln!(
+            "TER-1225: the probe {held} ended {:?} after the jobs were idle",
+            idle.elapsed()
+        );
+    }
     let log = std::fs::read_to_string(&ran).unwrap_or_default();
     assert!(
         !log.contains(&job),
