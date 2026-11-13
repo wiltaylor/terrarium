@@ -283,7 +283,8 @@ it("prompts when a link switches to another instance with unsaved changes", asyn
 // The browser Router asks beforeLeave with a numeric delta on Back and Forward.
 async function mountBrowser(path: string) {
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
-  window.history.replaceState(null, "", path);
+  // A real browser history entry carries the router's depth, which gives Back its delta.
+  window.history.replaceState({ _depth: window.history.length - 1 }, "", path);
   const host = document.createElement("div"); document.body.append(host);
   const dispose = render(() => createComponent(Router, { get children() { return [
     createComponent(Route, { path: "/p/:project", component: ProjectScreen, get children() { return [
@@ -318,10 +319,13 @@ it("keeps the draft and offers Retry when a refresh fails while editing", async 
   const { host } = await mount();
   await startEdit(host);
   input(host.querySelector<HTMLInputElement>('input[aria-label="Title of a"]')!, "Unsaved");
-  api.pages.list.mockRejectedValueOnce(new ApiError(503, "unavailable"));
+  // Both the tab row and the page read the list again. Both fail.
+  const list = api.pages.list.getMockImplementation()!;
+  api.pages.list.mockImplementation(async () => { throw new ApiError(503, "unavailable"); });
   emit({ project: "demo", revision: 3, operation: "replace" });
   await waitFor(() => expect(has(host, "Retry")).toBe(true));
   expect(has(host, "Save pages")).toBe(false);
+  api.pages.list.mockImplementation(list);
   button(host, "Retry").click();
   await waitFor(() => expect(has(host, "Save pages")).toBe(true));
   expect(host.querySelector<HTMLInputElement>('input[aria-label="Title of a"]')!.value).toBe("Unsaved");

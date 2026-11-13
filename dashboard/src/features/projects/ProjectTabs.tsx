@@ -26,7 +26,8 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
   const scope = () => `${instanceKey}/${project()}`;
   const [scopedPages, { refetch, mutate }] = createResource(scope, async current => ({ scope: current, value: await api.pages.list(project()) }));
   const pages = { get latest() { return !scopedPages.error && scopedPages.latest?.scope === scope() ? scopedPages.latest.value : undefined; }, get error() { return scopedPages.error; } };
-  const enabled = () => projectPagesEnabled(scopedPages.latest, scope(), scopedPages.error);
+  // Solid throws when `latest` of an errored resource is read. Check the error first (fail closed).
+  const enabled = () => !scopedPages.error && projectPagesEnabled(scopedPages.latest, scope(), undefined);
   const [adding, setAdding] = createSignal(false);
   const [slug, setSlug] = createSignal("");
   const [title, setTitle] = createSignal("");
@@ -40,7 +41,7 @@ export function ProjectTabs(props: { base: string; active: (path: string) => boo
   createEffect(() => editor?.setAllowed(shared() && pages.latest?.can_edit === true));
   const editing = () => shared() && editor!.editing();
   createEffect(on(() => editor?.committed(), layout => {
-    const value = scopedPages.latest;
+    const value = scopedPages.error ? undefined : scopedPages.latest;
     if (layout && value?.scope === scope()) mutate({ scope: value.scope, value: { ...value.value, items: layout.pages } });
   }, { defer: true }));
   const [dragging, setDragging] = createSignal<string>();

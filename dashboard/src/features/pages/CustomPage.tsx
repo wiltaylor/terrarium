@@ -33,7 +33,8 @@ export default function CustomPage() {
   const scope = () => `${instanceKey}/${params.project}`;
   const [scopedRights, { refetch: refetchRights }] = createResource(scope, async current => ({ scope: current, value: await api.pages.list(params.project) }));
   const rights = () => !scopedRights.error && scopedRights.latest?.scope === scope() ? scopedRights.latest?.value : undefined;
-  const enabled = () => projectPagesEnabled(scopedRights.latest, scope(), scopedRights.error);
+  // Solid throws when `latest` of an errored resource is read. Check the error first (fail closed).
+  const enabled = () => !scopedRights.error && projectPagesEnabled(scopedRights.latest, scope(), undefined);
   const canEdit = () => !scopedRights.error && rights()?.can_edit === true;
   const [monitors, { refetch: refetchMonitors }] = createResource(() => params.project, p => api.monitors.list(p));
   const [draft, setDraft] = createSignal<ProjectPageInput | null>(null);
@@ -51,6 +52,8 @@ export default function CustomPage() {
     const saved = layout?.pages.find(item => item.slug === params.slug);
     if (saved) mutate(saved);
   }, { defer: true }));
+  // After a Retry on the tab row brings editing back, read this page's rights again too.
+  createEffect(on(() => editor?.editing(), now => { if (now && scopedRights.error) void refetchRights(); }, { defer: true }));
   createEffect(on(() => editor?.draft(), (now, before) => { if (before && !now) { setEditingWidget(undefined); void refetch(); } }, { defer: true }));
   const widgets = () => shared() && editor!.editing() ? sharedPage()?.widgets ?? [] : draft()?.widgets ?? page.latest?.widgets ?? [];
   function changeWidgets(change: (widgets: PageWidget[]) => PageWidget[]) {
