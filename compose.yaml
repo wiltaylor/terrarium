@@ -67,6 +67,8 @@ services:
       # network. Empty turns it off (every repo is then direct).
       TERRARIUM_GIT_PROXY_LISTEN: ${TERRARIUM_GIT_PROXY_LISTEN-127.0.0.1:8084}
       TERRARIUM_WS_QUERY_TOKEN: ${TERRARIUM_WS_QUERY_TOKEN:-}
+      # Staged default OFF. C7 alone owns deployment activation after proof.
+      TERRARIUM_PROJECT_PAGES_V2: ${TERRARIUM_PROJECT_PAGES_V2:-0}
       # The operator password at the first start, when none is set (remove it
       # from .env after that), and the session lives (docs/api.md §1.1).
       TERRARIUM_PASSWORD: ${TERRARIUM_PASSWORD:-}

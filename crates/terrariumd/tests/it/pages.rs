@@ -474,7 +474,9 @@ async fn v2_copy_does_not_grant_foreign_monitor_access() {
         .await
         .err(403, "forbidden");
     assert!(
-        td.get_as(reader, "/api/projects/p/monitors").await.ok()["items"]
+        td.get_as(reader, "/api/projects/p/monitors")
+            .await
+            .ok()
             .as_array()
             .unwrap()
             .iter()
