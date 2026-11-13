@@ -394,7 +394,11 @@ async fn each_check_changes_only_its_own_path() {
     .await
     .err(403, "forbidden");
     let r = td
-        .patch_as("proj/w1", &format!("/api/cards/{d}"), json!({"eta_at": "1h"}))
+        .patch_as(
+            "proj/w1",
+            &format!("/api/cards/{d}"),
+            json!({"eta_at": "1h"}),
+        )
         .await;
     r.err(403, "forbidden");
     assert!(
@@ -406,7 +410,11 @@ async fn each_check_changes_only_its_own_path() {
         r.body
     );
     let r = td
-        .patch_as("proj/lead", &format!("/api/cards/{d}"), json!({"eta_at": "1h"}))
+        .patch_as(
+            "proj/lead",
+            &format!("/api/cards/{d}"),
+            json!({"eta_at": "1h"}),
+        )
         .await;
     r.err(409, "conflict");
     assert!(
@@ -598,5 +606,8 @@ async fn a_board_patch_that_changes_options_needs_the_options_right() {
     let audit = td.get(audits).await.ok().clone();
     let rows = audit.as_array().unwrap().to_vec();
     let text = serde_json::to_string(&rows).unwrap();
-    assert!(text.contains("\"before\"") && text.contains("\"ready\""), "{text}");
+    assert!(
+        text.contains("\"before\"") && text.contains("\"ready\""),
+        "{text}"
+    );
 }
