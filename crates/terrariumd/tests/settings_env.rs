@@ -677,6 +677,17 @@ fn the_env_scan_finds_the_reads_outside_settings() {
     }
 }
 
+/// TER-1209: the updater's check (`terrariumd release-env-keys`) reads the
+/// same keys of the repo compose.yaml as this test's parser, and skips none.
+#[test]
+fn release_env_keys_match_the_compose_service_environment() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let expected = compose_env_keys(&read(&root.join("compose.yaml")));
+    let release = terrariumd::release_env::release_env();
+    assert_eq!(release.keys, expected);
+    assert!(release.skipped.is_empty(), "{:?}", release.skipped);
+}
+
 /// TER-428, TER-439: every env key that the daemon reads (settings.rs and
 /// each `std::env` read in src/) is passed to the `terrarium` service of
 /// compose.yaml, or listed in `NOT_PASSED` with a reason.

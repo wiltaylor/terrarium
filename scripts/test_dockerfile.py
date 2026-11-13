@@ -35,6 +35,12 @@ class HostArtifacts(unittest.TestCase):
         self.assertIn("ln -s /opt/terrarium/bundled/dist /opt/terrarium/dist", DOCKERFILE)
         self.assertIn("TERRARIUM_HOST_DIST_DIR=/state/releases/current/dist", DOCKERFILE)
 
+    def test_the_daemon_build_has_the_compose_file_it_embeds(self):
+        # TER-1209: terrariumd embeds compose.yaml (release-env-keys).
+        ignore = (REPO / "docker/Dockerfile.dockerignore").read_text()
+        self.assertIn("COPY compose.yaml ./compose.yaml", DOCKERFILE)
+        self.assertIn("\n!compose.yaml\n", ignore)
+
     def test_labels_the_image(self):
         for label in ("source", "licenses", "revision", "version"):
             with self.subTest(label=label):

@@ -316,6 +316,11 @@ pub enum RunnerModeName {
 pub enum Command {
     /// Read-only check of the templates this daemon requires before an update.
     RequiredTemplatesCheck,
+    /// Print the environment key names of the daemon service in this
+    /// build's compose.yaml, and the keys it marks `# update:required`, as
+    /// one JSON line. No values. The updater runs it in the new image
+    /// before an update (TER-1209).
+    ReleaseEnvKeys,
     /// Print the full sandbox command for an agent, and exit. It writes the
     /// agent's prompt and harness files, as a start does, but starts nothing.
     SandboxDryRun {
