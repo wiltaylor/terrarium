@@ -5092,14 +5092,15 @@ async fn column_rules_split_a_red_merge_batch() {
         "{failed}"
     );
 
-    // The half of a passes: a goes to accepted. One accepted card cuts no
-    // version.
+    // The half of a passes: a goes to accepted and stays in the merge
+    // group, which waits for b. One accepted card cuts no version.
     let left = pass_job(&td, &halves[0]).await;
     settle(&td).await;
     verdict(&td, &left, &a, "passed").await;
     settle(&td).await;
-    assert_eq!(card(&td, &a).await["column"], "accepted");
-    assert!(card(&td, &a).await.get("group").is_none_or(Value::is_null));
+    let x = card(&td, &a).await;
+    assert_eq!(x["column"], "accepted", "{x}");
+    assert_eq!(x["group"]["id"], json!(merge_group), "{x}");
 
     // The half of b is red: b goes to the top of ready with the failure
     // block, and leaves the merge group.
