@@ -74,6 +74,13 @@ class Outcomes:
     binaries come from cargo's stderr (`cargo`) or from the caller that
     starts each binary itself (`ended`). Any end that is not a failed test
     goes to `unexplained`.
+
+    Only the suites at the top level count. A test that runs a test binary
+    with the stdout inherited (its own binary again, as
+    git_identity::tests::instance_identity_from_env does) puts a whole
+    plain libtest run inside the suite of its parent: that inner `running`,
+    its `test` lines and its `test result` are output of the test, not a
+    started binary or a result (TER-1222).
     """
 
     def __init__(self) -> None:
@@ -90,6 +97,9 @@ class Outcomes:
         self._section: str | None = None
         self._lines: list[str] = []
         self._summary = False
+        # The open suites: 1 inside a test binary's own suite, more inside
+        # a libtest run that one of its tests started.
+        self._depth = 0
 
     def feed(self, line: str) -> None:
         text = line.rstrip("\r\n")
@@ -107,11 +117,17 @@ class Outcomes:
         kind, event = e.get("type"), e.get("event")
         if kind == "suite":
             if event == "started":
-                self.started += 1
+                # Only a test binary of the step prints JSON (a test that
+                # starts one passes no `--format json`): a suite still open
+                # here ended without its result, and stays without one.
+                self._depth = 0
+                self._open()
             elif event in ("ok", "failed"):
-                self.finished += 1
-                self.failed_suites += event == "failed"
-        elif kind == "test" and isinstance(e.get("name"), str):
+                # The end of the binary's own suite, even when a run inside
+                # one of its tests printed no result.
+                self._depth = min(self._depth, 1)
+                self._end(event == "failed")
+        elif kind == "test" and self._depth <= 1 and isinstance(e.get("name"), str):
             if event == "failed":
                 self.failed[e["name"]] = str(e.get("stdout") or "")
             elif event == "ok":
@@ -120,11 +136,12 @@ class Outcomes:
     def _plain(self, text: str) -> None:
         if RUNNING.match(text):
             self._close()
-            self.started += 1
+            self._open()
         elif m := RESULT.match(text):
             self._close()
-            self.finished += 1
-            self.failed_suites += m.group(1) == "FAILED"
+            self._end(m.group(1) == "FAILED")
+        elif self._depth > 1:
+            pass
         elif m := TEST.match(text):
             if m.group(2) == "ok":
                 self.passed.add(m.group(1))
@@ -167,6 +184,19 @@ class Outcomes:
             self.failed_runs += 1
         elif code:
             self.unexplained.append(f"a test binary ended with exit code {code}")
+
+    def _open(self) -> None:
+        """A suite starts: a test binary at the top level, else a run inside a test."""
+        if self._depth == 0:
+            self.started += 1
+        self._depth += 1
+
+    def _end(self, failed: bool) -> None:
+        """A suite ends: the result of a test binary when it is the top level."""
+        self._depth = max(self._depth - 1, 0)
+        if self._depth == 0:
+            self.finished += 1
+            self.failed_suites += failed
 
     def _close(self) -> None:
         """End the captured output of a failed test (plain output)."""

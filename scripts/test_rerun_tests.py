@@ -46,6 +46,34 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ONE_FAIL = PLAIN_FAIL.split("\nrunning 1 test")[0]
 
 
+# A test that runs its own binary again with the stdout inherited
+# (git_identity::tests::instance_identity_from_env): the child's plain
+# libtest run lands inside the suite of its parent (TER-1222).
+NESTED = """running 1 test
+test git_identity::tests::instance_identity_from_env ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+"""
+
+
+def json_suite(passed=(), failed=(), inside=""):
+    """One binary's libtest JSON, with `inside` printed by one of its tests."""
+    lines = [json.dumps({"type": "suite", "event": "started",
+                         "test_count": len(passed) + len(failed)}) + "\n", inside]
+    lines += [json.dumps({"type": "test", "event": "ok", "name": n}) + "\n" for n in passed]
+    lines += [json.dumps({"type": "test", "event": "failed", "name": n, "stdout": "boom"}) + "\n"
+              for n in failed]
+    lines.append(json.dumps({"type": "suite", "event": "failed" if failed else "ok"}) + "\n")
+    return "".join(lines)
+
+
+def with_nested(out):
+    """`out` with NESTED printed after the first line of its first suite."""
+    first, rest = out.split("\n", 1)
+    return f"{first}\n{NESTED}{rest}"
+
+
 def plain(passed=(), failed=()):
     lines = [f"running {len(passed) + len(failed)} tests"]
     lines += [f"test {n} ... ok" for n in passed]
@@ -140,6 +168,60 @@ class Parse(unittest.TestCase):
         five = parse(plain(failed=[f"t{i}" for i in range(5)]), cargo(1, ["a"]))
         self.assertIsNone(rerun_tests.why_not(five))
 
+    def test_a_libtest_run_inside_a_json_suite_is_output_not_a_binary(self):
+        # 0.70.0 cut: "63 runs, 64 started, 64 with a result".
+        out = json_suite(passed=["git_identity::tests::instance_identity_from_env"],
+                         inside=NESTED) + json_suite(failed=["x::flaky"])
+        o = parse(out, cargo(2, ["it"]))
+        self.assertEqual((o.runs, o.started, o.finished, o.failed_runs, o.failed_suites),
+                         (2, 2, 2, 1, 1))
+        self.assertEqual(list(o.failed), ["x::flaky"])
+        self.assertIsNone(rerun_tests.why_not(o))
+
+    def test_a_libtest_run_inside_a_plain_suite_is_output_not_a_binary(self):
+        # 0.66.0 and 0.67.0, the uid 1001 pass: "1 runs, 2 started, 2 with a result".
+        o = parse(with_nested(ONE_FAIL))
+        o.ended(101)
+        self.assertEqual((o.runs, o.started, o.finished, o.failed_runs, o.failed_suites),
+                         (1, 1, 1, 1, 1))
+        self.assertEqual(list(o.failed), ["a::flaky"])
+        self.assertIn("timed out", o.failed["a::flaky"])
+        self.assertIsNone(rerun_tests.why_not(o))
+
+    def test_a_failed_test_inside_a_nested_run_is_not_a_failure_of_the_step(self):
+        inner = NESTED.replace("... ok", "... FAILED").replace("result: ok", "result: FAILED")
+        o = parse(json_suite(passed=["p"], inside=inner) + json_suite(failed=["x"]),
+                  cargo(2, ["it"]))
+        self.assertEqual((list(o.failed), o.failed_suites), (["x"], 1))
+        self.assertIsNone(rerun_tests.why_not(o))
+        # The inner run crashed after `running`: its parent's suite still ends.
+        cut = NESTED.split("test result")[0]
+        o = parse(json_suite(passed=["p"], inside=cut) + json_suite(failed=["x"]),
+                  cargo(2, ["it"]))
+        self.assertEqual((o.started, o.finished, list(o.failed)), (2, 2, ["x"]))
+        self.assertIsNone(rerun_tests.why_not(o))
+
+    def test_refusals_stay_with_a_nested_run(self):
+        nested = json_suite(passed=["p"], inside=NESTED)
+        # A crash before running: cargo started 3 runs, 2 have a result.
+        o = parse(nested + json_suite(failed=["x"]), cargo(3, ["it", "b"]))
+        self.assertIn("ended without a result", rerun_tests.why_not(o))
+        # A signal.
+        err = cargo(2, ["it", "b"], ["  process didn't exit successfully: `b-1`"
+                                     " (signal: 11, SIGSEGV: invalid memory reference)"])
+        o = parse(nested + json_suite(failed=["x"]), err)
+        self.assertIn("signal: 11", rerun_tests.why_not(o))
+        # A panic before the tests (exit 101 without a result).
+        o = parse(nested + json_suite(failed=["x"]), cargo(3, ["it", "b"]))
+        self.assertIn("ended without a result", rerun_tests.why_not(o))
+        # More than 5 failed tests.
+        o = parse(nested + json_suite(failed=[f"t{i}" for i in range(6)]), cargo(2, ["it"]))
+        self.assertIn("more than 5", rerun_tests.why_not(o))
+        # A binary that crashed in its tests: a suite without its result.
+        cut = json_suite(passed=["p"], inside=NESTED).rsplit("{", 1)[0]
+        o = parse(cut + json_suite(failed=["x"]), cargo(2, ["it", "b"]))
+        self.assertIn("ended without a result", rerun_tests.why_not(o))
+
     def test_the_context(self):
         for env, want in ((RELEASE, "release"), (MERGE, "merge"), ({}, None),
                           ({"TERRARIUM_VALIDATE_CONTEXT": "card"}, None)):
@@ -203,6 +285,20 @@ class CargoStep(unittest.TestCase):
         # A green run writes no record at all, whatever its output says.
         code, calls, _, report = self.run_with([(plain(passed=["a"]) + FORGED + "\n", cargo(1), 0)])
         self.assertEqual((code, len(calls), report), (0, 1, None))
+
+    def test_one_failed_assertion_beside_a_nested_run_is_rerun_once(self):
+        # TER-1222: the release suite with one flaky assertion reruns it by itself.
+        first = json_suite(passed=["git_identity::tests::instance_identity_from_env"],
+                           inside=NESTED) + json_suite(failed=["x::flaky"])
+        code, calls, out, report = self.run_with([
+            (first, cargo(2, ["it"]), 101),
+            (json_suite(passed=["x::flaky"]), cargo(2), 0)])
+        self.assertEqual((code, len(calls)), (0, 2))
+        self.assertEqual(calls[1][1][-2:], ["x::flaky", "--exact"])
+        [step] = report["steps"]
+        self.assertEqual((step["outcome"], [(t["name"], t["rerun"]) for t in step["tests"]]),
+                         ("green", [("x::flaky", "ok")]))
+        self.assertNotIn("no rerun", out)
 
     def test_a_second_failure_stays_red(self):
         code, calls, out, report = self.run_with([
@@ -321,6 +417,14 @@ class UnprivilegedStep(unittest.TestCase):
         [step] = report["steps"]
         self.assertEqual((step["step"], step["outcome"], step["tests"][0]["rerun"]),
                          ("test-unprivileged", "green", "ok"))
+
+    def test_one_failed_assertion_beside_a_nested_run_as_uid_1001_is_rerun_once(self):
+        failed = [("/t/lib-1", "/w", self.first(with_nested(ONE_FAIL)))]
+        ok, calls, out, report = self.rerun(failed, [plain(passed=["a::flaky"])], [0])
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("no rerun", out)
+        self.assertEqual(report["steps"][0]["outcome"], "green")
 
     def test_a_second_failure_as_uid_1001_stays_red(self):
         failed = [("/t/it-1", "/w", self.first(ONE_FAIL)),
