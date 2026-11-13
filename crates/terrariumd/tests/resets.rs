@@ -73,6 +73,19 @@ async fn events(td: &TestDaemon, a: &str, kind: &str) -> Vec<Value> {
         .clone()
 }
 
+/// The `agent.compacted` events of agent `a`, once there is one. The
+/// supervisor types the `then` turn at the end of the compaction, and a
+/// lifecycle task writes the event after that end
+/// (`lifecycle::start_compaction`), so a read right after `prompted` can
+/// still see none (TER-1187).
+async fn compacted(td: &TestDaemon, a: &str) -> Vec<Value> {
+    until(td, "the event agent.compacted", || async {
+        !events(td, a, "agent.compacted").await.is_empty()
+    })
+    .await;
+    events(td, a, "agent.compacted").await
+}
+
 async fn sessions(td: &TestDaemon, a: &str) -> Vec<Value> {
     td.get(&format!("/api/agents/{a}/sessions"))
         .await
@@ -189,7 +202,7 @@ async fn self_compaction_waits_for_the_turn_and_sends_then() {
     )
     .await;
     assert_eq!(td.sup.compactions(aid(&w)), 1);
-    let done = events(&td, &w, "agent.compacted").await;
+    let done = compacted(&td, &w).await;
     assert_eq!(done.len(), 1, "{done:#?}");
     assert_eq!(done[0]["data"]["ok"], true);
     // The compaction came before the prompt.
@@ -512,7 +525,7 @@ async fn a_busy_agent_queues_and_a_new_request_replaces_the_pending_one() {
         "the replaced request did not run"
     );
     assert_eq!(td.sup.compactions(aid(&w)), 1);
-    let done = events(&td, &w, "agent.compacted").await;
+    let done = compacted(&td, &w).await;
     assert_eq!(done[0]["data"]["ok"], false, "the silent one timed out");
 }
 
