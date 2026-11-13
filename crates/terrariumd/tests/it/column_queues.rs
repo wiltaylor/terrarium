@@ -554,6 +554,22 @@ async fn an_options_write_releases_waiting_cards() {
     assert!(card(&td, &b).await.get("queued").is_none());
 }
 
+/// The stored `eta_at` and `eta_set_by` of card `id`.
+async fn db_eta(td: &TestDaemon, id: &str) -> (Option<String>, Option<String>) {
+    let id = id.to_owned();
+    state(td)
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT eta_at, eta_set_by FROM cards WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
 /// TER-1204 (rev-1114 findings 1 and 2): with `clear_eta_on_enter = false`
 /// a card that waits in the queue has no ETA, so no `eta_overdue` fires
 /// while it waits. The kept ETA is held and set again at its admission. A
@@ -603,26 +619,17 @@ async fn a_waiting_card_holds_a_kept_eta_and_another_actors_change_is_audited() 
     assert_eq!(mb["queued"]["place"], 1, "{mb}");
     assert!(mb.get("eta_at").is_none(), "{mb}");
     assert_eq!(mb["queued"]["held_eta"], json!(eta), "{mb}");
-    let raw: Option<String> = {
-        let b = b.clone();
-        state(&td)
-            .db
-            .read(move |c| {
-                Ok(c.query_row("SELECT eta_at FROM cards WHERE id = ?1", [b], |r| {
-                    r.get(0)
-                })?)
-            })
-            .await
-            .unwrap()
-    };
+    let (raw, _) = db_eta(&td, &b).await;
     assert!(raw.is_none(), "a waiting card has no eta_at: {raw:?}");
 
     // A leaves: B is admitted with its kept ETA.
     move_to(&td, &a, "ready").await;
     let kb = card(&td, &b).await;
     assert!(kb.get("queued").is_none(), "{kb}");
-    assert_eq!(kb["eta_at"], json!(eta), "{kb}");
-    assert_eq!(kb["eta_set_by_name"], "flow/w1", "{kb}");
+    // The review column shows the review ETA: read the stored one.
+    let (at, by) = db_eta(&td, &b).await;
+    assert_eq!(at.as_deref(), Some(eta.as_str()), "{kb}");
+    assert_eq!(by.as_deref(), kb["assignee"].as_str(), "{kb}");
 
     // C waits; w1's own held ETA is not audited, the operator's is.
     let mc = td
@@ -703,7 +710,8 @@ async fn a_change_from_wip_to_batch_waits_for_the_cards_already_in_the_column() 
     set_options(
         &td,
         "merge_queue",
-        json!({"release": "batch", "batch_size": 2, "max_batch_cards": 2}),
+        json!({"release": "batch", "batch_size": 2, "max_wait_seconds": 3600,
+               "max_batch_cards": 2}),
         json!([]),
     )
     .await;
