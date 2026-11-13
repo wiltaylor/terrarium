@@ -5323,7 +5323,17 @@ async fn column_rules_fix_then_split_a_red_merge_batch() {
         "{v} {:?}",
         runs_of(&td, "p", "accepted/version-cut").await
     );
-    assert_eq!(v["members"], json!([a, b]), "{v}");
+    // Accepted order: the member runs of a and b may end in either order.
+    let mut members: Vec<String> = v["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m.as_str().unwrap().to_owned())
+        .collect();
+    members.sort_unstable();
+    let mut want = vec![a.clone(), b.clone()];
+    want.sort_unstable();
+    assert_eq!(members, want, "{v}");
     // Each comment of a and b, from the column rules only: 4 queue
     // comments, 3 fix notes, 2 split notes and the end of the pass. The
     // move of `group built` below adds the lead's status comment.
