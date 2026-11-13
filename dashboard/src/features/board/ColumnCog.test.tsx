@@ -30,7 +30,7 @@ it("is a viewer when the server says the caller may not write (a sysadmin)", asy
   await waitFor(() => expect(root.querySelector("[data-options-view]")).not.toBeNull());
   expect(text()).toContain("You can read these options");
   expect(text()).toContain("Cards are released in batches of 4");
-  expect(root.querySelector('[data-rule="merge-pass"]')?.textContent).toContain("When the merge job of a card here has a verdict, if the job outcome is passed: move the card to done.");
+  expect(root.querySelector('[data-rule="merge-pass"]')?.textContent).toContain("When the merge job of a card here has a verdict, if the job state is passed: move the card to done.");
   expect(root.querySelector('[data-rule="merge-red-note"]')?.textContent).toContain("off");
   expect(text()).toContain("Last runs and the queue strip come with");
   // C2a D4: both caps for every rule, the defaults marked.

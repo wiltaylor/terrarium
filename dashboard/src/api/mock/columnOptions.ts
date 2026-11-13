@@ -21,7 +21,11 @@ export interface ColumnOptionsMockContext {
 
 const ONE_OF = (name: string, values: string[], required = true) => ({ name, type: "one_of", required, values });
 
-/** A short copy of `board_rules::catalog` (crates/terrarium-core/src/board_rules.rs). */
+/**
+ * A short copy of `board_rules::catalog` (crates/terrarium-core/src/board_rules.rs): every trigger and condition, and
+ * a subset of the verbs of `rules_file::VERBS` (crates/terrarium-core/src/rules_file.rs) with the daemon's arguments
+ * (TER-1242).
+ */
 export const MOCK_CATALOG: RuleCatalog = {
   model_version: 1,
   triggers: [
@@ -40,24 +44,36 @@ export const MOCK_CATALOG: RuleCatalog = {
     when: { description: "a condition on the event; every one must hold", paths: ["project", "kind", "actor", "summary", "data.<path>"], ops: ["eq", "ne", "glob", "in"] },
     if_card: { description: "a condition on the current card; each field that is set must hold", fields: [
       { name: "group_key_prefix", type: "text" }, { name: "column", type: "columns" }, { name: "not_column", type: "columns" },
-      { name: "has_labels", type: "list" }, { name: "lacks_labels", type: "list" }, { name: "assigned", type: "bool" }, { name: "archived", type: "bool" },
+      { name: "has_labels", type: "list" }, { name: "any_labels", type: "list" }, { name: "lacks_labels", type: "list" }, { name: "assigned", type: "bool" }, { name: "archived", type: "bool" },
     ] },
     if_job: { description: "a condition on the current job (job_result only)", fields: [
-      { name: "state", type: "one_of_list", values: ["queued", "running", "passed", "failed", "error", "cancelled"] },
-      { name: "outcome", type: "one_of_list", values: ["passed", "red", "conflict", "infra", "error"] },
+      { name: "state", type: "one_of_list", values: ["queued", "running", "passed", "failed", "cancelled"] },
+      { name: "outcome", type: "one_of_list", values: ["red", "conflict", "error", "none"] },
       { name: "split", type: "bool" }, { name: "batch", type: "bool" }, { name: "rerun", type: "bool" }, { name: "halves", type: "bool" },
     ] },
   },
   actions: [
-    { verb: "card.move", args: [{ name: "to", type: "column", required: true }, { name: "comment", type: "text", required: false }] },
+    { verb: "card.move", args: [
+      { name: "to", type: "column", required: true }, { name: "from", type: "columns", required: false }, { name: "comment", type: "text", required: false },
+      ONE_OF("position", ["top", "bottom"], false),
+    ] },
     { verb: "card.label", args: [{ name: "add", type: "list", required: false }, { name: "remove", type: "list", required: false }] },
-    { verb: "card.comment", args: [{ name: "body", type: "text", required: true }] },
-    { verb: "card.assign", args: [{ name: "to", type: "text", required: true }] },
-    { verb: "mail", args: [{ name: "to", type: "text", required: true }, { name: "subject", type: "text", required: true }, { name: "body", type: "text", required: false }] },
-    { verb: "agent.park", args: [] },
-    { verb: "agent.end", args: [ONE_OF("outcome", ["done", "merged", "archived"])] },
+    { verb: "card.comment", args: [{ name: "text", type: "text", required: true }] },
+    { verb: "card.assign", args: [
+      { name: "who", type: "text", required: false }, { name: "template", type: "text", required: false }, { name: "templates", type: "list", required: false },
+      { name: "owner", type: "text", required: false }, { name: "from", type: "column", required: false }, { name: "limit", type: "count", required: false },
+    ] },
+    { verb: "mail", args: [{ name: "to", type: "list", required: true }, { name: "subject", type: "text", required: true }, { name: "body", type: "text", required: false }] },
+    { verb: "agent.park", args: [{ name: "reason", type: "text", required: false }] },
+    { verb: "agent.end", args: [ONE_OF("outcome", ["done", "cancelled"]), { name: "result", type: "text", required: false }] },
   ],
-  placeholders: { event: ["kind", "summary", "project", "seq", "actor", "data.<path>"], card: ["id", "title", "column"], job: ["id", "kind", "state"], group: ["key"], rule: ["name"] },
+  placeholders: {
+    event: ["kind", "summary", "project", "seq", "actor", "data.<path>"],
+    card: ["id", "title", "column", "assignee", "labels", "project"],
+    job: ["group_key", "id", "kind", "state", "outcome", "attempt", "by_agent", "repo", "commit", "branch", "end_comment", "failure_block", "next_jobs", "queue_comment", "rerun_comment", "split_comment", "fail_comment", "fail_mail", "infra_comment"],
+    group: ["id", "key", "title", "column", "status", "done", "total", "eta_at", "failed_step"],
+    rule: ["name"],
+  },
   limits: { max_rules_per_column: 50, max_rules_per_project: 300, max_actions: 20, max_rule_bytes: 32768, max_name_chars: 64, max_description_chars: 500, max_per_hour: 600 },
 };
 
@@ -126,8 +142,8 @@ export function createColumnOptionsMock(ctx: ColumnOptionsMockContext) {
       checks: { require_comment_on_enter: false, require_dependencies_met: false, terminal_for_members: false, clear_eta_on_enter: true },
       queue: { release: "batch", batch_size: 4, max_wait_seconds: 1800, max_batch_cards: 8 },
       rules: [
-        { id: "01M7MOCKRULE0000000000001", name: "merge-pass", enabled: true, trigger: { kind: "job_result", events: ["verdict"], job_kinds: ["merge"] }, if_job: [{ outcome: ["passed"] }], actions: [{ verb: "card.move", args: { to: "done" } }] },
-        { id: "01M7MOCKRULE0000000000002", name: "merge-red-note", description: "Tell the card why the merge failed.", enabled: false, trigger: { kind: "job_result", events: ["ended"] }, if_card: [{ lacks_labels: ["hold"] }], actions: [{ verb: "card.comment", args: { body: "Merge failed: {{job.state}}" } }] },
+        { id: "01M7MOCKRULE0000000000001", name: "merge-pass", enabled: true, trigger: { kind: "job_result", events: ["verdict"], job_kinds: ["merge"] }, if_job: [{ state: ["passed"] }], actions: [{ verb: "card.move", args: { to: "done" } }] },
+        { id: "01M7MOCKRULE0000000000002", name: "merge-red-note", description: "Tell the card why the merge failed.", enabled: false, trigger: { kind: "job_result", events: ["ended"] }, if_card: [{ lacks_labels: ["hold"] }], actions: [{ verb: "card.comment", args: { text: "Merge failed: {{job.state}}" } }] },
       ],
     });
   };

@@ -80,9 +80,9 @@ export function actionText(a: RuleAction): string {
       const parts = [list(args.add).length ? `add the label ${orList(list(args.add), "and")}` : "", list(args.remove).length ? `remove the label ${orList(list(args.remove), "and")}` : ""].filter(Boolean);
       return parts.length ? parts.join(" and ") : "change the labels";
     }
-    case "card.comment": return `comment "${String(args.body ?? "")}"`;
+    case "card.comment": return `comment "${String(args.text ?? "")}"`;
     case "card.assign": return assignText(args);
-    case "mail": return `mail ${String(args.to ?? "")}${args.subject ? ` "${String(args.subject)}"` : ""}`;
+    case "mail": return `mail ${orList(list(args.to), "and")}${args.subject ? ` "${String(args.subject)}"` : ""}`;
     default: {
       const rest = Object.entries(args).map(([k, v]) => `${k} ${Array.isArray(v) ? v.join(", ") : String(v)}`);
       return `${a.verb}${rest.length ? ` (${rest.join("; ")})` : ""}`;

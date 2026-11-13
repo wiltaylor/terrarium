@@ -37,9 +37,22 @@ describe("column rules in plain words (TER-1116)", () => {
     expect(actionText({ verb: "card.assign", args: { template: "card-worker", owner: "lead", from: "ready" } })).toBe("start an agent from the template card-worker for the top card of ready, owned by lead");
   });
 
+  it("says card.assign with the old `to` arg and coerces limit (rev-1230, TER-1242)", () => {
+    expect(actionText({ verb: "card.assign", args: { to: "cog-7" } })).toBe("assign the card to cog-7");
+    expect(actionText({ verb: "card.assign", args: { who: "cog-8", to: "cog-7" } })).toBe("assign the card to cog-8");
+    expect(actionText({ verb: "card.assign", args: { template: "w", owner: "lead", from: "ready", limit: "3" } })).toBe("start an agent from the template w for the top 3 cards of ready, owned by lead");
+    expect(actionText({ verb: "card.assign", args: { template: "w", owner: "lead", from: "ready", limit: "x" } })).toBe("start an agent from the template w for the top card of ready, owned by lead");
+  });
+
   it("says if_card any_labels (TER-1230)", () => {
     expect(cardConditionText({ any_labels: ["bug", "deps"] })).toBe("it has one of the labels bug or deps");
     expect(cardConditionText({ any_labels: ["bug"] })).toBe("it has the label bug");
+  });
+
+  it("says card.comment with the daemon arg text, and mail to a list (TER-1242)", () => {
+    expect(actionText({ verb: "card.comment", args: { text: "Merge failed: {{job.state}}" } })).toBe('comment "Merge failed: {{job.state}}"');
+    expect(actionText({ verb: "mail", args: { to: ["lead", "operator"], subject: "red" } })).toBe('mail lead and operator "red"');
+    expect(actionText({ verb: "mail", args: { to: "lead", subject: "red" } })).toBe('mail lead "red"');
   });
 
   it("says the queue", () => {
