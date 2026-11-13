@@ -115,6 +115,9 @@ pub struct Parser {
     caps: Vec<String>,
     /// The pkt-line headers read: the work done, for the tests.
     steps: usize,
+    /// The line bytes given to [`Parser::line`]: the rest of the work,
+    /// for the tests.
+    scanned: usize,
 }
 
 impl Parser {
@@ -156,6 +159,7 @@ impl Parser {
                 return Parse::More;
             };
             self.pos = pos + len;
+            self.scanned += raw.len();
             if let Err(m) = self.line(raw) {
                 return Parse::Bad(m);
             }
@@ -483,7 +487,6 @@ mod tests {
             lines += 1;
         }
         b.extend_from_slice(FLUSH);
-        let t = std::time::Instant::now();
         let mut p = Parser::new();
         let mut done = None;
         for n in 1..=b.len() {
@@ -495,11 +498,13 @@ mod tests {
                 }
             }
         }
-        let took = t.elapsed();
         let Some(Parse::Done(c)) = done else {
             panic!("{done:?}")
         };
         assert_eq!(c.commands.len(), lines);
+        // The work is counted, not timed (TER-1189: a time limit fails on
+        // a loaded host). A call with fewer bytes than `need` returns at
+        // once; the rest of the work is the headers and the line bytes.
         // Each pkt-line header is read about once (twice when the header
         // came in before its line): linear, not one parse of the whole
         // buffer for each byte (about 4 million times 4500 lines).
@@ -508,10 +513,9 @@ mod tests {
             "{} steps for {lines} lines",
             p.steps
         );
-        // Well under 1 s of CPU in a release build; a debug build is
-        // about 10 times slower.
-        let bound = if cfg!(debug_assertions) { 3000 } else { 300 };
-        assert!(took < std::time::Duration::from_millis(bound), "{took:?}");
+        // Each line byte is parsed once: the bytes of the body without
+        // the pkt-line headers.
+        assert_eq!(p.scanned, b.len() - 4 * (lines + 1));
     }
 
     #[test]
