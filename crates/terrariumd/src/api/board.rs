@@ -247,18 +247,29 @@ async fn patch_board(
     Ok(Json(b))
 }
 
+/// The options of a column with the caller's right to write them: the
+/// dashboard cog shows an editor or a viewer from it (TER-1116).
+#[derive(Debug, serde::Serialize)]
+struct ColumnOptionsView {
+    #[serde(flatten)]
+    options: ColumnOptions,
+    /// [`policy::edit_column_options`] for the caller: the operator and a
+    /// project_admin of the project, never a sysadmin.
+    can_edit: bool,
+}
+
 async fn show_column_options(
     State(state): State<Shared>,
     actor: Actor,
     Path((name, column)): Path<(String, String)>,
-) -> ApiResult<Json<ColumnOptions>> {
+) -> ApiResult<Json<ColumnOptionsView>> {
     policy::read_project(&actor, &name)?;
-    Ok(Json(
-        state
-            .db
-            .read(move |c| column_options::get_options(c, &name, &column))
-            .await?,
-    ))
+    let can_edit = policy::edit_column_options(&actor, &name).is_ok();
+    let options = state
+        .db
+        .read(move |c| column_options::get_options(c, &name, &column))
+        .await?;
+    Ok(Json(ColumnOptionsView { options, can_edit }))
 }
 
 async fn put_column_options(
@@ -266,14 +277,18 @@ async fn put_column_options(
     actor: Actor,
     Path((name, column)): Path<(String, String)>,
     ApiJson(body): ApiJson<OptionsPut>,
-) -> ApiResult<Json<ColumnOptions>> {
+) -> ApiResult<Json<ColumnOptionsView>> {
     let o = state
         .db
         .write(actor.label(), move |t| {
             column_options::put_options(t, &actor, &name, &column, &body)
         })
         .await?;
-    Ok(Json(o))
+    // A write passed the same check.
+    Ok(Json(ColumnOptionsView {
+        options: o,
+        can_edit: true,
+    }))
 }
 
 async fn list_cards(

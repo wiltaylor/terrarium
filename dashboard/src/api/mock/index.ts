@@ -126,6 +126,7 @@ import { createDbMock } from "./db";
 import { createTestRunMock } from "./testRuns";
 import { createJobsMock } from "./jobs";
 import { createRulesMock } from "./rules";
+import { createColumnOptionsMock } from "./columnOptions";
 import { createMonitorMock } from "./monitors";
 import { createPipelineMock } from "./pipelines";
 import { createCalendarMock } from "./calendar";
@@ -871,6 +872,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   // The board rules (docs/api.md §19.12): ./rules. The seed gives project `terrarium` two runs.
   const rulesMock = createRulesMock({ reply, fail, audit, project: (name) => project(name), columns: (name) => w.columns[name] ?? [], iso });
   if (w.projects.some((x) => x.name === "terrarium")) rulesMock.seed();
+  // The column options and the rule catalog (docs/api.md §8.2.1): ./columnOptions. The seed gives the merge_queue of `terrarium` a batch queue and two rules.
+  const optionsMock = createColumnOptionsMock({ reply, fail, audit, emit, column: (proj, name) => { project(proj); return columnOf(proj, name); }, ulid: () => ulid("rule") });
+  if (w.projects.some((x) => x.name === "terrarium")) optionsMock.seed();
   // The job queue (docs/api.md §35.4): ./jobs. The seed gives project `terrarium` a month of merge jobs with flakes,
   // a conflict, an error, a split batch, and one queued job.
   const jobsMock = createJobsMock({ reply, fail, project: (name) => project(name), now });
@@ -3016,6 +3020,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           emit({ kind: "board", actor: "operator", project: proj, summary: `${proj}: columns changed`, data: { columns: after } });
           return boardOf(proj);
         }),
+      ...optionsMock.board,
     },
 
     home: {
@@ -4241,7 +4246,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     db: dbMock.api,
     testRuns: testRunMock.api,
     jobs: jobsMock.api,
-    rules: rulesMock.api,
+    rules: { ...rulesMock.api, catalog: optionsMock.catalog },
     monitors: monitorMock.api,
     pipelines: pipelineMock.api,
     calendar: calendarMock.api,
