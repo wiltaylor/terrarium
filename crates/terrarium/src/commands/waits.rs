@@ -296,39 +296,6 @@ fn cleanup_verified(v: &Value) -> bool {
             .is_some_and(|at| !at.is_empty())
 }
 
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-
-    #[test]
-    fn only_complete_bound_evidence_can_allow_success() {
-        for status in [
-            "not_requested",
-            "pending",
-            "unknown",
-            "unavailable",
-            "remaining",
-            "unrecognized",
-            "verified_terminated",
-        ] {
-            assert!(!cleanup_verified(
-                &json!({"cleanup":{"operation_id":"same-op","status":status}})
-            ));
-        }
-        for legacy in [
-            json!({}),
-            json!({"kill":{"pid":null,"left":[]}}),
-            json!({"kill":{"pid":1,"left":[]}}),
-        ] {
-            assert!(!cleanup_verified(&legacy));
-            assert_eq!(cleanup_status(&legacy), "unknown");
-        }
-        assert!(cleanup_verified(
-            &json!({"cleanup":{"operation_id":"op","status":"verified_terminated","evidence_kind":"bound_complete_scope","observed_at":"2026-11-12T00:00:00Z"}})
-        ));
-    }
-}
-
 async fn start_run(ctx: &Ctx, a: &RunArgs) -> anyhow::Result<()> {
     let Some(target) = &a.target else {
         return Err(CliError::usage(
@@ -435,5 +402,38 @@ pub async fn watch(ctx: &Ctx, cmd: Option<&WatchCmd>, a: &WatchArgs) -> anyhow::
                 c.line(format!("removed watch {id}"));
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn only_complete_bound_evidence_can_allow_success() {
+        for status in [
+            "not_requested",
+            "pending",
+            "unknown",
+            "unavailable",
+            "remaining",
+            "unrecognized",
+            "verified_terminated",
+        ] {
+            assert!(!cleanup_verified(
+                &json!({"cleanup":{"operation_id":"same-op","status":status}})
+            ));
+        }
+        for legacy in [
+            json!({}),
+            json!({"kill":{"pid":null,"left":[]}}),
+            json!({"kill":{"pid":1,"left":[]}}),
+        ] {
+            assert!(!cleanup_verified(&legacy));
+            assert_eq!(cleanup_status(&legacy), "unknown");
+        }
+        assert!(cleanup_verified(
+            &json!({"cleanup":{"operation_id":"op","status":"verified_terminated","evidence_kind":"bound_complete_scope","observed_at":"2026-11-12T00:00:00Z"}})
+        ));
     }
 }
