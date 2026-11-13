@@ -1,6 +1,6 @@
 import { useInstance } from "../../instance";
 import { A, useNavigate } from "../../instance/navigation";
-import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { LeaseChips } from "../../components/Leases";
 import { HoldBadge } from "../../components/HoldBadge";
 import { StatusBadge } from "../../components/StatusBadge";
@@ -91,6 +91,8 @@ export function AgentsPanel(props: { project: string; onRefresh?: () => void; ca
   const navigate = useNavigate();
   const project = () => props.project;
   const [creating, setCreating] = createSignal(false);
+  // A revoked grant closes New agent, so a re-grant does not open it again without a click.
+  createEffect(() => { if (props.canCreateAgent === false) setCreating(false); });
   const [pinError, setPinError] = createSignal<unknown>(null);
   // The "holds <target>" chips: the leases older than the event backlog.
   onMount(() => void leases.loadAll());

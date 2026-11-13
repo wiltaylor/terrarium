@@ -235,19 +235,74 @@ it("shows board writes only with the grants, and a revoked grant removes them an
   expect(el.querySelector<HTMLElement>("[data-card][draggable=true]")).toBeNull();
 });
 
+it("closes the New card, Block and Edit columns dialogs on a revoked grant and keeps them closed on a re-grant", async () => {
+  const move = vi.spyOn(api.cards, "move");
+  const el = host();
+  const Lanes = BOARD_PARTS.lanes;
+  const [grants, setGrants] = createSignal<Partial<typeof admin>>(admin);
+  dispose = render(() => <Lanes project="terrarium" widget={widget("d", "board")} grants={grants()} />, el);
+  const dialog = (title: string) => document.querySelector(`.modal[aria-label="${title}"]`);
+  const revokeAndRegrant = async (title: string, grant: Partial<typeof admin>) => {
+    expect(dialog(title)).not.toBeNull();
+    setGrants(grant);
+    expect(dialog(title)).toBeNull();
+    setGrants(admin);
+    await new Promise(r => setTimeout(r, 20));
+    expect(dialog(title)).toBeNull();
+  };
+  await waitFor(() => expect(el.querySelector(".column-add")).not.toBeNull());
+
+  el.querySelector<HTMLButtonElement>(".column-add")!.click();
+  await waitFor(() => expect(document.querySelector(".modal")).not.toBeNull());
+  await revokeAndRegrant(document.querySelector(".modal")!.getAttribute("aria-label")!, {});
+
+  buttonText(el, "Edit columns")!.click();
+  await revokeAndRegrant("Edit columns", { ...admin, canEditColumns: false });
+
+  const card = [...el.querySelectorAll<HTMLElement>("[data-card]")].find(c => !c.closest("[data-column=blocked]"))!;
+  card.click();
+  await waitFor(() => expect(document.querySelector(".drawer")).not.toBeNull());
+  const column = [...document.querySelectorAll<HTMLSelectElement>(".drawer select")].find(s => [...s.options].some(o => o.value === "blocked"))!;
+  change(column, "blocked");
+  await waitFor(() => expect(dialog(`Block ${card.dataset.card}`)).not.toBeNull());
+  await revokeAndRegrant(`Block ${card.dataset.card}`, {});
+  expect(move).not.toHaveBeenCalled();
+});
+
+it("closes New agent on a revoked grant and keeps it closed on a re-grant", async () => {
+  const el = host();
+  const Agents = AGENTS_PARTS.agents;
+  const [grants, setGrants] = createSignal<{ canCreateAgent?: boolean }>({ canCreateAgent: true });
+  dispose = render(() => <Agents project="terrarium" widget={widget("n", "agents")} grants={grants()} />, el);
+  buttonText(el, "New agent")!.click();
+  await waitFor(() => expect(document.querySelector(".modal")).not.toBeNull());
+  setGrants({});
+  expect(document.querySelector(".modal")).toBeNull();
+  setGrants({ canCreateAgent: true });
+  await new Promise(r => setTimeout(r, 20));
+  expect(document.querySelector(".modal")).toBeNull();
+});
+
 it("shows read-only columns without a grant and the editor with one", async () => {
   const board = await api.board.get("terrarium");
   vi.spyOn(api.board, "get").mockResolvedValue(board);
   const update = vi.spyOn(api.board, "update");
   const el = host();
   const Columns = BOARD_PARTS.columns;
-  const [grants, setGrants] = createSignal<{ canEditColumns?: boolean } | undefined>(undefined);
+  const [grants, setGrants] = createSignal<typeof admin | { canEditColumns?: boolean } | undefined>(undefined);
   dispose = render(() => <Columns project="terrarium" widget={widget("c", "board", { view: "columns" })} grants={grants()} />, el);
   await waitFor(() => expect(el.querySelectorAll("table [data-column-row]").length).toBe(board.columns.length));
   expect(el.querySelector("form, input, select, textarea")).toBeNull();
   expect(el.querySelector("button")).toBeNull();
-  // A write right of another domain is not a columns grant.
   setGrants({ canEditColumns: false });
+  expect(el.querySelector("form")).toBeNull();
+  // A write right of another domain is not a columns grant.
+  setGrants({ ...admin, canEditColumns: false });
+  await new Promise(r => setTimeout(r, 20));
+  expect(el.querySelector("form")).toBeNull();
+  // Only `true` is a grant: a truthy value of another type is not.
+  setGrants({ canEditColumns: 1 as unknown as boolean });
+  await new Promise(r => setTimeout(r, 20));
   expect(el.querySelector("form")).toBeNull();
   setGrants({ canEditColumns: true });
   await waitFor(() => expect(el.querySelectorAll(".columns-editor-row").length).toBe(board.columns.length));
