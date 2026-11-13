@@ -198,9 +198,18 @@ impl Drop for ObservedResourceGuard {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use futures_util::poll;
     use std::pin::pin;
     use std::time::Duration;
+
+    // Poll once to establish queue order without enabling dependency features.
+    macro_rules! poll {
+        ($future:expr) => {
+            std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(std::future::Future::poll($future.as_mut(), cx))
+            })
+            .await
+        };
+    }
 
     #[tokio::test(start_paused = true)]
     async fn fifo_cancel_timeout_and_independent_progress() {
