@@ -888,6 +888,65 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn repro_ter1165() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut hangs = 0;
+        for iter in 0..300 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let mut served = Vec::new();
+                for _ in 0..4 {
+                    let Ok(Ok((mut socket, _))) = tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        listener.accept(),
+                    )
+                    .await
+                    else {
+                        return served;
+                    };
+                    let mut request = [0; 4096];
+                    let n = socket.read(&mut request).await.unwrap();
+                    let request = String::from_utf8_lossy(&request[..n]).to_string();
+                    let first = request.lines().next().unwrap_or("").to_string();
+                    let response = if request.contains("/missing ") {
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
+                    } else if request.contains("/partial ") {
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort".to_vec()
+                    } else if request.contains("/large ") {
+                        let body = vec![b'x'; terrarium_host::update_signature::MAX_BUNDLE_BYTES + 1];
+                        let mut response =
+                            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len())
+                                .into_bytes();
+                        response.extend(body);
+                        response
+                    } else {
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nbundle".to_vec()
+                    };
+                    served.push(first);
+                    let _ = socket.write_all(&response).await;
+                }
+                served
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("cached");
+            let client = reqwest::Client::new();
+            let mut errors = Vec::new();
+            for route in ["missing", "partial", "large"] {
+                let r = fetch_bundle(&client, &format!("{base}/{route}"), &path).await;
+                errors.push(format!("{route}: {:#}", r.err().map(|e| format!("{e:#}")).unwrap_or_default()));
+            }
+            let valid = fetch_bundle(&client, &format!("{base}/valid"), &path).await;
+            let served = server.await.unwrap();
+            if served.len() != 4 {
+                hangs += 1;
+                eprintln!("REPRO iter {iter}: served {} {:?} errors {:?} valid {:?}", served.len(), served, errors, valid.err().map(|e| format!("{e:#}")));
+            }
+        }
+        eprintln!("REPRO hangs {hangs}/300");
+    }
+
     #[test]
     fn install_line() {
         assert_eq!(
