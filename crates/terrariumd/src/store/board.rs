@@ -2927,7 +2927,12 @@ pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> Ap
 /// The audit of [`set_eta`] for the held ETA of a waiting card (TER-1204):
 /// a change to the ETA of a card that is not the actor's is audited, as
 /// for an admitted card.
-fn audit_held_eta(t: &mut Tx<'_>, actor: &Actor, card: &CardRow, eta: Option<&str>) -> ApiResult<()> {
+fn audit_held_eta(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    card: &CardRow,
+    eta: Option<&str>,
+) -> ApiResult<()> {
     if owns(actor, card) {
         return Ok(());
     }

@@ -602,7 +602,11 @@ async fn a_waiting_card_holds_a_kept_eta_and_another_actors_change_is_audited() 
             .ok();
     }
     let kb = td
-        .patch_as("flow/w1", &format!("/api/cards/{b}"), json!({"eta_at": "2h"}))
+        .patch_as(
+            "flow/w1",
+            &format!("/api/cards/{b}"),
+            json!({"eta_at": "2h"}),
+        )
         .await
         .ok()
         .clone();
@@ -642,9 +646,13 @@ async fn a_waiting_card_holds_a_kept_eta_and_another_actors_change_is_audited() 
         .ok()
         .clone();
     assert_eq!(mc["queued"]["place"], 1, "{mc}");
-    td.patch_as("flow/w1", &format!("/api/cards/{c}"), json!({"eta_at": "3h"}))
-        .await
-        .ok();
+    td.patch_as(
+        "flow/w1",
+        &format!("/api/cards/{c}"),
+        json!({"eta_at": "3h"}),
+    )
+    .await
+    .ok();
     let audit = td.get("/api/audit?action=card.eta").await.ok().clone();
     assert!(audit.as_array().unwrap().is_empty(), "{audit}");
     td.patch(&format!("/api/cards/{c}"), json!({"eta_at": "1h"}))
@@ -706,7 +714,12 @@ async fn a_change_from_wip_to_batch_waits_for_the_cards_already_in_the_column() 
     let a = new_card(&td, "a").await;
     let b = new_card(&td, "b").await;
     let c = new_card(&td, "c").await;
-    assert!(move_to(&td, &a, "merge_queue").await.get("queued").is_none());
+    assert!(
+        move_to(&td, &a, "merge_queue")
+            .await
+            .get("queued")
+            .is_none()
+    );
     set_options(
         &td,
         "merge_queue",
