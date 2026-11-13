@@ -3437,7 +3437,8 @@ mod tests {
                             ))
                             .await
                             .unwrap();
-                        drive_link(socket, &registry, "lab1", 77, tx, rx).await;
+                        let why = drive_link(socket, &registry, "lab1", 77, tx, rx).await;
+                        eprintln!("DIAG drive_link ended: {why}");
                     })
                 }
             }),
