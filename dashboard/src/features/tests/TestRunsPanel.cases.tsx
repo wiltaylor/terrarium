@@ -75,7 +75,7 @@ it("deduplicates pagination, retains rows on errors and keeps detail/card/label 
   const hrefs = [...el.querySelectorAll("a")].map(a => a.getAttribute("href"));
   expect(hrefs).toContain("/p/my%20app/tests/R1");
   expect(hrefs).toContain("/p/my%20app/board?card=TER-12");
-  expect(hrefs).toContain("/p/my%20app/board?version=vnext");
+  expect(hrefs).toContain("/p/my%20app/board?version=vnext&group=version");
 });
 
 it("ignores stale project/query replies and wrong-project events, cleans timers on disposal", async () => {
