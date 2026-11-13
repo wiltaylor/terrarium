@@ -2,6 +2,7 @@ import { For, Show } from "solid-js";
 import type { LoginStatus, Subscription } from "../api/types";
 import { ago, compact, humanize, orderWindows, sparkPath, subscriptionTitle, timeUntil, usageLevel, money, windowLabel, windowValue } from "../lib/format";
 import { ProviderLogo } from "./ui";
+import { AssignedAgentsChip } from "./AssignedAgentsChip";
 
 export function Sparkline(props: { values: number[]; label?: string; height?: number }) {
   const w = 200;
@@ -40,6 +41,7 @@ export function UsageTile(props: { sub: Subscription; now: number; spark: number
           </div>
         </div>
         <div class="row" style={{ gap: "4px", "flex-wrap": "wrap", "justify-content": "flex-end" }}>
+          <AssignedAgentsChip sub={props.sub} />
           <Show when={props.sub.login_status !== "logged_in"}>
             <span class={`chip ${LOGIN_CHIP[props.sub.login_status]}`}>{humanize(props.sub.login_status)}</span>
           </Show>

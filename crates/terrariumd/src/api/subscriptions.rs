@@ -345,6 +345,13 @@ pub struct SubscriptionView {
     pub account: Option<AccountView>,
     /// The agents whose current subscription this is.
     pub agents: Vec<AgentOn>,
+    /// Effective assignments among actor-readable agents, all statuses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assigned_agent_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assigned_agent_count_scope: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assigned_agent_count_project: Option<String>,
     /// The account is the default account of its harness (PLAN §16.3): an
     /// agent of that harness with no subscription runs on it.
     pub default: bool,
@@ -557,6 +564,9 @@ fn view_with_key_presence(
         default: subs::is_default(c, &sub.name)?,
         account,
         agents,
+        assigned_agent_count: None,
+        assigned_agent_count_scope: None,
+        assigned_agent_count_project: None,
         default_models: crate::models::default_models(&sub),
         local_estimate_only: sub.probe.is_none(),
         no_quota: sub.is_selfhosted() && sub.provider != "litellm",
@@ -595,14 +605,23 @@ async fn load(state: &Shared, name: String) -> ApiResult<SubscriptionView> {
 
 async fn list(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Vec<SubscriptionView>>> {
     policy::read_subscriptions(&actor)?;
+    let project = actor.agent().filter(|a| !a.reads_all()).map(|a| a.project.clone());
     let dir = state.state_dir.clone();
     let st = state.clone();
     let v = state
         .db
         .read(move |c| {
+            let counts = ustore::assigned_agent_counts(c, project.as_deref())?;
             subs::list(c)?
                 .into_iter()
-                .map(|s| view(c, s, &dir, &st.usage.streams))
+                .map(|s| {
+                    let count = counts.get(&s.name).copied().unwrap_or(0);
+                    let mut v = view(c, s, &dir, &st.usage.streams)?;
+                    v.assigned_agent_count = Some(count);
+                    v.assigned_agent_count_scope = Some(if project.is_some() { "project" } else { "all_projects" });
+                    v.assigned_agent_count_project = project.clone();
+                    Ok(v)
+                })
                 .collect::<ApiResult<Vec<_>>>()
         })
         .await?;

@@ -2376,6 +2376,10 @@ export interface SubscriptionAgentRef {
 
 /** docs/api.md §16.1. */
 export interface Subscription {
+  /** Effective stored assignments, all statuses. Absent on older daemons and mutation replies. */
+  assigned_agent_count?: number;
+  assigned_agent_count_scope?: "all_projects" | "project";
+  assigned_agent_count_project?: string;
   fallback_spend_usd?: number;
   cloud?: CloudSettings;
   month_spend_usd?: number;

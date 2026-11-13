@@ -9,7 +9,7 @@ import type { AgentEvent, DetectedLogin, Subscription } from "../api/types";
 import type { EventsStore } from "./events";
 
 /** Events after which the list is stale. */
-export const REFRESH_KINDS = ["quota.sample", "quota.blocked", "quota.resumed", "subscription"];
+export const REFRESH_KINDS = ["quota.sample", "quota.blocked", "quota.resumed", "subscription", "agent_removed", "status", "agent.create", "agent.delete", "agent.update", "agent.subscription"];
 
 export function createSubscriptionsStore(api: Pick<Api, "subscriptions">, events?: Pick<EventsStore, "on">) {
   const [list, setList] = createSignal<Subscription[]>([]);
@@ -23,11 +23,16 @@ export function createSubscriptionsStore(api: Pick<Api, "subscriptions">, events
   let soon: ReturnType<typeof setTimeout> | undefined;
 
   let inflight: Promise<void> | null = null;
+  let generation = 0;
   const load = async () => {
+    const request = ++generation;
     try {
-      setList(await api.subscriptions.list());
+      const result = await api.subscriptions.list();
+      if (request !== generation) return;
+      setList(result);
       setError(null);
     } catch (e) {
+      if (request !== generation) return;
       setError(e);
       if (isMissingEndpoint(e)) {
         // Stop polling an endpoint the daemon does not have.
@@ -35,7 +40,7 @@ export function createSubscriptionsStore(api: Pick<Api, "subscriptions">, events
         clearInterval(timer);
       }
     } finally {
-      setLoaded(true);
+      if (request === generation) setLoaded(true);
     }
   };
 
@@ -83,7 +88,7 @@ export function createSubscriptionsStore(api: Pick<Api, "subscriptions">, events
     /** Poll every `ms`. Safe to call twice. */
     poll(ms = 15_000) {
       if (timer) return;
-      void refresh();
+      void (inflight ?? refresh());
       timer = setInterval(refresh, ms);
     },
     stop() {
@@ -93,10 +98,14 @@ export function createSubscriptionsStore(api: Pick<Api, "subscriptions">, events
       off?.();
     },
     replace(s: Subscription) {
-      setList((prev) => (prev.some((x) => x.name === s.name) ? prev.map((x) => (x.name === s.name ? s : x)) : [...prev, s]));
+      ++generation;
+      setList((prev) => (prev.some((x) => x.name === s.name) ? prev.map((x) => (x.name === s.name ? { ...s, assigned_agent_count: s.assigned_agent_count ?? x.assigned_agent_count, assigned_agent_count_scope: s.assigned_agent_count_scope ?? x.assigned_agent_count_scope, assigned_agent_count_project: s.assigned_agent_count_project ?? x.assigned_agent_count_project } : x)) : [...prev, s]));
+      refreshSoon();
     },
     drop(name: string) {
+      ++generation;
       setList((prev) => prev.filter((x) => x.name !== name));
+      refreshSoon();
     },
   };
 }

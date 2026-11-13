@@ -9,6 +9,7 @@ import { createSignal, For, onMount, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead, ProviderLogo, useNow } from "../../components/ui";
 import { isLocalOnly, LOGIN_CHIP } from "../../components/UsageTile";
 import type { DetectedLogin, Subscription } from "../../api/types";
+import { AssignedAgentsChip } from "../../components/AssignedAgentsChip";
 import { ago, balanceText, humanize, orderWindows, subscriptionTitle, timeUntil, windowLabel, windowValue } from "../../lib/format";
 
 import { AddSubscriptionWizard } from "./AddSubscriptionWizard";
@@ -145,6 +146,7 @@ export default function SubscriptionsPage() {
                       <span class="muted small mono" title="The subscription name">
                         {s.name}
                       </span>
+                      <AssignedAgentsChip sub={s} />
                       <Show when={def().isDefault}>
                         <span class="chip ok" title={`Agents of ${s.account?.harness} with no subscription run on this account`}>
                           default
