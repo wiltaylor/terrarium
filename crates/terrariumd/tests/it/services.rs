@@ -31,7 +31,10 @@ async fn raw(td: &TestDaemon, path: &str, ct: &str, body: Vec<u8>, agent: &str) 
     let resp = sender.send_request(req).await.unwrap();
     let status = resp.status().as_u16();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 /// Plenty of free space, whatever the disk of this machine has (the 20%
@@ -456,9 +459,13 @@ async fn payloads_go_after_the_seven_day_retention() {
         .await;
     assert_eq!(r.status, 503, "{}", r.body);
     // One ends; the other runs (C2 will move it).
-    td.post_as("p/w1", &format!("/api/service-requests/{ended}/cancel"), json!({}))
-        .await
-        .ok();
+    td.post_as(
+        "p/w1",
+        &format!("/api/service-requests/{ended}/cancel"),
+        json!({}),
+    )
+    .await
+    .ok();
     move_request(&td, &open, &[("queued", "waiting"), ("waiting", "running")]).await;
     let dir = |id: &str| td.state.join("services/payloads").join(id);
     let state = td.daemon.as_ref().unwrap().state.clone();
@@ -469,7 +476,9 @@ async fn payloads_go_after_the_seven_day_retention() {
         .unwrap();
     assert_eq!(deleted, 0);
     assert!(dir(&ended).join("request").exists());
-    let row = td.get_as("p/w1", &format!("/api/service-requests/{ended}")).await;
+    let row = td
+        .get_as("p/w1", &format!("/api/service-requests/{ended}"))
+        .await;
     assert!(row.ok()["payload_deleted_at"].is_null(), "{}", row.body);
     // At 8 days the ended one goes; the running one stays.
     let (_, deleted) = terrariumd::service_sweep::sweep(&state, now + chrono::Duration::days(8))
@@ -478,14 +487,18 @@ async fn payloads_go_after_the_seven_day_retention() {
     assert_eq!(deleted, 1);
     assert!(!dir(&ended).exists());
     assert!(dir(&open).join("request").exists());
-    let row = td.get_as("p/w1", &format!("/api/service-requests/{ended}")).await;
+    let row = td
+        .get_as("p/w1", &format!("/api/service-requests/{ended}"))
+        .await;
     assert!(row.ok()["payload_deleted_at"].is_string(), "{}", row.body);
     let r = td
         .get_as("p/w1", &format!("/api/service-requests/{ended}/payload"))
         .await;
     assert_eq!(r.status, 404, "{}", r.body);
     assert!(r.body.to_string().contains("retention"), "{}", r.body);
-    let row = td.get_as("p/w1", &format!("/api/service-requests/{open}")).await;
+    let row = td
+        .get_as("p/w1", &format!("/api/service-requests/{open}"))
+        .await;
     assert!(row.ok()["payload_deleted_at"].is_null(), "{}", row.body);
     // The 5 freed bytes fit again.
     let r = td
@@ -503,10 +516,11 @@ async fn a_multipart_call_stores_the_payload() {
     td.post("/api/services", script("mp", Some("p"), "p-box"))
         .await
         .ok();
-    let mut body = b"--XyZ\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{\"seconds\": 5}\r\n\
+    let mut body =
+        b"--XyZ\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{\"seconds\": 5}\r\n\
 --XyZ\r\nContent-Disposition: form-data; name=\"payload\"; filename=\"in.bin\"\r\n\
 Content-Type: application/octet-stream\r\n\r\n"
-        .to_vec();
+            .to_vec();
     let data: Vec<u8> = (0..=255u8).collect();
     body.extend_from_slice(&data);
     body.extend_from_slice(b"\r\n--XyZ--\r\n");
@@ -520,7 +534,9 @@ Content-Type: application/octet-stream\r\n\r\n"
     .await;
     assert_eq!(status, 201, "{v}");
     let id = v["id"].as_str().unwrap();
-    let row = td.get_as("p/w1", &format!("/api/service-requests/{id}")).await;
+    let row = td
+        .get_as("p/w1", &format!("/api/service-requests/{id}"))
+        .await;
     assert_eq!(row.ok()["request"], json!({"seconds": 5}));
     assert_eq!(row.ok()["payload_size"], 256);
     let file = td.state.join("services/payloads").join(id).join("request");
@@ -544,7 +560,10 @@ async fn a_body_over_the_limit_is_413_before_it_is_read() {
     let td = setup().await;
     td.post(
         "/api/services",
-        with(script("tiny", Some("p"), "p-box"), json!({"max_payload": "8"})),
+        with(
+            script("tiny", Some("p"), "p-box"),
+            json!({"max_payload": "8"}),
+        ),
     )
     .await
     .ok();
@@ -577,7 +596,8 @@ async fn a_reload_keeps_a_removed_file_service_while_requests_are_open() {
     let dir = td.config.join("services");
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("echo.toml");
-    let text = "kind = \"script\"\ntarget = \"p-box\"\nproject = \"p\"\ncommand = [\"/opt/echo\"]\n";
+    let text =
+        "kind = \"script\"\ntarget = \"p-box\"\nproject = \"p\"\ncommand = [\"/opt/echo\"]\n";
     std::fs::write(&file, text).unwrap();
     td.post_empty("/api/reload").await.ok();
     let r = td
@@ -602,9 +622,13 @@ async fn a_reload_keeps_a_removed_file_service_while_requests_are_open() {
     // Gone again, and the request ends: the next reload removes it.
     std::fs::remove_file(&file).unwrap();
     td.post_empty("/api/reload").await.ok();
-    td.post_as("p/w1", &format!("/api/service-requests/{id}/cancel"), json!({}))
-        .await
-        .ok();
+    td.post_as(
+        "p/w1",
+        &format!("/api/service-requests/{id}/cancel"),
+        json!({}),
+    )
+    .await
+    .ok();
     td.post_empty("/api/reload").await.ok();
     td.get("/api/services/echo").await.err(404, "not_found");
     // The request stays readable.
