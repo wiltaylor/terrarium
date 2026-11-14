@@ -56,6 +56,7 @@ const SoftwarePage = lazy(() => import("../features/settings/SoftwarePage"));
 const ConfigPage = lazy(() => import("../features/config/ConfigPage"));
 const SkillsPage = lazy(() => import("../features/skills/SkillsPage"));
 const ToolsPage = lazy(() => import("../features/tools/ToolsPage"));
+const ServicesPage = lazy(() => import("../features/services/ServicesPage"));
 const SessionPage = lazy(() => import("../features/sessions/SessionPage"));
 const SecretsPage = lazy(() => import("../features/secrets/SecretsPage"));
 // Mock only: the hostile payloads, to eyeball that the sanitizer keeps them inert.
@@ -124,6 +125,8 @@ function instanceRoutes() {
         <Route path="/threads" component={ThreadsPage} />
         <Route path="/threads/:id" component={ThreadPage} />
         <Route path="/schedules" component={SchedulesPage} />
+        {/* The services and their queues (docs/api.md §17.12). */}
+        <Route path="/services" component={ServicesPage} />
         {/* The logs screen: a tab bar over one route per tab (nav.ts LOGS_TABS). /logs redirects to the first tab. */}
         <Route path="/logs" component={LogsPage}>
           <Route path="/mail" component={MailPage} />

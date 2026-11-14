@@ -38,11 +38,13 @@ pub use report::{Outcome, Report};
 pub use scenario::run_suite;
 
 /// Every harness, in report order.
-pub const ALL: [HarnessId; 4] = [
+/// A real run skips grok: it needs a signed-in check (TER-1192).
+pub const ALL: [HarnessId; 5] = [
     HarnessId::Claude,
     HarnessId::Codex,
     HarnessId::Copilot,
     HarnessId::Pi,
+    HarnessId::Grok,
 ];
 
 /// The settings of one run, from the env (see [`Settings::from_env`]).

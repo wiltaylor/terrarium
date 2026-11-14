@@ -50,7 +50,8 @@ pub fn parser_for(harness: HarnessId) -> Box<dyn Transcript> {
     }
 }
 
-/// A harness with no transcript parser yet (grok, TER-1192): no blocks.
+/// A harness with no transcript parser yet (grok: its session files
+/// need the signed-in capture, a TER-1192 release gate): no blocks.
 struct NoTranscript(HarnessId);
 
 impl Transcript for NoTranscript {

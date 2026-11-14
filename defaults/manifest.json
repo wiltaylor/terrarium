@@ -11,6 +11,7 @@
     "prompts/harness/claude.md": "906179f78b48b4cfc12392fad44cd7dfdcaedc12e33cfe40889da76f22a36f39",
     "prompts/harness/codex.md": "f233135d17431fc2cc096dfc4bdddf6b26fb2e9ff32b30f80039d580169318ff",
     "prompts/harness/copilot.md": "33bf9131fb3fdac475dd8f7edf47c9c86de4bea852ba365b629f2fe1d1246898",
+    "prompts/harness/grok.md": "ebc66008baee8b5d08984976d2fad534a33b094ad4def53b9bac596fac0c2aa8",
     "prompts/harness/pi.md": "ece909cd3759462ad485e18a9551118eff7343f50cd2b1ec9e44e4bbbef56c27",
     "prompts/project-lead.md": "7affd90642b67187876f3e59c98b4ba9de4cadfd74042389f8bdfe509cb02e16",
     "prompts/system-lead.md": "39732b91e2945db7547b5949e6fe8f24e5957357c187e33ac1a34c218c1e06fc",

@@ -9,6 +9,7 @@ use semver::Version;
 use terrarium_adapter_claude::{ClaudeAdapter, ClaudeOptions};
 use terrarium_adapter_codex::{CodexAdapter, CodexOptions};
 use terrarium_adapter_copilot::{CopilotAdapter, CopilotOptions};
+use terrarium_adapter_grok::{GrokAdapter, GrokOptions};
 use terrarium_adapter_pi::{PiAdapter, PiOptions};
 use terrarium_core::{
     Adapter, Agent, Answer, Event, HarnessId, HarnessSessionId, HookPayload, LaunchSpec,
@@ -55,12 +56,14 @@ pub fn select(spec: &RunnerSpec) -> Arc<dyn Adapter> {
             opts.host_agent_dir = o.host_config_dir.clone();
             Arc::new(PiAdapter::new(opts))
         }
-        // No grok adapter yet (TER-1192): the daemon refuses a grok start
-        // (`runner_supervisor::check_subscription`), so no grok runner comes
-        // here. The fake adapter reads no hook it does not know.
-        HarnessId::Grok => Arc::new(FakeAdapter {
-            harness: spec.harness,
-        }),
+        HarnessId::Grok => {
+            let mut opts = GrokOptions::default();
+            if let Some(d) = &o.config_dir {
+                opts.home_dir = d.clone();
+            }
+            opts.host_home_dir = o.host_config_dir.clone();
+            Arc::new(GrokAdapter::new(opts))
+        }
     }
 }
 

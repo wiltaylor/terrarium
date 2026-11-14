@@ -738,6 +738,7 @@ mod tests {
             "prompts/harness/codex.md",
             "prompts/harness/copilot.md",
             "prompts/harness/pi.md",
+            "prompts/harness/grok.md",
             "harness/claude/settings.json",
             "harness/codex/config.toml",
             "harness/copilot/settings.json",
