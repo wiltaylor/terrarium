@@ -245,7 +245,8 @@ pub fn parse_output(kind: LoginKind, raw: &[u8]) -> Parsed {
         // pi has no login: it uses API keys only.
         LoginKind::Pi => Parsed::default(),
         // The output of `grok login --device-auth` is not captured yet
-        // (TER-1192): the first URL and code that the generic patterns find.
+        // (a TER-1192 release gate): the first URL and code that the
+        // generic patterns find.
         LoginKind::Grok => Parsed {
             url: last(&p.any_url, &text, 0),
             device_code: last(&p.any_code, &text, 1),
@@ -295,10 +296,26 @@ fn child_env(kind: LoginKind, home: &Path) -> BTreeMap<String, String> {
             !STRIP_PREFIXES.iter().any(|p| k.starts_with(p)) && !STRIP_VARS.contains(&k.as_str())
         })
         .collect();
-    env.insert(
-        kind.harness().home_env().to_owned(),
-        home.display().to_string(),
-    );
+    match kind {
+        // `home` is the scratch HOME: grok writes `$GROK_HOME/auth.json`,
+        // and the import reads `<home>/.grok/auth.json`. Both vars point
+        // there, so a GROK_HOME of the daemon's env is not used either.
+        LoginKind::Grok => {
+            env.insert("HOME".to_owned(), home.display().to_string());
+            env.insert(
+                HarnessId::Grok.home_env().to_owned(),
+                home.join(crate::accounts::GROK_HOME_DIR)
+                    .display()
+                    .to_string(),
+            );
+        }
+        _ => {
+            env.insert(
+                kind.harness().home_env().to_owned(),
+                home.display().to_string(),
+            );
+        }
+    }
     env
 }
 
@@ -2099,6 +2116,18 @@ mod tests {
         );
         assert_eq!(p.url.as_deref(), Some("https://accounts.x.ai/device"));
         assert_eq!(p.device_code.as_deref(), Some("ABCD-1234"));
+    }
+
+    /// TER-1192: grok reads `GROK_HOME`; a login writes into the scratch
+    /// home's `.grok`, where the import reads `auth.json`.
+    #[test]
+    fn a_grok_login_runs_in_the_scratch_grok_home() {
+        let home = Path::new("/tmp/terrarium-login-x/home");
+        let env = child_env(LoginKind::Grok, home);
+        assert_eq!(env["HOME"], "/tmp/terrarium-login-x/home");
+        assert_eq!(env["GROK_HOME"], "/tmp/terrarium-login-x/home/.grok");
+        let env = child_env(LoginKind::Codex, home);
+        assert_eq!(env["CODEX_HOME"], "/tmp/terrarium-login-x/home");
     }
 
     fn fixture(name: &str) -> Vec<u8> {

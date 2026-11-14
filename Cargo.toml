@@ -16,6 +16,7 @@ members = [
     "crates/adapters/codex",
     "crates/adapters/copilot",
     "crates/adapters/pi",
+    "crates/adapters/grok",
 ]
 
 [workspace.package]
@@ -37,6 +38,7 @@ terrarium-adapter-claude = { path = "crates/adapters/claude" }
 terrarium-adapter-codex = { path = "crates/adapters/codex" }
 terrarium-adapter-copilot = { path = "crates/adapters/copilot" }
 terrarium-adapter-pi = { path = "crates/adapters/pi" }
+terrarium-adapter-grok = { path = "crates/adapters/grok" }
 
 # Runtime and HTTP
 tokio = { version = "1.47", features = ["full"] }

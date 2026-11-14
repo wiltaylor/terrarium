@@ -364,6 +364,50 @@ pub async fn rebuild(state: &AppState) {
     }
 }
 
+/// How often [`watch_grok_logins`] reads the stamps of the Grok logins.
+pub const GROK_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// True when the matcher must be built again: the stamps changed since
+/// the last read, or this is the first read and a Grok login exists.
+pub fn grok_logins_changed(
+    last: Option<&[crate::accounts::GrokStamp]>,
+    now: &[crate::accounts::GrokStamp],
+) -> bool {
+    match last {
+        Some(l) => l != now,
+        None => !now.is_empty(),
+    }
+}
+
+/// Build the matcher again whenever a Grok `auth.json` of an account
+/// changes (TER-1192, rev-1191 a). Grok refreshes its token itself, with
+/// no daemon call: the build after a login or a verify (TER-1191) would
+/// cover the new token only later. This task reads the size, the change
+/// time, and the inode of each file every [`GROK_WATCH_INTERVAL`] (no
+/// content), and builds the matcher on a change, so a refreshed token is
+/// in it within that time. Each value a build reads stays in the matcher
+/// ([`retain_dropped`]). The supervisor also builds it before a grok agent
+/// starts and after it exits. The task ends with the daemon.
+pub async fn watch_grok_logins(state: std::sync::Weak<AppState>) {
+    let mut last: Option<Vec<crate::accounts::GrokStamp>> = None;
+    loop {
+        let Some(s) = state.upgrade() else {
+            return;
+        };
+        let dir = s.state_dir.clone();
+        let now = tokio::task::spawn_blocking(move || crate::accounts::grok_auth_stamps(&dir))
+            .await
+            .unwrap_or_default();
+        if grok_logins_changed(last.as_deref(), &now) {
+            tracing::debug!("a Grok login changed; building the redaction matcher");
+            rebuild(&s).await;
+        }
+        last = Some(now);
+        drop(s);
+        tokio::time::sleep(GROK_WATCH_INTERVAL).await;
+    }
+}
+
 /// The labels that `actor` sees in a text that the daemon redacts when it
 /// shows it (a transcript, a screen, an upload): each name for the
 /// operator and a sysadmin; the names of the own project for another
@@ -458,6 +502,49 @@ mod tests {
             r.redact_str("a ghp_globalvalue123 b projectvalue4567 c zai-key-abcdefgh abc"),
             "a [secret:gh] b [secret:p/deploy] c [secret:subscription/zai] abc"
         );
+    }
+
+    /// TER-1192 (rev-1191 a): a write of a Grok `auth.json`, by the daemon
+    /// or by grok in place, changes its stamp, so the login watch builds
+    /// the matcher again. The stamps hold no content.
+    #[test]
+    fn a_grok_login_write_changes_its_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let stamps = || crate::accounts::grok_auth_stamps(dir.path());
+        assert!(stamps().is_empty());
+        assert!(!grok_logins_changed(None, &stamps()));
+        let grok = terrarium_core::HarnessId::Grok;
+        let token = "xai-at-Q7w9Zk2LmP4rT8vB";
+        crate::accounts::write_credential(
+            dir.path(),
+            "x-super",
+            grok,
+            format!(r#"{{"session": {{"access_token": "{token}"}}}}"#).as_bytes(),
+        )
+        .unwrap();
+        let first = stamps();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, "x-super");
+        assert!(!format!("{first:?}").contains(token));
+        // The first read with a login builds the matcher.
+        assert!(grok_logins_changed(None, &first));
+        assert!(!grok_logins_changed(Some(&first), &stamps()));
+        // grok rewrites the file in place (the single-file bind keeps the
+        // inode): a longer token changes the size.
+        let path = crate::accounts::credential_path(
+            &crate::accounts::store_dir(dir.path(), "x-super"),
+            grok,
+        );
+        std::fs::write(
+            &path,
+            r#"{"session": {"access_token": "xai-at-N4eW8tOk3nV6yU2c-refreshed"}}"#,
+        )
+        .unwrap();
+        let second = stamps();
+        assert!(grok_logins_changed(Some(&first), &second));
+        // A second account is a change too.
+        crate::accounts::write_credential(dir.path(), "x-other", grok, b"{\"a\": \"b\"}").unwrap();
+        assert!(grok_logins_changed(Some(&second), &stamps()));
     }
 
     /// TER-1191: the matcher holds each token of a Grok Build login of an

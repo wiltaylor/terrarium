@@ -70,6 +70,7 @@ use serde_json::Value;
 use terrarium_adapter_claude::{ClaudeAdapter, ClaudeOptions};
 use terrarium_adapter_codex::{CodexAdapter, CodexOptions};
 use terrarium_adapter_copilot::{CopilotAdapter, CopilotOptions};
+use terrarium_adapter_grok::{GrokAdapter, GrokOptions};
 use terrarium_adapter_pi::{PiAdapter, PiOptions};
 use terrarium_core::config::SubscriptionDef;
 use terrarium_core::turn_tag::{self, SystemKind, TurnSource};
@@ -236,7 +237,7 @@ pub const DEFAULT_LEAD_NUDGE_INTERVAL: Duration = Duration::from_secs(10);
 
 impl RunnerSupervisorConfig {
     /// The config with the real adapters: Claude Code, Codex, Copilot CLI,
-    /// and pi.
+    /// pi, and Grok Build.
     pub fn new(
         state_dir: PathBuf,
         runtime_dir: PathBuf,
@@ -317,15 +318,23 @@ pub fn default_adapters(
     let pi = PiOptions {
         agent_dir: inside(HarnessId::Pi),
         host_agent_dir: Some(host(HarnessId::Pi)),
-        harness_workspace: work,
+        harness_workspace: work.clone(),
         ..PiOptions::default()
     };
+    let grok = GrokOptions {
+        home_dir: inside(HarnessId::Grok),
+        host_home_dir: Some(host(HarnessId::Grok)),
+        harness_workspace: work,
+        hook_program: sandbox.hook_program(),
+        ..GrokOptions::default()
+    };
     let mut map = HashMap::new();
-    let entries: [(HarnessId, Arc<dyn Adapter>); 4] = [
+    let entries: [(HarnessId, Arc<dyn Adapter>); 5] = [
         (HarnessId::Claude, Arc::new(ClaudeAdapter::new(claude))),
         (HarnessId::Codex, Arc::new(CodexAdapter::new(codex))),
         (HarnessId::Copilot, Arc::new(CopilotAdapter::new(copilot))),
         (HarnessId::Pi, Arc::new(PiAdapter::new(pi))),
+        (HarnessId::Grok, Arc::new(GrokAdapter::new(grok))),
     ];
     for (h, a) in entries {
         let mut entry = AdapterEntry::new(a);
@@ -1595,14 +1604,6 @@ fn check_subscription(
     agent: &Agent,
     sub: Option<&SubscriptionCheck>,
 ) -> Result<Option<Subscription>, SupervisorError> {
-    // Grok Build is a value only until its adapter lands (TER-1192).
-    if agent.harness == terrarium_core::HarnessId::Grok {
-        return Err(SupervisorError::NotReady(
-            "the grok harness has no adapter yet (TER-1192); an xai plan row keeps its Grok \
-             Build login until then"
-                .into(),
-        ));
-    }
     // pi uses API keys only (PLAN §16.3): a plan login does not list pi,
     // so say why before the harness list does.
     if let Some(SubscriptionCheck::Found(s)) = sub
@@ -2612,6 +2613,14 @@ impl RunnerSupervisor {
             .await?;
         // The socket is up before the sandbox binds its dir.
         secret_warnings.extend(self.ssh_agent(&agent, ssh_agent));
+        // Grok refreshes its login file itself: the matcher holds the
+        // tokens of the file as it is now before the first output line
+        // (TER-1192). The login watch and the exit build it again later.
+        if agent.harness == HarnessId::Grok
+            && let Some(state) = self.state()
+        {
+            crate::secrets::redact::rebuild(&state).await;
+        }
         self.record_version(id, agent.harness, harness_version);
         self.record_accounts(id, &accounts);
         let resume = if fresh_for_prompt {
@@ -3834,6 +3843,15 @@ impl RunnerSupervisor {
         let clean = status.success();
         let how = exit_how(&status);
         let mut ended_agent = None;
+        // A grok agent may have refreshed its login file just before it
+        // exited: take the new tokens into the matcher now (TER-1192,
+        // rev-1191 a), before its last output is read.
+        let grok = lock(&self.inner.slots)
+            .get(&id)
+            .is_some_and(|s| s.agent.harness == HarnessId::Grok);
+        if grok && let Some(state) = self.state() {
+            crate::secrets::redact::rebuild(&state).await;
+        }
         // The harness is gone: its stream is free (`crate::stream_limit`).
         self.stream_forget(id);
         // A disabled subscription: the agent stays down (no relaunch).

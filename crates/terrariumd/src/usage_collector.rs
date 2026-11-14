@@ -389,7 +389,8 @@ pub fn check_transcript(
             HarnessId::Copilot => parent == session,
             // A per-agent directory: no other agent writes there.
             HarnessId::Pi => true,
-            // No grok sessions are read yet (TER-1192).
+            // No grok session file is read: its layout and `grok usage`
+            // need the signed-in capture (TER-1192 release gate).
             HarnessId::Grok => false,
         };
     if !named {
