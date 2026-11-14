@@ -126,7 +126,7 @@ async fn merge(td: &TestDaemon, cards: &[&str]) -> Job {
     let j = state(td)
         .db
         .write("operator", move |t| {
-            jobs::create(
+            let job = jobs::create(
                 t,
                 NewJob {
                     project: "p".into(),
@@ -139,7 +139,13 @@ async fn merge(td: &TestDaemon, cards: &[&str]) -> Job {
                     batch,
                     planned_secs: None,
                 },
-            )
+            )?;
+            // What the API's queue writes on a `code` board (`card merge`,
+            // `POST /api/merges`); on the other flows a rule writes it.
+            if terrariumd::jobs::code_flow(t, "p")? {
+                terrariumd::jobs::mark_queued(t, &job)?;
+            }
+            Ok(job)
         })
         .await
         .unwrap();
