@@ -20,6 +20,8 @@
 //!     by `job` holds the job slot from its admission until a job of the
 //!     card has ended after it (passed, failed, or cancelled) and it has no
 //!     open job, or it leaves the column. Then the next card is admitted.
+//!     A failed job ends only when the rules have acted on it, so its
+//!     rerun keeps the slot (TER-1250, `RERUN_SETTLED`).
 //!   - `batch`: when no card of the last batch is still in the column, and
 //!     `batch_size` cards wait or the first one has waited
 //!     `max_wait_seconds`: admit up to `max_batch_cards` (default
@@ -148,6 +150,28 @@ pub(crate) fn queued_by_column(
 const JOB_OF_CARD: &str = "(j.card = q.card OR EXISTS (SELECT 1 FROM json_each(j.batch)
                             WHERE json_extract(value, '$.card') = q.card))";
 
+/// The rerun of ended job `j` is settled (TER-1250): `j` did not fail, or
+/// the board rules have acted on its end. A failed job frees the `job`
+/// slot only when its `job.verdict` is written (by `after_end`, after the
+/// end; a kind with no verdict, or 10 minutes after the end, without
+/// one), the rule engine's cursor is past its `job` and `job.verdict`
+/// events, and no rule run of them is pending. A rerun that a rule queued
+/// is then an open job, so the slot stays held until the rerun ends.
+const RERUN_SETTLED: &str = "(j.state <> 'failed'
+    OR ((j.kind IN ('e2e', 'release')
+         OR j.ended_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-600 seconds')
+         OR EXISTS (SELECT 1 FROM events e WHERE e.card = j.card AND e.kind = 'job.verdict'
+                      AND json_extract(e.payload, '$.job') = j.id))
+        AND NOT EXISTS (SELECT 1 FROM events e
+                         WHERE e.seq > coalesce((SELECT seq FROM rule_cursor WHERE id = 1), e.seq)
+                           AND e.kind IN ('job', 'job.verdict')
+                           AND coalesce(json_extract(e.payload, '$.job'),
+                                        json_extract(e.payload, '$.id')) = j.id)
+        AND NOT EXISTS (SELECT 1 FROM rule_runs r JOIN events e ON e.seq = r.event_seq
+                         WHERE r.state = 'pending' AND e.kind IN ('job', 'job.verdict')
+                           AND coalesce(json_extract(e.payload, '$.job'),
+                                        json_extract(e.payload, '$.id')) = j.id)))";
+
 /// Does a card of column `column_id` hold its job slot (release `job`)?
 fn job_slot_busy(conn: &Connection, column_id: i64) -> ApiResult<bool> {
     let sql = format!(
@@ -158,7 +182,8 @@ fn job_slot_busy(conn: &Connection, column_id: i64) -> ApiResult<bool> {
                            AND {JOB_OF_CARD})
                  OR NOT EXISTS (SELECT 1 FROM jobs j
                            WHERE j.state IN ('passed', 'failed', 'cancelled')
-                             AND j.ended_at >= q.admitted_at AND {JOB_OF_CARD})))"
+                             AND j.ended_at >= q.admitted_at AND {JOB_OF_CARD}
+                             AND {RERUN_SETTLED})))"
     );
     Ok(conn.query_row(&sql, [column_id], |r| r.get(0))?)
 }
@@ -373,7 +398,8 @@ pub fn release(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
                                 WHERE j.state IN ('queued', 'running') AND {JOB_OF_CARD})
                               AND EXISTS (SELECT 1 FROM jobs j
                                 WHERE j.state IN ('passed', 'failed', 'cancelled')
-                                  AND j.ended_at >= q.admitted_at AND {JOB_OF_CARD}))))"
+                                  AND j.ended_at >= q.admitted_at AND {JOB_OF_CARD}
+                                  AND {RERUN_SETTLED}))))"
         ),
         params![s.id, s.release == QueueRelease::Job],
     )?;

@@ -15,6 +15,11 @@
 //!   builds the matcher again after a Grok login and after a verify of the
 //!   row, so a refreshed token joins it then (TER-1191).
 //!
+//! - each key that the daemon dropped from a row that became an xai plan
+//!   row ([`retain_dropped`], TER-1239), for the life of the daemon: an
+//!   agent that started with the key (a pi agent) may still run and print
+//!   it. A restart forgets these keys.
+//!
 //! The decrypted values live only for the build, in zeroizing buffers. The
 //! matcher keeps its own copy of the patterns, for the life of the daemon:
 //! it must, to find them. That copy is not zeroized.
@@ -57,8 +62,9 @@
 //!
 //! The live terminal stream to the operator is not redacted.
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 use rusqlite::Connection;
 use terrarium_core::redact::{self as core, Entry, Judgment, Redactor, View};
@@ -263,6 +269,45 @@ fn grok_entries(state_dir: &Path) -> Vec<Entry<Zeroizing<String>>> {
     out
 }
 
+/// The values of the dropped subscription keys, by state dir (one daemon,
+/// or one test daemon), with the subscription name.
+type Dropped = HashMap<PathBuf, Vec<(String, Zeroizing<String>)>>;
+
+static DROPPED: LazyLock<Mutex<Dropped>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Keep the values of a subscription key that the daemon drops (TER-1239,
+/// rev-1205b): the key file goes, but an agent that started with the key
+/// may still run, so its output stays redacted until the daemon ends. Call
+/// it before the key file goes; the next build holds the values.
+pub fn retain_dropped(state_dir: &Path, name: &str, values: Vec<String>) {
+    let mut map = DROPPED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let list = map.entry(state_dir.to_owned()).or_default();
+    for v in values {
+        if !list.iter().any(|(n, k)| n == name && k.as_str() == v) {
+            list.push((name.to_owned(), Zeroizing::new(v)));
+        }
+    }
+}
+
+/// The entries of the dropped subscription keys of `state_dir`, with the
+/// label and scope of a stored key.
+fn dropped_entries(state_dir: &Path) -> Vec<Entry<Zeroizing<String>>> {
+    let map = DROPPED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    map.get(state_dir)
+        .into_iter()
+        .flatten()
+        .map(|(name, value)| Entry {
+            label: format!("{SUBSCRIPTION_PREFIX}{name}"),
+            scope: Some(GLOBAL.to_owned()),
+            value: value.clone(),
+        })
+        .collect()
+}
+
 /// Build the matcher from the store and the subscription keys. A value
 /// shorter than [`terrarium_core::redact::MIN_LEN`] bytes is skipped, and
 /// so is each pattern that [`keep`] refuses.
@@ -271,6 +316,7 @@ pub fn build(conn: &Connection, state_dir: &Path) -> ApiResult<Redactor> {
     let mut entries = secret_entries(conn, state_dir)?;
     entries.extend(subscription_entries(state_dir));
     entries.extend(grok_entries(state_dir));
+    entries.extend(dropped_entries(state_dir));
     let redactor = Redactor::build(
         entries.iter().map(|e| Entry {
             label: e.label.clone(),

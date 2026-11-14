@@ -10288,6 +10288,12 @@ role_in_use`, `details.roles`, and `details.rules`, and nothing changes.
 The reference is not rewritten: `@x` follows the role, so there is no
 column to rewrite it to. A reference that named no column before the
 change does not block it.
+A change that leaves `@x` resolving by name to another column than
+before (the role `x` cleared while another column is named `x`) is
+refused the same way (TER-1246): `role_in_use`, or `column_in_use` when
+the column it named is removed. `@x` may still follow the role `x` to
+another column, and it may keep its own column by name, also renamed in
+the same change (`@x` rewritten to `@<new name>`).
 
 ## 20. Event sources and ingest
 
@@ -13143,6 +13149,7 @@ The updater does these steps, and records each one (`steps` of a run):
 | `resolve` | Asks the registry for the digest of the tag (anonymous pull token). The container runs that digest already: the run ends as `current`. |
 | `verify` | Checks the signature of `<repo>@<digest>` (§34.4). A failure stops the run. With `off`, the step is `skipped`. |
 | `pull` | Pulls the image by digest. Before the drain, so a slow or failed pull stops no work. |
+| `environment` | Resolves the deployed compose environment, runs the required template check in a one-off container of the new image, and compares the environment key names of the release's `compose.yaml` (`terrariumd release-env-keys`) with the deployed ones. A missing key ends the detail with `WARNING: ...` and the update goes on; a missing key that the release marks `# update:required` fails the step and the run. Key names only, never values ([release.md](release.md), "New environment keys"). |
 | `drain` | Runs `terrarium admin update drain --wait <s>` in the container (§34.5). |
 | `backup` | Runs `terrariumd backup create --json` in the container: a full backup in the backup dir (§32). Migrations only go forward; the way back needs it. |
 | `stop`, `remove`, `start` | Stops the container (its stop timeout), removes it, and makes a new one with the same settings (binds, ports, networks, labels, the seccomp profile, the env of compose) and the new image. The env, command, user, and labels of the old image do not carry over: the new image brings its own. Each compose label (`com.docker.compose.*`: the project, the service, the working dir, the config files) stays, also when the old image has it: an image that `docker compose build` made carries the project and service labels, and without them the next `inspect` finds no container. |

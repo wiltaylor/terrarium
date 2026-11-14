@@ -2210,7 +2210,9 @@ sandbox ([api.md §34](api.md#34-self-update)). `status` prints the running
 version, the newest release of the channel (`UPDATE AVAILABLE` when it is
 newer), the policy, the maintenance window that runs now, the updater (its
 build, the signature check, the image, the rollback target), and the last
-run with its steps. `check` reads the releases now. `apply` asks the
+run with its steps. A step warning (the deployed compose lacks
+environment keys of the release, [release.md](release.md) "New environment
+keys") is printed first, as a `WARNING:` line. `check` reads the releases now. `apply` asks the
 updater for the update and returns at once: the daemon drains, backs up,
 and restarts, so a CLI in an agent can lose its turn. Follow it with
 `status`. `rollback` restores the backup of the last update: **the data

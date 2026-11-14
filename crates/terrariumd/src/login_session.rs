@@ -893,6 +893,12 @@ pub async fn detect_on_start(state: &Shared) -> ApiResult<()> {
     Ok(())
 }
 
+/// Test builds only (TER-1239, `fake-supervisor`): the subscription names
+/// whose [`register`] fails, so a test can reach the cleanup of a failed
+/// Grok import (`drop_grok_import`).
+#[cfg(feature = "fake-supervisor")]
+pub static FAIL_REGISTER: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 /// Make or update the subscription of a finished login. A file
 /// subscription keeps its definition; only its login state changes.
 pub async fn register(
@@ -900,6 +906,16 @@ pub async fn register(
     st: &LoginStatus,
     name: Option<&str>,
 ) -> ApiResult<Subscription> {
+    #[cfg(feature = "fake-supervisor")]
+    if let Some(n) = name
+        && FAIL_REGISTER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|f| f == n)
+    {
+        return Err(ApiError::internal("register failed (test fault hook)"));
+    }
     let list = state.db.read(subs::list).await?;
     let existing = match name {
         Some(n) => list.iter().find(|s| s.name == n).cloned(),
@@ -944,6 +960,9 @@ pub async fn register(
             subs::get(t, &name)
         })
         .await?;
+    // `set_plan` may have made an xai key row a plan row: its key file goes
+    // (TER-1239).
+    drop_plan_row_keys_in(state).await;
     Ok(sub)
 }
 
@@ -1754,10 +1773,24 @@ pub fn key_path(state_dir: &Path, name: &str) -> PathBuf {
         .join(format!("{name}.json"))
 }
 
-/// Write the key file, mode 0600, through a temp file and a rename.
+/// Write the key file, mode 0600, through a temp file and a rename. The
+/// values of a key that it replaces stay in the redaction matcher for the
+/// life of the daemon (`secrets::redact::retain_dropped`, TER-1239): an
+/// agent that started with the old key may still run.
 pub fn store_key(state_dir: &Path, name: &str, key: &ApiKey) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
+    if let Some(old) = read_key(state_dir, name) {
+        let new = key.secret_values();
+        let gone: Vec<String> = old
+            .secret_values()
+            .into_iter()
+            .filter(|v| !new.contains(v))
+            .collect();
+        if !gone.is_empty() {
+            crate::secrets::redact::retain_dropped(state_dir, name, gone);
+        }
+    }
     let path = key_path(state_dir, name);
     let dir = path.parent().unwrap_or(state_dir);
     std::fs::create_dir_all(dir)?;
@@ -1780,12 +1813,17 @@ pub fn store_key(state_dir: &Path, name: &str, key: &ApiKey) -> std::io::Result<
 /// Remove the key file of each xai plan row in `list` (TER-1205): a fleet
 /// or file apply that turns an xai API-key row into a plan row drops the
 /// key (`store::subscriptions::upsert_def` clears the row). Returns the
-/// names whose key went. The caller rebuilds the redaction matcher.
+/// names whose key went. The key values stay in the redaction matcher for
+/// the life of the daemon (`secrets::redact::retain_dropped`, TER-1239).
+/// The caller rebuilds the matcher.
 pub fn drop_plan_row_keys(state_dir: &Path, list: &[Subscription]) -> Vec<String> {
     let mut out = Vec::new();
     for s in list {
         if !terrarium_core::xai::is_plan_row(&s.provider, s.plan.as_deref()) {
             continue;
+        }
+        if let Some(k) = read_key(state_dir, &s.name) {
+            crate::secrets::redact::retain_dropped(state_dir, &s.name, k.secret_values());
         }
         match std::fs::remove_file(key_path(state_dir, &s.name)) {
             Ok(()) => out.push(s.name.clone()),

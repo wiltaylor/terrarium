@@ -40,6 +40,10 @@ services:
     ports:
       - "${TERRARIUM_ARTIFACT_PORT:-8081}:8081"        # artifact serving origin (§15.2)
       - "${TERRARIUM_HOST_PORT:-8082}:8082"            # host agent dial-in (§19)
+    # The self-updater does not change a deployed compose file. Before an
+    # update it warns about each key here that the deployment lacks, and
+    # refuses the update for a key that ends with `# update:required`
+    # (docs/release.md, "New environment keys").
     environment:
       TERRARIUM_TOKEN: ${TERRARIUM_TOKEN:?set TERRARIUM_TOKEN in .env (see .env.example)}
       TERRARIUM_PUBLIC_URL: ${TERRARIUM_PUBLIC_URL:-http://localhost:8080}
