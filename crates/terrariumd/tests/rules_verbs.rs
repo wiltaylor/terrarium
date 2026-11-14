@@ -5200,6 +5200,8 @@ async fn column_rules_merge_a_batch_cut_a_version_and_build_it() {
 
 /// TER-1280: a repair tick between a red end and the requeue keeps the
 /// `merge_queue` members of the open group, so the lead can queue it again.
+/// Without a live fix card the repair releases them (TER-333, the sweep
+/// test above).
 #[tokio::test]
 async fn merge_group_repair_keeps_red_batch_members_until_the_requeue() {
     use terrariumd::store::groups;
@@ -5214,6 +5216,15 @@ async fn merge_group_repair_keeps_red_batch_members_until_the_requeue() {
         .unwrap()
         .to_owned();
     end_job(&td, &job, false).await;
+    // The red group waits for its requeue: it holds a live fix card.
+    let label = format!("merge-fix:{}", job.id);
+    let fix = state(&td)
+        .db
+        .read(move |c| terrariumd::store::board::find_open_by_label(c, "p", &label))
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("the red group has no fix card"));
+    assert_eq!(card(&td, &fix).await["group"]["id"], gid);
     let (members, group) = ([a.clone(), b.clone()], gid.clone());
     let kept = state(&td)
         .db

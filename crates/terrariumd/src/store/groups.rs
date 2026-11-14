@@ -669,9 +669,12 @@ fn pending_run(conn: &Connection, id: &str) -> ApiResult<Option<String>> {
 /// in `backlog`, and the job's later step writes found the group closed.
 /// The repair removes such a member once the job has ended.
 ///
-/// A `merge_queue` member whose newest merge job ended red also stays
-/// (TER-1280): the lead queues the open group again, so the repair must not
-/// drop it between the red end and the requeue. The group's close removes it.
+/// A `merge_queue` member whose newest merge job ended red also stays while
+/// the group holds a live fix card (`merge-fix:`, not archived, not done):
+/// the lead queues that group again, so the repair must not drop it between
+/// the red end and the requeue (TER-1280). Without a live fix card the
+/// group waits for nothing, and the member is released so it can join a
+/// new group (TER-333).
 ///
 /// `waiting` holds when each waiting group was first skipped. A group that
 /// waited [`RECONCILE_WAIT`] is repaired anyway. Returns the groups that
@@ -706,6 +709,13 @@ pub fn reconcile_merge_groups(
             params![g.key.strip_prefix("merge:").unwrap_or_default(), board::project_of(t, &id)?],
             |r| r.get::<_, bool>(0),
         )?;
+        let mut awaits_requeue = false;
+        for member in &g.members {
+            let card = board::get_card(t, member)?;
+            awaits_requeue |= !card.archived
+                && card.column != "done"
+                && card.labels.iter().any(|l| l.starts_with("merge-fix:"));
+        }
         for member in &g.members {
             let card = board::get_card(t, member)?;
             let role: Option<String> = t.query_row(
@@ -721,7 +731,8 @@ pub fn reconcile_merge_groups(
                 || (!repair && !merging
                     && ((job_ended && role.as_deref() == Some("merge_queue")
                             && super::jobs::open_of_card(t, member)?.is_none()
-                            && !t.query_row(MERGE_JOB_RED_SQL, [member], |r| r.get::<_, bool>(0))?)
+                            && !(awaits_requeue
+                                && t.query_row(MERGE_JOB_RED_SQL, [member], |r| r.get::<_, bool>(0))?))
                         || matches!(role.as_deref(), Some("working" | "blocked"))
                         || (role.is_none() && matches!(card.column.as_str(), "ready" | "backlog"))))
             {
