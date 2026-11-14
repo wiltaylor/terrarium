@@ -330,11 +330,28 @@ pub(crate) async fn cleanup_selected(
     after: i64,
     only: Option<Vec<i64>>,
 ) -> ApiResult<serde_json::Value> {
+    cleanup_page(state, project, after, only, false).await
+}
+
+/// One page of cleanup. `background`: a page of [`maintain`], which does
+/// nothing while a test holds it ([`crate::jobs::Runtime::hold_log_maintenance`]).
+/// The hold is read under the cleanup lock, so a hold that has returned
+/// is never passed by a page.
+async fn cleanup_page(
+    state: &Shared,
+    project: String,
+    after: i64,
+    only: Option<Vec<i64>>,
+    background: bool,
+) -> ApiResult<serde_json::Value> {
     let _guard = state
         .job_queue
         .log_cleanup
         .try_lock()
         .map_err(|_| ApiError::conflict("job log cleanup is already running"))?;
+    if background && state.job_queue.log_maintenance_held() {
+        return Ok(serde_json::json!({"removed":0,"skipped":0,"scanned":0,"next":0,"conflicts":[]}));
+    }
     let p = project.clone();
     let (logs, def, mut total, next) = state
         .db
@@ -538,7 +555,7 @@ pub async fn maintain(state: &Shared, project: &mut String, after: &mut i64) -> 
         };
         *project = found;
     }
-    let result = cleanup(state, project.clone(), *after).await?;
+    let result = cleanup_page(state, project.clone(), *after, None, true).await?;
     *after = result["next"].as_i64().unwrap_or(0);
     Ok(())
 }

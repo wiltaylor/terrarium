@@ -236,6 +236,10 @@ pub struct Runtime {
     /// True while [`record_accepted_heads`] does nothing (TER-580): a test
     /// holds the background read to see what the API pre-read recorded.
     accepted_hold: std::sync::atomic::AtomicBool,
+    /// True while the background pages of job log cleanup do nothing
+    /// (TER-1286): a test of the cleanup API holds them, so its calls
+    /// neither get a 409 nor find its logs already gone.
+    log_maintenance_hold: AtomicBool,
 }
 
 impl Default for Runtime {
@@ -246,6 +250,7 @@ impl Default for Runtime {
             recovered: tokio::sync::watch::Sender::new(false),
             log_cleanup: tokio::sync::Mutex::new(()),
             accepted_hold: std::sync::atomic::AtomicBool::new(false),
+            log_maintenance_hold: AtomicBool::new(false),
         }
     }
 }
@@ -269,6 +274,19 @@ impl Runtime {
 
     fn accepted_held(&self) -> bool {
         self.accepted_hold.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Hold the background pages of job log cleanup
+    /// ([`crate::job_logs::maintain`]), for tests of the cleanup API. When
+    /// this returns, no page runs: one that had the cleanup lock has
+    /// ended, and a later one sees the hold under that lock and skips.
+    pub async fn hold_log_maintenance(&self) {
+        self.log_maintenance_hold.store(true, Ordering::SeqCst);
+        drop(self.log_cleanup.lock().await);
+    }
+
+    pub(crate) fn log_maintenance_held(&self) -> bool {
+        self.log_maintenance_hold.load(Ordering::SeqCst)
     }
 
     /// Wait until [`spawn`] has taken up the jobs of the last daemon. From
@@ -650,9 +668,14 @@ async fn end_lost(state: &Shared, l: Lost) {
     // TER-676: a job that goes back to the queue starts again only after
     // the lost run let go of its slot. Its receive step takes the slot
     // lock without a wait, so a rerun that starts while the lost run still
-    // ends fails as held. Past the cap the job ends, with why.
+    // ends fails as held. Past the cap the job ends, with why. A release
+    // never goes back to the queue (TER-623), so it does not wait: a held
+    // slot made its error end red after the cap (TER-1286).
+    let rerun = job.kind != JobKind::Release;
     let red = match (&def, dir.as_deref()) {
-        (Some(def), Some(dir)) if running && red.is_none() && wraps && !other_host => {
+        (Some(def), Some(dir))
+            if running && rerun && red.is_none() && wraps && !other_host =>
+        {
             match wait_slot_free(state, def, &job, dir).await {
                 Some(held) => {
                     let merge = job.kind == JobKind::Merge;
