@@ -28,7 +28,11 @@ async fn request(state: &Shared, id: &str) -> RequestRow {
 
 async fn reservation(state: &Shared, id: &str) -> res_store::Reservation {
     let id = id.to_owned();
-    state.db.read(move |c| res_store::get(c, &id)).await.unwrap()
+    state
+        .db
+        .read(move |c| res_store::get(c, &id))
+        .await
+        .unwrap()
 }
 
 async fn call(td: &TestDaemon, service: &str) -> String {
@@ -89,7 +93,11 @@ async fn a_claim_is_reserved_for_the_run_and_given_back() {
     assert_eq!(res.gpus.len(), 1);
     assert!(res.gpus[0].exclusive);
     // The reservation lasts the max run time, and the run ends with it.
-    assert!((res.duration_ms - 120_000).abs() < 5_000, "{}", res.duration_ms);
+    assert!(
+        (res.duration_ms - 120_000).abs() < 5_000,
+        "{}",
+        res.duration_ms
+    );
     assert_eq!(
         ra.run_until.as_deref(),
         Some(
@@ -106,7 +114,11 @@ async fn a_claim_is_reserved_for_the_run_and_given_back() {
 
     // A cancel gives the reservation back.
     let r = td
-        .post_as("p/lead", &format!("/api/service-requests/{a}/cancel"), json!({}))
+        .post_as(
+            "p/lead",
+            &format!("/api/service-requests/{a}/cancel"),
+            json!({}),
+        )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     tick(&state, Utc::now()).await;
@@ -224,7 +236,9 @@ async fn a_run_without_a_claim_gets_its_lease_and_gives_it_back() {
     assert!(ra.reservation_id.is_none());
     assert!(ra.run_until.is_some());
 
-    let lease = service_sched::lease_run(&state, &a, "p/runner").await.unwrap();
+    let lease = service_sched::lease_run(&state, &a, "p/runner")
+        .await
+        .unwrap();
     assert_eq!(lease.lease.target, "p-ssh");
     assert_eq!(lease.lease.expires_at, ra.run_until);
     let again = service_sched::lease_run(&state, &a, "p/runner").await;
@@ -271,7 +285,10 @@ async fn a_run_without_a_claim_gets_its_lease_and_gives_it_back() {
     assert!(rb.error.unwrap().contains("removed"));
     // The scheduler is idle with nothing open.
     tokio::time::sleep(Duration::from_millis(10)).await;
-    assert_eq!(tick(&state, Utc::now()).await, service_sched::Tick::default());
+    assert_eq!(
+        tick(&state, Utc::now()).await,
+        service_sched::Tick::default()
+    );
 }
 
 /// rev-1264b minor 1: a resource claim on a target that `reserve` refuses

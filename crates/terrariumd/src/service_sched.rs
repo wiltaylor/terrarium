@@ -555,8 +555,9 @@ async fn reservation_body(
         })
         .await?;
     let memory_bytes = match &def.resources.memory {
-        Some(m) => core::parse_size(m)
-            .ok_or_else(|| ApiError::invalid(format!("bad memory `{m}`")))?,
+        Some(m) => {
+            core::parse_size(m).ok_or_else(|| ApiError::invalid(format!("bad memory `{m}`")))?
+        }
         None => 0,
     };
     let body = crate::reservations::NewBody {
