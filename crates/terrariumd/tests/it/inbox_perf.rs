@@ -315,6 +315,8 @@ async fn inbox_live_and_tenfold_load() {
         assert_eq!(counts["mail"], 257 * scale);
         assert_eq!(counts["thread"], 100 * scale);
         // The threads have their own badge (TER-466): `open` leaves them out.
-        assert_eq!(counts["open"], 20 * scale - 5);
+        // It counts the open questions and the open notices (TER-1324).
+        assert_eq!(counts["notice"], 10 * scale - 5);
+        assert_eq!(counts["open"], 30 * scale - 10);
     }
 }
