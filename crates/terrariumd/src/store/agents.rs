@@ -1926,9 +1926,9 @@ mod tests {
             .unwrap_err();
         assert!(e.message.contains("is not valid"), "{}", e.message);
         let model: Option<String> = db
-            .read(|c| {
-                Ok(c.query_row("SELECT model FROM agents WHERE id = 'A1'", [], |r| r.get(0))?)
-            })
+            .read(
+                |c| Ok(c.query_row("SELECT model FROM agents WHERE id = 'A1'", [], |r| r.get(0))?),
+            )
             .await
             .unwrap();
         assert_eq!(model, None);

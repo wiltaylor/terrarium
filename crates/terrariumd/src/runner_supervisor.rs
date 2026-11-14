@@ -8802,7 +8802,10 @@ mod tests {
             .unwrap()
         };
         for h in HarnessId::ALL {
-            assert!(check_subscription(&agent(h, "grok-build"), None).is_ok(), "{h}");
+            assert!(
+                check_subscription(&agent(h, "grok-build"), None).is_ok(),
+                "{h}"
+            );
             for bad in ["--always-approve", "-x", "a b"] {
                 let Err(SupervisorError::NotReady(msg)) = check_subscription(&agent(h, bad), None)
                 else {

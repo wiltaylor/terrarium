@@ -1577,7 +1577,13 @@ mod tests {
     /// has white space, is refused.
     #[test]
     fn model_names_cannot_be_flags_or_have_white_space() {
-        for ok in ["", "grok-build", "claude-haiku-4.5", "openai/gpt-6-luna", "m:1"] {
+        for ok in [
+            "",
+            "grok-build",
+            "claude-haiku-4.5",
+            "openai/gpt-6-luna",
+            "m:1",
+        ] {
             assert!(check_model(ok).is_ok(), "{ok}");
         }
         for bad in ["-x", "--always-approve", "a b", "a\tb", "m\n--trust", " m"] {
