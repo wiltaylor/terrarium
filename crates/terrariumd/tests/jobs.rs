@@ -2059,7 +2059,11 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str
     // it ran before the job ended, it closed the group with `e2e` running.
     let r = lab
         .td
-        .post_as(&lab.lead, &format!("/api/cards/{b}/move"), json!({"column": "qa"}))
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{b}/move"),
+            json!({"column": "qa"}),
+        )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     let r = lab
