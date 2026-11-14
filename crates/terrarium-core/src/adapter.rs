@@ -309,15 +309,23 @@ pub const PASTE_END: &str = "\x1b[201~";
 /// pass of `replace` is not enough: the removal of a nested marker can
 /// rebuild one (`"\x1b[20\x1b[201~1~"` becomes `"\x1b[201~"`), and a
 /// rebuilt end marker ends the paste early, so the rest of an untrusted
-/// text (task, mail, card) is typed as keys. The removal repeats until no
-/// marker is left. Each pass makes the text shorter, so the loop ends.
+/// text (task, mail, card) is typed as keys.
+///
+/// One scan in linear time: each char goes onto the output, and a marker
+/// that the output then ends with is cut off. The output before the push
+/// had no marker, so a new marker can only end at the last char. The
+/// result has no marker, at any nesting depth. The markers are ASCII, so
+/// a cut never splits a UTF-8 char.
 pub fn strip_paste_markers(text: &str) -> std::borrow::Cow<'_, str> {
     if !text.contains(PASTE_START) && !text.contains(PASTE_END) {
         return std::borrow::Cow::Borrowed(text);
     }
-    let mut clean = text.to_owned();
-    while clean.contains(PASTE_START) || clean.contains(PASTE_END) {
-        clean = clean.replace(PASTE_START, "").replace(PASTE_END, "");
+    let mut clean = String::with_capacity(text.len());
+    for c in text.chars() {
+        clean.push(c);
+        if c == '~' && (clean.ends_with(PASTE_START) || clean.ends_with(PASTE_END)) {
+            clean.truncate(clean.len() - PASTE_END.len());
+        }
     }
     std::borrow::Cow::Owned(clean)
 }
@@ -426,6 +434,10 @@ mod tests {
             // Parts of a marker that are not a marker stay.
             ("\x1b[20", "\x1b[20"),
             ("1~ \x1b[201", "1~ \x1b[201"),
+            // UTF-8 around and between the parts of a marker.
+            ("é\x1b[20\x1b[201~1~ü", "éü"),
+            ("日\x1b[20\x1b[201~本1~語", "日\x1b[20本1~語"),
+            ("\x1b[2\u{00A0}01~", "\x1b[2\u{00A0}01~"),
         ];
         for (text, want) in cases {
             let got = strip_paste_markers(text);
@@ -436,6 +448,16 @@ mod tests {
             strip_paste_markers("no marker"),
             std::borrow::Cow::Borrowed(_)
         ));
+    }
+
+    /// TER-1289: deep nesting is one linear scan. 100 000 levels (about
+    /// 800 KB) leave nothing. A strip that loops over the whole text for
+    /// each level would make about 10^11 byte steps here.
+    #[test]
+    fn deeply_nested_paste_markers_strip_in_one_scan() {
+        let depth = 100_000;
+        let text = format!("{}{PASTE_END}{}", "\x1b[20".repeat(depth), "1~".repeat(depth));
+        assert_eq!(strip_paste_markers(&format!("a{text}b")), "ab");
     }
 
     #[test]

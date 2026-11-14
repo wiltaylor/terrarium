@@ -95,6 +95,9 @@ mod tests {
             ("a\x1b[20\x1b[200~1~b", "ab"),
             ("a\x1b\x1b[201~[201~b", "ab"),
             ("a\x1b[\x1b[200~201~b", "ab"),
+            // UTF-8 around and between the parts of a marker.
+            ("é\x1b[20\x1b[201~1~ü", "éü"),
+            ("日\x1b[20\x1b[201~本1~語", "日\x1b[20本1~語"),
         ] {
             let typed = type_turn(text);
             let mut expected = b"\x1b[200~".to_vec();
