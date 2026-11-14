@@ -4164,9 +4164,10 @@ pub enum ServiceCmd {
     /// later
     Call {
         name: String,
-        /// The request JSON, or `@<file>` to read it from a file
+        /// The request JSON, or `@<file>` to read it from a file. Not
+        /// `--json`: that is the global output flag
         #[arg(long)]
-        json: Option<String>,
+        request: Option<String>,
         /// A payload file for the service
         #[arg(long)]
         payload: Option<std::path::PathBuf>,

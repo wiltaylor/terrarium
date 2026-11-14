@@ -67,7 +67,7 @@ fn call_body(json_arg: Option<&str>, payload: Option<&std::path::Path>) -> anyho
                 None => a.to_owned(),
             };
             serde_json::from_str(&text)
-                .map_err(|e| CliError::usage(format!("--json is not JSON: {e}")))?
+                .map_err(|e| CliError::usage(format!("--request is not JSON: {e}")))?
         }
     };
     let mut body = json!({"request": request});
@@ -141,10 +141,10 @@ pub async fn service(ctx: &Ctx, cmd: &ServiceCmd) -> anyhow::Result<()> {
         }
         ServiceCmd::Call {
             name,
-            json: j,
+            request,
             payload,
         } => {
-            let body = call_body(j.as_deref(), payload.as_deref())?;
+            let body = call_body(request.as_deref(), payload.as_deref())?;
             let v = ctx
                 .api
                 .post_upload(&format!("{}/requests", path(name)), body)
