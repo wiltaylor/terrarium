@@ -10,10 +10,8 @@
 use std::time::Duration;
 
 use terrarium_core::Answer;
-use terrarium_core::adapter::bracketed_paste;
+use terrarium_core::adapter::{bracketed_paste, strip_paste_markers};
 
-const PASTE_START: &str = "\x1b[200~";
-const PASTE_END: &str = "\x1b[201~";
 /// Cursor down.
 pub const DOWN: &[u8] = b"\x1b[B";
 pub const ENTER: &[u8] = b"\r";
@@ -38,7 +36,7 @@ pub fn escape(text: &str) -> std::borrow::Cow<'_, str> {
 /// from `text` first: a turn can carry mail, which is untrusted input, and
 /// a stray end marker would turn the rest of the text into keystrokes.
 pub fn type_turn(text: &str) -> Vec<u8> {
-    let clean = text.replace(PASTE_START, "").replace(PASTE_END, "");
+    let clean = strip_paste_markers(text);
     bracketed_paste(&escape(&clean))
 }
 
@@ -72,6 +70,29 @@ pub fn answer(answer: &Answer) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TER-1289: nested and split markers cannot rebuild an end marker.
+    /// The typed bytes hold exactly one start and one end marker, at the
+    /// ends of the paste.
+    #[test]
+    fn nested_and_split_paste_markers_are_removed() {
+        for (text, want) in [
+            ("a\x1b[20\x1b[201~1~b", "ab"),
+            ("a\x1b[20\x1b[20\x1b[201~1~1~b", "ab"),
+            ("a\x1b[20\x1b[200~1~b", "ab"),
+            ("a\x1b\x1b[201~[201~b", "ab"),
+            ("a\x1b[\x1b[200~201~b", "ab"),
+            // UTF-8 around and between the parts of a marker.
+            ("é\x1b[20\x1b[201~1~ü", "éü"),
+            ("日\x1b[20\x1b[201~本1~語", "日\x1b[20本1~語"),
+        ] {
+            let typed = type_turn(text);
+            let mut expected = b"\x1b[200~".to_vec();
+            expected.extend_from_slice(want.as_bytes());
+            expected.extend_from_slice(b"\x1b[201~\r");
+            assert_eq!(typed, expected, "{text:?}");
+        }
+    }
 
     #[test]
     fn a_turn_is_a_clean_bracketed_paste() {

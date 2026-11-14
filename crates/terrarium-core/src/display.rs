@@ -761,9 +761,8 @@ impl TerminalKey {
     pub fn bytes(&self) -> Vec<u8> {
         match self {
             Self::Chord(c) => c.terminal_bytes().unwrap_or_default(),
-            Self::Text(t) => t
-                .replace("\x1b[200~", "")
-                .replace("\x1b[201~", "")
+            Self::Text(t) => crate::adapter::strip_paste_markers(t)
+                .into_owned()
                 .into_bytes(),
         }
     }
@@ -1113,6 +1112,8 @@ mod tests {
             ("shift-/", b"?"),
             ("text:/compact", b"/compact"),
             ("text:a\x1b[201~b", b"ab"),
+            ("text:a\x1b[20\x1b[201~1~b", b"ab"),
+            ("text:\x1b\x1b[200~[201~", b""),
         ] {
             assert_eq!(b(key), want.to_vec(), "{key}");
         }
