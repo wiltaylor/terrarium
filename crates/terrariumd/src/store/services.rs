@@ -813,10 +813,72 @@ pub fn mark_payload_deleted(conn: &Connection, id: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// The most request rows that one sweep deletes (TER-1285).
+pub const PRUNE_BATCH: usize = 500;
+
+/// Delete at most `limit` ended request rows that ended before `cutoff`
+/// and whose payload is gone (TER-1285). An open request, or one whose
+/// payload is still there, stays. Returns the number deleted.
+pub fn prune_ended(conn: &Connection, cutoff: &str, limit: usize) -> ApiResult<usize> {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let n = conn.execute(
+        "DELETE FROM service_requests WHERE id IN (
+           SELECT id FROM service_requests
+           WHERE state IN ('done', 'failed', 'cancelled', 'timed_out')
+             AND payload_deleted_at IS NOT NULL
+             AND COALESCE(ended_at, created_at) < ?1
+           ORDER BY id LIMIT ?2)",
+        params![cutoff, limit],
+    )?;
+    Ok(n)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// TER-1285: only ended rows past the cutoff with their payload gone
+    /// are deleted, at most `limit` at a time; open rows stay at any age.
+    #[test]
+    fn prune_ended_deletes_only_old_ended_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("t.db")).unwrap();
+        let rows = [
+            // id, state, ended_at, payload_deleted_at
+            ("r1", "done", Some("2026-01-01"), Some("2026-01-08")),
+            ("r2", "failed", Some("2026-01-01"), Some("2026-01-08")),
+            ("r3", "timed_out", Some("2026-01-01"), Some("2026-01-08")),
+            ("r4", "cancelled", Some("2026-01-01"), None),
+            ("r5", "done", Some("2026-03-01"), Some("2026-03-08")),
+            ("r6", "running", None, Some("2026-01-08")),
+            ("r7", "queued", None, Some("2026-01-08")),
+        ];
+        for (id, state, ended, deleted) in rows {
+            conn.execute(
+                "INSERT INTO service_requests
+                   (id, service, caller, state, request, wait_until, created_at, ended_at,
+                    payload_deleted_at)
+                 VALUES (?1, 's', 'operator', ?2, '{}', 'x', '2026-01-01', ?3, ?4)",
+                params![id, state, ended, deleted],
+            )
+            .unwrap();
+        }
+        let left = |conn: &Connection| -> Vec<String> {
+            let mut st = conn
+                .prepare("SELECT id FROM service_requests ORDER BY id")
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(prune_ended(&conn, "2026-02-01", 2).unwrap(), 2);
+        assert_eq!(left(&conn), ["r3", "r4", "r5", "r6", "r7"]);
+        assert_eq!(prune_ended(&conn, "2026-02-01", 2).unwrap(), 1);
+        assert_eq!(prune_ended(&conn, "2026-02-01", 2).unwrap(), 0);
+        assert_eq!(left(&conn), ["r4", "r5", "r6", "r7"]);
+    }
 
     fn service(max_payload: &str, max_retained: &str) -> ServiceRow {
         let mut def: ServiceDef = serde_json::from_value(serde_json::json!({

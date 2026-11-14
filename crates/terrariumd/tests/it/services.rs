@@ -505,6 +505,26 @@ async fn payloads_go_after_the_seven_day_retention() {
         .post_as("p/w1", "/api/services/keep/requests", call("QllURVM="))
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
+    // TER-1285: the ended row stays until 30 days after its end, then the
+    // sweep deletes it. The running one stays at any age.
+    terrariumd::service_sweep::sweep(&state, now + chrono::Duration::days(29))
+        .await
+        .unwrap();
+    let row = td
+        .get_as("p/w1", &format!("/api/service-requests/{ended}"))
+        .await;
+    assert_eq!(row.status, 200, "{}", row.body);
+    terrariumd::service_sweep::sweep(&state, now + chrono::Duration::days(31))
+        .await
+        .unwrap();
+    let row = td
+        .get_as("p/w1", &format!("/api/service-requests/{ended}"))
+        .await;
+    assert_eq!(row.status, 404, "{}", row.body);
+    let row = td
+        .get_as("p/w1", &format!("/api/service-requests/{open}"))
+        .await;
+    assert_eq!(row.status, 200, "{}", row.body);
 }
 
 /// A call over HTTP as multipart: the `request` part and the `payload`
