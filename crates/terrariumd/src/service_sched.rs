@@ -20,16 +20,18 @@
 //!    is one queued reservation (`crate::reservations::grant` with
 //!    `queue`), held by the target (N2), for the `max_run_time`, with the
 //!    time left to `wait_until` as its queue timeout; the request is then
-//!    `waiting`. A `409` (host offline, target running, the holder has a
-//!    reservation) leaves the request `queued` until `retry_at`; any other
-//!    refusal ends it as `failed`.
+//!    `waiting`. A refusal leaves the request `queued` until `retry_at`
+//!    or ends it as `failed`, by the kind the reservation code gives it.
 //!
-//! A reservation refusal that waiting does not change (a missing host
-//! capability, a claim larger than the host, any refusal of the
-//! reservation's preflight) ends the request as `failed`; [`precheck`]
-//! finds the busy cases before a row is written. A reservation that no
-//! request holds (the daemon stopped between the grant and its write) is
-//! given back by [`release_orphans`].
+//! Before each grant, `crate::reservations::admission` runs the
+//! reservation's own checks with nothing written, and marks a refusal busy
+//! (other work on the host, the host's link) or final (a missing host
+//! capability, a claim larger than the host). Busy leaves the request
+//! `queued` until `retry_at`; final ends it as `failed` with the reason. A
+//! grant that fails after the check is classified by the same call.
+//!
+//! A reservation that no request holds (the daemon stopped between the
+//! grant and its write) is given back by [`release_orphans`].
 //!
 //! A target lease needs an agent. [`lease_run`] leases the target to the
 //! agent that runs a request (C4) until `run_until`; the release revokes
@@ -44,7 +46,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use serde::Serialize;
-use terrarium_core::resources::{Amounts, GpuClaim, GpuDevice};
+use terrarium_core::resources::{GpuClaim, GpuDevice};
 use terrarium_core::service::{self as core, ServiceDef, State};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -52,7 +54,7 @@ use tracing::{debug, info, warn};
 use crate::actor::Actor;
 use crate::api::Shared;
 use crate::error::{ApiError, ApiResult, Code};
-use crate::store::reservations::{self as res_store, State as ResState};
+use crate::store::reservations::{self as res_store, Refusal, State as ResState};
 use crate::store::services::{self as store, Outcome, RequestRow};
 
 /// How often the scheduler runs.
@@ -510,26 +512,27 @@ async fn start_one(
     }
     let (host, body) = match reservation_body(state, def, r, at).await {
         Ok(b) => b,
-        Err(e) => return refused(state, r, Refusal::of(e), at, out).await,
+        Err(e) if matches!(e.code, Code::Conflict | Code::ResourceBusy) => {
+            return refused(state, r, Refusal::Busy(e), at, out).await;
+        }
+        Err(e) => return refused(state, r, Refusal::Final(e), at, out).await,
     };
-    if let Err(why) = precheck(state, def, &host).await {
+    // The reservation's own checks, with nothing written: a busy refusal
+    // waits without a row, a final one fails the request.
+    if let Err(why) = crate::reservations::admission(state, &host, &body).await {
         return refused(state, r, why, at, out).await;
     }
-    let reason = body.reason.clone();
-    let before = rows_with_reason(state, &host, &reason).await?;
+    let check = body.clone();
     let granted = crate::reservations::grant(state, &Actor::Operator, &host, body).await;
     let res = match granted {
         Ok(res) => res,
         Err(e) => {
-            // A refusal after the row was written comes from the
-            // reservation's preflight. The pre-check above lets through
-            // only what waiting does not change, so it is final: one row
-            // and one round of mail per request at most.
-            let made = rows_with_reason(state, &host, &reason).await? > before;
-            let why = if made {
-                Refusal::Final(e.message)
-            } else {
-                Refusal::of(e)
+            // Something changed since the check: ask the reservation code
+            // again what kind of refusal it is now. Admitted now: a race,
+            // try again later.
+            let why = match crate::reservations::admission(state, &host, &check).await {
+                Err(why) => why,
+                Ok(()) => Refusal::Busy(e),
             };
             return refused(state, r, why, at, out).await;
         }
@@ -563,28 +566,6 @@ async fn start_one(
     Ok(())
 }
 
-/// Why a reservation was not made.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Refusal {
-    /// The resources or the host are busy for now: try again after
-    /// [`RETRY`]. No reservation row was written.
-    Busy(String),
-    /// Waiting does not change it: the request fails.
-    Final(String),
-}
-
-impl Refusal {
-    /// A `409` or `resource_busy` before any row was written is busy;
-    /// anything else is final.
-    fn of(e: ApiError) -> Self {
-        if matches!(e.code, Code::Conflict | Code::ResourceBusy) {
-            Self::Busy(e.message)
-        } else {
-            Self::Final(e.message)
-        }
-    }
-}
-
 /// A refused reservation: [`Refusal::Busy`] waits for [`RETRY`];
 /// [`Refusal::Final`] ends the request as `failed` with the reason.
 async fn refused(
@@ -595,8 +576,8 @@ async fn refused(
     out: &mut Tick,
 ) -> ApiResult<()> {
     let message = match why {
-        Refusal::Busy(m) => {
-            debug!(request = %r.id, "service reservation refused for now: {m}");
+        Refusal::Busy(e) => {
+            debug!(request = %r.id, "service reservation refused for now: {}", e.message);
             let (id, next) = (r.id.clone(), fmt(add(at, RETRY)));
             state
                 .db
@@ -611,7 +592,7 @@ async fn refused(
             out.deferred.push(r.id.clone());
             return Ok(());
         }
-        Refusal::Final(m) => m,
+        Refusal::Final(e) => e.message,
     };
     let why = format!("the reservation was refused: {message}");
     if end(state, &r.id, State::Failed, why).await? {
@@ -621,164 +602,10 @@ async fn refused(
     Ok(())
 }
 
-/// The reservation rows on `host` made for one request (by their reason).
-async fn rows_with_reason(state: &Shared, host: &str, reason: &str) -> ApiResult<i64> {
-    let (host, reason) = (host.to_owned(), reason.to_owned());
-    state
-        .db
-        .read(move |c| {
-            Ok(c.query_row(
-                "SELECT COUNT(*) FROM reservations
-                 WHERE host = ?1 AND json_extract(data, '$.reason') = ?2",
-                params![host, reason],
-                |r| r.get(0),
-            )?)
-        })
-        .await
-}
-
 /// The reason of the reservation of request `id`. The orphan sweep reads
 /// the request ID back from it.
 fn reason_of(service: &str, id: &str) -> String {
     format!("service `{service}` request {id}")
-}
-
-/// The checks of `crate::reservations` (its `preflight`) that run after
-/// the row is written, done before the grant: the ones that waiting does
-/// not change fail the request; the busy ones wait without a row.
-async fn precheck(state: &Shared, def: &ServiceDef, host: &str) -> Result<(), Refusal> {
-    use terrarium_core::config::TargetKind;
-    let Some(caps) = state.executor.hosts.capabilities(host) else {
-        return Err(Refusal::Busy(format!("host `{host}` is offline")));
-    };
-    if !caps.reservations {
-        return Err(Refusal::Final(format!(
-            "host `{host}` is missing the reservations capability; upgrade its host agent"
-        )));
-    }
-    let res = &def.resources;
-    let n = usize::try_from(res.gpus).unwrap_or(usize::MAX);
-    if n > 0 && !caps.gpu_reservations {
-        return Err(Refusal::Final(format!(
-            "host `{host}` lacks GPU reservation support"
-        )));
-    }
-    if caps.gpus.len() < n {
-        return Err(Refusal::Final(format!(
-            "host `{host}` has {} GPU(s), and the service claims {n}",
-            caps.gpus.len()
-        )));
-    }
-    if !res.gpu_exclusive
-        && let Some(v) = res.gpu_vram.as_deref().and_then(core::parse_size)
-        && caps.gpus.iter().filter(|g| g.memory_bytes >= v).count() < n
-    {
-        return Err(Refusal::Final(format!(
-            "host `{host}` has fewer than {n} GPU(s) with {v} bytes of memory"
-        )));
-    }
-    let amounts = claim_amounts(def).map_err(|e| Refusal::Final(e.message))?;
-    let (target, name, h) = (def.target.clone(), host.to_owned(), host.to_owned());
-    let read = state
-        .db
-        .read(move |c| {
-            let t = crate::store::targets::get(c, &target)?;
-            let others: Vec<_> = crate::store::targets::list(c)?
-                .into_iter()
-                .filter(|o| o.def.host.as_deref() == Some(&h) && o.def.name != target)
-                .collect();
-            let budget = res_store::capacity(c, &h).map(|(_, b, _)| b);
-            let agent_held = res_store::list(c, &h)?.iter().any(|x| {
-                matches!(x.holder, res_store::Holder::Agent(_))
-                    && matches!(
-                        x.state,
-                        ResState::Starting | ResState::Active | ResState::Ending
-                    )
-            });
-            Ok((t, others, budget, agent_held))
-        })
-        .await
-        .map_err(|e| Refusal::Final(e.message))?;
-    let (target, others, budget, agent_held) = read;
-    match budget {
-        Ok(b) if b.remaining_after(&amounts).is_none() => {
-            return Err(Refusal::Final(format!(
-                "the claim is larger than the reservable capacity of host `{name}`"
-            )));
-        }
-        Ok(_) => {}
-        Err(e) => return Err(Refusal::Busy(e.message)),
-    }
-    let limits = terrarium_core::resources::RuntimeLimits {
-        limits: terrarium_core::limits::Limits {
-            cpu_millis: u32::try_from(amounts.cpu_millis).ok().filter(|c| *c > 0),
-            memory_bytes: (amounts.memory_bytes > 0).then_some(amounts.memory_bytes),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let support = if target.def.kind == TargetKind::Docker {
-        limits.limits.docker_support(caps.limits.as_ref())
-    } else {
-        limits.host_support(caps.limits.as_ref())
-    };
-    if let Err(e) = support {
-        return Err(Refusal::Final(format!(
-            "host `{name}` cannot apply the claim: {e}"
-        )));
-    }
-    // Busy: these change when other work on the host ends.
-    if agent_held {
-        return Err(Refusal::Busy(format!(
-            "an agent holds a reservation on host `{name}`"
-        )));
-    }
-    if n > 0 && target.def.kind == TargetKind::Docker && target.state == "running" {
-        return Err(Refusal::Busy(format!(
-            "target `{}` runs; a GPU reservation needs it stopped",
-            target.def.name
-        )));
-    }
-    if res.gpu_exclusive {
-        let busy: Vec<String> = others
-            .iter()
-            .filter(|o| o.def.kind != TargetKind::Host && o.state == "running")
-            .map(|o| o.def.name.clone())
-            .collect();
-        if !busy.is_empty() {
-            return Err(Refusal::Busy(format!(
-                "an exclusive GPU waits for these targets to stop: {}",
-                busy.join(", ")
-            )));
-        }
-    }
-    if target.def.kind == TargetKind::Host
-        && !state
-            .executor
-            .resource_sessions(std::slice::from_ref(&target.def.name), None)
-            .is_empty()
-    {
-        return Err(Refusal::Busy(format!(
-            "target `{}` has sessions that are not in a reservation",
-            target.def.name
-        )));
-    }
-    Ok(())
-}
-
-/// The CPU and memory of the claim.
-fn claim_amounts(def: &ServiceDef) -> ApiResult<Amounts> {
-    let memory_bytes = match &def.resources.memory {
-        Some(m) => {
-            core::parse_size(m).ok_or_else(|| ApiError::invalid(format!("bad memory `{m}`")))?
-        }
-        None => 0,
-    };
-    Ok(Amounts {
-        cpu_millis: def.resources.cpu_millis,
-        memory_bytes,
-        io: Default::default(),
-    })
 }
 
 /// The host and the reservation body of request `r`.
@@ -811,7 +638,7 @@ async fn reservation_body(
         gpus,
         target: def.target.clone(),
         agent: None,
-        amounts: claim_amounts(def)?,
+        amounts: store::claim_amounts(def)?,
         until: fmt(add(at, def.max_run_time())),
         exclusive: false,
         reason: reason_of(&def.name, &r.id),
@@ -907,11 +734,8 @@ pub async fn lease_run(
             r.state
         )));
     }
-    if r.lease_id.is_some() {
-        return Err(ApiError::conflict(format!(
-            "service request `{id}` has a target lease already"
-        )));
-    }
+    // `lease_id` is checked in the write below, not here: one check, in
+    // the same transaction as the write.
     let lease = crate::leases::grant(
         state,
         &Actor::Operator,

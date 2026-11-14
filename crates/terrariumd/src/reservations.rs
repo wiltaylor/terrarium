@@ -3,7 +3,7 @@
 use crate::executor::ResourceOperation;
 use crate::store::{
     agents, hosts,
-    reservations::{self as store, Holder, Reservation, State},
+    reservations::{self as store, Holder, Refusal, Reservation, State},
     targets,
 };
 use crate::{
@@ -22,7 +22,7 @@ use terrarium_core::{
 };
 use terrarium_host::protocol::{DaemonFrame, ResourceApply, ResourceStop};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewBody {
     #[serde(default)]
@@ -94,17 +94,70 @@ fn until(value: &str) -> ApiResult<i64> {
         .map_err(|e| ApiError::invalid(e.to_string()))
 }
 
-fn budget(r: &Reservation) -> ApiResult<RuntimeLimits> {
-    let cpu = u32::try_from(r.amounts.cpu_millis)
-        .map_err(|_| ApiError::invalid("CPU amount is too large"))?;
+/// The CPU and memory rules of a reservation: the CPU in millicores.
+fn check_amounts(a: &Amounts) -> ApiResult<u32> {
+    let cpu =
+        u32::try_from(a.cpu_millis).map_err(|_| ApiError::invalid("CPU amount is too large"))?;
     if cpu > 1_024_000 || !cpu.is_multiple_of(10) {
         return Err(ApiError::invalid(
             "CPU must be at most 1024 cores with at most two decimals",
         ));
     }
-    if r.amounts.memory_bytes > 0 && r.amounts.memory_bytes < terrarium_core::limits::MIN_MEMORY {
+    if a.memory_bytes > 0 && a.memory_bytes < terrarium_core::limits::MIN_MEMORY {
         return Err(ApiError::invalid("memory reservation must be at least 16M"));
     }
+    Ok(cpu)
+}
+
+/// The rules of a reservation that depend only on the target and the
+/// claim, not on the host's state: the amounts, the target kind and host,
+/// and the docker image and GPU rules. [`preflight`] runs them on each
+/// grant; a caller that defines a claim ahead (a service, TER-1265) runs
+/// them when it is defined.
+pub fn check_claim(
+    def: &TargetDef,
+    amounts: &Amounts,
+    gpus: usize,
+    gpu_exclusive: bool,
+) -> ApiResult<()> {
+    amounts.validate().map_err(ApiError::invalid)?;
+    check_amounts(amounts)?;
+    if def.host.is_none() {
+        return Err(ApiError::invalid(format!(
+            "target `{}` has no host to reserve on",
+            def.name
+        )));
+    }
+    if !matches!(def.kind, TargetKind::Host | TargetKind::Docker) {
+        return Err(ApiError::invalid(if gpu_exclusive {
+            "exclusive GPU needs a managed ephemeral Docker target or a native host target with enforced native GPU support; SSH and vmlab cannot enforce exclusive access"
+        } else {
+            "reservations need a host or managed Docker target"
+        }));
+    }
+    if gpus > 0 && def.kind == TargetKind::Docker && (!def.ephemeral || def.image.is_none()) {
+        return Err(ApiError::invalid(
+            "Docker GPU reservations require a managed ephemeral target, not an individual agent",
+        ));
+    }
+    if def.kind == TargetKind::Docker && def.image.is_none() {
+        return Err(ApiError::invalid(
+            "Docker reservations need a managed image target",
+        ));
+    }
+    Ok(())
+}
+
+fn busy<T>(e: ApiError) -> Result<T, Refusal> {
+    Err(Refusal::Busy(e))
+}
+
+fn fin<T>(e: ApiError) -> Result<T, Refusal> {
+    Err(Refusal::Final(e))
+}
+
+fn budget(r: &Reservation) -> ApiResult<RuntimeLimits> {
+    let cpu = check_amounts(&r.amounts)?;
     Ok(RuntimeLimits {
         gpu_devices: r.gpus.iter().map(|g| g.uuid.clone()).collect(),
         limits: Limits {
@@ -187,23 +240,30 @@ async fn host_targets(state: &Shared, host: &str) -> ApiResult<Vec<targets::Targ
 /// Refuse unrepresentable live migrations instead of doubling a host-wide
 /// agent budget across its old per-target slices.
 async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
+    preflight_kind(state, r).await.map_err(Refusal::into_error)
+}
+
+/// [`preflight`], with each refusal marked busy (other work on the host,
+/// or the host's link, must change first) or final.
+async fn preflight_kind(state: &Shared, r: &Reservation) -> Result<(), Refusal> {
     let rows = host_targets(state, &r.host).await?;
     let target = rows
         .iter()
         .find(|t| t.def.name == r.target)
         .ok_or_else(|| ApiError::invalid("target is not on the requested host"))?;
-    if !matches!(target.def.kind, TargetKind::Host | TargetKind::Docker) {
-        return Err(ApiError::invalid(
-            "reservations need a host or managed Docker target",
-        ));
-    }
+    check_claim(
+        &target.def,
+        &r.amounts,
+        r.gpus.len(),
+        r.gpus.iter().any(|g| g.exclusive),
+    )?;
     let caps = state
         .executor
         .hosts
         .capabilities(&r.host)
-        .ok_or_else(|| ApiError::conflict("reservation host is offline"))?;
+        .ok_or_else(|| Refusal::Busy(ApiError::conflict("reservation host is offline")))?;
     if !caps.reservations {
-        return Err(ApiError::conflict(
+        return fin(ApiError::conflict(
             "host is missing the reservations capability; upgrade its host agent",
         ));
     }
@@ -211,7 +271,7 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
     let reservations = state.db.read(move |c| store::list(c, &host)).await?;
     if !r.gpus.is_empty() {
         if !caps.gpu_reservations {
-            return Err(ApiError::conflict("host lacks GPU reservation support"));
+            return fin(ApiError::conflict("host lacks GPU reservation support"));
         }
         if r.gpus.iter().any(|g| g.exclusive)
             && target.def.kind == TargetKind::Host
@@ -223,28 +283,17 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
                 .as_ref()
                 .and_then(|n| n.reason.clone())
                 .unwrap_or_else(|| "the host agent has no [native_gpu] helper".into());
-            return Err(ApiError::conflict(format!(
+            return fin(ApiError::conflict(format!(
                 "exclusive GPU needs enforced native GPU support on a native host target: {reason}"
             )));
         }
-        if r.gpus.iter().any(|g| g.exclusive)
-            && !matches!(target.def.kind, TargetKind::Docker | TargetKind::Host)
-        {
-            return Err(ApiError::invalid(
-                "exclusive GPU needs a managed ephemeral Docker target or a native host target with enforced native GPU support; SSH and vmlab cannot enforce exclusive access",
-            ));
-        }
-        if target.def.kind == TargetKind::Docker
-            && (!target.def.ephemeral
-                || target.def.image.is_none()
-                || !matches!(r.holder, Holder::Target(_)))
-        {
-            return Err(ApiError::invalid(
+        if target.def.kind == TargetKind::Docker && !matches!(r.holder, Holder::Target(_)) {
+            return fin(ApiError::invalid(
                 "Docker GPU reservations require a managed ephemeral target, not an individual agent",
             ));
         }
         if target.def.kind == TargetKind::Docker && target.state == "running" {
-            return Err(ApiError::conflict(
+            return busy(ApiError::conflict(
                 "stop the target before changing GPU exposure; recreate required",
             ));
         }
@@ -281,7 +330,7 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
                     .resource_sessions(&incompatible, None)
                     .is_empty())
         {
-            return Err(ApiError::conflict(
+            return busy(ApiError::conflict(
                 "exclusive GPU admission requires incompatible containers and remote targets to stop",
             ));
         }
@@ -295,7 +344,7 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
                 (Holder::Agent(_), Holder::Target(_)) | (Holder::Target(_), Holder::Agent(_))
             )
     }) {
-        return Err(ApiError::conflict(
+        return busy(ApiError::conflict(
             "agent and target reservations cannot overlap on a host: their slice hierarchies differ",
         ));
     }
@@ -316,7 +365,7 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
             .map(|t| t.def.name.clone())
             .collect();
         if !incompatible.is_empty() {
-            return Err(
+            return busy(
                 ApiError::conflict("exclusive CPU cannot cover these running targets")
                     .with_details(json!({"targets":incompatible})),
             );
@@ -328,18 +377,13 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
             .collect();
         let sessions = state.executor.resource_sessions(&names, None);
         if !sessions.is_empty() {
-            return Err(ApiError::conflict("end existing host sessions before an exclusive grant; live scopes cannot be reparented").with_details(json!({"sessions":sessions})));
+            return busy(ApiError::conflict("end existing host sessions before an exclusive grant; live scopes cannot be reparented").with_details(json!({"sessions":sessions})));
         }
     }
     match target.def.kind {
         TargetKind::Docker => {
-            if target.def.image.is_none() {
-                return Err(ApiError::invalid(
-                    "Docker reservations need a managed image target",
-                ));
-            }
             if matches!(r.holder, Holder::Agent(_)) {
-                return Err(ApiError::invalid(
+                return fin(ApiError::invalid(
                     "a Docker container shares one budget: reserve for its target, not an individual agent",
                 ));
             }
@@ -348,12 +392,12 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
                 .docker_support(caps.limits.as_ref())
                 .map_err(ApiError::conflict)?;
             if !limits.io.is_empty() && !target.def.ephemeral {
-                return Err(ApiError::conflict(
+                return fin(ApiError::conflict(
                     "device IO reservations require an ephemeral Docker target: limits are fixed at create and cannot be cleared without recreating a permanent container",
                 ));
             }
             if !limits.io.is_empty() && target.state == "running" {
-                return Err(ApiError::conflict(
+                return busy(ApiError::conflict(
                     "device IO limits take effect at the next up; Docker cannot change them live",
                 ));
             }
@@ -366,7 +410,7 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
         let names = rows.iter().map(|r| r.def.name.clone()).collect::<Vec<_>>();
         let sessions = state.executor.resource_sessions(&names, Some(agent));
         if !sessions.is_empty() {
-            return Err(ApiError::conflict("finish existing host sessions before granting an agent reservation; live scopes cannot be reparented")
+            return busy(ApiError::conflict("finish existing host sessions before granting an agent reservation; live scopes cannot be reparented")
                 .with_details(json!({"sessions":sessions,"host":r.host,"holder":agent})));
         }
     } else if target.def.kind == TargetKind::Host {
@@ -374,7 +418,7 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
             .executor
             .resource_sessions(std::slice::from_ref(&r.target), None);
         if !sessions.is_empty() {
-            return Err(ApiError::conflict("finish existing host sessions before granting a target reservation; unscoped processes cannot be reparented")
+            return busy(ApiError::conflict("finish existing host sessions before granting a target reservation; unscoped processes cannot be reparented")
                 .with_details(json!({"sessions":sessions,"host":r.host,"target":r.target})));
         }
     }
@@ -481,6 +525,44 @@ pub async fn grant(
     } else {
         Ok(r)
     }
+}
+
+/// Would [`grant`] admit a reservation held by target `body.target` on
+/// `host` now, or queue it? The same checks as a grant (the store's
+/// [`store::candidate`] and the [`preflight`]), with each refusal marked
+/// busy or final, and nothing written. For a caller that tries again
+/// later (services, TER-1265).
+pub async fn admission(state: &Shared, host: &str, body: &NewBody) -> Result<(), Refusal> {
+    if body.agent.is_some() {
+        return fin(ApiError::invalid("admission checks a reservation held by its target"));
+    }
+    if let Err(e) = ready(state, host) {
+        return busy(e);
+    }
+    let target = body.target.clone();
+    let t = state.db.read(move |c| targets::get(c, &target)).await?;
+    if t.def.host.as_deref() != Some(host) {
+        return fin(ApiError::invalid("target is not on the requested host"));
+    }
+    let at = now();
+    let end = until(&body.until)?;
+    let req = store::Request {
+        gpus: body.gpus.clone(),
+        host: host.to_owned(),
+        project: t.def.project.clone().unwrap_or_default(),
+        holder: Holder::Target(t.def.name.clone()),
+        target: t.def.name.clone(),
+        amounts: body.amounts.clone(),
+        exclusive: body.exclusive,
+        reason: body.reason.clone(),
+        duration_ms: end - at,
+        queue_ms: Some(1),
+    };
+    let r = state
+        .db
+        .read(move |c| Ok(store::candidate(c, req, at, "system")))
+        .await??;
+    preflight_kind(state, &r).await
 }
 
 async fn apply(state: &Shared, r: &Reservation, reset: bool) -> ApiResult<()> {

@@ -216,6 +216,7 @@ async fn a_run_without_a_claim_gets_its_lease_and_gives_it_back() {
     td.agent("p", "lead", json!({"roles": ["project_admin"]}))
         .await;
     td.agent("p", "runner", json!({})).await;
+    td.agent("p", "second", json!({})).await;
     let r = td
         .post(
             "/api/targets",
@@ -243,6 +244,22 @@ async fn a_run_without_a_claim_gets_its_lease_and_gives_it_back() {
     assert_eq!(lease.lease.expires_at, ra.run_until);
     let again = service_sched::lease_run(&state, &a, "p/runner").await;
     assert_eq!(again.unwrap_err().code, terrariumd::error::Code::Conflict);
+    // rev-1265b minor 4: a second agent gets its lease granted, then the
+    // check in the write transaction finds the request's lease and gives
+    // the second one back.
+    let clash = service_sched::lease_run(&state, &a, "p/second").await;
+    assert_eq!(
+        clash.unwrap_err().code,
+        terrariumd::error::Code::Conflict
+    );
+    let leases = state
+        .db
+        .read(|c| terrariumd::store::leases::active_on(c, "p-ssh"))
+        .await
+        .unwrap();
+    assert_eq!(leases.len(), 1, "{leases:?}");
+    assert_eq!(leases[0].id, lease.lease.id);
+    assert_eq!(request(&state, &a).await.lease_id, Some(lease.lease.id.clone()));
 
     // The run ends (C3 or C4): the release revokes the lease.
     let id = a.clone();
@@ -319,7 +336,9 @@ async fn a_claim_on_a_target_that_cannot_reserve_is_refused() {
             .await;
         assert_eq!(r.status, 422, "{resources}: {}", r.body);
         assert!(
-            r.body.to_string().contains("needs a host or docker target"),
+            r.body
+                .to_string()
+                .contains("need a host or managed Docker target"),
             "{}",
             r.body
         );
@@ -369,7 +388,7 @@ async fn a_final_refusal_fails_at_once_and_a_busy_one_waits_without_a_row() {
         (
             "big",
             json!({"cpu_millis": 4000}),
-            "larger than the reservable capacity",
+            "is exhausted",
         ),
         (
             "many",
@@ -431,11 +450,12 @@ async fn a_final_refusal_fails_at_once_and_a_busy_one_waits_without_a_row() {
     server.abort();
 }
 
-/// rev-1265 major 2: a refusal of the reservation's own preflight (after
-/// its row is written) fails the request: one row per request at most.
-/// Here an exclusive GPU waits for a session on another container target.
+/// rev-1265b major 1: a busy refusal of the reservation's own preflight
+/// (an exclusive GPU waits for a session on another container target)
+/// leaves the request `queued`, writes no row, and the request runs when
+/// the session has ended.
 #[tokio::test]
-async fn a_preflight_refusal_fails_the_request_with_one_row() {
+async fn a_busy_preflight_refusal_waits_and_runs_when_it_clears() {
     let (td, server, client) = crate::reservations_api::setup().await;
     let state = state_of(&td);
     td.patch("/api/targets/p-box", json!({"ephemeral": true}))
@@ -464,20 +484,60 @@ async fn a_preflight_refusal_fails_the_request_with_one_row() {
     tick(&state, Utc::now()).await;
     tick(&state, Utc::now() + chrono::Duration::seconds(61)).await;
     let ra = request(&state, &a).await;
-    assert_eq!(ra.state.as_str(), "failed", "{ra:?}");
-    assert!(
-        ra.error
-            .as_deref()
-            .unwrap()
-            .contains("reservation was refused"),
-        "{ra:?}"
-    );
-    assert_eq!(reservation_rows(&state, &a).await, 1);
+    assert_eq!(ra.state.as_str(), "queued", "{ra:?}");
+    assert_eq!(reservation_rows(&state, &a).await, 0, "a busy wait makes no row");
     state
         .executor
         .end_resource_sessions(&["p-box2".to_owned()], None)
         .await;
     let _ = tokio::time::timeout(Duration::from_secs(5), collected).await;
+    tick(&state, Utc::now() + chrono::Duration::seconds(130)).await;
+    let ra = request(&state, &a).await;
+    assert_eq!(ra.state.as_str(), "running", "{ra:?}");
+    assert_eq!(reservation_rows(&state, &a).await, 1);
+    client.abort();
+    server.abort();
+}
+
+/// rev-1265b minor 3: two exclusive-GPU services on separate docker
+/// targets of one host run at once on disjoint GPUs, as the reservation
+/// preflight allows.
+#[tokio::test]
+async fn exclusive_gpus_on_two_targets_run_at_once() {
+    let (td, server, client) = crate::reservations_api::setup().await;
+    let state = state_of(&td);
+    for (svc, target) in [("g1", "p-box"), ("g2", "p-box2")] {
+        td.patch(&format!("/api/targets/{target}"), json!({"ephemeral": true}))
+            .await
+            .ok();
+        define(
+            &td,
+            json!({"name": svc, "kind": "script", "target": target, "project": "p",
+                   "command": ["/opt/gen"],
+                   "resources": {"gpus": 1, "gpu_exclusive": true}}),
+        )
+        .await;
+    }
+    let a = call(&td, "g1").await;
+    tick(&state, Utc::now()).await;
+    let ra = request(&state, &a).await;
+    assert_eq!(ra.state.as_str(), "running", "{ra:?}");
+    // The GPU target of `g1` runs now, as a run would start it.
+    state
+        .db
+        .write("system", |t| {
+            t.execute("UPDATE targets SET state = 'running' WHERE name = 'p-box'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let b = call(&td, "g2").await;
+    tick(&state, Utc::now()).await;
+    let rb = request(&state, &b).await;
+    assert_eq!(rb.state.as_str(), "running", "{rb:?}");
+    let ga = reservation(&state, ra.reservation_id.as_deref().unwrap()).await;
+    let gb = reservation(&state, rb.reservation_id.as_deref().unwrap()).await;
+    assert_ne!(ga.gpus[0].uuid, gb.gpus[0].uuid);
     client.abort();
     server.abort();
 }
@@ -523,6 +583,8 @@ async fn a_claim_needs_an_image_target_with_a_host() {
                "container": "c1"}),
         json!({"name": "p-nohost", "kind": "docker", "project": "p", "host": "helios",
                "image": "alpine", "ephemeral": true}),
+        json!({"name": "p-img", "kind": "docker", "project": "p", "host": "helios",
+               "image": "alpine", "ephemeral": true}),
     ] {
         let r = td.post("/api/targets", t.clone()).await;
         assert_eq!(r.status, 201, "{t}: {}", r.body);
@@ -549,6 +611,14 @@ async fn a_claim_needs_an_image_target_with_a_host() {
         ),
         ("p-cont", json!({"memory": "1GiB"}), "managed image target"),
         ("p-nohost", json!({"cpu_millis": 1000}), "has no host"),
+        // The amount rules of a reservation (rev-1265b major 2).
+        ("p-img", json!({"cpu_millis": 1005}), "at most two decimals"),
+        (
+            "p-img",
+            json!({"cpu_millis": 2_000_000}),
+            "at most 1024 cores",
+        ),
+        ("p-img", json!({"memory": "1M"}), "at least 16M"),
     ] {
         let r = td
             .post(

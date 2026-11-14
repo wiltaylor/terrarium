@@ -102,49 +102,41 @@ pub fn validate(conn: &Connection, def: &ServiceDef) -> ApiResult<()> {
             def.name, def.target
         )));
     }
-    // The rule of `crate::reservations` for a GPU reservation on a docker
-    // target, so that the claim that C2 reserves is not refused later.
-    if def.resources.gpus > 0
-        && target.def.kind == TargetKind::Docker
-        && (!target.def.ephemeral || target.def.image.is_none())
-    {
-        return Err(ApiError::invalid(format!(
-            "service `{}` claims a GPU on docker target `{}`, which is not a managed ephemeral \
-             target with an image: a docker GPU reservation needs `ephemeral = true` and `image`",
-            def.name, def.target
-        )));
-    }
-    // C2 (TER-1265, rev-1264b minor 1): a claim is reserved through the
-    // target, and `crate::reservations` takes only a host or docker target
-    // on a host. Refuse the rest here, so that a defined service can
-    // always reserve.
+    // C2 (TER-1265): a claim is reserved through the target, so it must
+    // pass the reservation's own rules that need no host state (the
+    // amounts, the target kind and host, the docker image and GPU rules):
+    // a defined service can always reserve.
     if !def.resources.is_empty() {
-        if !matches!(target.def.kind, TargetKind::Host | TargetKind::Docker) {
-            let kind = format!("{:?}", target.def.kind).to_lowercase();
-            return Err(ApiError::invalid(format!(
-                "service `{}` claims resources, and target `{}` is a {kind} target: a resource \
-                 claim needs a host or docker target",
-                def.name, def.target
-            )));
-        }
-        if target.def.host.is_none() {
-            return Err(ApiError::invalid(format!(
-                "service `{}` claims resources, and target `{}` has no host: a resource claim \
-                 is reserved on the target's host",
-                def.name, def.target
-            )));
-        }
-        // `reservations.rs` preflight: "Docker reservations need a managed
-        // image target", for any claim.
-        if target.def.kind == TargetKind::Docker && target.def.image.is_none() {
-            return Err(ApiError::invalid(format!(
-                "service `{}` claims resources on docker target `{}`, which has no `image`: a \
-                 docker reservation needs a managed image target",
-                def.name, def.target
-            )));
-        }
+        let amounts = claim_amounts(def)?;
+        crate::reservations::check_claim(
+            &target.def,
+            &amounts,
+            usize::try_from(def.resources.gpus).unwrap_or(usize::MAX),
+            def.resources.gpu_exclusive,
+        )
+        .map_err(|e| {
+            ApiError::invalid(format!(
+                "service `{}` claims resources that target `{}` cannot reserve: {}",
+                def.name, def.target, e.message
+            ))
+        })?;
     }
     Ok(())
+}
+
+/// The CPU and memory of the service's claim, as a reservation counts them.
+pub fn claim_amounts(def: &ServiceDef) -> ApiResult<terrarium_core::resources::Amounts> {
+    let memory_bytes = match &def.resources.memory {
+        Some(m) => {
+            core::parse_size(m).ok_or_else(|| ApiError::invalid(format!("bad memory `{m}`")))?
+        }
+        None => 0,
+    };
+    Ok(terrarium_core::resources::Amounts {
+        cpu_millis: def.resources.cpu_millis,
+        memory_bytes,
+        io: Default::default(),
+    })
 }
 
 fn def_json(def: &ServiceDef) -> ApiResult<String> {

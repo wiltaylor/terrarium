@@ -8727,8 +8727,10 @@ reload:
   target). A shared GPU needs `gpu_vram`. Any GPU claim on a docker target
   needs a managed ephemeral target with an `image`, the rule of a docker
   GPU reservation (`terrarium reserve`, `crates/terrariumd/src/reservations.rs`), so that the claim C2 reserves is not refused
-  later. Any resource claim needs a host or docker target that names a
-  host, as a reservation does (TER-1265).
+  later. Any resource claim must pass the reservation rules that need no
+  host state (`reservations::check_claim`, TER-1265): a host or docker
+  target with a host, an `image` on a docker target, CPU in steps of 10
+  millicores up to 1024 cores, and memory of at least 16M.
 - `callers`: `project:<name>` or `agent:<project>/<name>`. Empty: the
   agents of the service's own project; a global service with an empty list
   is called only by its admins.
@@ -8839,11 +8841,17 @@ A pass runs every 5 s, in this order:
    gives a GPU count; the daemon picks the host's GPUs that no open
    reservation claims first. The request is then `waiting`, and `running`
    when the reservation is active, with `run_until` = the end of the
-   reservation. A refusal with `409` or `resource_busy` (the host is
-   offline, the target runs, the target holds a reservation already)
-   leaves the request `queued`, and it is tried again after 60 s; the
-   requests behind it wait. Any other refusal ends it as `failed` with the
-   reason in `error`.
+   reservation. Before the grant the daemon runs the reservation's own
+   checks with nothing written (`reservations::admission`: the store's
+   checks and the preflight of a grant), which mark each refusal busy or
+   final. Busy (the host is offline or reconciling, the target runs, the
+   target holds a reservation already, other targets or sessions on the
+   host must stop first) leaves the request `queued` with no reservation
+   row, and it is tried again after 60 s; the requests behind it wait.
+   Final (a claim larger than the host's reservable budget, a missing host
+   capability, limits the host cannot apply) ends it as `failed` with the
+   reason in `error`. A grant that fails after the check is classified by
+   the same call again.
 
 A target holds one reservation on a host at a time, so a service with a
 resource claim runs one request at a time per target, whatever its

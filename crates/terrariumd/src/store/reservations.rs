@@ -84,6 +84,34 @@ pub struct Reservation {
     pub warned_5: bool,
 }
 
+/// A refused reservation, for a caller that tries again later (services,
+/// TER-1265): `Busy` clears when other work on the host ends or the host
+/// comes back; `Final` does not change by waiting.
+#[derive(Debug, Clone)]
+pub enum Refusal {
+    Busy(ApiError),
+    Final(ApiError),
+}
+
+impl Refusal {
+    pub fn is_busy(&self) -> bool {
+        matches!(self, Self::Busy(_))
+    }
+
+    pub fn into_error(self) -> ApiError {
+        match self {
+            Self::Busy(e) | Self::Final(e) => e,
+        }
+    }
+}
+
+/// An error of the store or of a check that waiting does not change.
+impl From<ApiError> for Refusal {
+    fn from(e: ApiError) -> Self {
+        Self::Final(e)
+    }
+}
+
 /// Already-authorized request. The API resolves agent/target IDs and checks
 /// lease permissions before calling the store.
 pub struct Request {
@@ -402,22 +430,28 @@ pub fn request(t: &mut Tx<'_>, req: Request, at: i64) -> ApiResult<Reservation> 
     request_deferred(t, req, at, false)
 }
 
-pub fn request_deferred(
-    t: &mut Tx<'_>,
+/// The reservation that [`request_deferred`] would store for `req`, with
+/// the checks that come before its admission: the amounts, the total
+/// budget of the host, and one reservation per holder and host (busy).
+/// It writes nothing.
+pub fn candidate(
+    conn: &Connection,
     req: Request,
     at: i64,
-    deferred: bool,
-) -> ApiResult<Reservation> {
+    granted_by: &str,
+) -> Result<Reservation, Refusal> {
     // TER-623: a release target is used by the release job only.
-    crate::store::jobs::check_not_release_target(t, &req.target, "reserving through the target")?;
+    crate::store::jobs::check_not_release_target(
+        conn,
+        &req.target,
+        "reserving through the target",
+    )?;
     req.amounts.validate().map_err(ApiError::invalid)?;
     if (req.amounts.is_empty() && req.gpus.is_empty())
         || req.duration_ms <= 0
         || req.queue_ms.is_some_and(|q| q <= 0)
     {
-        return Err(ApiError::invalid(
-            "give nonzero amounts and positive duration/queue timeout",
-        ));
+        return Err(ApiError::invalid("give nonzero amounts and positive duration/queue timeout").into());
     }
     let until = at
         .checked_add(req.duration_ms)
@@ -443,7 +477,7 @@ pub fn request_deferred(
         exclusive: req.exclusive,
         cores: vec![],
         reason: req.reason,
-        granted_by: t.actor.clone(),
+        granted_by: granted_by.to_owned(),
         created_at: at,
         start: Some(at),
         until: Some(until),
@@ -456,16 +490,29 @@ pub fn request_deferred(
     };
     // Even queued requests must fit the total budget. Impossible requests
     // cannot occupy the head and starve the entire FIFO.
-    allocation(t, &r, &[])?;
-    let existing = list(t, &r.host)?;
+    allocation(conn, &r, &[])?;
+    let existing = list(conn, &r.host)?;
     if existing
         .iter()
         .any(|x| x.holder == r.holder && (x.state.holds_capacity() || x.state == State::Queued))
     {
-        return Err(ApiError::conflict(
+        return Err(Refusal::Busy(ApiError::conflict(
             "holder already has a reservation on this host; extend or retract it",
-        ));
+        )));
     }
+    Ok(r)
+}
+
+pub fn request_deferred(
+    t: &mut Tx<'_>,
+    req: Request,
+    at: i64,
+    deferred: bool,
+) -> ApiResult<Reservation> {
+    let actor = t.actor.clone();
+    let mut r = candidate(t, req, at, &actor).map_err(Refusal::into_error)?;
+    let queue_until = r.queue_until;
+    let existing = list(t, &r.host)?;
     let admission = if deferred {
         Err(ApiError::resource_busy(
             "host lifecycle verbs are in progress",
