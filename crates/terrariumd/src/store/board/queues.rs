@@ -23,12 +23,14 @@
 //!     next card is admitted. A job from the previous column does not free
 //!     the slot (TER-1204). A failed job ends only when the rules have
 //!     acted on it, so its rerun keeps the slot (TER-1250, `RERUN_SETTLED`).
-//!   - `batch`: when no admitted card is in the column (the last batch, or
-//!     a card that was there before the `batch` release), and
-//!     `batch_size` cards wait or the first one has waited
-//!     `max_wait_seconds`: admit up to `max_batch_cards` (default
-//!     `batch_size`) in queue order. The last batch out means the lane is
-//!     free, as the `merge-queue-batch` rule did.
+//!   - `batch`: when the last batch no longer holds the lane (an admitted
+//!     card with an open job, or in [`BATCH_GRACE_SECONDS`] after its
+//!     admission or job end; a stale card goes back to the queue), and
+//!     `batch_size` cards wait or one has waited `max_wait_seconds`: admit
+//!     up to `max_batch_cards` (default `batch_size`) in queue order. The
+//!     merge_queue column counts and admits only the cards that a merge
+//!     takes now, and a ready release-blocker alone, at once, as the
+//!     `merge-queue-batch` rule did ([`merge_candidates`]).
 //! - **When.** [`release`] runs in the transaction of its cause: a move into
 //!   or out of the column, an archive, a job end ([`on_job_end`]), and a
 //!   change of the column's WIP limit or queue options. The rule engine's
@@ -59,6 +61,7 @@ pub struct CardQueue {
 
 struct Settings {
     id: i64,
+    name: String,
     project: String,
     wip_limit: Option<i64>,
     release: QueueRelease,
@@ -82,6 +85,7 @@ fn settings(conn: &Connection, column_id: i64) -> ApiResult<Option<Settings>> {
             |r| {
                 Ok(Settings {
                     id: r.get(0)?,
+                    name: r.get(7)?,
                     project: r.get(1)?,
                     wip_limit: r.get(2)?,
                     release: QueueRelease::parse(&r.get::<_, String>(3)?)?,
@@ -230,11 +234,13 @@ fn stale_in_batch(conn: &Connection, column_id: i64, cutoff: &str) -> ApiResult<
             AND NOT EXISTS (SELECT 1 FROM card_queue q
                              WHERE q.card = c.id AND q.admitted_at IS NULL)
             AND coalesce((SELECT q.admitted_at FROM card_queue q WHERE q.card = c.id), '') < ?2
-            AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.state IN ('queued', 'running')
-                              AND {JOB_OF_C})
             AND NOT EXISTS (SELECT 1 FROM jobs j
-                             WHERE j.state IN ('passed', 'failed', 'cancelled')
-                               AND j.ended_at >= ?2 AND {JOB_OF_C})
+                             WHERE j.project = c.project AND j.state IN ('queued', 'running')
+                               AND {JOB_OF_C})
+            AND NOT EXISTS (SELECT 1 FROM jobs j INDEXED BY jobs_project_ended
+                             WHERE j.project = c.project AND j.ended_at >= ?2
+                               AND j.state IN ('passed', 'failed', 'cancelled')
+                               AND {JOB_OF_C})
           ORDER BY c.position"
     );
     let mut st = conn.prepare(&sql)?;
@@ -251,9 +257,8 @@ fn grace_cutoff() -> String {
 /// Does a batch still hold the lane of `batch` column `column_id`? An
 /// admitted card holds it while it has an open job, or in the grace time
 /// after its admission or its last job end ([`BATCH_GRACE_SECONDS`]). A
-/// card that the batch job left out (held, no reviewed commit, another
-/// repo, a lone release-blocker, a busy merge lane) does not hold it after
-/// that, so it never stops the queue (TER-1204).
+/// card that the batch job left out does not hold it after that, so it
+/// never stops the queue (TER-1204).
 fn batch_open(conn: &Connection, column_id: i64) -> ApiResult<bool> {
     let stale = stale_in_batch(conn, column_id, &grace_cutoff())?.len() as i64;
     Ok(admitted_count(conn, column_id)? > stale)
@@ -296,19 +301,48 @@ fn return_stale(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
     Ok(())
 }
 
-/// The first card that waits in the queue of column `column_id` with the
-/// release-blocker label: it is a batch alone, at once (TER-607, TER-1204).
-fn waiting_release_blocker(conn: &Connection, column_id: i64) -> ApiResult<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT q.card FROM card_queue q JOIN cards c ON c.id = q.card
-              WHERE q.column_id = ?1 AND q.admitted_at IS NULL AND c.archived = 0
-                AND EXISTS (SELECT 1 FROM json_each(c.labels) WHERE value = ?2)
-              ORDER BY q.seq LIMIT 1",
-            params![column_id, crate::rules_verbs::RELEASE_BLOCKER],
-            |r| r.get(0),
-        )
-        .optional()?)
+/// The waiting cards of merge_queue column `s` that a batch merge takes
+/// now, as `merge-queue-batch` counts them (TER-1204): only cards that can
+/// go ([`crate::rules_verbs::merge_ready`]) with a repo in `next_repos`,
+/// and of one repo, the repo of the first one, in queue order:
+/// `(card, queued_at)`. The others wait, and never hold the lane. The
+/// second value is the first such card with the release-blocker label,
+/// of any repo: it goes alone, at once (TER-607).
+fn merge_candidates(
+    conn: &Connection,
+    s: &Settings,
+    queue: &[(String, String)],
+) -> ApiResult<(Vec<(String, String)>, Option<String>)> {
+    let served = crate::store::jobs::delivery(conn, &s.project)?.next_repos;
+    let cards: std::collections::HashMap<String, Card> =
+        selection_cards(conn, &s.project, &s.name)?
+            .into_iter()
+            .map(|c| (c.id.clone(), c))
+            .collect();
+    let mut repo: Option<String> = None;
+    let mut out = Vec::new();
+    let mut blocker = None;
+    for (id, at) in queue {
+        let Some(c) = cards.get(id) else { continue };
+        let Ok(r) = crate::rules_verbs::merge_ready(conn, c)? else {
+            continue;
+        };
+        if !served.contains(&r) {
+            continue;
+        }
+        if blocker.is_none()
+            && c
+                .labels
+                .iter()
+                .any(|l| l == crate::rules_verbs::RELEASE_BLOCKER)
+        {
+            blocker = Some(id.clone());
+        }
+        if repo.get_or_insert_with(|| r.clone()) == &r {
+            out.push((id.clone(), at.clone()));
+        }
+    }
+    Ok((out, blocker))
 }
 
 /// The free places of the column: `None` without a WIP limit.
@@ -563,10 +597,16 @@ pub fn release(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
                 if s.merge_lane && crate::store::jobs::open_merge(t, &s.project)?.is_some() {
                     return Ok(());
                 }
-                if let Some(card) = waiting_release_blocker(t, s.id)? {
-                    admit(t, &card, true)?;
-                    return Ok(());
-                }
+                let ready = if s.merge_lane {
+                    let (ready, blocker) = merge_candidates(t, &s, &queue)?;
+                    if let Some(card) = blocker {
+                        admit(t, &card, true)?;
+                        return Ok(());
+                    }
+                    ready
+                } else {
+                    queue
+                };
                 let size = s.batch_size.unwrap_or(1).max(1);
                 let waited_out = s.max_wait_seconds.is_some_and(|w| {
                     let cutoff = crate::time_param::stored(
@@ -574,20 +614,20 @@ pub fn release(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
                     );
                     // The longest wait: a card put back (stale) is first
                     // in the queue, but its wait started again.
-                    queue
+                    ready
                         .iter()
                         .map(|q| q.1.as_str())
                         .min()
                         .is_some_and(|m| m <= cutoff.as_str())
                 });
-                if (queue.len() as i64) < size && !waited_out {
+                if ready.is_empty() || ((ready.len() as i64) < size && !waited_out) {
                     return Ok(());
                 }
-                let mut n = s.max_batch_cards.unwrap_or(size).min(queue.len() as i64);
+                let mut n = s.max_batch_cards.unwrap_or(size).min(ready.len() as i64);
                 if let Some(r) = room {
                     n = n.min(r);
                 }
-                for (card, _) in queue.iter().take(usize::try_from(n).unwrap_or(0)) {
+                for (card, _) in ready.iter().take(usize::try_from(n).unwrap_or(0)) {
                     admit(t, card, true)?;
                 }
                 return Ok(());
@@ -644,7 +684,8 @@ fn projects_with_queues(conn: &Connection) -> ApiResult<Vec<String>> {
 
 /// Release every queue that has a waiting card, and every `batch` column
 /// with a card in it: the wait of a batch, the stale cards of a batch
-/// (TER-1204), and any release that no cause triggered. The rule engine's tick runs it.
+/// (TER-1204), and any release that no cause triggered. The rule engine's
+/// tick runs it.
 pub fn sweep_all(t: &mut Tx<'_>) -> ApiResult<()> {
     for project in projects_with_queues(t)? {
         release_project(t, &project)?;

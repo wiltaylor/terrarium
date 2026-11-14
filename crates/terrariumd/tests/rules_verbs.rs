@@ -5544,17 +5544,16 @@ async fn sweep_queues(td: &TestDaemon) {
         .unwrap();
 }
 
-/// Move the admissions of the merge_queue column `minutes` back, past the
-/// grace time of a batch.
-async fn age_admissions(td: &TestDaemon, minutes: i64) {
+/// Make card `id` held by the GitHub author gate.
+async fn hold(td: &TestDaemon, id: &str) {
+    let id = id.to_owned();
     state(td)
         .db
-        .write("operator", move |t| {
-            let at = (chrono::Utc::now() - chrono::Duration::minutes(minutes))
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        .write("test", move |t| {
             t.execute(
-                "UPDATE card_queue SET admitted_at = ?1 WHERE admitted_at IS NOT NULL",
-                [at],
+                "UPDATE cards SET labels = json_insert(labels, '$[#]', 'github', '$[#]', 'hold')
+                  WHERE id = ?1",
+                [id],
             )?;
             Ok(())
         })
@@ -5562,10 +5561,24 @@ async fn age_admissions(td: &TestDaemon, minutes: i64) {
         .unwrap();
 }
 
-/// rev-1204 finding 1: the cards of a batch that the merge leaves out (a
-/// card with no reviewed commit, a card of another repo, a held card) do
-/// not hold the merge lane. After the grace time the sweep puts them back
-/// in the queue, and a later batch takes them.
+/// Drop the reviewed commit of card `id`.
+async fn drop_head(td: &TestDaemon, id: &str) {
+    let id = id.to_owned();
+    state(td)
+        .db
+        .write("test", move |t| {
+            t.execute("DELETE FROM card_accepted_heads WHERE card = ?1", [id])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// rev-1204 finding 1, rev-1204b finding 3: the merge_queue column counts
+/// and admits only the cards that a batch merge takes now, as
+/// `merge-queue-batch` counts them. A card with no reviewed commit, a held
+/// card and a card of another repo wait and never hold the merge lane;
+/// the card of the other repo goes when it is the first ready repo.
 #[tokio::test]
 async fn left_out_cards_of_a_batch_do_not_hold_the_merge_lane() {
     let td = queue_lab().await;
@@ -5577,50 +5590,45 @@ async fn left_out_cards_of_a_batch_do_not_hold_the_merge_lane() {
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
-    let mk = |title: &'static str, repo: &'static str| json!({"title": title, "column": "review", "repo": repo});
-    let n = new_card(&td, "p", mk("n", "app")).await;
-    let a = new_card(&td, "p", mk("a", "app")).await;
-    let b = new_card(&td, "p", mk("b", "lib")).await;
-    let h = new_card(&td, "p", mk("h", "app")).await;
-    let c = new_card(&td, "p", mk("c", "app")).await;
+    let mk = |title: String, repo: &'static str| json!({"title": title, "column": "review", "repo": repo});
+    let n = new_card(&td, "p", mk("n".into(), "app")).await;
+    let b = new_card(&td, "p", mk("b".into(), "lib")).await;
+    let h = new_card(&td, "p", mk("h".into(), "app")).await;
+    let mut ready = Vec::new();
+    for i in 0..4 {
+        ready.push(new_card(&td, "p", mk(format!("a{i}"), "app")).await);
+    }
     settle(&td).await;
     batch_merge_column(&td).await;
-    // H is held by the GitHub author gate.
-    let id = h.clone();
-    state(&td)
-        .db
-        .write("test", move |t| {
-            t.execute(
-                "UPDATE cards SET labels = '[\"github\",\"hold\"]' WHERE id = ?1",
-                [id],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    // N has no reviewed commit.
-    move_to(&td, &n, "merge_queue").await;
-    let id = n.clone();
-    state(&td)
-        .db
-        .write("test", move |t| {
-            t.execute("DELETE FROM card_accepted_heads WHERE card = ?1", [id])?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    for id in [&a, &b, &h] {
+    hold(&td, &h).await;
+    for id in [&n, &b, &h] {
+        move_to(&td, id, "merge_queue").await;
+    }
+    drop_head(&td, &n).await;
+    for id in &ready[..3] {
         move_to(&td, id, "merge_queue").await;
     }
     settle(&td).await;
-    // The batch of 4 is admitted; the merge takes only A.
+    // 6 cards wait, 3 of them can go: no batch.
+    assert!(open_jobs(&td).await.is_empty());
+    for id in [&n, &b, &h].into_iter().chain(&ready[..3]) {
+        assert!(card(&td, id).await["queued"].is_object(), "{id}");
+    }
+
+    // The 4th ready card of the repo: one batch of the 4.
+    move_to(&td, &ready[3], "merge_queue").await;
+    settle(&td).await;
     let open = open_jobs(&td).await;
     assert_eq!(open.len(), 1, "{open:?}");
-    assert_eq!(open[0].card, a);
-    assert!(open[0].batch.is_empty(), "{open:?}");
+    let cards: Vec<&str> = open[0].batch.iter().map(|x| x.card.as_str()).collect();
+    let want: Vec<&str> = ready.iter().map(String::as_str).collect();
+    assert_eq!(cards, want);
+    for id in [&n, &b, &h] {
+        assert!(card(&td, id).await["queued"].is_object(), "{id}");
+    }
 
-    // A's merge ends and A goes on. In the grace time N, B and H still
-    // hold the lane; after it the sweep puts them back, first.
+    // The batch ends and goes on. B, of the other repo, is the first
+    // ready repo now; it goes alone after the wait.
     let lane = open[0].id.clone();
     state(&td)
         .db
@@ -5630,36 +5638,86 @@ async fn left_out_cards_of_a_batch_do_not_hold_the_merge_lane() {
         })
         .await
         .unwrap();
-    move_to(&td, &a, "accepted").await;
+    for id in &ready {
+        move_to(&td, id, "accepted").await;
+    }
     sweep_queues(&td).await;
-    assert!(card(&td, &b).await.get("queued").is_none());
-    age_admissions(&td, 10).await;
+    assert!(card(&td, &b).await["queued"].is_object());
     state(&td)
         .db
         .write("operator", |t| {
+            let at = (chrono::Utc::now() - chrono::Duration::minutes(31))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
             t.execute(
-                "UPDATE jobs SET ended_at = '2000-01-01T00:00:00.000Z' WHERE state = 'cancelled'",
-                [],
+                "UPDATE card_queue SET queued_at = ?1 WHERE admitted_at IS NULL",
+                [at],
             )?;
+            terrariumd::store::board::queues::sweep_all(t)?;
             Ok(())
         })
         .await
         .unwrap();
-    sweep_queues(&td).await;
-    for (i, id) in [&n, &b, &h].into_iter().enumerate() {
-        assert_eq!(card(&td, id).await["queued"]["place"], i + 1, "{id}");
-    }
-    settle(&td).await;
-    assert!(open_jobs(&td).await.is_empty());
-
-    // C makes 4 again: the batch goes, and its merge takes B (the first
-    // card that can go; its repo is the batch's).
-    move_to(&td, &c, "merge_queue").await;
     settle(&td).await;
     let open = open_jobs(&td).await;
     assert_eq!(open.len(), 1, "{open:?}");
     assert_eq!(open[0].card, b);
     assert_eq!(open[0].repo, "lib");
+    assert!(card(&td, &n).await["queued"].is_object());
+    assert!(card(&td, &h).await["queued"].is_object());
+}
+
+/// rev-1204b finding 1: a release-blocker that cannot go (held, no
+/// reviewed commit, an open job, a repo that `next_repos` does not serve)
+/// waits like any card and never takes or holds the merge lane: 4 ready
+/// cards make their batch.
+#[tokio::test]
+async fn an_unready_release_blocker_does_not_stop_the_merge_queue() {
+    let td = queue_lab().await;
+    add_repo(&td, "lib").await;
+    let rb = |title: &'static str, repo: &'static str| json!({"title": title, "column": "review", "repo": repo, "labels": ["release-blocker"]});
+    let held = new_card(&td, "p", rb("held", "app")).await;
+    let headless = new_card(&td, "p", rb("headless", "app")).await;
+    let busy = new_card(&td, "p", rb("busy", "app")).await;
+    let other = new_card(&td, "p", rb("other", "lib")).await;
+    let mut ready = Vec::new();
+    for i in 0..4 {
+        ready.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review", "repo": "app"}),
+            )
+            .await,
+        );
+    }
+    settle(&td).await;
+    batch_merge_column(&td).await;
+    hold(&td, &held).await;
+    store_job(&td, JobKind::Validate, &[&busy]).await;
+    for id in [&held, &headless, &busy, &other] {
+        move_to(&td, id, "merge_queue").await;
+    }
+    drop_head(&td, &headless).await;
+    sweep_queues(&td).await;
+    for id in [&held, &headless, &busy, &other] {
+        assert!(card(&td, id).await["queued"].is_object(), "{id}");
+    }
+    for id in &ready {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    let merges: Vec<Job> = open_jobs(&td)
+        .await
+        .into_iter()
+        .filter(|j| j.kind == JobKind::Merge)
+        .collect();
+    assert_eq!(merges.len(), 1, "{merges:?}");
+    let cards: Vec<&str> = merges[0].batch.iter().map(|x| x.card.as_str()).collect();
+    let want: Vec<&str> = ready.iter().map(String::as_str).collect();
+    assert_eq!(cards, want);
+    for id in [&held, &headless, &busy, &other] {
+        assert!(card(&td, id).await["queued"].is_object(), "{id}");
+    }
 }
 
 /// rev-1204 finding 1, the C5 case: cards that wait in merge_queue with no

@@ -1093,6 +1093,39 @@ pub struct BatchPick {
 /// the same commit into the frozen version.
 pub const RELEASE_BLOCKER: &str = "release-blocker";
 
+/// Can card `c` go in a batch merge now? `Ok(repo)` with its repo, or
+/// `Err(reason)` why a batch leaves it out: it is held, has an open job,
+/// has no usable branch or repo, or has no reviewed commit (TER-553). The
+/// checks of [`pick_batch`]; the merge_queue column queue uses them too
+/// (TER-1204).
+pub fn merge_ready(conn: &Connection, c: &Card) -> ApiResult<Result<String, String>> {
+    if api_jobs::not_held(c).is_err() {
+        return Ok(Err("held".to_owned()));
+    }
+    if let Some(j) = open_job(conn, &c.id)? {
+        return Ok(Err(format!("open job {}", j.id)));
+    }
+    // A card goes in a batch only with its reviewed commit, the head
+    // that the review accept recorded (TER-553); until then it waits,
+    // and does not count as waiting.
+    let branch = match api_jobs::branch_of(c, None) {
+        Ok(b) => b,
+        Err(e) if e.code == Code::Invalid => return Ok(Err(e.message)),
+        Err(e) => return Err(e),
+    };
+    if accepted_heads::commit_for(conn, &c.id, &branch)?.is_none() {
+        return Ok(Err(accepted_heads::missing_reason(conn, &c.id, &branch)?));
+    }
+    // A card without a usable repo (none in a project of several
+    // repos, or one that is not the project's) is left out, so it
+    // does not stop the batch or the timers (TER-227 review).
+    match api_jobs::repo_of(conn, c, None) {
+        Ok(r) => Ok(Ok(r)),
+        Err(e) if e.code == Code::Invalid => Ok(Err(e.message)),
+        Err(e) => Err(e),
+    }
+}
+
 /// The cards of column `from` of `project` that a batch takes, in board
 /// order, at most `limit` (`None`: all). A card that is held, has an
 /// open job, or has no usable repo is left out. A batch is one repo: the repo of the first card
@@ -1115,15 +1148,6 @@ pub fn pick_batch(
     // The cards that could go, with their repo, in board order.
     let mut ready: Vec<(&Card, String)> = Vec::new();
     for c in &cards {
-        if api_jobs::not_held(c).is_err() {
-            out.left_out.push(json!({"card": c.id, "reason": "held"}));
-            continue;
-        }
-        if let Some(j) = open_job(conn, &c.id)? {
-            out.left_out
-                .push(json!({"card": c.id, "reason": format!("open job {}", j.id)}));
-            continue;
-        }
         // A card that waits in the column's queue is not admitted yet
         // (TER-1114): its batch is the one that the queue releases.
         if board::queues::is_waiting(conn, &c.id)? {
@@ -1131,36 +1155,10 @@ pub fn pick_batch(
                 .push(json!({"card": c.id, "reason": "waits in the column queue"}));
             continue;
         }
-        // A card goes in a batch only with its reviewed commit, the head
-        // that the review accept recorded (TER-553); until then it waits,
-        // and does not count as waiting.
-        let branch = match api_jobs::branch_of(c, None) {
-            Ok(b) => b,
-            Err(e) if e.code == Code::Invalid => {
-                out.left_out
-                    .push(json!({"card": c.id, "reason": e.message}));
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
-        if accepted_heads::commit_for(conn, &c.id, &branch)?.is_none() {
-            let why = accepted_heads::missing_reason(conn, &c.id, &branch)?;
-            out.left_out.push(json!({"card": c.id, "reason": why}));
-            continue;
+        match merge_ready(conn, c)? {
+            Ok(r) => ready.push((c, r)),
+            Err(reason) => out.left_out.push(json!({"card": c.id, "reason": reason})),
         }
-        // A card without a usable repo (none in a project of several
-        // repos, or one that is not the project's) is left out, so it
-        // does not stop the batch or the timers (TER-227 review).
-        let r = match api_jobs::repo_of(conn, c, None) {
-            Ok(r) => r,
-            Err(e) if e.code == Code::Invalid => {
-                out.left_out
-                    .push(json!({"card": c.id, "reason": e.message}));
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
-        ready.push((c, r));
     }
     if let Some(i) = ready
         .iter()

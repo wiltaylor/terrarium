@@ -5019,7 +5019,28 @@ The capacity is the column's `wip_limit` (none: no limit) in each release
 |---|---|
 | `wip` | the admitted cards are fewer than the WIP limit |
 | `job` | one job at a time: no card of the column holds the job slot. A card that lands or is admitted holds it until a job of the card has ended after that (passed, failed, or cancelled) and it has no open job, or until it leaves the column. A job that is requeued (lost at a restart) stays open and keeps the slot |
-| `batch` | no card of the last batch is still in the column, and `batch_size` cards wait or the first has waited `max_wait_seconds`. Up to `max_batch_cards` (default `batch_size`) are admitted, in queue order |
+| `batch` | the last batch no longer holds the lane (below), and `batch_size` cards wait or one has waited `max_wait_seconds`. Up to `max_batch_cards` (default `batch_size`) are admitted, in queue order |
+
+A batch holds the lane of its column while one of its admitted cards has
+an open job, or for 120 seconds after the card was admitted or its last job
+ended: the time for its `lands` rules to queue the job and for the
+job-result rules to move it on (TER-1204). The 120 seconds are wall-clock
+time, not tied to the rule engine. When the engine lags more than that, or
+after a daemon stop, a card can go back to the queue before its rules ran;
+that only delays it (a batch by its count is admitted again at once, one by
+its wait waits again up to `max_wait_seconds`). After the grace a card with
+no open job is stale: the release puts it back first in the queue (the
+`card` event `queue_returned`), its wait starts again, and its ETA is held.
+A card that was in a `batch` column before it had that release (a change of
+the release, or the conversion of a board) is stale at once.
+
+The column with the role or name `merge_queue` counts and admits only the
+cards that a batch merge takes now, as the `merge-queue-batch` rule does:
+cards that are not held, have no open job, have a reviewed commit, and have
+a repo in `next_repos`, of one repo (the repo of the first such card). The
+other cards wait and never hold the lane. A ready card with the label
+`release-blocker` is admitted alone, at once (TER-607). The column admits no
+batch while a merge job of the project is queued or running.
 
 The release runs in the transaction of its cause: a move into or out of
 the column, an archive, a job end or cancel, a board `PATCH`, and an
