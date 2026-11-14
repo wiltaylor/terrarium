@@ -60,6 +60,8 @@ export const TOP_ITEMS = [
   // The logs screen (LOGS_TABS): mail, events, and audit. Active on every /logs/... tab.
   { href: "/logs", label: "Logs" },
   { href: "/schedules", label: "Schedules" },
+  // The services, each queue, and the request states (docs/api.md §17.12, TER-1269).
+  { href: "/services", label: "Services" },
   // The calendars of every project and the global calendar (docs/api.md §33).
   { href: "/calendar", label: "Calendar" },
 ] as const;

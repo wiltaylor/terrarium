@@ -1101,6 +1101,7 @@ mod tests {
                 terrarium_core::HarnessId::Codex,
                 terrarium_core::HarnessId::Copilot,
                 terrarium_core::HarnessId::Pi,
+                terrarium_core::HarnessId::Grok,
             ] {
                 let mut a = agent(roles.clone(), None, None);
                 a.harness = harness;
@@ -1158,6 +1159,7 @@ mod tests {
                 ],
             ),
             ("pi", &["sub-agent tool", "todo"]),
+            ("grok", &["--always-approve", "--yolo", "--trust", "todo"]),
         ];
         for (harness, names) in removed {
             let text = strip_comments(
