@@ -55,6 +55,21 @@ pub const DEFAULT_COLUMNS: [(&str, Option<&str>); 9] = [
     ("done", None),
 ];
 
+/// The columns of the standard board of a new project on column rules
+/// (TER-1117), the board of the delivery process: in order, with their
+/// roles and WIP limits. No validating column (operator, 2026-11-07).
+pub const STANDARD_COLUMNS: [(&str, Option<&str>, Option<i64>); 9] = [
+    ("backlog", None, None),
+    ("research", None, Some(2)),
+    ("ready", None, None),
+    ("in_progress", Some(WORKING), None),
+    ("review", Some(REVIEW), None),
+    ("merge_queue", Some(MERGE_QUEUE), None),
+    ("accepted", Some(ACCEPTED), None),
+    ("blocked", Some(BLOCKED), None),
+    ("done", None, None),
+];
+
 /// The first column. New cards go here. It cannot be removed, renamed, or
 /// moved, and takes no WIP limit and no role.
 pub const BACKLOG: &str = "backlog";
@@ -370,12 +385,18 @@ pub fn create_board(t: &mut Tx<'_>, project: &str) -> ApiResult<()> {
         "INSERT INTO boards (project, created_at) VALUES (?1, ?2)",
         params![project, now()],
     )?;
-    for (i, (name, role)) in DEFAULT_COLUMNS.iter().enumerate() {
+    // With the column rules, the standard board (TER-1117).
+    let columns: Vec<(&str, Option<&str>, Option<i64>)> = if t.board_columns {
+        STANDARD_COLUMNS.to_vec()
+    } else {
+        DEFAULT_COLUMNS.iter().map(|(n, r)| (*n, *r, None)).collect()
+    };
+    for (i, (name, role, wip)) in columns.iter().enumerate() {
         let c = ColumnChecks::default_for(name, *role);
         t.execute(
             "INSERT INTO board_columns (project, name, position, role, require_comment_on_enter,
-                 require_dependencies_met, terminal_for_members, clear_eta_on_enter)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 require_dependencies_met, terminal_for_members, clear_eta_on_enter, wip_limit)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 project,
                 name,
@@ -384,7 +405,8 @@ pub fn create_board(t: &mut Tx<'_>, project: &str) -> ApiResult<()> {
                 c.require_comment_on_enter,
                 c.require_dependencies_met,
                 c.terminal_for_members,
-                c.clear_eta_on_enter
+                c.clear_eta_on_enter,
+                wip
             ],
         )?;
     }

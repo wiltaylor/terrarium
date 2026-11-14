@@ -1,6 +1,7 @@
 //! Shared integration binary. Keep module sources beside the standalone tests.
 //! Run a module with: cargo test -p terrariumd --test it board::
 
+mod board_convert;
 mod board_summary_growth;
 mod card_waits;
 mod column_engine;

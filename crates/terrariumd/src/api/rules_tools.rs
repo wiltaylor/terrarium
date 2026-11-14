@@ -57,6 +57,87 @@ pub fn routes() -> super::link_registry::RegisteredRouter {
             post(disable),
             &[(axum::http::Method::POST, super::link_registry::Access::Link)],
         )
+        .route(
+            "/projects/{name}/board/conversion",
+            get(conversion),
+            &[(axum::http::Method::GET, super::link_registry::Access::Link)],
+        )
+        .route(
+            "/projects/{name}/board/convert",
+            post(convert),
+            &[(axum::http::Method::POST, super::link_registry::Access::Link)],
+        )
+}
+
+/// `GET .../board/conversion` (TER-1117): the stored conversion of the
+/// board (`null` before it), and the plan of a conversion now (`null` on a
+/// columns board): the report of a dry run. Whoever reads the project.
+async fn conversion(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    policy::read_project(&actor, &name)?;
+    let n = name.clone();
+    let (record, plan, flow) = state
+        .db
+        .read(move |c| {
+            let flow = projects::board_flow(c, &n)?;
+            let plan = if flow == BoardFlow::Columns {
+                None
+            } else {
+                Some(crate::board_convert::plan(c, &n)?)
+            };
+            Ok((crate::board_convert::record(c, &n)?, plan, flow))
+        })
+        .await?;
+    Ok(Json(json!({"project": name, "board_flow": flow.as_str(),
+                   "conversion": record, "plan": plan,
+                   "switch": state.db.board_columns()})))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConvertBody {
+    /// `apply` (convert now) or `revert` (take back the conversion).
+    action: String,
+}
+
+/// `POST .../board/convert` (TER-1117): convert one board now, or revert
+/// its conversion. Only the operator.
+async fn convert(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiJson(body): ApiJson<ConvertBody>,
+) -> ApiResult<Json<Value>> {
+    policy::read_project(&actor, &name)?;
+    if !matches!(actor, Actor::Operator) {
+        return Err(ApiError::forbidden(
+            "only the operator converts a board or reverts its conversion",
+        ));
+    }
+    let n = name.clone();
+    let out = match body.action.as_str() {
+        "apply" => {
+            state
+                .db
+                .write(actor.label(), move |t| crate::board_convert::apply(t, &n))
+                .await?
+        }
+        "revert" => {
+            state
+                .db
+                .write(actor.label(), move |t| crate::board_convert::revert(t, &n))
+                .await?
+        }
+        other => {
+            return Err(ApiError::invalid(format!(
+                "action `{other}`: use `apply` or `revert`"
+            )));
+        }
+    };
+    Ok(Json(serde_json::to_value(out).map_err(|e| ApiError::internal(e.to_string()))?))
 }
 
 /// What the tools read of a project: its rules file (with the rules read

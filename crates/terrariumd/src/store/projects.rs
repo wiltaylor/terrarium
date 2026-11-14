@@ -235,6 +235,10 @@ pub fn create(t: &mut Tx<'_>, p: &NewProject, source: &str) -> ApiResult<Project
         params![p.name, p.description, prefix, source, at],
     )?;
     board::create_board(t, &p.name)?;
+    // The standard board on column rules (TER-1117).
+    if t.board_columns {
+        crate::board_convert::standard_board(t, &p.name)?;
+    }
     // Project pages v2 (TER-1077): a new project gets the built-in pages in
     // the same transaction. OFF keeps today's Dashboard trigger only.
     if t.project_pages_v2 {
@@ -527,6 +531,7 @@ pub fn delete(t: &mut Tx<'_>, name: &str) -> ApiResult<()> {
     }
     // Cards point at columns without a cascade; drop them first.
     t.execute("DELETE FROM cards WHERE project = ?1", [name])?;
+    t.execute("DELETE FROM board_conversions WHERE project = ?1", [name])?;
     t.execute("DELETE FROM projects WHERE name = ?1", [name])?;
     // The project's secrets and their grants (PLAN §16b.2).
     crate::secrets::delete_project(t, name)?;

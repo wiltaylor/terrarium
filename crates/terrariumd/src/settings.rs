@@ -98,6 +98,15 @@ pub struct Settings {
         action = clap::ArgAction::Set, value_parser = parse_switch)]
     pub project_pages_v2: bool,
 
+    /// The column rules (TER-1117, kanban rework C5): at each load of the
+    /// config the daemon converts every board that does not run on column
+    /// rules yet, and a new project gets the standard board. On by
+    /// default; `0` keeps the legacy flows (no per-project fallback). C2b
+    /// (TER-1172) removes the switch with the legacy flows.
+    #[arg(long, env = "TERRARIUM_BOARD_COLUMNS", default_value = "1",
+        action = clap::ArgAction::Set, value_parser = parse_switch)]
+    pub board_columns: bool,
+
     /// The life of a dashboard session cookie (`POST /api/session`):
     /// seconds, or a number with `s`, `m`, `h`, or `d`. A cookie past half
     /// its life is renewed on the next request.
@@ -704,6 +713,9 @@ impl Default for InstallConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebConfig {
     pub project_pages_v2: bool,
+    /// [`Settings::board_columns`]. Off in a config that a test makes
+    /// directly: most tests still run the legacy flows.
+    pub board_columns: bool,
     /// [`ENV_PUBLIC_URL`], with no trailing `/`. `None`: not set.
     pub public_url: Option<String>,
     /// [`ENV_ARTIFACT_PUBLIC_URL`], with no trailing `/`. `None`: not set.
@@ -731,6 +743,7 @@ impl Default for WebConfig {
             artifact_public_url: None,
             ws_query_token: false,
             project_pages_v2: false,
+            board_columns: false,
             session_ttl: std::time::Duration::from_secs(30 * 86_400),
             cli_session_ttl: std::time::Duration::from_secs(90 * 86_400),
             session_max_age: std::time::Duration::from_secs(90 * 86_400),
@@ -842,6 +855,7 @@ impl Settings {
             artifact_public_url: clean_url(self.artifact_public_url.as_deref()),
             ws_query_token: self.ws_query_token,
             project_pages_v2: self.project_pages_v2,
+            board_columns: self.board_columns,
             session_ttl: self.session_ttl,
             cli_session_ttl: self.cli_session_ttl,
             session_max_age: self.session_max_age,
@@ -892,6 +906,14 @@ mod tests {
     #[test]
     fn switches_and_origins() {
         assert!(!WebConfig::default().project_pages_v2);
+        assert!(!WebConfig::default().board_columns);
+        assert!(Settings::try_parse_from(["terrariumd"]).unwrap().web().board_columns);
+        assert!(
+            !Settings::try_parse_from(["terrariumd", "--board-columns", "0"])
+                .unwrap()
+                .web()
+                .board_columns
+        );
         assert!(
             !Settings::try_parse_from(["terrariumd", "--project-pages-v2", "0"])
                 .unwrap()

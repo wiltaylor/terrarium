@@ -10,6 +10,7 @@ pub mod agent_tools;
 pub mod api;
 pub mod assets;
 pub mod backup;
+pub mod board_convert;
 pub mod bound;
 pub mod calendar;
 pub mod card_delivery;
@@ -313,7 +314,9 @@ async fn start_with_usage_and_executor(
         )),
         started: Instant::now(),
         started_at: chrono::Utc::now(),
-        db: Db::new(conn, EventHub::default()).with_project_pages_v2(cfg.web.project_pages_v2),
+        db: Db::new(conn, EventHub::default())
+            .with_project_pages_v2(cfg.web.project_pages_v2)
+            .with_board_columns(cfg.web.board_columns),
         definitions: RwLock::new(Definitions::default()),
         supervisor: cfg.supervisor.clone(),
         state_dir: cfg.state_dir.clone(),
@@ -1064,6 +1067,12 @@ pub async fn apply_definitions(
             .push(format!("cannot load the template files: {}", e.message)),
     }
     report.errors.extend(fleet::apply_config_dir(state).await);
+    // The kanban rework (TER-1117, D5): every board to column rules, after
+    // the projects, their rules files and the fleets. A converted board is
+    // skipped, so a reload writes nothing.
+    if state.db.board_columns() {
+        report.errors.extend(board_convert::upgrade(&state.db).await);
+    }
     // A config-dir fleet file that made an xai key row a plan row: its key
     // file goes too (TER-1239, rev-1205b). The sweep after the file sync
     // above does not see the fleet rows.

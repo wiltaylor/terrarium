@@ -2576,6 +2576,9 @@ impl Drop for DatabaseScope {
 #[derive(Clone)]
 pub struct Db {
     project_pages_v2: bool,
+    /// The column-rules switch (TER-1117): the upgrade converts every
+    /// board, and a new project gets the standard board.
+    board_columns: bool,
     conn: Arc<Mutex<Connection>>,
     hub: EventHub,
     /// The redaction matcher (PLAN §16b.6). Each write transaction takes a
@@ -2595,6 +2598,7 @@ impl Db {
     pub fn new(conn: Connection, hub: EventHub) -> Self {
         Self {
             project_pages_v2: false,
+            board_columns: false,
             conn: Arc::new(Mutex::new(conn)),
             hub,
             redactor: RedactorHandle::default(),
@@ -2606,6 +2610,17 @@ impl Db {
     pub fn with_project_pages_v2(mut self, enabled: bool) -> Self {
         self.project_pages_v2 = enabled;
         self
+    }
+
+    /// The column-rules switch (TER-1117, `TERRARIUM_BOARD_COLUMNS`).
+    pub fn with_board_columns(mut self, enabled: bool) -> Self {
+        self.board_columns = enabled;
+        self
+    }
+
+    /// Whether the column-rules switch is on.
+    pub fn board_columns(&self) -> bool {
+        self.board_columns
     }
 
     /// The lock of [`crate::jobs::prepare_hosts`] on this database.
@@ -2758,6 +2773,7 @@ impl Db {
         let conn = self.conn.clone();
         let actor = actor.into();
         let project_pages_v2 = self.project_pages_v2;
+        let board_columns = self.board_columns;
         // The link of the request (TER-61 review round 5, F9): the
         // task-local is gone inside the blocking task, so take it here. An
         // actor label `link:<id>` counts too.
@@ -2800,6 +2816,7 @@ impl Db {
                     let tx = guard.transaction_with_behavior(TransactionBehavior::Immediate)?;
                     let mut t = Tx {
                         project_pages_v2,
+                        board_columns,
                         tx,
                         actor,
                         link,
@@ -2873,6 +2890,8 @@ impl Db {
 /// A write transaction with the actor and the events and audit rows it made.
 pub struct Tx<'c> {
     pub project_pages_v2: bool,
+    /// The column-rules switch of the [`Db`] (TER-1117).
+    pub board_columns: bool,
     tx: rusqlite::Transaction<'c>,
     /// `operator`, `agent:<ulid>`, `system`, or `schedule:<ulid>` (the
     /// writes of a trigger run).
@@ -2972,6 +2991,7 @@ impl<'c> Tx<'c> {
     pub fn for_test(tx: rusqlite::Transaction<'c>, actor: &str) -> Self {
         Self {
             project_pages_v2: false,
+            board_columns: false,
             tx,
             actor: actor.to_owned(),
             link: actor.strip_prefix("link:").map(str::to_owned),
