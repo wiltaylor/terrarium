@@ -2,6 +2,10 @@ set working-directory := '../..'
 
 import '../shared.just'
 
+# At most 8 libtest threads per test binary (operator decision, META-225): 32 threads per suite fought over
+# shared store locks on build2's 24-core quota. An explicit RUST_TEST_THREADS in the caller's environment wins.
+export RUST_TEST_THREADS := env("RUST_TEST_THREADS", "8")
+
 [default, private]
 main:
 	@just --list ci
