@@ -106,6 +106,25 @@ TARGETS = ("--lib", "--bins", "--test", "--bin", "--tests", "--all-targets", "--
            "--example", "--examples", "--bench", "--benches")
 
 
+def split(cmd: list[str]) -> tuple[list[str], list[str]]:
+    """The cargo part of `cmd` and the libtest part after its first `--`."""
+    if "--" not in cmd:
+        return cmd, []
+    i = cmd.index("--")
+    return cmd[:i], cmd[i + 1:]
+
+
+def libtest(cmd: list[str], extra: list[str]) -> list[str]:
+    """`cmd` with `extra` put before its own libtest arguments, behind one `--`.
+
+    A second `--` would make libtest read `extra` as test name filters: with
+    `-- webhooks::`, the JSON options added `json` as a filter and the run
+    took every test with `json` in its name (TER-1261).
+    """
+    cargo, rest = split(cmd)
+    return [*cargo, "--", *extra, *rest]
+
+
 def run(args: list[str]) -> int:
     if args and args[0] == "--nextest":
         return run_nextest(args[1:])
@@ -116,7 +135,7 @@ def run(args: list[str]) -> int:
         return subprocess.call(cmd)
     if results:
         Path(results).mkdir(parents=True, exist_ok=True)
-        code = reported(cmd + ["--", *JSON], results, dict(os.environ, RUSTC_BOOTSTRAP="1"),
+        code = reported(libtest(cmd, JSON), results, dict(os.environ, RUSTC_BOOTSTRAP="1"),
                         "rust.json", first)
     else:
         code = teed(cmd, None, None, first)
@@ -144,15 +163,16 @@ def rerun_failed(cmd: list[str], results: str | None, first: rerun_tests.Outcome
     print(f"rerun: test: {len(names)} failed tests run once more: {', '.join(names)}", flush=True)
     # The same command, so the same build and env. Without a target
     # selection `--tests` leaves out the doctests: none of them failed.
-    again = cmd if any(a in cmd for a in TARGETS) else [*cmd, "--tests"]
+    cargo, rest = split(cmd)
+    again = cmd if any(a in cargo for a in TARGETS) else libtest([*cargo, "--tests"], rest)
     tests = [*names, "--exact"]
     out = rerun_tests.Outcomes()
     if results:
         Path(results, "rust-rerun.json").write_text("", encoding="utf-8")
-        rc = reported([*again, "--", *JSON, *tests], results, dict(os.environ, RUSTC_BOOTSTRAP="1"),
+        rc = reported(libtest(again, [*JSON, *tests]), results, dict(os.environ, RUSTC_BOOTSTRAP="1"),
                       "rust-rerun.json", out)
     else:
-        rc = teed([*again, "--", *tests], None, None, out)
+        rc = teed(libtest(again, tests), None, None, out)
     return 0 if rerun_tests.report("test", first, names, out.done(), rc) else code
 
 

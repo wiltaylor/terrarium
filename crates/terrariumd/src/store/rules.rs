@@ -101,6 +101,7 @@ pub fn context(conn: &Connection, project: &str) -> ApiResult<Context> {
     Ok(Context {
         columns: Some(columns),
         max_rules: max_per_project(),
+        columns_flow: false,
     })
 }
 
@@ -146,6 +147,7 @@ pub async fn with_rules(mut r: Rules) -> ApiResult<Rules> {
     let ctx = Context {
         columns: None,
         max_rules: usize::MAX,
+        columns_flow: false,
     };
     match parse_off(r.text.clone(), rules_file::FILE_NAME.to_owned(), ctx).await? {
         Ok(s) => r.rules = s.rules,
@@ -490,6 +492,7 @@ pub async fn retire_legacy_wait_overrides(db: &crate::db::Db) -> Vec<String> {
         let any_columns = Context {
             columns: None,
             max_rules: usize::MAX,
+            columns_flow: false,
         };
         let own = match parse_off(text.clone(), rules_file::FILE_NAME.to_owned(), any_columns).await
         {

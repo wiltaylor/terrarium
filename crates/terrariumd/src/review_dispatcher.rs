@@ -1,17 +1,33 @@
 //! Opt-in review agents. Verdicts are accepted only from the current round's agent.
-use rusqlite::{Connection, params};
+//!
+//! Two callers share the selection and the spawn ([`Pick`], [`run`]): the
+//! `review_dispatcher` project setting and the `review.start` rule action
+//! (TER-1214, kanban rework C4b, D23). A project on `board_flow = columns`
+//! has only the rule action: its setting is refused and ignored, and a
+//! verdict there acts as the owner of the round's spawn.
+use rusqlite::{Connection, OptionalExtension, params};
 use terrarium_core::Role;
+use terrarium_core::config::BoardFlow;
 
 use crate::actor::Actor;
 use crate::api::Shared;
-use crate::card_dispatcher::{actor, defer_project, project_limit};
+use crate::card_dispatcher::{actor, defer_project, named_owner, project_limit};
 use crate::db::Tx;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::spawn::{Internal, SpawnBody};
 use crate::store::{agents, board, mail, projects, spawns};
 
+/// The template and the round limit of the `review_dispatcher` setting.
+pub const DEFAULT_TEMPLATE: &str = "card-review";
+pub const DEFAULT_MAX_ROUNDS: u32 = 3;
+
 fn owner(c: &Connection, project: &str) -> ApiResult<Option<Actor>> {
-    let Some(name) = projects::get(c, project)?.review_dispatcher else {
+    let p = projects::get(c, project)?;
+    // The column rules start reviews on a columns board (TER-1214 D24).
+    if p.board_flow == BoardFlow::Columns {
+        return Ok(None);
+    }
+    let Some(name) = p.review_dispatcher else {
         return Ok(None);
     };
     let v = agents::find(c, &name, Some(project))?;
@@ -52,9 +68,61 @@ WHERE c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = 
   AND (c.position, c.id) > (?4, ?5)
 ORDER BY c.position, c.id LIMIT ?6";
 
-fn candidate(c: &Connection, project: &str) -> ApiResult<Option<String>> {
-    let review = board::role_name(c, project, "review", "review")?;
+/// One card of [`CANDIDATES`]: the same tests, for the card `?4` only (a
+/// `review.start` on its run's card).
+pub const ONE_CANDIDATE: &str = "
+SELECT c.id, c.title, c.labels FROM cards c
+WHERE c.id = ?4
+  AND c.column_id = (SELECT id FROM board_columns WHERE project = ?1 AND name = ?2)
+  AND c.archived = 0 AND c.kind = 'card'
+  AND NOT EXISTS (SELECT 1 FROM spawns s WHERE s.bound_kind = 'review'
+      AND s.bound_id = c.id AND s.finished_at IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM card_dispatch_retries d WHERE d.card = c.id AND d.retry_at > ?3)
+  AND NOT EXISTS (SELECT 1 FROM card_reviews r WHERE r.card = c.id
+      AND (r.applied = 2 OR r.cap_notified = 1))";
+
+/// What one review dispatch chooses from and starts: the cards of the
+/// review column `from` (only `card` when it is set), the template of the
+/// agent, and the round limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pick {
+    pub from: String,
+    pub card: Option<String>,
+    pub template: String,
+    pub max_rounds: u32,
+}
+
+/// The `review_dispatcher` setting's pick: the review column, the
+/// `card-review` template and 3 rounds.
+fn setting_pick(c: &Connection, project: &str) -> ApiResult<Pick> {
+    Ok(Pick {
+        from: board::role_name(c, project, "review", "review")?,
+        card: None,
+        template: DEFAULT_TEMPLATE.into(),
+        max_rounds: DEFAULT_MAX_ROUNDS,
+    })
+}
+
+/// The first card of `pick` with no open review, no consumed verdict and
+/// no cooldown, not held.
+pub fn candidate(c: &Connection, project: &str, pick: &Pick) -> ApiResult<Option<String>> {
     let now = chrono::Utc::now().timestamp();
+    if let Some(id) = &pick.card {
+        let row = c
+            .query_row(ONE_CANDIDATE, params![project, pick.from, now, id], |r| {
+                Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })
+            .optional()?;
+        return Ok(row
+            .filter(|(title, labels)| {
+                !crate::store::github_gate::is_held(
+                    title,
+                    &crate::store::json_col::<Vec<String>>(labels),
+                )
+            })
+            .map(|_| id.clone()));
+    }
+    let review = &pick.from;
     let mut q = c.prepare(CANDIDATES)?;
     // `(position, id)` is a strict total order, so a tie at a page boundary
     // is not dropped. A full page of title-held cards continues with the
@@ -111,6 +179,57 @@ fn tell_owner(t: &mut Tx<'_>, who: &Actor, id: &str, reason: &str) -> ApiResult<
     Ok(())
 }
 
+/// The review round of card `id` (0: none yet).
+pub fn round(c: &Connection, id: &str) -> ApiResult<u32> {
+    Ok(c.query_row(
+        "SELECT coalesce((SELECT round FROM card_reviews WHERE card = ?1), 0)",
+        [id],
+        |r| r.get(0),
+    )?)
+}
+
+/// At the round limit: mark card `id` capped and mail `who` once. `false`:
+/// the card is under the limit.
+pub fn cap(t: &mut Tx<'_>, who: &Actor, id: &str, max_rounds: u32) -> ApiResult<bool> {
+    if round(t, id)? < max_rounds {
+        return Ok(false);
+    }
+    let notified = t.execute(
+        "UPDATE card_reviews SET cap_notified = 1 WHERE card = ?1 AND cap_notified = 0",
+        [id],
+    )?;
+    if notified > 0 {
+        tell_owner(
+            t,
+            who,
+            id,
+            &format!(
+                "Review round limit ({max_rounds}) reached. Card remains in review for the lead."
+            ),
+        )?;
+    }
+    Ok(true)
+}
+
+/// Where the owner of a review dispatch comes from, for the recheck in the
+/// spawn transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Owner {
+    /// The `review_dispatcher` setting.
+    Setting,
+    /// The `owner` of a `review.start` rule action: an agent name.
+    Named(String),
+}
+
+impl Owner {
+    fn current(&self, c: &Connection, project: &str) -> ApiResult<Option<Actor>> {
+        match self {
+            Self::Setting => owner(c, project),
+            Self::Named(name) => named_owner(c, project, name, "review.start owner"),
+        }
+    }
+}
+
 pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
     let p = project.to_owned();
     let who = match state.db.read(move |c| owner(c, &p)).await {
@@ -122,55 +241,48 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
         }
     };
     let p = project.to_owned();
-    let Some(id) = state.db.read(move |c| candidate(c, &p)).await? else {
+    let pick = state.db.read(move |c| setting_pick(c, &p)).await?;
+    run(state, project, who, pick, Owner::Setting).await
+}
+
+/// Select one card of `pick` and start its review agent as `who`. At the
+/// round limit the owner gets one mail instead. `Ok(true)`: an agent
+/// started or a card was capped. The owner, the round and the selection
+/// are rechecked in the spawn transaction. Public for tests.
+pub async fn run(
+    state: &Shared,
+    project: &str,
+    who: Actor,
+    pick: Pick,
+    source: Owner,
+) -> ApiResult<bool> {
+    let (p, pk) = (project.to_owned(), pick.clone());
+    let Some(id) = state.db.read(move |c| candidate(c, &p, &pk)).await? else {
         return Ok(false);
     };
-    let (card, a) = (id.clone(), who.clone());
+    let (card, a, max_rounds) = (id.clone(), who.clone(), pick.max_rounds);
     let capped = state
         .db
-        .write("system", move |t| {
-            let round: u32 = t.query_row(
-                "SELECT coalesce((SELECT round FROM card_reviews WHERE card = ?1), 0)",
-                [&card],
-                |r| r.get(0),
-            )?;
-            if round < 3 {
-                return Ok(false);
-            }
-            let notified = t.execute(
-                "UPDATE card_reviews SET cap_notified = 1 WHERE card = ?1 AND cap_notified = 0",
-                [&card],
-            )?;
-            if notified == 0 {
-                return Ok(true);
-            }
-            tell_owner(
-                t,
-                &a,
-                &card,
-                "Review round limit (3) reached. Card remains in review for the lead.",
-            )?;
-            Ok(true)
-        })
+        .write("system", move |t| cap(t, &a, &card, max_rounds))
         .await?;
     if capped {
         return Ok(true);
     }
-    let a = who.clone();
-    if let Some(reason) = state.db.read(move |c| project_limit(c, &a)).await? {
-        defer_project(state, project, Some(&who), &reason).await?;
-        return Ok(false);
+    // The rule action checked the owner's limits in its run (a no-op with
+    // the reason); the spawn checks them again.
+    if source == Owner::Setting {
+        let a = who.clone();
+        if let Some(reason) = state.db.read(move |c| project_limit(c, &a)).await? {
+            defer_project(state, project, Some(&who), &reason).await?;
+            return Ok(false);
+        }
     }
-    let (p, expected, expected_owner) = (project.to_owned(), id.clone(), who.clone());
+    let (p, expected, expected_owner, pk) =
+        (project.to_owned(), id.clone(), who.clone(), pick.clone());
     let check: crate::spawn::DefCheck = Box::new(move |c, _| {
-        let round: u32 = c.query_row(
-            "SELECT coalesce((SELECT round FROM card_reviews WHERE card = ?1), 0)",
-            [&expected],
-            |r| r.get(0),
-        )?;
-        if round >= 3
-            || owner(c, &p)?.as_ref() != Some(&expected_owner)
-            || candidate(c, &p)? != Some(expected)
+        if round(c, &expected)? >= pk.max_rounds
+            || source.current(c, &p)?.as_ref() != Some(&expected_owner)
+            || candidate(c, &p, &pk)? != Some(expected)
         {
             return Err(ApiError::conflict("review selection changed")
                 .with_details(serde_json::json!({"dispatcher_selection_changed":true})));
@@ -205,7 +317,7 @@ pub async fn dispatch(state: &Shared, project: &str) -> ApiResult<bool> {
         SpawnBody {
             like: None,
             like_skip_missing: false,
-            template: "card-review".into(),
+            template: pick.template.clone(),
             task,
             name: None,
             wait: false,
@@ -260,7 +372,7 @@ pub fn verdict(t: &mut Tx<'_>, reviewer: &Actor, id: &str, body: &str) -> ApiRes
     // comment and lose the findings: keep the verdict, record why nothing
     // was applied, and leave the round open like a project without a
     // review dispatcher. Any other error (a database error) still fails.
-    let who = match owner(t, &card.project) {
+    let who = match verdict_owner(t, &card.project, &a.id) {
         Ok(Some(who)) => who,
         Ok(None) => return Ok(()),
         Err(e) if matches!(e.code, Code::Forbidden | Code::NotFound) => {
@@ -306,6 +418,24 @@ pub fn verdict(t: &mut Tx<'_>, reviewer: &Actor, id: &str, body: &str) -> ApiRes
         )?;
     }
     Ok(())
+}
+
+/// Who applies the verdict of the round of agent `agent`: on a columns
+/// board the owner of the round's spawn (the `review.start` owner), else
+/// the `review_dispatcher` setting.
+fn verdict_owner(c: &Connection, project: &str, agent: &str) -> ApiResult<Option<Actor>> {
+    if projects::board_flow(c, project)? != BoardFlow::Columns {
+        return owner(c, project);
+    }
+    let spawn_owner: Option<String> = c
+        .query_row("SELECT owner FROM spawns WHERE id = ?1", [agent], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    let Some(spawn_owner) = spawn_owner else {
+        return Err(ApiError::not_found("the review round has no spawn"));
+    };
+    named_owner(c, project, &spawn_owner, "review.start owner")
 }
 
 pub fn finished(c: &Connection, id: &str) -> ApiResult<Option<(&'static str, String)>> {

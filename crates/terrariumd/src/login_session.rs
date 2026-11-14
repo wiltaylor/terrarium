@@ -1469,8 +1469,9 @@ async fn finish(state: &Shared, s: &LoginSession) -> Result<subs::Subscription, 
 }
 
 /// Remove the Grok tokens that a login imported into the account of
-/// `name` when its register failed (TER-1205): no orphan credential stays,
-/// and the tokens leave the redaction matcher.
+/// `name` when its register failed (TER-1205): no orphan credential stays.
+/// The removed tokens stay in the redaction matcher for the life of the
+/// daemon (`accounts::remove*` retain them, TER-1257).
 async fn drop_grok_import(state: &Shared, name: &str, had_account: bool) {
     let (dir, n) = (state.state_dir.clone(), name.to_owned());
     let removed = tokio::task::spawn_blocking(move || {

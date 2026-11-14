@@ -199,7 +199,8 @@ pub struct Card {
     /// The dependencies that are neither accepted nor done yet.
     pub blocked_by: Vec<String>,
     pub comments: Vec<Comment>,
-    /// The review round (TER-614 R9): with a review dispatcher, its round
+    /// The review round (TER-614 R9): with a review dispatcher, or on a
+    /// columns board after a `review.start` (TER-1214), its round
     /// (`card_reviews`); else each move of the card into review
     /// (`cards.review_entries`). 0: never in review.
     #[serde(default)]
@@ -312,9 +313,13 @@ struct CardRow {
     idle_since: Option<String>,
 }
 
-/// The review round of card `?1` ([`Card::review_round`], TER-614 R9).
+/// The review round of card `?1` ([`Card::review_round`], TER-614 R9). On
+/// a columns board, a card that a `review.start` rule reviewed shows the
+/// rule's rounds (TER-1214).
 const REVIEW_ROUND_SQL: &str = "SELECT CASE
     WHEN (SELECT p.review_dispatcher FROM projects p WHERE p.name = c.project) IS NOT NULL
+      OR ((SELECT p.board_flow FROM projects p WHERE p.name = c.project) = 'columns'
+          AND EXISTS (SELECT 1 FROM card_reviews r WHERE r.card = c.id))
     THEN coalesce((SELECT round FROM card_reviews WHERE card = c.id), 0)
     ELSE c.review_entries END
   FROM cards c WHERE c.id = ?1";
@@ -976,6 +981,8 @@ pub fn board_summary(
           'eta_set_by_name', coalesce(eb.project || '/' || eb.name, ebr.project || '/' || ebr.name, c.eta_set_by),
           'done_at', c.done_at, 'idle_since', c.idle_since,
           'review_round', CASE WHEN (SELECT review_dispatcher FROM projects WHERE name = c.project) IS NOT NULL
+              OR ((SELECT board_flow FROM projects WHERE name = c.project) = 'columns'
+                  AND EXISTS (SELECT 1 FROM card_reviews WHERE card = c.id))
             THEN coalesce((SELECT round FROM card_reviews WHERE card = c.id), 0)
             ELSE c.review_entries END,
           'trouble', (SELECT json_group_array(signal) FROM
@@ -3361,8 +3368,9 @@ pub fn set_columns(
         .collect();
     // A rule of a column that stays may not name a removed column
     // (TER-1159), nor a role that no column has after the change
-    // (TER-1210): refused before anything is written. The references
-    // resolve on the board after the change (TER-1199).
+    // (TER-1210), nor move `@x` to another column, by name or by a new
+    // role (TER-1246, TER-1252): refused before anything is written. The
+    // references resolve on the board after the change (TER-1199).
     let removed: Vec<&ColumnRow> = current.iter().filter(|c| !kept.contains(&c.id)).collect();
     let after: Vec<terrarium_core::rules_file::BoardColumn> = wanted
         .iter()

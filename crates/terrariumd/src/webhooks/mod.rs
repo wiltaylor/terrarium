@@ -24,8 +24,8 @@
 pub mod net;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -708,6 +708,56 @@ async fn attempt(state: &Shared, d: Delivery) -> ApiResult<(Option<Delivery>, Op
     Ok((Some(row), preview))
 }
 
+/// The live [`hold_retries`] holds, so that the worker reads the map only
+/// while a test holds a trigger.
+static HOLDS_LIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// The triggers that [`hold_retries`] holds, with their hold count.
+fn retry_holds() -> &'static Mutex<HashMap<String, usize>> {
+    static HOLDS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    HOLDS.get_or_init(Mutex::default)
+}
+
+/// A hold of [`hold_retries`]: dropping it lets the retries start.
+#[doc(hidden)]
+pub struct RetryHold {
+    schedule: String,
+}
+
+impl Drop for RetryHold {
+    fn drop(&mut self) {
+        let mut map = lock(retry_holds());
+        if let Some(n) = map.get_mut(&self.schedule) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.schedule);
+            }
+        }
+        HOLDS_LIVE.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// For the tests: while the hold lives, no pass of any daemon in the
+/// process starts a retry (a delivery with an attempt) of trigger
+/// `schedule`, so a test can read a `pending` row without a time budget
+/// (TER-1243). The first attempt of a delivery is not held.
+#[doc(hidden)]
+pub fn hold_retries(schedule: &str) -> RetryHold {
+    *lock(retry_holds()).entry(schedule.to_owned()).or_insert(0) += 1;
+    HOLDS_LIVE.fetch_add(1, Ordering::AcqRel);
+    RetryHold {
+        schedule: schedule.to_owned(),
+    }
+}
+
+/// True when a [`hold_retries`] holds this retry. Outside the tests this
+/// is one atomic load.
+fn retry_held(d: &Delivery) -> bool {
+    d.attempt > 0
+        && HOLDS_LIVE.load(Ordering::Acquire) > 0
+        && lock(retry_holds()).contains_key(&d.schedule)
+}
+
 /// One pass of the worker: send the deliveries that are due at `now` and
 /// not in flight. Returns the started sends.
 pub async fn pass(state: &Shared, now: DateTime<Utc>) -> Vec<JoinHandle<Option<Delivery>>> {
@@ -720,6 +770,9 @@ pub async fn pass(state: &Shared, now: DateTime<Utc>) -> Vec<JoinHandle<Option<D
     };
     let mut out = Vec::new();
     for d in due {
+        if retry_held(&d) {
+            continue;
+        }
         let Some(claim) = state.webhooks.claim(&d.id) else {
             continue;
         };

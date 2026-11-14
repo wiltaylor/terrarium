@@ -130,11 +130,7 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
         {
             report.projects.updated.push(def.name.clone());
         }
-        projects::set_review_dispatcher(
-            t,
-            &def.name,
-            def.review_dispatcher.as_deref().unwrap_or("off"),
-        )?;
+        projects::set_review_dispatcher_from_file(t, &def.name, def.review_dispatcher.as_deref())?;
         projects::set_card_dispatcher_from_file(t, &def.name, def.card_dispatcher.as_deref())?;
         // Repos: the file list replaces the file repos, and takes over API
         // repos with the same name.

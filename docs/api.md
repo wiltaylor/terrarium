@@ -946,6 +946,14 @@ waking the bound implementation agent through the normal card-move flow.
 The `review:lead` label retains both decisions for the lead without an
 automatic move. Moving the card invalidates the previous round's verdict.
 
+A project on `board_flow = columns` has no `review_dispatcher` (TER-1214).
+Setting an owner there is refused with 409 (`board_flow_columns`), a
+project file or fleet value is stored as `off` with a warning, and a
+stored value starts nothing. Such a board starts reviews with the
+`review_start` column rule action (§19.9), and a verdict there acts as the
+owner of the round's spawn. The card shows the rule's rounds as its
+`review_round`.
+
 A project:
 
 ```json
@@ -9768,6 +9776,35 @@ expression. No manual close endpoint exists.
     the card again. No room, no eligible card, a paused owner, or an owner
     at a spawn cap: a no-op with the reason. A failed spawn gives the card
     the dispatcher's cooldown, comment and owner mail.
+- `review_start` (`review.start`, TER-1214, kanban rework C4b): only in
+  the column rules of a project on `board_flow = columns`. `rules.wcl`,
+  the column rules of a rules or code board, and the output of a script
+  step refuse it (422); other boards keep the `review_dispatcher` setting
+  until the conversion (C5). It starts a review agent for a card in the
+  review column (the column with the role
+  `review`, else the one named `review`), as the review dispatcher does
+  (§5). `owner` (required) is a non-ephemeral project admin of the
+  project: its spawn rights and caps are used, pausing it pauses the
+  action, and the verdict moves the card as this owner. `template`
+  (default `card-review`). `max_rounds` (1 to 10, default 3): at the limit
+  the card stays in review and the owner gets one mail; after that mail
+  the card is not picked again. `from` (only the review column): take the
+  top eligible card of that column, for a rule with no card (a `timer`);
+  one card for each run. Without `from`, the run's card. Eligible: no open
+  review agent, no consumed verdict of the current stay in review, not
+  held, not cooling down after a failed spawn. The run's write picks the
+  card and reports it (`changed`, with the round); the spawn runs after
+  the commit and checks the owner, the round and the card again. A card
+  outside the review column, no eligible card, a paused owner, or an owner
+  at a spawn cap: a no-op with the reason. A failed spawn gives the card
+  the dispatcher's cooldown, comment and owner mail. The spawn takes the
+  card that the run reported, or none when it is no longer eligible. The
+  action does not retry by itself: a retry after the cooldown, or after a
+  reviewer that ended with no verdict, needs a rule that runs again, such
+  as a `timer` rule on the review column with `from: "@review"` (the
+  setting's timer did this on each tick). The verdict works as
+  in §5: accept moves the card to `merge_queue`, changes to the top of
+  `ready`, and `review:lead` keeps it for the lead.
 - `card_prepend`: put `text` at the top of the card body. A body that
   starts with the text already: a no-op.
 - `mail`: mail from `project:<project>` to each of `to` (`operator`,
@@ -10291,9 +10328,12 @@ change does not block it.
 A change that leaves `@x` resolving by name to another column than
 before (the role `x` cleared while another column is named `x`) is
 refused the same way (TER-1246): `role_in_use`, or `column_in_use` when
-the column it named is removed. `@x` may still follow the role `x` to
-another column, and it may keep its own column by name, also renamed in
-the same change (`@x` rewritten to `@<new name>`).
+the column it named is removed. So is the reverse (TER-1252): `@x` named
+the column `x` by name (no column had the role `x`), and the change gives
+the role `x` to another column. `@x` may still follow the role `x` to
+another column when it named the column with that role before, and it may
+keep its own column by name, also renamed in the same change (`@x`
+rewritten to `@<new name>`).
 
 ## 20. Event sources and ingest
 
