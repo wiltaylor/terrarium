@@ -4026,11 +4026,9 @@ async fn grok_verify_and_logout_rebuild_the_redaction_matcher() {
         v.body
     );
     assert_eq!(card_body(td, GROK_TOKEN_B).await, format!("t={label}"));
-    // The old token is no longer in the file, nor in the matcher.
-    assert_eq!(
-        card_body(td, GROK_TOKEN_A).await,
-        format!("t={GROK_TOKEN_A}")
-    );
+    // The old token is no longer in the file. It stays in the matcher: an
+    // agent that used it may still print it (TER-1259).
+    assert_eq!(card_body(td, GROK_TOKEN_A).await, format!("t={label}"));
 
     // A logout removes the account. Its token stays in the matcher for the
     // life of the daemon (TER-1257).
