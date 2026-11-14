@@ -300,11 +300,33 @@ pub fn unescape_turn(text: &str) -> &str {
     text.trim_start_matches(TURN_ESCAPE)
 }
 
+/// The bracketed-paste start marker.
+pub const PASTE_START: &str = "\x1b[200~";
+/// The bracketed-paste end marker.
+pub const PASTE_END: &str = "\x1b[201~";
+
+/// The text with every bracketed-paste marker removed (TER-1289). One
+/// pass of `replace` is not enough: the removal of a nested marker can
+/// rebuild one (`"\x1b[20\x1b[201~1~"` becomes `"\x1b[201~"`), and a
+/// rebuilt end marker ends the paste early, so the rest of an untrusted
+/// text (task, mail, card) is typed as keys. The removal repeats until no
+/// marker is left. Each pass makes the text shorter, so the loop ends.
+pub fn strip_paste_markers(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains(PASTE_START) && !text.contains(PASTE_END) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut clean = text.to_owned();
+    while clean.contains(PASTE_START) || clean.contains(PASTE_END) {
+        clean = clean.replace(PASTE_START, "").replace(PASTE_END, "");
+    }
+    std::borrow::Cow::Owned(clean)
+}
+
 /// The text as keystrokes, then CR. The bracketed-paste markers are
 /// removed: a raw text is typed, not pasted.
 pub fn raw_text_keys(text: &str) -> Vec<u8> {
-    let clean = text.replace("\x1b[200~", "").replace("\x1b[201~", "");
-    let mut out = clean.into_bytes();
+    let clean = strip_paste_markers(text);
+    let mut out = clean.into_owned().into_bytes();
     out.push(b'\r');
     out
 }
@@ -312,9 +334,9 @@ pub fn raw_text_keys(text: &str) -> Vec<u8> {
 /// Wrap `text` in bracketed-paste markers and add a carriage return.
 pub fn bracketed_paste(text: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len() + 13);
-    out.extend_from_slice(b"\x1b[200~");
+    out.extend_from_slice(PASTE_START.as_bytes());
     out.extend_from_slice(text.as_bytes());
-    out.extend_from_slice(b"\x1b[201~");
+    out.extend_from_slice(PASTE_END.as_bytes());
     out.push(b'\r');
     out
 }
@@ -377,6 +399,43 @@ mod tests {
     fn raw_text_is_typed_not_pasted() {
         assert_eq!(raw_text_keys("/compact"), b"/compact\r".to_vec());
         assert_eq!(raw_text_keys("a\x1b[201~b"), b"ab\r".to_vec());
+        // TER-1289: a nested marker does not come back.
+        assert_eq!(raw_text_keys("a\x1b[20\x1b[201~1~b"), b"ab\r".to_vec());
+    }
+
+    /// TER-1289: the strip runs to a fixed point. Nested markers (one in
+    /// the other, at any depth), markers that a removed start marker
+    /// rebuilds, and split markers leave no marker.
+    #[test]
+    fn paste_marker_strip_leaves_no_marker() {
+        let cases = [
+            ("plain text", "plain text"),
+            ("a\x1b[201~b", "ab"),
+            ("a\x1b[200~b", "ab"),
+            // Nested end marker in an end marker.
+            ("\x1b[20\x1b[201~1~", ""),
+            ("x\x1b[20\x1b[201~1~/exit\r", "x/exit\r"),
+            // Two levels deep.
+            ("\x1b[20\x1b[20\x1b[201~1~1~", ""),
+            // A start marker that rebuilds an end marker, and the reverse.
+            ("\x1b[20\x1b[200~1~", ""),
+            ("\x1b[20\x1b[201~0~", ""),
+            // Split across the ESC and the CSI.
+            ("\x1b\x1b[201~[201~", ""),
+            ("\x1b[\x1b[200~201~", ""),
+            // Parts of a marker that are not a marker stay.
+            ("\x1b[20", "\x1b[20"),
+            ("1~ \x1b[201", "1~ \x1b[201"),
+        ];
+        for (text, want) in cases {
+            let got = strip_paste_markers(text);
+            assert_eq!(got, want, "{text:?}");
+            assert!(!got.contains(PASTE_START) && !got.contains(PASTE_END));
+        }
+        assert!(matches!(
+            strip_paste_markers("no marker"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]
