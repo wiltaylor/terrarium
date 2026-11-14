@@ -248,10 +248,7 @@ async fn a_run_without_a_claim_gets_its_lease_and_gives_it_back() {
     // check in the write transaction finds the request's lease and gives
     // the second one back.
     let clash = service_sched::lease_run(&state, &a, "p/second").await;
-    assert_eq!(
-        clash.unwrap_err().code,
-        terrariumd::error::Code::Conflict
-    );
+    assert_eq!(clash.unwrap_err().code, terrariumd::error::Code::Conflict);
     let leases = state
         .db
         .read(|c| terrariumd::store::leases::active_on(c, "p-ssh"))
@@ -259,7 +256,10 @@ async fn a_run_without_a_claim_gets_its_lease_and_gives_it_back() {
         .unwrap();
     assert_eq!(leases.len(), 1, "{leases:?}");
     assert_eq!(leases[0].id, lease.lease.id);
-    assert_eq!(request(&state, &a).await.lease_id, Some(lease.lease.id.clone()));
+    assert_eq!(
+        request(&state, &a).await.lease_id,
+        Some(lease.lease.id.clone())
+    );
 
     // The run ends (C3 or C4): the release revokes the lease.
     let id = a.clone();
@@ -385,11 +385,7 @@ async fn a_final_refusal_fails_at_once_and_a_busy_one_waits_without_a_row() {
         .ok();
     // The host has 4 CPUs at 50%: 2 cores reservable. And 2 GPUs.
     for (name, resources, says) in [
-        (
-            "big",
-            json!({"cpu_millis": 4000}),
-            "is exhausted",
-        ),
+        ("big", json!({"cpu_millis": 4000}), "is exhausted"),
         (
             "many",
             json!({"gpus": 3, "gpu_exclusive": true}),
@@ -485,7 +481,11 @@ async fn a_busy_preflight_refusal_waits_and_runs_when_it_clears() {
     tick(&state, Utc::now() + chrono::Duration::seconds(61)).await;
     let ra = request(&state, &a).await;
     assert_eq!(ra.state.as_str(), "queued", "{ra:?}");
-    assert_eq!(reservation_rows(&state, &a).await, 0, "a busy wait makes no row");
+    assert_eq!(
+        reservation_rows(&state, &a).await,
+        0,
+        "a busy wait makes no row"
+    );
     state
         .executor
         .end_resource_sessions(&["p-box2".to_owned()], None)
@@ -507,9 +507,12 @@ async fn exclusive_gpus_on_two_targets_run_at_once() {
     let (td, server, client) = crate::reservations_api::setup().await;
     let state = state_of(&td);
     for (svc, target) in [("g1", "p-box"), ("g2", "p-box2")] {
-        td.patch(&format!("/api/targets/{target}"), json!({"ephemeral": true}))
-            .await
-            .ok();
+        td.patch(
+            &format!("/api/targets/{target}"),
+            json!({"ephemeral": true}),
+        )
+        .await
+        .ok();
         define(
             &td,
             json!({"name": svc, "kind": "script", "target": target, "project": "p",
@@ -526,7 +529,10 @@ async fn exclusive_gpus_on_two_targets_run_at_once() {
     state
         .db
         .write("system", |t| {
-            t.execute("UPDATE targets SET state = 'running' WHERE name = 'p-box'", [])?;
+            t.execute(
+                "UPDATE targets SET state = 'running' WHERE name = 'p-box'",
+                [],
+            )?;
             Ok(())
         })
         .await

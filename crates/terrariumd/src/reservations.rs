@@ -534,7 +534,9 @@ pub async fn grant(
 /// later (services, TER-1265).
 pub async fn admission(state: &Shared, host: &str, body: &NewBody) -> Result<(), Refusal> {
     if body.agent.is_some() {
-        return fin(ApiError::invalid("admission checks a reservation held by its target"));
+        return fin(ApiError::invalid(
+            "admission checks a reservation held by its target",
+        ));
     }
     if let Err(e) = ready(state, host) {
         return busy(e);

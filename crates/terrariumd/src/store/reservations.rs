@@ -451,7 +451,9 @@ pub fn candidate(
         || req.duration_ms <= 0
         || req.queue_ms.is_some_and(|q| q <= 0)
     {
-        return Err(ApiError::invalid("give nonzero amounts and positive duration/queue timeout").into());
+        return Err(
+            ApiError::invalid("give nonzero amounts and positive duration/queue timeout").into(),
+        );
     }
     let until = at
         .checked_add(req.duration_ms)
@@ -463,7 +465,7 @@ pub fn candidate(
                 .ok_or_else(|| ApiError::invalid("queue timeout overflow"))
         })
         .transpose()?;
-    let mut r = Reservation {
+    let r = Reservation {
         gpus: req.gpus,
         gpu_warned: false,
         gpu_below_since: None,
