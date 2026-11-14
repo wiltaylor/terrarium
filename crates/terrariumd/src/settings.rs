@@ -907,7 +907,12 @@ mod tests {
     fn switches_and_origins() {
         assert!(!WebConfig::default().project_pages_v2);
         assert!(!WebConfig::default().board_columns);
-        assert!(Settings::try_parse_from(["terrariumd"]).unwrap().web().board_columns);
+        assert!(
+            Settings::try_parse_from(["terrariumd"])
+                .unwrap()
+                .web()
+                .board_columns
+        );
         assert!(
             !Settings::try_parse_from(["terrariumd", "--board-columns", "0"])
                 .unwrap()

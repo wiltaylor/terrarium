@@ -137,7 +137,12 @@ fn parse(text: &str, file: &str) -> Result<RuleSet, String> {
 
 /// The rules that a board with `flow` runs, with their origins: the pack
 /// mapped to `board`, with `own`.
-fn running(flow: BoardFlow, own_text: &str, own: &RuleSet, board: &[BoardColumn]) -> Vec<(Rule, &'static str)> {
+fn running(
+    flow: BoardFlow,
+    own_text: &str,
+    own: &RuleSet,
+    board: &[BoardColumn],
+) -> Vec<(Rule, &'static str)> {
     let pack = rules_file::default_pack();
     let mig = rules_tools::migrate(pack, own_text, own, board);
     let mut with = own.clone();
@@ -179,7 +184,11 @@ pub fn plan(conn: &Connection, project: &str) -> ApiResult<Plan> {
     } else {
         RuleSet::default()
     };
-    let own_text = if problems.is_empty() { stored.text.clone() } else { String::new() };
+    let own_text = if problems.is_empty() {
+        stored.text.clone()
+    } else {
+        String::new()
+    };
     let cols = columns(conn, project)?;
     let board: Vec<BoardColumn> = cols
         .iter()
@@ -191,7 +200,8 @@ pub fn plan(conn: &Connection, project: &str) -> ApiResult<Plan> {
     // The coded flow moves a card to validating when its validate job is
     // queued: on the column rules that is the opt-in validate rules.
     if p.board_flow == BoardFlow::Code && has_validating(&board) {
-        let v = parse(rules_file::VALIDATE_RULES, "rules.validate.wcl").map_err(ApiError::internal)?;
+        let v =
+            parse(rules_file::VALIDATE_RULES, "rules.validate.wcl").map_err(ApiError::internal)?;
         for r in v.rules {
             if !own.rules.iter().any(|o| o.name == r.name) {
                 own.rules.push(r);
@@ -285,11 +295,12 @@ fn write(t: &mut Tx<'_>, plan: &Plan) -> ApiResult<(Vec<String>, Option<Value>, 
             },
         )
         .map_err(|e| {
-            let detail = e.details.as_ref().map(ToString::to_string).unwrap_or_default();
-            ApiError::internal(format!(
-                "column `{}`: {} {detail}",
-                pc.column, e.message
-            ))
+            let detail = e
+                .details
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            ApiError::internal(format!("column `{}`: {} {detail}", pc.column, e.message))
         })?;
         ids.extend(
             after
@@ -342,7 +353,8 @@ pub fn apply(t: &mut Tx<'_>, project: &str) -> ApiResult<Outcome> {
             json!(ids).to_string(),
             queue_before.map(|q| q.to_string()),
             json!({"report": plan.report, "problems": plan.problems, "kept": kept,
-                   "batch": plan.batch}).to_string()
+                   "batch": plan.batch})
+            .to_string()
         ],
     )?;
     t.audit(
@@ -410,7 +422,12 @@ pub fn revert(t: &mut Tx<'_>, project: &str) -> ApiResult<Outcome> {
     };
     let ids: Vec<String> = rec["rule_ids"]
         .as_array()
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default();
     let queue_before = &rec["queue_before"];
     let actor = Actor::Operator;
@@ -458,7 +475,10 @@ pub fn revert(t: &mut Tx<'_>, project: &str) -> ApiResult<Outcome> {
         "UPDATE projects SET board_flow = ?2, board_flow_at = ?3 WHERE name = ?1",
         params![project, stored, crate::db::now()],
     )?;
-    t.execute("DELETE FROM board_conversions WHERE project = ?1", [project])?;
+    t.execute(
+        "DELETE FROM board_conversions WHERE project = ?1",
+        [project],
+    )?;
     t.audit(
         "board.convert_revert",
         project,
@@ -491,7 +511,12 @@ pub fn standard_board(t: &mut Tx<'_>, project: &str) -> ApiResult<()> {
         .collect();
     let own = parse(rules_file::MERGE_QUEUE_RULES, "rules.merge_queue.wcl")
         .map_err(ApiError::internal)?;
-    let rules = running(BoardFlow::Rules, rules_file::MERGE_QUEUE_RULES, &own, &board);
+    let rules = running(
+        BoardFlow::Rules,
+        rules_file::MERGE_QUEUE_RULES,
+        &own,
+        &board,
+    );
     let conv = board_convert::convert(&rules, &cols, &Dispatchers::default());
     let plan = from_conversion(&p, None, conv, Vec::new());
     let (ids, _, _) = write(t, &plan)?;
@@ -513,9 +538,7 @@ pub fn report_text(o: &Outcome) -> String {
         "The board of project `{}` now runs on column rules (kanban rework, TER-1117). It ran \
          `board_flow = {}` before.\n\n{} rules were written to the columns. Each column's cog \
          shows its rules.\n\n| Rule | Result | Trigger | Columns | Note |\n|---|---|---|---|---|\n",
-        o.project,
-        plan.board_flow,
-        o.rules
+        o.project, plan.board_flow, o.rules
     );
     for e in &plan.report {
         s.push_str(&format!(
@@ -523,8 +546,16 @@ pub fn report_text(o: &Outcome) -> String {
             e.rule,
             e.result,
             e.trigger.unwrap_or("-"),
-            if e.columns.is_empty() { "-".to_owned() } else { e.columns.join(", ") },
-            if e.note.is_empty() { "-" } else { e.note.as_str() }
+            if e.columns.is_empty() {
+                "-".to_owned()
+            } else {
+                e.columns.join(", ")
+            },
+            if e.note.is_empty() {
+                "-"
+            } else {
+                e.note.as_str()
+            }
         ));
     }
     if let Some(b) = &plan.batch {
@@ -600,7 +631,9 @@ pub async fn upgrade(db: &Db) -> Vec<String> {
             })
             .await;
         match r {
-            Ok(Some(n)) => tracing::info!(project = %name, rules = n, "board converted to column rules"),
+            Ok(Some(n)) => {
+                tracing::info!(project = %name, rules = n, "board converted to column rules")
+            }
             Ok(None) => {}
             Err(e) => errors.push(format!(
                 "board of project `{name}`: not converted: {}",
@@ -612,7 +645,10 @@ pub async fn upgrade(db: &Db) -> Vec<String> {
 }
 
 /// The options of every column of `project`, for a test or a reader.
-pub fn options_of(conn: &Connection, project: &str) -> ApiResult<Vec<column_options::ColumnOptions>> {
+pub fn options_of(
+    conn: &Connection,
+    project: &str,
+) -> ApiResult<Vec<column_options::ColumnOptions>> {
     columns(conn, project)?
         .iter()
         .map(|c| get_options(conn, project, &c.name))

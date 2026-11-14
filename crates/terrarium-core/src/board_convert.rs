@@ -139,7 +139,11 @@ impl Conversion {
 fn texts(v: &Value) -> Vec<String> {
     match v {
         Value::String(s) => vec![s.clone()],
-        Value::Array(a) => a.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+        Value::Array(a) => a
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -260,12 +264,19 @@ fn is_done(c: &str) -> bool {
 }
 
 fn description(rule: &Rule, origin: &str) -> Option<String> {
-    let from = format!("Converted from the {origin} rule `{}` (TER-1117).", rule.name);
+    let from = format!(
+        "Converted from the {origin} rule `{}` (TER-1117).",
+        rule.name
+    );
     let text = match &rule.description {
         Some(d) if !d.trim().is_empty() => format!("{} {from}", d.trim()),
         _ => from,
     };
-    Some(text.chars().take(crate::board_rules::MAX_DESCRIPTION_CHARS).collect())
+    Some(
+        text.chars()
+            .take(crate::board_rules::MAX_DESCRIPTION_CHARS)
+            .collect(),
+    )
 }
 
 fn column_rule(rule: &Rule, name: &str, origin: &str, trigger: Trigger) -> ColumnRule {
@@ -286,7 +297,8 @@ fn column_rule(rule: &Rule, name: &str, origin: &str, trigger: Trigger) -> Colum
 /// `rule` with the conditions on `data.to` and `data.to_role` taken out,
 /// and `data.change` widened to `admitted` on a column that queues.
 fn landed(mut r: ColumnRule, queues: bool) -> ColumnRule {
-    r.when.retain(|m| m.path != "data.to" && m.path != "data.to_role");
+    r.when
+        .retain(|m| m.path != "data.to" && m.path != "data.to_role");
     if queues {
         for m in r.when.iter_mut().filter(|m| m.path == "data.change") {
             if let Some(mut v) = allowed(m)
@@ -324,14 +336,20 @@ fn job_trigger(rule: &Rule) -> Trigger {
     let mut job_kinds: Vec<String> = Vec::new();
     for m in when_on(rule, "data.kind") {
         if let Some(v) = allowed(m) {
-            job_kinds = v.into_iter().filter(|k| JOB_KINDS.contains(&k.as_str())).collect();
+            job_kinds = v
+                .into_iter()
+                .filter(|k| JOB_KINDS.contains(&k.as_str()))
+                .collect();
         }
     }
     Trigger::JobResult { events, job_kinds }
 }
 
 fn verb_args<'a>(rule: &'a Rule, verb: &str) -> Option<&'a Map<String, Value>> {
-    rule.actions.iter().find(|a| a.verb == verb).map(|a| &a.args)
+    rule.actions
+        .iter()
+        .find(|a| a.verb == verb)
+        .map(|a| &a.args)
 }
 
 /// A batch `job.queue` that waits for a count or a time (the legacy batch
@@ -481,7 +499,10 @@ pub fn convert(rules: &[(Rule, &str)], board: &[Column], d: &Dispatchers) -> Con
                     }
                 };
                 for c in &cols {
-                    let r = landed(column_rule(rule, &rule.name, origin, Trigger::Lands), queues(c));
+                    let r = landed(
+                        column_rule(rule, &rule.name, origin, Trigger::Lands),
+                        queues(c),
+                    );
                     out.push(c, r);
                 }
                 entry.trigger = Some("lands");
@@ -615,7 +636,9 @@ fn dispatchers(out: &mut Conversion, board: &[Column], d: &Dispatchers) {
             result: "converted",
             trigger: Some("lands"),
             columns: Vec::new(),
-            note: format!("owner `{owner}`, template `{REVIEW_TEMPLATE}`, {REVIEW_MAX_ROUNDS} rounds"),
+            note: format!(
+                "owner `{owner}`, template `{REVIEW_TEMPLATE}`, {REVIEW_MAX_ROUNDS} rounds"
+            ),
         };
         match crate::rules_file::review_column(&cols).map(|c| c.name.clone()) {
             Some(review) => {
@@ -689,7 +712,11 @@ mod tests {
     }
 
     fn pack() -> Vec<(Rule, &'static str)> {
-        default_pack().rules.iter().map(|r| (r.clone(), "pack")).collect()
+        default_pack()
+            .rules
+            .iter()
+            .map(|r| (r.clone(), "pack"))
+            .collect()
     }
 
     fn merge_queue_rules() -> RuleSet {
@@ -722,11 +749,17 @@ mod tests {
             columns_flow: true,
         };
         for (column, rules) in &c.columns {
-            let values: Vec<Value> = rules.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+            let values: Vec<Value> = rules
+                .iter()
+                .map(|r| serde_json::to_value(r).unwrap())
+                .collect();
             if let Err(p) = read_rules(&ctx, &values) {
                 panic!("{column}: {p:?}");
             }
-            assert!(rules.len() <= crate::board_rules::MAX_RULES_PER_COLUMN, "{column}");
+            assert!(
+                rules.len() <= crate::board_rules::MAX_RULES_PER_COLUMN,
+                "{column}"
+            );
         }
         assert!(c.rule_count() <= crate::board_rules::MAX_RULES_PER_PROJECT);
     }
@@ -736,22 +769,38 @@ mod tests {
         let board = terrarium_board();
         let c = convert(&pack(), &board, &Dispatchers::default());
         check_all(&c, &board);
-        let not: Vec<_> = c.report.iter().filter(|e| e.result != "converted").collect();
+        let not: Vec<_> = c
+            .report
+            .iter()
+            .filter(|e| e.result != "converted")
+            .collect();
         assert!(not.is_empty(), "{not:?}");
         assert!(c.batch.is_none());
         // The triage mails on backlog, the hourly one as a timer.
         let backlog = names(&c, "backlog");
-        for n in ["triage-new-backlog", "triage-moved-backlog", "triage-hourly"] {
+        for n in [
+            "triage-new-backlog",
+            "triage-moved-backlog",
+            "triage-hourly",
+        ] {
             assert!(backlog.contains(&n.to_owned()), "{backlog:?}");
         }
         let hourly = rules_of(&c, "backlog")
             .into_iter()
             .find(|r| r.name == "triage-hourly")
             .unwrap();
-        assert_eq!(hourly.trigger, Trigger::Timer { every_seconds: 3600 });
+        assert_eq!(
+            hourly.trigger,
+            Trigger::Timer {
+                every_seconds: 3600
+            }
+        );
         // The cut on accepted, and its timer.
         let acc = names(&c, "accepted");
-        assert!(acc.contains(&"version-cut".to_owned()) && acc.contains(&"version-cut-timer".to_owned()));
+        assert!(
+            acc.contains(&"version-cut".to_owned())
+                && acc.contains(&"version-cut-timer".to_owned())
+        );
         let cut = rules_of(&c, "accepted")
             .into_iter()
             .find(|r| r.name == "version-cut")
@@ -760,32 +809,53 @@ mod tests {
         // The job rules on every column but done.
         for col in board.iter().filter(|c| c.name != "done") {
             let n = names(&c, &col.name);
-            for j in ["merge-pass", "job-fail-red", "merge-queued", "agent-end-merged"] {
+            for j in [
+                "merge-pass",
+                "job-fail-red",
+                "merge-queued",
+                "agent-end-merged",
+            ] {
                 assert!(n.contains(&j.to_owned()), "{}: {n:?}", col.name);
             }
         }
         assert!(!names(&c, "done").contains(&"merge-pass".to_owned()));
         // A returned card leaves its merge group where it lands.
         for col in ["in_progress", "ready", "blocked", "backlog"] {
-            assert!(names(&c, col).contains(&"merge-group-returned".to_owned()), "{col}");
+            assert!(
+                names(&c, col).contains(&"merge-group-returned".to_owned()),
+                "{col}"
+            );
         }
         assert!(!names(&c, "review").contains(&"merge-group-returned".to_owned()));
         // Park on the wait columns; unpark where a card comes back to.
         for col in ["review", "merge_queue", "accepted"] {
             assert!(names(&c, col).contains(&"agent-park".to_owned()), "{col}");
-            assert!(!names(&c, col).contains(&"agent-unpark".to_owned()), "{col}");
+            assert!(
+                !names(&c, col).contains(&"agent-unpark".to_owned()),
+                "{col}"
+            );
         }
         for col in ["backlog", "research", "ready", "in_progress", "blocked"] {
             assert!(names(&c, col).contains(&"agent-unpark".to_owned()), "{col}");
         }
         assert!(!names(&c, "done").contains(&"agent-unpark".to_owned()));
-        assert_eq!(names(&c, "done").iter().filter(|n| n.starts_with("agent-end")).count(), 2);
+        assert_eq!(
+            names(&c, "done")
+                .iter()
+                .filter(|n| n.starts_with("agent-end"))
+                .count(),
+            2
+        );
         // A move into a column that queues also lands on `admitted`.
         let unpark = rules_of(&c, "in_progress")
             .into_iter()
             .find(|r| r.name == "agent-unpark")
             .unwrap();
-        let change = unpark.when.iter().find(|m| m.path == "data.change").unwrap();
+        let change = unpark
+            .when
+            .iter()
+            .find(|m| m.path == "data.change")
+            .unwrap();
         assert_eq!(change.value, json!(["moved", "admitted"]));
         assert!(unpark.when.iter().any(|m| m.path == "data.from_role"));
         assert!(unpark.when.iter().all(|m| !m.path.starts_with("data.to")));
@@ -793,7 +863,11 @@ mod tests {
             .into_iter()
             .find(|r| r.name == "agent-unpark")
             .unwrap();
-        let change = ready_unpark.when.iter().find(|m| m.path == "data.change").unwrap();
+        let change = ready_unpark
+            .when
+            .iter()
+            .find(|m| m.path == "data.change")
+            .unwrap();
         assert_eq!(change.value, json!("moved"));
     }
 
@@ -818,7 +892,10 @@ mod tests {
             .find(|r| r.name == "merge-queue-batch")
             .unwrap();
         assert_eq!(batch.trigger, Trigger::Lands);
-        assert_eq!(batch.actions[0].args, args(json!({"kind": "batch", "from": "@merge_queue"})));
+        assert_eq!(
+            batch.actions[0].args,
+            args(json!({"kind": "batch", "from": "@merge_queue"}))
+        );
         // The batch column queues: a park there lands on `admitted` too.
         let park = rules_of(&c, "merge_queue")
             .into_iter()
@@ -839,7 +916,10 @@ mod tests {
         check_all(&c, &board);
         assert_eq!(names(&c, "ready"), vec!["dispatch", "dispatch-timer"]);
         assert_eq!(names(&c, "in_progress"), vec!["dispatch-on-free-slot"]);
-        assert_eq!(names(&c, "review"), vec!["review-start", "review-start-timer"]);
+        assert_eq!(
+            names(&c, "review"),
+            vec!["review-start", "review-start-timer"]
+        );
         let a = &rules_of(&c, "ready")[0].actions[0];
         assert_eq!(a.verb, "card.assign");
         assert_eq!(a.args["owner"], "lead");
@@ -877,7 +957,11 @@ rule "off" {
         let own = rules_file::parse(text, "rules.wcl", &Context::default()).unwrap();
         let rules: Vec<_> = own.rules.into_iter().map(|r| (r, "own")).collect();
         let c = convert(&rules, &board, &Dispatchers::default());
-        let res: Vec<_> = c.report.iter().map(|e| (e.rule.as_str(), e.result)).collect();
+        let res: Vec<_> = c
+            .report
+            .iter()
+            .map(|e| (e.rule.as_str(), e.result))
+            .collect();
         assert_eq!(
             res,
             vec![

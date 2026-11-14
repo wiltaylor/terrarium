@@ -389,7 +389,10 @@ pub fn create_board(t: &mut Tx<'_>, project: &str) -> ApiResult<()> {
     let columns: Vec<(&str, Option<&str>, Option<i64>)> = if t.board_columns {
         STANDARD_COLUMNS.to_vec()
     } else {
-        DEFAULT_COLUMNS.iter().map(|(n, r)| (*n, *r, None)).collect()
+        DEFAULT_COLUMNS
+            .iter()
+            .map(|(n, r)| (*n, *r, None))
+            .collect()
     };
     for (i, (name, role, wip)) in columns.iter().enumerate() {
         let c = ColumnChecks::default_for(name, *role);

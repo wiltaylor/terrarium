@@ -52,7 +52,10 @@ async fn settle(td: &TestDaemon) {
         }
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
-    panic!("the rule engine did not settle: {:?}", engine_state(td).await);
+    panic!(
+        "the rule engine did not settle: {:?}",
+        engine_state(td).await
+    );
 }
 
 /// Project `p` with repo `app`, a build target and the merge queue set,
@@ -299,7 +302,10 @@ async fn only_column_rule_writes(td: &TestDaemon) {
         .unwrap();
     let mut seen = 0;
     for (card, actor, change) in rows {
-        if !matches!(change.as_str(), "moved" | "commented" | "edited" | "assigned") {
+        if !matches!(
+            change.as_str(),
+            "moved" | "commented" | "edited" | "assigned"
+        ) {
             continue;
         }
         seen += 1;
@@ -359,7 +365,10 @@ async fn a_converted_code_board_does_what_the_coded_flow_did() {
         );
     }
     // The validating column keeps the coded flow's validate move.
-    assert!(report.iter().any(|e| e["rule"] == "validate-queued-move"), "{out}");
+    assert!(
+        report.iter().any(|e| e["rule"] == "validate-queued-move"),
+        "{out}"
+    );
     let got = scenario(&after).await;
     assert_eq!(got, want);
     only_column_rule_writes(&after).await;
@@ -369,7 +378,11 @@ async fn a_converted_code_board_does_what_the_coded_flow_did() {
 #[tokio::test]
 async fn the_conversion_is_a_dry_run_first_then_once_then_reverts() {
     let td = lab("rules").await;
-    let dry = td.get("/api/projects/p/board/conversion").await.ok().clone();
+    let dry = td
+        .get("/api/projects/p/board/conversion")
+        .await
+        .ok()
+        .clone();
     assert!(dry["conversion"].is_null(), "{dry}");
     let planned: usize = dry["plan"]["columns"]
         .as_array()
@@ -386,14 +399,23 @@ async fn the_conversion_is_a_dry_run_first_then_once_then_reverts() {
     assert_eq!(out["rules"].as_u64().unwrap() as usize, planned, "{out}");
     let again = convert(&td).await;
     assert_eq!(again["result"], "skipped", "{again}");
-    let rec = td.get("/api/projects/p/board/conversion").await.ok().clone();
+    let rec = td
+        .get("/api/projects/p/board/conversion")
+        .await
+        .ok()
+        .clone();
     assert_eq!(rec["conversion"]["previous_flow"], "rules", "{rec}");
     assert!(rec["plan"].is_null(), "{rec}");
 
     // Only the operator converts.
-    td.agent("p", "lead", json!({"roles": ["project_admin"]})).await;
+    td.agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await;
     let r = td
-        .post_as("lead", "/api/projects/p/board/convert", json!({"action": "revert"}))
+        .post_as(
+            "lead",
+            "/api/projects/p/board/convert",
+            json!({"action": "revert"}),
+        )
         .await;
     assert_eq!(r.status, 403, "{}", r.body);
 
@@ -419,7 +441,8 @@ async fn the_conversion_is_a_dry_run_first_then_once_then_reverts() {
 #[tokio::test]
 async fn the_dispatchers_and_the_merge_queue_rules_become_column_rules() {
     let td = lab("rules").await;
-    td.agent("p", "lead", json!({"roles": ["project_admin"]})).await;
+    td.agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await;
     let r = td
         .patch(
             "/api/projects/p",
@@ -462,7 +485,10 @@ async fn the_dispatchers_and_the_merge_queue_rules_become_column_rules() {
         .iter()
         .map(|r| r["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"review-start") && names.contains(&"review-start-timer"), "{names:?}");
+    assert!(
+        names.contains(&"review-start") && names.contains(&"review-start-timer"),
+        "{names:?}"
+    );
     let mq = opt("merge_queue").await;
     assert_eq!(
         mq["queue"],
@@ -486,7 +512,8 @@ async fn the_upgrade_converts_every_board_once_at_the_start_and_mails_the_report
     let mut td = TestDaemon::start().await;
     lab_with(&td, "rules").await;
     td.project("q").await;
-    td.agent("p", "lead", json!({"roles": ["project_admin"]})).await;
+    td.agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await;
     td.web.board_columns = true;
     td.boot(None, None).await;
     for name in ["p", "q"] {
@@ -537,8 +564,15 @@ async fn a_new_project_gets_the_standard_board_on_column_rules() {
     assert_eq!(
         names,
         vec![
-            "backlog", "research", "ready", "in_progress", "review", "merge_queue", "accepted",
-            "blocked", "done"
+            "backlog",
+            "research",
+            "ready",
+            "in_progress",
+            "review",
+            "merge_queue",
+            "accepted",
+            "blocked",
+            "done"
         ]
     );
     assert_eq!(*cols[1].2, json!(2));
@@ -567,7 +601,11 @@ async fn a_new_project_gets_the_standard_board_on_column_rules() {
         .ok()
         .clone();
     assert!(
-        acc["rules"].as_array().unwrap().iter().any(|r| r["name"] == "version-cut-timer"),
+        acc["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "version-cut-timer"),
         "{acc}"
     );
 }

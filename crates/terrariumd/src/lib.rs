@@ -1071,7 +1071,9 @@ pub async fn apply_definitions(
     // the projects, their rules files and the fleets. A converted board is
     // skipped, so a reload writes nothing.
     if state.db.board_columns() {
-        report.errors.extend(board_convert::upgrade(&state.db).await);
+        report
+            .errors
+            .extend(board_convert::upgrade(&state.db).await);
     }
     // A config-dir fleet file that made an xai key row a plan row: its key
     // file goes too (TER-1239, rev-1205b). The sweep after the file sync

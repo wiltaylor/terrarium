@@ -137,7 +137,9 @@ async fn convert(
             )));
         }
     };
-    Ok(Json(serde_json::to_value(out).map_err(|e| ApiError::internal(e.to_string()))?))
+    Ok(Json(
+        serde_json::to_value(out).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
 }
 
 /// What the tools read of a project: its rules file (with the rules read
