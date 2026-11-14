@@ -122,18 +122,18 @@ pub fn check_claim(
 ) -> ApiResult<()> {
     amounts.validate().map_err(ApiError::invalid)?;
     check_amounts(amounts)?;
-    if def.host.is_none() {
-        return Err(ApiError::invalid(format!(
-            "target `{}` has no host to reserve on",
-            def.name
-        )));
-    }
     if !matches!(def.kind, TargetKind::Host | TargetKind::Docker) {
         return Err(ApiError::invalid(if gpu_exclusive {
             "exclusive GPU needs a managed ephemeral Docker target or a native host target with enforced native GPU support; SSH and vmlab cannot enforce exclusive access"
         } else {
             "reservations need a host or managed Docker target"
         }));
+    }
+    if def.host.is_none() {
+        return Err(ApiError::invalid(format!(
+            "target `{}` has no host to reserve on",
+            def.name
+        )));
     }
     if gpus > 0 && def.kind == TargetKind::Docker && (!def.ephemeral || def.image.is_none()) {
         return Err(ApiError::invalid(
