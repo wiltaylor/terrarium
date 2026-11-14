@@ -24,8 +24,11 @@ python3 (no dependencies).
   targets, the slot locks, the lead's tree), a symlink, an entry of a live
   agent (`<live>` or `<live>-*`), and an entry that is the working
   directory or the `CARGO_TARGET_DIR` of a running process, or holds one.
-  When the cwd or environ of some process cannot be read (another user),
-  nothing is removed and the reason names those pids.
+  When the cwd or environ of some process cannot be read (another user,
+  or a non-dumpable process, when root has no CAP_SYS_PTRACE), nothing is
+  removed and the reason names those pids with their name and uid. After
+  checking such a process (its `cmdline` stays readable), the lead may pass
+  `--ignore-pid PID` for it; the pid must be numeric.
   Each selected and kept path is printed with its size and the reason, and
   the total freed (or that a dry run would free) is printed at the end.
   An entry that fails to delete is reported as `error`, the run goes on,
@@ -167,14 +170,43 @@ def matches(name: str, agent: str, card: str) -> bool:
     return low == c or low.startswith(c + "-") or rest.startswith(("target", "dev"))
 
 
-def busy_paths(proc: Path) -> tuple[list[Path], list[str]]:
+class Procs:
+    """Where to read the processes, and the pids that the lead checked and
+    lets pass (`--ignore-pid`)."""
+
+    def __init__(self, root: str, ignore: list[str] | None = None):
+        self.root = Path(root)
+        self.ignore = set(ignore or [])
+        for pid in self.ignore:
+            if not pid.isdigit():
+                raise UsageError(f"--ignore-pid wants a pid, got {pid!r}")
+
+    def __str__(self) -> str:
+        return str(self.root)
+
+
+def describe(d: Path) -> str:
+    """`<pid> <name> uid <uid>` from the status file, which stays readable."""
+    name = uid = "?"
+    with contextlib.suppress(OSError):
+        for line in (d / "status").read_text().splitlines():
+            if line.startswith("Name:"):
+                parts = line.split(None, 1)
+                name = parts[1] if len(parts) > 1 else "?"
+            elif line.startswith("Uid:"):
+                uid = line.split()[1]
+    return f"{d.name} {name} uid {uid}"
+
+
+def busy_paths(procs: Procs) -> tuple[list[Path], list[str]]:
     """The working dirs and CARGO_TARGET_DIRs of the running processes, and
     the pids whose cwd or environ could not be read (not a process that
     ended while it was read)."""
     out: list[Path] = []
     unreadable: list[str] = []
+    proc = procs.root
     for d in proc.iterdir() if proc.is_dir() else []:
-        if not d.name.isdigit():
+        if not d.name.isdigit() or d.name in procs.ignore:
             continue
         failed = False
         try:
@@ -192,7 +224,7 @@ def busy_paths(proc: Path) -> tuple[list[Path], list[str]]:
         except OSError:
             failed = True
         if failed:
-            unreadable.append(d.name)
+            unreadable.append(describe(d))
     return out, unreadable
 
 
@@ -203,17 +235,18 @@ def in_use(path: Path, busy: list[Path]) -> bool:
     return False
 
 
-def busy_reason(path: Path, proc: Path) -> str | None:
+def busy_reason(path: Path, proc: Procs) -> str | None:
     """Why a path must be kept for a running process, or None."""
     busy, unreadable = busy_paths(proc)
     if in_use(path, busy):
         return "used by a running process"
     if unreadable:
-        return f"cannot read {len(unreadable)} processes in {proc} (pids {', '.join(unreadable[:5])}), so their trees are unknown"
+        return (f"cannot read the cwd or environ of {len(unreadable)} processes in {proc} "
+                f"({'; '.join(unreadable[:5])}), so their trees are unknown; check them and pass --ignore-pid")
     return None
 
 
-def select(root: Path, done: list[tuple[str, str]], live: list[str], proc: Path):
+def select(root: Path, done: list[tuple[str, str]], live: list[str], proc: Procs):
     """Each entry of root that a done pair names, as (path, action, reason)."""
     rows = []
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
@@ -249,7 +282,7 @@ def cmd_clean(args, out) -> int:
     root = check_root(args.root)
     done = parse_done(args.done)
     live = parse_live(args.live)
-    proc = Path(args.proc)
+    proc = Procs(args.proc, args.ignore_pid)
     rows = select(root, done, live, proc)
     freed = 0
     errors = 0
@@ -352,7 +385,7 @@ def empty_target(target: Path) -> list[str]:
 def cmd_cap(args, out) -> int:
     root = check_root(args.root)
     cap = int(args.cap_gib * GIB)
-    proc = Path(args.proc)
+    proc = Procs(args.proc, args.ignore_pid)
     report = []
     freed = 0
     errors = 0
@@ -442,10 +475,13 @@ def main(argv=None, out=sys.stdout) -> int:
     c.add_argument("--done", action="append", default=[], metavar="AGENT:CARD")
     c.add_argument("--apply", action="store_true")
     c.add_argument("--proc", default="/proc", help=argparse.SUPPRESS)
+    c.add_argument("--ignore-pid", action="append", default=[], metavar="PID",
+                   help="a pid whose /proc cannot be read and that you checked uses no candidate")
     k = sub.add_parser("cap")
     k.add_argument("--cap-gib", type=float, required=True)
     k.add_argument("--apply", action="store_true")
     k.add_argument("--proc", default="/proc", help=argparse.SUPPRESS)
+    k.add_argument("--ignore-pid", action="append", default=[], metavar="PID")
     f = sub.add_parser("floor")
     f.add_argument("path", nargs="?")
     f.add_argument("--min-free-pct", type=float, default=FLOOR_PCT)

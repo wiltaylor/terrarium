@@ -178,6 +178,7 @@ class CleanSelection(Tree):
     def test_unreadable_process_keeps_everything_and_says_so(self):
         a = self.mk("grok-1192-dev")
         (self.proc / "200").mkdir()  # no cwd link: readlink fails
+        (self.proc / "200" / "status").write_text("Name:\tjanitor\nUmask:\t0077\nUid:\t1001\t1001\t1001\t1001\n")
         real = os.readlink
 
         def readlink(path):
@@ -191,8 +192,14 @@ class CleanSelection(Tree):
         self.assertTrue(a.exists())
         entry = json.loads(out)["entries"][0]
         self.assertEqual(entry["action"], "keep")
-        self.assertIn("cannot read 1 processes", entry["reason"])
-        self.assertIn("200", entry["reason"])
+        self.assertIn("cannot read the cwd or environ of 1 processes", entry["reason"])
+        self.assertIn("200 janitor uid 1001", entry["reason"])
+        with mock.patch.object(btc.os, "readlink", readlink):
+            rc, _ = self.clean("--live", "lead", "--done", "grok-1192:TER-1192", "--ignore-pid", "x1")
+            self.assertEqual(rc, 2)
+            rc, out = self.clean("--live", "lead", "--done", "grok-1192:TER-1192", "--apply", "--ignore-pid", "200")
+        self.assertEqual(rc, 0)
+        self.assertFalse(a.exists())
 
     def test_ended_process_is_ignored(self):
         a = self.mk("grok-1192-dev")

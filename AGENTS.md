@@ -150,8 +150,11 @@ entries, symlinks, every entry of a live agent and every entry that a
 running process uses. It prints each path with its size and the total
 freed. `cap` never removes a shared target dir, only its build output,
 and only while its own lock and every `.cargo-lock` in it are free and no
-process uses it. Run both as root: when the script cannot read a process
-in `/proc`, it keeps everything and says so. A failed delete is reported,
+process uses it. Run both as root. When the script cannot read the cwd
+of a process in `/proc` (on build2, root has no CAP_SYS_PTRACE, so the
+non-dumpable uid 1001 processes are unreadable), it keeps everything and
+names the pids. Read their `cat /proc/<pid>/cmdline`, and pass
+`--ignore-pid <pid>` for each one that uses no candidate. A failed delete is reported,
 the run goes on, and the exit code is 1.
 
 ### Run it on a clean checkout of a pushed commit
