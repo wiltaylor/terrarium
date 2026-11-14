@@ -52,8 +52,8 @@ async fn start(dir: &Path, session: SessionStart<'_>) -> Harness {
         ..GrokOptions::default()
     });
     let spec = adapter.launch_with(&agent, session, Some("You are a test agent."));
-    let mut launch = terrarium_core::LaunchSpec::new("python3", dir)
-        .arg(fake_grok().display().to_string());
+    let mut launch =
+        terrarium_core::LaunchSpec::new("python3", dir).arg(fake_grok().display().to_string());
     for a in &spec.args {
         launch = launch.arg(a.clone());
     }
@@ -166,8 +166,10 @@ async fn a_grok_agent_runs_turns_cancels_and_quits() {
     until("working", || h.runner.status() == AgentStatus::Working).await;
     assert!(h.runner.interrupt().await.expect("interrupt"));
     let seen = until_status(&mut h, AgentStatus::Idle).await;
-    assert!(seen.iter().any(|e| matches!(e,
-        Event::StatusChanged { to: AgentStatus::Idle, reason: Some(r), .. } if r == "interrupted")));
+    assert!(
+        seen.iter().any(|e| matches!(e,
+        Event::StatusChanged { to: AgentStatus::Idle, reason: Some(r), .. } if r == "interrupted"))
+    );
     until_screen(&h, "cancelled").await;
     let d = h.runner.type_turn("again");
     timeout(wait(), d.wait())

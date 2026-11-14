@@ -175,7 +175,10 @@ mod tests {
         ] {
             for bad in opts.flags.forbidden {
                 assert!(
-                    !spec.args.iter().any(|a| a == bad || a.starts_with(&format!("{bad}="))),
+                    !spec
+                        .args
+                        .iter()
+                        .any(|a| a == bad || a.starts_with(&format!("{bad}="))),
                     "{bad} in {:?}",
                     spec.args
                 );

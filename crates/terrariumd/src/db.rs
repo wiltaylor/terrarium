@@ -4150,8 +4150,11 @@ mod tests {
         let insert = "INSERT INTO agents (id, name, project, harness, model, workspace, \
                       created_at, updated_at) VALUES (?1, ?2, 'p', ?3, ?4, '/w', 't', 't')";
         for (id, harness) in [("a1", "claude"), ("a2", "codex"), ("a3", "pi")] {
-            conn.execute(insert, rusqlite::params![id, id, harness, "m-".to_owned() + id])
-                .unwrap();
+            conn.execute(
+                insert,
+                rusqlite::params![id, id, harness, "m-".to_owned() + id],
+            )
+            .unwrap();
         }
         conn.execute(
             "INSERT INTO sessions (id, agent_id, started_at) VALUES ('s1', 'a1', 't')",
@@ -4205,7 +4208,11 @@ mod tests {
         assert_eq!(columns(&conn), cols);
         assert_eq!(dump(&conn), rows);
         let sessions: i64 = conn
-            .query_row("SELECT count(*) FROM sessions WHERE agent_id = 'a1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT count(*) FROM sessions WHERE agent_id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(sessions, 1);
         conn.execute(insert, rusqlite::params!["g1", "g1", "grok", "grok-build"])

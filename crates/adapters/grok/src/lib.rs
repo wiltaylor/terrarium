@@ -247,7 +247,10 @@ mod tests {
     #[test]
     fn the_verified_version_is_the_pin() {
         assert_eq!(GROK_1_0.verified, terrarium_core::harnesses::grok::VERSION);
-        assert_eq!(terrarium_core::harnesses::grok::PACKAGE, "@xai-official/grok");
+        assert_eq!(
+            terrarium_core::harnesses::grok::PACKAGE,
+            "@xai-official/grok"
+        );
         assert_eq!(terrarium_core::harnesses::grok::BINARY, "grok");
         assert!(Version::parse(GROK_1_0.verified).is_ok());
         assert_eq!(GrokAdapter::default().id(), HarnessId::Grok);

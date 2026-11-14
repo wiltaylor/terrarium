@@ -26,7 +26,10 @@ fn looks_like_uuid(s: &str) -> bool {
 
 /// Record the UUID of a fresh start.
 pub fn record_session_id(agent: &Agent, id: &str) -> terrarium_core::Result<()> {
-    config::write_atomic(&config::session_id_file(agent), format!("{id}\n").as_bytes())
+    config::write_atomic(
+        &config::session_id_file(agent),
+        format!("{id}\n").as_bytes(),
+    )
 }
 
 /// The UUID of the last fresh start, if one was recorded.

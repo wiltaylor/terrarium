@@ -238,7 +238,13 @@ mod tests {
         for name in ["PermissionDenied", "Notification"] {
             let ev = hook_events(&fixture(name));
             assert!(
-                matches!(ev.as_slice(), [Event::Notification { question: false, .. }]),
+                matches!(
+                    ev.as_slice(),
+                    [Event::Notification {
+                        question: false,
+                        ..
+                    }]
+                ),
                 "{name}: {ev:?}"
             );
         }
