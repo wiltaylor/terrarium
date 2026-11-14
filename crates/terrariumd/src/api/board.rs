@@ -430,7 +430,14 @@ async fn show(
     let card = state
         .db
         .read(move |c| {
-            let card = board::get_card(c, &id)?;
+            let mut card = board::get_card(c, &id)?;
+            // Why a waiting card is not in the next batch (TER-1284).
+            if card.queued.is_some() {
+                let reason = board::queues::wait_reason(c, &card)?;
+                if let Some(q) = card.queued.as_mut() {
+                    q.reason = reason;
+                }
+            }
             crate::store::threads::read_linked_card(c, &who, &card.project, Some(&card.id))?;
             let wait = card_waits::view(c, &who, &card.id)?;
             Ok((card, wait))

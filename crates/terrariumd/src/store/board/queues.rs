@@ -31,7 +31,10 @@
 //!     up to `max_batch_cards` (default `batch_size`) in queue order. The
 //!     merge_queue column counts and admits only the cards that a merge
 //!     takes now, and a ready release-blocker alone, at once, as the
-//!     `merge-queue-batch` rule did ([`merge_candidates`]).
+//!     `merge-queue-batch` rule did ([`merge_candidates`]). A card put
+//!     back after a round in which it got no job is marked stale, and is
+//!     not admitted again until something changes ([`UNMARKED`],
+//!     TER-1284), so a column whose rules queue no job does not churn.
 //! - **When.** [`release`] runs in the transaction of its cause: a move into
 //!   or out of the column, an archive, a job end ([`on_job_end`]), and a
 //!   change of the column's WIP limit or queue options. The rule engine's
@@ -58,6 +61,11 @@ pub struct CardQueue {
     /// An ETA set while the card waits: it is set when the card is admitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_eta: Option<String>,
+    /// Why the card is not in the next batch, when the daemon knows
+    /// (TER-1284): stale, or why a merge does not take it now. Only a
+    /// single card read has it ([`wait_reason`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 struct Settings {
@@ -113,6 +121,47 @@ fn waiting(conn: &Connection, column_id: i64) -> ApiResult<Vec<(String, String)>
         .query_map([column_id], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// A waiting card `q` (with its card `c`) that is not marked stale, or
+/// that was edited after the mark (TER-1284).
+const UNMARKED: &str = "(q.stale_at IS NULL OR c.updated_at > q.stale_at)";
+
+/// [`waiting`] without the cards that are marked stale ([`UNMARKED`]):
+/// the cards a batch counts and admits.
+fn waiting_unmarked(conn: &Connection, column_id: i64) -> ApiResult<Vec<(String, String)>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT q.card, q.queued_at FROM card_queue q JOIN cards c ON c.id = q.card
+          WHERE q.column_id = ?1 AND q.admitted_at IS NULL AND c.archived = 0
+            AND {UNMARKED}
+          ORDER BY q.seq"
+    ))?;
+    let rows = st
+        .query_map([column_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Clear the stale marks of the waiting cards of column `column_id`:
+/// something changed for its batch (a new card, a job end, new options).
+pub(super) fn unmark_column(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
+    t.execute(
+        "UPDATE card_queue SET stale_at = NULL WHERE column_id = ?1 AND stale_at IS NOT NULL",
+        [column_id],
+    )?;
+    Ok(())
+}
+
+/// Clear the stale marks of every column of `project`: its board columns
+/// changed (TER-1284).
+pub fn unmark_project(t: &mut Tx<'_>, project: &str) -> ApiResult<()> {
+    t.execute(
+        "UPDATE card_queue SET stale_at = NULL
+          WHERE stale_at IS NOT NULL
+            AND column_id IN (SELECT id FROM board_columns WHERE project = ?1)",
+        [project],
+    )?;
+    Ok(())
 }
 
 /// The cards of column `column_id` that are admitted (in the column, not
@@ -307,10 +356,28 @@ fn batch_open(conn: &Connection, column_id: i64) -> ApiResult<bool> {
     Ok(admitted_count(conn, column_id)? > stale)
 }
 
+/// Did admitted card `?1` get a job queued at or after its admission? A
+/// card with no queue row has no admission time: false, so it is not
+/// marked stale on its first return (TER-1284).
+fn had_job_sql() -> String {
+    format!(
+        "SELECT EXISTS (SELECT 1 FROM cards c JOIN card_queue q ON q.card = c.id
+                          JOIN jobs j INDEXED BY jobs_project_created_at
+                            ON j.project = c.project AND j.created_at >= q.admitted_at
+                         WHERE c.id = ?1 AND q.admitted_at IS NOT NULL AND {JOB_OF_C})
+             OR NOT EXISTS (SELECT 1 FROM card_queue q
+                             WHERE q.card = ?1 AND q.admitted_at IS NOT NULL)"
+    )
+}
+
 /// Put the stale admitted cards of `batch` column `column_id` back in its
 /// queue, first, in board order (TER-1204). Their wait starts again, so a
 /// card that no batch takes is tried once per `max_wait_seconds`, and an
-/// ETA is held for the next admission.
+/// ETA is held for the next admission. A card that got no job after its
+/// admission is marked stale (TER-1284): the release does not count or
+/// admit it again until something changes ([`UNMARKED`]), so its
+/// `queue_returned` and `admitted` events are written once, not every
+/// [`BATCH_GRACE_SECONDS`].
 fn return_stale(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
     let stale = stale_in_batch(t, column_id, &grace_cutoff())?;
     if stale.is_empty() {
@@ -324,10 +391,13 @@ fn return_stale(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
     let at = now();
     let n = stale.len() as i64;
     for (i, card) in stale.iter().enumerate() {
+        let had_job: bool = t.query_row(&had_job_sql(), [card], |r| r.get(0))?;
+        let mark = (!had_job).then_some(at.as_str());
         t.execute(
-            "INSERT OR REPLACE INTO card_queue (card, column_id, seq, queued_at, held_eta, held_eta_by)
-             SELECT id, ?2, ?3, ?4, eta_at, eta_set_by FROM cards WHERE id = ?1",
-            params![card, column_id, first - n + i as i64, at],
+            "INSERT OR REPLACE INTO card_queue
+                    (card, column_id, seq, queued_at, held_eta, held_eta_by, stale_at)
+             SELECT id, ?2, ?3, ?4, eta_at, eta_set_by, ?5 FROM cards WHERE id = ?1",
+            params![card, column_id, first - n + i as i64, at, mark],
         )?;
         t.execute(
             "UPDATE cards SET eta_at = NULL, eta_set_at = NULL, eta_set_by = NULL WHERE id = ?1",
@@ -338,14 +408,16 @@ fn return_stale(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
             t,
             &row,
             "queue_returned",
-            json!({"reason": "no open job in the batch", "assignee": row.assignee}),
+            json!({"reason": "no open job in the batch", "assignee": row.assignee,
+                   "stale": !had_job}),
         )?;
     }
     Ok(())
 }
 
-/// [`merge_candidates`]: the cards a batch takes, and a release-blocker.
-type Candidates = (Vec<(String, String)>, Option<String>);
+/// [`merge_candidates`]: the cards a batch takes, a release-blocker, and
+/// the repo of the batch.
+type Candidates = (Vec<(String, String)>, Option<String>, Option<String>);
 
 /// The waiting cards of merge_queue column `s` that a batch merge takes
 /// now, as `merge-queue-batch` counts them (TER-1204): only cards that can
@@ -353,7 +425,8 @@ type Candidates = (Vec<(String, String)>, Option<String>);
 /// and of one repo, the repo of the first one, in queue order:
 /// `(card, queued_at)`. The others wait, and never hold the lane. The
 /// second value is the first such card with the release-blocker label,
-/// of any repo: it goes alone, at once (TER-607).
+/// of any repo: it goes alone, at once (TER-607). The third value is the
+/// repo of the batch.
 fn merge_candidates(
     conn: &Connection,
     s: &Settings,
@@ -363,7 +436,7 @@ fn merge_candidates(
     // A project with no `next` repo has no merge lane: the column is a
     // plain `batch` column.
     if served.is_empty() {
-        return Ok((queue.to_vec(), None));
+        return Ok((queue.to_vec(), None, None));
     }
     let cards: std::collections::HashMap<String, Card> =
         selection_cards(conn, &s.project, &s.name)?
@@ -392,7 +465,7 @@ fn merge_candidates(
             out.push((id.clone(), at.clone()));
         }
     }
-    Ok((out, blocker))
+    Ok((out, blocker, repo))
 }
 
 /// The free places of the column: `None` without a WIP limit.
@@ -428,8 +501,10 @@ pub(super) fn must_queue(conn: &Connection, project: &str, column_id: i64) -> Ap
     })
 }
 
-/// Put card `card` in the queue of column `column_id`, last.
+/// Put card `card` in the queue of column `column_id`, last. A new card
+/// changes the batch: the stale marks of the column go (TER-1284).
 pub(super) fn enqueue(t: &mut Tx<'_>, card: &str, column_id: i64) -> ApiResult<()> {
+    unmark_column(t, column_id)?;
     let seq: i64 = t.query_row(
         "SELECT coalesce(max(seq), 0) + 1 FROM card_queue WHERE column_id = ?1",
         [column_id],
@@ -507,6 +582,7 @@ pub(crate) fn of_card(conn: &Connection, card: &str) -> ApiResult<Option<CardQue
                     since: r.get(1)?,
                     held_eta: r.get(2)?,
                     place: r.get(3)?,
+                    reason: None,
                 })
             },
         )
@@ -647,8 +723,10 @@ pub fn release(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
                 if s.merge_lane && crate::store::jobs::open_merge(t, &s.project)?.is_some() {
                     return Ok(());
                 }
+                // A card marked stale waits for a change (TER-1284).
+                let queue = waiting_unmarked(t, s.id)?;
                 let ready = if s.merge_lane {
-                    let (ready, blocker) = merge_candidates(t, &s, &queue)?;
+                    let (ready, blocker, _) = merge_candidates(t, &s, &queue)?;
                     if let Some(card) = blocker {
                         admit(t, &card, true)?;
                         return Ok(());
@@ -687,8 +765,13 @@ pub fn release(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
 }
 
 /// [`release`] for the column of card `card`: its reviewed commit is
-/// recorded now, so a merge_queue batch may take it (TER-1204).
+/// recorded now, so a merge_queue batch may take it (TER-1204). That is a
+/// change: its stale mark goes (TER-1284).
 pub fn release_card_column(t: &mut Tx<'_>, card: &str) -> ApiResult<()> {
+    t.execute(
+        "UPDATE card_queue SET stale_at = NULL WHERE card = ?1 AND stale_at IS NOT NULL",
+        [card],
+    )?;
     let column: Option<i64> = t
         .query_row(
             "SELECT column_id FROM cards WHERE id = ?1 AND archived = 0",
@@ -713,7 +796,9 @@ pub fn release_project(t: &mut Tx<'_>, project: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// A job ended: release the columns of its cards (the `job` slot).
+/// A job ended: release the columns of its cards (the `job` slot). The
+/// end is a change for a batch: the stale marks of those columns go
+/// (TER-1284).
 pub fn on_job_end(t: &mut Tx<'_>, job: &str) -> ApiResult<()> {
     let columns: Vec<i64> = {
         let mut st = t.prepare(
@@ -726,9 +811,62 @@ pub fn on_job_end(t: &mut Tx<'_>, job: &str) -> ApiResult<()> {
             .collect::<Result<Vec<_>, _>>()?
     };
     for c in columns {
+        unmark_column(t, c)?;
         release(t, c)?;
     }
     Ok(())
+}
+
+/// Why waiting card `card` is not in the next batch of its column
+/// (TER-1284, rev-1204c finding 3), for `card show`: it is marked stale,
+/// or, in a merge_queue column with a merge lane, why a merge does not
+/// take it now (held, an open job, no reviewed commit, a repo that is not
+/// served, or another repo goes first). `None`: the card does not wait,
+/// or waits only for its batch.
+pub(crate) fn wait_reason(conn: &Connection, card: &Card) -> ApiResult<Option<String>> {
+    let row: Option<(i64, bool)> = conn
+        .query_row(
+            &format!(
+                "SELECT q.column_id, NOT {UNMARKED} FROM card_queue q JOIN cards c ON c.id = q.card
+                  WHERE q.card = ?1 AND q.admitted_at IS NULL"
+            ),
+            [&card.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((column_id, stale)) = row else {
+        return Ok(None);
+    };
+    if stale {
+        return Ok(Some(
+            "stale: it got no job in its last batch; it waits for a change (a new card \
+             in the queue, a job end, an edit of the card)"
+                .to_owned(),
+        ));
+    }
+    let Some(s) = settings(conn, column_id)? else {
+        return Ok(None);
+    };
+    if s.release != QueueRelease::Batch || !s.merge_lane {
+        return Ok(None);
+    }
+    let served = crate::store::jobs::delivery(conn, &s.project)?.next_repos;
+    if served.is_empty() {
+        return Ok(None);
+    }
+    let repo = match crate::rules_verbs::merge_ready(conn, card)? {
+        Ok(r) => r,
+        Err(why) => return Ok(Some(why)),
+    };
+    if !served.contains(&repo) {
+        return Ok(Some(format!(
+            "repo `{repo}` has no merge lane (it is not in `next_repos`)"
+        )));
+    }
+    let (_, _, batch_repo) = merge_candidates(conn, &s, &waiting_unmarked(conn, column_id)?)?;
+    Ok(batch_repo
+        .filter(|b| b != &repo)
+        .map(|b| format!("another repo goes first: the next batch is of repo `{b}`")))
 }
 
 /// The projects with a card in a queue ([`sweep_all`]).
