@@ -1400,7 +1400,8 @@ mod tests {
     fn the_skills_section_is_last() {
         let text = compose(Some("Base."), "P\n", &ctx());
         let text = append_section(
-            format!("{text}\n\nEphemeral."),
+            // As the supervisor joins the ephemeral section.
+            format!("{}\n\nEphemeral.", text.trim_end()),
             Some("# Your skills".into()),
         );
         assert_eq!(text, "Base.\n\nP\n\nEphemeral.\n\n# Your skills");
