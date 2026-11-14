@@ -4,40 +4,61 @@
 // CLI: an admin of a service sees all its requests, any other caller only
 // its own, and cancel takes the same check (`may_touch` in
 // api/services.rs). The page shows what the daemon answers and adds no
-// rights of its own. It reloads every 15 seconds.
+// rights of its own.
+//
+// It reloads every 15 seconds. The lists are stores that a reload
+// reconciles by service name and by request ID (rev-1269 finding 1), so a
+// reload keeps each card and row mounted: an open details row, the state
+// filter, an open cancel confirm, and an error banner stay.
 
 import { useSearchParams } from "@solidjs/router";
-import { createResource, createSignal, For, onCleanup, Show } from "solid-js";
-import type { Service, ServiceRequest, ServiceRequestState } from "../../api/types";
+import { createEffect, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
+import type { Service, ServiceDetail, ServiceRequest, ServiceRequestState } from "../../api/types";
 import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui";
 import { useInstance } from "../../instance";
 import { ago, bytes } from "../../lib/format";
 
-import { callersText, claimText, filterServices, isOpen, jsonText, outcomeText, REQUEST_STATES, runsText, scopeOptions, stateCounts, stateLabel, stateTone } from "./model";
+import { callersText, claimText, countsNote, filterServices, isOpen, jsonText, outcomeText, REQUEST_STATES, runsText, scopeOptions, stateCounts, stateLabel, stateTone } from "./model";
 
 /** How often the page reloads the services and their queues. */
 export const REFRESH_MS = 15_000;
+/** The most requests that one card loads (newest first). */
+export const REQUEST_LIMIT = 100;
 
 export default function ServicesPage() {
   const { api } = useInstance();
   const [search, setSearch] = useSearchParams<{ project?: string }>();
   const [tick, setTick] = createSignal(0);
-  const [services, { refetch }] = createResource(() => api.services.list());
+  const [services, setServices] = createStore<Service[]>([]);
+  const [loaded, setLoaded] = createSignal(false);
+  const [error, setError] = createSignal<unknown>(null);
+  const load = async () => {
+    try {
+      setServices(reconcile(await api.services.list(), { key: "name" }));
+      setError(null);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setLoaded(true);
+    }
+  };
+  void load();
   const reload = () => {
-    void refetch();
+    void load();
     setTick((n) => n + 1);
   };
   const timer = setInterval(reload, REFRESH_MS);
   onCleanup(() => clearInterval(timer));
   const scope = () => search.project ?? "";
-  const shown = () => filterServices(services() ?? [], scope());
+  const shown = () => filterServices([...services], scope());
   return (
     <div class="stack">
       <PageHead title="Services">
-        <Show when={(services() ?? []).length > 1}>
+        <Show when={services.length > 1}>
           <select aria-label="Project" value={scope()} onChange={(e) => setSearch({ project: e.currentTarget.value || undefined })}>
             <option value="">All services</option>
-            <For each={scopeOptions(services() ?? [])}>{(k) => <option value={k} selected={k === scope()}>{k === "global" ? "Global" : `Project ${k}`}</option>}</For>
+            <For each={scopeOptions([...services])}>{(k) => <option value={k} selected={k === scope()}>{k === "global" ? "Global" : `Project ${k}`}</option>}</For>
           </select>
         </Show>
         <button class="small" type="button" onClick={reload}>
@@ -48,8 +69,8 @@ export default function ServicesPage() {
         A service runs a script or an agent for each request in its queue. Define a service in <code>services/&lt;name&gt;.toml</code> of the config repo or with{" "}
         <code>POST /api/services</code>. Call it with <code>terrarium service call</code>.
       </p>
-      <ErrorBanner error={services.error} />
-      <Show when={services()} fallback={<Empty>{services.loading ? "Loading…" : "No services."}</Empty>}>
+      <ErrorBanner error={error()} />
+      <Show when={loaded()} fallback={<Empty>Loading…</Empty>}>
         <Show when={shown().length} fallback={<Empty>No services. Add a file under services/ in the config repo, then reload.</Empty>}>
           <div class="stack">
             <For each={shown()}>{(s) => <ServiceCard service={s} tick={tick()} />}</For>
@@ -66,10 +87,26 @@ export function ServiceCard(props: { service: Service; tick?: number }) {
   const s = () => props.service;
   const [state, setState] = createSignal<ServiceRequestState | "">("");
   const [error, setError] = createSignal<unknown>(null);
-  const [requests, { refetch }] = createResource(
-    () => ({ name: s().name, state: state(), tick: props.tick ?? 0 }),
-    (k) => api.services.requests(k.name, { state: k.state || undefined, limit: 100 }),
-  );
+  const [requests, setRequests] = createStore<ServiceRequest[]>([]);
+  const [detail, setDetail] = createSignal<ServiceDetail>();
+  const [loadError, setLoadError] = createSignal<unknown>(null);
+  // Only the newest load writes, so a slow answer for an old filter is dropped.
+  let seq = 0;
+  const load = async () => {
+    const n = ++seq;
+    const name = s().name;
+    const st = state();
+    try {
+      const [rows, d] = await Promise.all([api.services.requests(name, { state: st || undefined, limit: REQUEST_LIMIT }), api.services.get(name).catch(() => undefined)]);
+      if (n !== seq) return;
+      setRequests(reconcile(rows, { key: "id" }));
+      if (d) setDetail(d);
+      setLoadError(null);
+    } catch (e) {
+      if (n === seq) setLoadError(e);
+    }
+  };
+  createEffect(on([() => s().name, state, () => props.tick ?? 0], () => void load()));
   const cancel = async (r: ServiceRequest) => {
     setError(null);
     try {
@@ -77,7 +114,7 @@ export function ServiceCard(props: { service: Service; tick?: number }) {
     } catch (e) {
       setError(e);
     }
-    void refetch();
+    void load();
   };
   return (
     <article class="card-box stack" style={{ gap: "6px" }} aria-label={`Service ${s().name}`}>
@@ -113,11 +150,19 @@ export function ServiceCard(props: { service: Service; tick?: number }) {
         <dt>Callers</dt>
         <dd class="mono">{callersText(s())}</dd>
       </dl>
-      <ErrorBanner error={error() ?? requests.error} onDismiss={() => setError(null)} />
+      <ErrorBanner error={error() ?? loadError()} onDismiss={() => setError(null)} />
       <div class="spread small">
         <span class="row" style={{ gap: "6px", "flex-wrap": "wrap" }} aria-label="States">
+          <Show when={detail()}>
+            {(d) => (
+              <span class="chip" title="the open requests of every caller (GET /api/services/{name})">
+                {d().open_requests} open in the queue
+              </span>
+            )}
+          </Show>
           <Show when={!state()}>
-            <For each={stateCounts(requests() ?? [])} fallback={<span class="muted">No requests.</span>}>
+            <Show when={countsNote(requests.length, REQUEST_LIMIT)}>{(note) => <span class="muted">{note()}</span>}</Show>
+            <For each={stateCounts([...requests])} fallback={<span class="muted">No requests.</span>}>
               {(c) => (
                 <span class={`chip ${stateTone(c.state)}`}>
                   {stateLabel(c.state)} {c.count}
@@ -131,7 +176,7 @@ export function ServiceCard(props: { service: Service; tick?: number }) {
           <For each={REQUEST_STATES}>{(st) => <option value={st}>{stateLabel(st)}</option>}</For>
         </select>
       </div>
-      <Show when={requests()?.length}>
+      <Show when={requests.length}>
         <table class="small" aria-label={`Requests of ${s().name}`}>
           <thead>
             <tr>
@@ -145,7 +190,7 @@ export function ServiceCard(props: { service: Service; tick?: number }) {
             </tr>
           </thead>
           <tbody>
-            <For each={requests()}>{(r) => <RequestRow request={r} onCancel={() => cancel(r)} />}</For>
+            <For each={requests}>{(r) => <RequestRow request={r} onCancel={() => cancel(r)} />}</For>
           </tbody>
         </table>
       </Show>

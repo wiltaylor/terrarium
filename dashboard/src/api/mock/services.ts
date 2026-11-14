@@ -1,6 +1,9 @@
 // Services in the mock (docs/api.md §17.12, the daemon's api/services.rs):
-// the definitions, the requests of each queue, and cancel. The mock caller
-// is the operator, an admin of every service, so it sees every request.
+// the definitions, the requests of each queue, and cancel. The caller is
+// the operator by default, an admin of every service. `serviceCaller` of
+// the mock options makes it an agent, with the rights of the daemon
+// (`may_see` and `may_touch`): an admin of a service sees all its
+// requests, any other caller only its own, and another's request is 404.
 // The seed has the global script service `video-gen` with one request in
 // each state, and the agent service `doc-summary` of project `terrarium`.
 
@@ -10,8 +13,12 @@ import type { MockWorld } from "./data";
 
 type Fail = (status: number, code: string, message: string, details?: unknown) => never;
 
+/** Who calls the mock: the operator, or an agent with its role. */
+export type ServiceCaller = { role: "operator" } | { role: "sysadmin" | "project_admin" | "member"; project: string; name: string };
+
 export interface ServiceMockContext {
   w: MockWorld & { services?: Service[]; serviceRequests?: ServiceRequest[] };
+  caller?: ServiceCaller;
   now: () => number;
   reply: <T>(fn: () => T) => Promise<T>;
   fail: Fail;
@@ -106,25 +113,34 @@ function withPositions(rows: ServiceRequest[]): ServiceRequest[] {
 
 export function createServiceMock(c: ServiceMockContext) {
   const { w, fail, reply } = c;
+  const me: ServiceCaller = c.caller ?? { role: "operator" };
+  /** The caller as the daemon writes it on a request: `operator` or `agent:<project>/<name>`. */
+  const label = me.role === "operator" ? "operator" : `agent:${me.project}/${me.name}`;
+  /** An admin of a service of `project` (none: a global service). */
+  const manages = (project: string | null | undefined) => me.role === "operator" || me.role === "sysadmin" || (me.role === "project_admin" && !!project && project === me.project);
+  const inCallers = (s: Service) => me.role !== "operator" && (s.callers ?? []).some((x) => x === `project:${me.project}` || x === label);
+  const maySee = (s: Service) => manages(s.project) || (me.role !== "operator" && s.project === me.project) || inCallers(s);
+  const mayTouch = (r: ServiceRequest) => manages(r.project) || r.caller === label;
   const services = () => (w.services ??= seedServices(new Date(c.now()).toISOString()));
   const requests = () => (w.serviceRequests ??= seedRequests(c.now()));
-  const find = (name: string) => services().find((s) => s.name === name) ?? fail(404, "not_found", `no service \`${name}\``);
-  const findRequest = (id: string) => requests().find((r) => r.id === id) ?? fail(404, "not_found", `no service request \`${id}\``);
+  const find = (name: string) => services().find((s) => s.name === name && maySee(s)) ?? fail(404, "not_found", `no service \`${name}\``);
+  const findRequest = (id: string) => requests().find((r) => r.id === id && mayTouch(r)) ?? fail(404, "not_found", `no service request \`${id}\``);
   const of = (name: string) => withPositions(requests().filter((r) => r.service === name));
   const api: Api["services"] = {
-    list: () => reply(() => services().map((s) => ({ ...s }))),
+    list: () => reply(() => services().filter(maySee).map((s) => ({ ...s }))),
     get: (name) =>
       reply((): ServiceDetail => {
         const s = find(name);
-        return { ...s, open_requests: requests().filter((r) => r.service === name && OPEN_STATES.includes(r.state)).length, may_call: !s.removed_at };
+        return { ...s, open_requests: requests().filter((r) => r.service === name && OPEN_STATES.includes(r.state)).length, may_call: !s.removed_at && (manages(s.project) || inCallers(s)) };
       }),
     requests: (name, q = {}) =>
       reply(() => {
-        find(name);
+        const s = find(name);
         if (q.state && !STATES.includes(q.state)) fail(400, "bad_request", `bad state \`${q.state}\``);
         const limit = Math.min(q.limit ?? 100, 1000);
+        const admin = manages(s.project);
         return of(name)
-          .filter((r) => !q.state || r.state === q.state)
+          .filter((r) => (admin || r.caller === label) && (!q.state || r.state === q.state))
           .sort((a, b) => b.id.localeCompare(a.id))
           .slice(0, limit);
       }),
@@ -139,7 +155,7 @@ export function createServiceMock(c: ServiceMockContext) {
         if (!OPEN_STATES.includes(r.state)) fail(409, "conflict", `service request \`${id}\` has ended (${r.state})`);
         r.state = "cancelled";
         r.ended_at = new Date(c.now()).toISOString();
-        r.error = "cancelled by operator";
+        r.error = `cancelled by ${label}`;
         c.audit("service.cancel", r.service, r.project ?? undefined, { request: r.id });
         return of(r.service).find((x) => x.id === id)!;
       }),

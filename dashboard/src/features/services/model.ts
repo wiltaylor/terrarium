@@ -35,6 +35,13 @@ export function stateCounts(rows: Pick<ServiceRequest, "state">[]): { state: Ser
   return REQUEST_STATES.map((state) => ({ state, count: rows.filter((r) => r.state === state).length })).filter((c) => c.count > 0);
 }
 
+/**
+ * The note before the state counts. The counts come from the loaded rows:
+ * when the load hit its limit, they are of the newest rows only, and the
+ * note says so (rev-1269 finding 2). The API has no count by state.
+ */
+export const countsNote = (loaded: number, limit: number): string => (loaded >= limit ? `of the newest ${limit}:` : "");
+
 /** The resource claim in words, or "none". */
 export function claimText(r: ServiceResources | undefined): string {
   if (!r) return "none";

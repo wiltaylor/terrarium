@@ -121,7 +121,7 @@ import { createThreadMock } from "./threads";
 import { createConfigMock } from "./config";
 import { createSkillMock, skillsError } from "./skills";
 import { createToolMock } from "./tools";
-import { createServiceMock } from "./services";
+import { createServiceMock, type ServiceCaller } from "./services";
 import { createSystemPromptMock } from "./systemPrompts";
 import { createDbMock } from "./db";
 import { createTestRunMock } from "./testRuns";
@@ -190,6 +190,8 @@ export interface MockOptions {
    * `approve_grants`) use the same caller.
    */
   scheduleCaller?: ScheduleCaller;
+  /** The caller of the services mock (docs/api.md §17.12): the operator by default, or an agent with its role. */
+  serviceCaller?: ServiceCaller;
   /** False: a daemon with no config repo, so `/api/config/*` answers `501 not_available`. Default true. */
   configRepo?: boolean;
   /** How long a schedule run takes before `run_finished`. Default 1500 ms with latency, else the step. */
@@ -922,7 +924,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   if (w.projects.some((x) => x.name === "terrarium") && w.agents.some((a) => a.name === "lead")) calendarMock.seed();
   const skillMock = createSkillMock({ w, reply, fail, audit, caller: opts.scheduleCaller, available: opts.configRepo });
   const toolMock = createToolMock({ w, iso, reply, fail, audit });
-  const serviceMock = createServiceMock({ w, now, reply, fail, audit });
+  const serviceMock = createServiceMock({ w, now, reply, fail, audit, caller: opts.serviceCaller });
   // The effective skills of an agent (PLAN §8.6), as the API fills them.
   const withSkills = (a: Agent): Agent => Object.assign(a, { effective_skills: skillMock.effective(a) });
   const systemPromptMock = createSystemPromptMock({ w, iso, reply, fail, audit, emit, caller: opts.scheduleCaller, available: opts.configRepo });
