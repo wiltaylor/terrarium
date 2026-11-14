@@ -1,0 +1,8 @@
+[env]
+# Bundled SQLite (libsqlite3-sys) keeps memory statistics by default, and in
+# its thread-safe build every sqlite3_malloc and free then takes one
+# process-wide mutex. Parallel test threads that each open a database and run
+# the migrations serialize on it: TER-1314 measured the terrariumd lib suite
+# at 8 threads, 259 s wall with 200 s sys before, 123 s with 12 s sys after.
+# Nothing in terrarium reads SQLite's memory statistics.
+LIBSQLITE3_FLAGS = "-DSQLITE_DEFAULT_MEMSTATUS=0"
