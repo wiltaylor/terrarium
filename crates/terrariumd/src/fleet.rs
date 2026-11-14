@@ -401,6 +401,7 @@ fn live_project(
     names: &BTreeSet<String>,
     checkout: &Value,
     delivery: bool,
+    flow: bool,
     board: Option<&[fleet::FleetColumn]>,
 ) -> ApiResult<Value> {
     let mut repos: Vec<Value> = all_repos(conn, &p.name)?
@@ -424,8 +425,12 @@ fn live_project(
     if delivery {
         spec["delivery"] = json!(jobs::delivery(conn, &p.name)?);
     }
-    if let Some(columns) = board {
+    // The flow whenever the file gives it, so that a plan shows each
+    // switch (rev-1305).
+    if flow {
         spec["board_flow"] = json!(p.board_flow.as_str());
+    }
+    if let Some(columns) = board {
         spec["columns"] = live_columns(conn, &p.name, columns)?;
     }
     Ok(spec)
@@ -449,17 +454,14 @@ fn rule_value(r: &terrarium_core::board_rules::ColumnRule) -> Value {
     v
 }
 
-/// A column as a fleet file holds it: its role and WIP limit, and its
-/// options.
-fn column_def(
-    o: &ColumnOptions,
-    role: Option<String>,
-    wip_limit: Option<i64>,
-) -> fleet::FleetColumn {
+/// A column as a fleet file holds it: its title, role, and WIP limit, and
+/// its options.
+fn column_def(o: &ColumnOptions, l: &board::ColumnLayout) -> fleet::FleetColumn {
     fleet::FleetColumn {
         name: o.column.clone(),
-        role,
-        wip_limit,
+        title: l.title.clone(),
+        role: l.role.clone(),
+        wip_limit: l.wip_limit,
         checks: Some(json!(o.checks)),
         queue: Some(json!(o.queue)),
         rules: Some(o.rules.iter().map(rule_value).collect()),
@@ -476,9 +478,9 @@ fn live_columns(
     let layout = board::column_layout(conn, project)?;
     let mut out = Vec::new();
     for c in columns {
-        if let Some((_, role, wip)) = layout.iter().find(|(n, _, _)| *n == c.name) {
+        if let Some(l) = layout.iter().find(|l| l.name == c.name) {
             let o = column_options::get_options(conn, project, &c.name)?;
-            out.push(json!(column_def(&o, role.clone(), *wip)));
+            out.push(json!(column_def(&o, l)));
         } else {
             out.push(json!({"name": c.name, "missing": true}));
         }
@@ -490,7 +492,8 @@ fn live_columns(
 /// [`live_columns`]: each value read as the API reads it (the defaults
 /// filled in), and an absent key the live value. A value that does not
 /// read stays as it is: the apply names the problem. A column that the
-/// board has keeps its role and WIP limit; a new one takes the file's.
+/// board has keeps its title, role, and WIP limit; a new one takes the
+/// file's.
 fn desired_columns(columns: &[fleet::FleetColumn], live: Option<&Value>) -> Value {
     fn typed<T: Serialize + for<'de> Deserialize<'de>>(v: &Value) -> Value {
         serde_json::from_value::<T>(v.clone()).map_or_else(|_| v.clone(), |t| json!(t))
@@ -505,9 +508,13 @@ fn desired_columns(columns: &[fleet::FleetColumn], live: Option<&Value>) -> Valu
                 mine.or_else(|| have.map(|h| h[key].clone()).filter(|v| !v.is_null()))
             };
             let kept = have.filter(|h| h.get("missing").is_none());
-            let (role, wip_limit) = match kept {
-                Some(h) => (h["role"].clone(), h["wip_limit"].clone()),
-                None => (json!(c.role), json!(c.wip_limit)),
+            let (title, role, wip_limit) = match kept {
+                Some(h) => (
+                    h["title"].clone(),
+                    h["role"].clone(),
+                    h["wip_limit"].clone(),
+                ),
+                None => (json!(c.title), json!(c.role), json!(c.wip_limit)),
             };
             let rules = c.rules.as_ref().map(|list| {
                 Value::Array(
@@ -528,7 +535,7 @@ fn desired_columns(columns: &[fleet::FleetColumn], live: Option<&Value>) -> Valu
                 "rules": pick("rules", rules),
             });
             // As `column_def` writes them: absent, not null.
-            for (key, x) in [("role", role), ("wip_limit", wip_limit)] {
+            for (key, x) in [("title", title), ("role", role), ("wip_limit", wip_limit)] {
                 if !x.is_null() {
                     v[key] = x;
                 }
@@ -550,15 +557,12 @@ fn export_columns(
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
-    for (name, role, wip) in board::column_layout(conn, project)? {
-        let c = column_def(
-            &column_options::get_options(conn, project, &name)?,
-            role,
-            wip,
-        );
+    for l in board::column_layout(conn, project)? {
+        let c = column_def(&column_options::get_options(conn, project, &l.name)?, &l);
         if let Some(e) = c.toml_problem() {
             return Err(ApiError::invalid(format!(
-                "column `{name}`: {e}; a fleet file cannot hold this value"
+                "column `{}`: {e}; a fleet file cannot hold this value",
+                l.name
             )));
         }
         out.push(c);
@@ -567,10 +571,10 @@ fn export_columns(
 }
 
 /// Add the columns of the file that the board lacks (TER-1305), each with
-/// its role and WIP limit, after the nearest column before it in the file
+/// its title, role, and WIP limit, after the nearest column before it in the file
 /// that the board has (else after `backlog`, never after `done`), with one
 /// board change as the board `PATCH` makes it. The columns of the board
-/// keep their place, role, and WIP limit. A role that a column of the board
+/// keep their place, title, role, and WIP limit. A role that a column of the board
 /// holds is an error: the apply does not move it.
 fn add_columns(
     t: &mut Tx<'_>,
@@ -579,16 +583,16 @@ fn add_columns(
     columns: &[fleet::FleetColumn],
 ) -> ApiResult<()> {
     let layout = board::column_layout(t, project)?;
-    let has = |name: &str| layout.iter().any(|(n, _, _)| n == name);
+    let has = |name: &str| layout.iter().any(|l| l.name == name);
     if columns.iter().all(|c| has(&c.name)) {
         return Ok(());
     }
     let mut order: Vec<board::ColumnSpec> = layout
         .iter()
-        .map(|(name, _, wip)| board::ColumnSpec {
-            name: name.clone(),
+        .map(|l| board::ColumnSpec {
+            name: l.name.clone(),
             title: None,
-            wip_limit: *wip,
+            wip_limit: l.wip_limit,
             role: None,
             rename_from: None,
             position: None,
@@ -601,13 +605,14 @@ fn add_columns(
         }
         let at = format!("projects.{project}.columns.{}", c.name);
         if let Some(r) = &c.role
-            && let Some((holder, _, _)) = layout.iter().find(|(_, x, _)| x.as_ref() == Some(r))
+            && let Some(holder) = layout.iter().find(|l| l.role.as_ref() == Some(r))
         {
             return Err(ApiError::invalid(format!(
                 "{at}: the board of `{project}` has no column `{}`, and its role `{r}` is the \
                  role of column `{holder}`; give the column another role, or move the role \
                  on the board first",
-                c.name
+                c.name,
+                holder = holder.name
             ))
             .with_details(json!({"path": format!("{at}.role")})));
         }
@@ -622,7 +627,7 @@ fn add_columns(
             at_index,
             board::ColumnSpec {
                 name: c.name.clone(),
-                title: None,
+                title: Some(c.title.clone()),
                 wip_limit: c.wip_limit,
                 role: Some(c.role.clone()),
                 rename_from: None,
@@ -654,10 +659,10 @@ fn apply_board(
     policy::edit_column_options(actor, project)?;
     if projects::set_columns_flow(t, project)? {
         t.audit(
-            "project.board_flow",
+            "project.update",
             project,
             Some(project),
-            json!({"board_flow": "columns", "source": "fleet"}),
+            json!({"board_flow": BoardFlow::Columns.as_str(), "source": "fleet"}),
         )?;
     }
     add_columns(t, actor, project, columns)?;
@@ -747,8 +752,10 @@ fn desired_project(
     if let Some(d) = delivery {
         spec["delivery"] = json!(d);
     }
+    if let Some(flow) = def.board_flow {
+        spec["board_flow"] = json!(flow.as_str());
+    }
     if let Some(columns) = board {
-        spec["board_flow"] = json!(BoardFlow::Columns.as_str());
         spec["columns"] = columns;
     }
     spec
@@ -1070,7 +1077,15 @@ pub fn plan(conn: &Connection, f: &Fleet) -> ApiResult<Plan> {
         let board = managed_board(p);
         let live = match &live_row {
             Some(row) => Some(Live {
-                spec: live_project(conn, row, &names, &checkout, delivery.is_some(), board)?,
+                spec: live_project(
+                    conn,
+                    row,
+                    &names,
+                    &checkout,
+                    delivery.is_some(),
+                    p.def.board_flow.is_some(),
+                    board,
+                )?,
                 source: row.source.clone(),
             }),
             None => None,
@@ -2090,9 +2105,29 @@ fn apply_project(t: &mut Tx<'_>, fleet_name: &str, p: &fleet::FleetProject) -> A
         }
     }
     // Who runs the card flow (TER-170): the fleet sets it when it gives
-    // the key. `columns` comes with the board options ([`apply_board`]).
+    // the key and it differs, as `PATCH /api/projects/{name}` does (with its
+    // `project.update` audit row). `columns` comes with the board options
+    // ([`apply_board`]), and a file does not take a board off them.
     if let Some(flow) = def.board_flow.filter(|f| *f != BoardFlow::Columns) {
-        projects::set_board_flow(t, &def.name, flow)?;
+        let now = projects::board_flow(t, &def.name)?;
+        if now == BoardFlow::Columns {
+            return Err(ApiError::invalid(format!(
+                "projects.{}.board_flow: the board is on column rules; a fleet file does not \
+                 take it off them: give `board_flow = \"columns\"` with its \
+                 `[[projects.columns]]` (`fleet export` writes them), or leave out the key",
+                def.name
+            )));
+        }
+        if now != flow {
+            projects::update(
+                t,
+                &def.name,
+                &ProjectPatch {
+                    board_flow: Some(flow),
+                    ..ProjectPatch::default()
+                },
+            )?;
+        }
     }
     projects::set_review_dispatcher_from_file(t, &def.name, def.review_dispatcher.as_deref())?;
     projects::set_card_dispatcher_from_file(t, &def.name, def.card_dispatcher.as_deref())?;
@@ -2144,6 +2179,7 @@ fn record_project(t: &Tx<'_>, fleet_name: &str, p: &fleet::FleetProject) -> ApiR
         &names,
         &json!(def.checkout.on_agent_create),
         p.delivery.is_some(),
+        def.board_flow.is_some(),
         managed_board(p),
     )?;
     record(

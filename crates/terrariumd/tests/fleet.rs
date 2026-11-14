@@ -1082,11 +1082,18 @@ async fn column_names(td: &TestDaemon, project: &str) -> Vec<String> {
 }
 
 /// Set the board of `project` to `columns`: each `(name, role, wip_limit)`,
-/// a column of the board keeping its title.
+/// a column of the board keeping its title. `validating` gets the title
+/// `Checks`.
 async fn set_board(td: &TestDaemon, project: &str, columns: &[(&str, Option<&str>, Option<i64>)]) {
     let cols: Vec<Value> = columns
         .iter()
-        .map(|(n, r, w)| json!({"name": n, "role": r, "wip_limit": w}))
+        .map(|(n, r, w)| {
+            let mut c = json!({"name": n, "role": r, "wip_limit": w});
+            if *n == "validating" {
+                c["title"] = json!("Checks");
+            }
+            c
+        })
         .collect();
     td.patch(
         &format!("/api/projects/{project}/board"),
@@ -1099,7 +1106,7 @@ async fn set_board(td: &TestDaemon, project: &str, columns: &[(&str, Option<&str
 /// TER-1305, the legacy case: a converted board with a `validating`
 /// column (a WIP limit and a rule on it), exported and applied to a
 /// project whose board lacks the column. The apply adds it at its place,
-/// with its role and WIP limit, then its options; a second plan shows no
+/// with its title, role, and WIP limit, then its options; a second plan shows no
 /// change.
 #[tokio::test]
 async fn apply_adds_the_validating_column_of_a_legacy_board() {
@@ -1137,7 +1144,9 @@ async fn apply_adds_the_validating_column_of_a_legacy_board() {
         .unwrap()
         .to_owned();
     assert!(
-        content.contains("name = \"validating\"\nrole = \"validating\"\nwip_limit = 2\n"),
+        content.contains(
+            "name = \"validating\"\ntitle = \"Checks\"\nrole = \"validating\"\nwip_limit = 2\n"
+        ),
         "{content}"
     );
 
@@ -1163,6 +1172,7 @@ async fn apply_adds_the_validating_column_of_a_legacy_board() {
         .unwrap()
         .clone();
     assert_eq!(col["role"], "validating", "{col}");
+    assert_eq!(col["title"], "Checks", "{col}");
     assert_eq!(col["wip_limit"], 2, "{col}");
     let got = options(&nd, "lg", "validating").await;
     assert_eq!(got["checks"], want["checks"]);
@@ -1173,36 +1183,118 @@ async fn apply_adds_the_validating_column_of_a_legacy_board() {
     assert_eq!(p["action"], "unchanged", "{p}");
 }
 
+/// Put `project` on the coded flow (`board_flow = code`) on purpose, as a
+/// board that no upgrade converted (TER-1117 gives a new project the
+/// column rules).
+async fn code_flow(td: &TestDaemon, project: &str) {
+    let p = project.to_owned();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE projects SET board_flow = NULL, board_flow_at = NULL WHERE name = ?1",
+                [&p],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// The `project.update` audit rows of `project` that set `board_flow`.
+async fn flow_audits(td: &TestDaemon, project: &str) -> Vec<Value> {
+    td.get("/api/audit?action=project.update")
+        .await
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["target"] == project && !r["detail"]["board_flow"].is_null())
+        .cloned()
+        .collect()
+}
+
 /// TER-1305: a board that is not on column rules exports as before: no
-/// `[[projects.columns]]`, and `board_flow` only for `rules`.
+/// `[[projects.columns]]`, and `board_flow` only for `rules`. A file never
+/// changes the flow silently (rev-1305): `board_flow = "rules"` on a `code`
+/// project shows in the plan, and the apply writes it with the
+/// `project.update` audit row; an unchanged file writes nothing; a board
+/// on column rules is not taken off them.
 #[tokio::test]
 async fn export_of_a_board_off_column_rules_has_no_columns() {
     let td = TestDaemon::start().await;
     td.project("pl").await;
-    let flow = td.get("/api/projects/pl").await.ok()["board_flow"].clone();
+    code_flow(&td, "pl").await;
+    assert_eq!(td.get("/api/projects/pl").await.ok()["board_flow"], "code");
     let content = td.get("/api/fleet/export?project=pl").await.ok()["content"]
         .as_str()
         .unwrap()
         .to_owned();
-    if flow == "columns" {
-        // The standard board of a new project (TER-1117) is on column
-        // rules: nothing more to check here.
-        return;
-    }
     assert!(!content.contains("[[projects.columns]]"), "{content}");
     assert!(!content.contains("board_flow"), "{content}");
-    td.patch("/api/projects/pl", json!({"board_flow": "rules"}))
-        .await
-        .ok();
+    td.post("/api/fleet/apply", body(&content)).await.ok();
+    assert_eq!(td.get("/api/projects/pl").await.ok()["board_flow"], "code");
+
+    // The file gives `rules`: the plan shows the switch.
+    let head = "[[projects]]\nname = \"pl\"\n";
+    assert!(content.contains(head), "{content}");
+    let rules = content.replacen(head, &format!("{head}board_flow = \"rules\"\n"), 1);
+    let plan = td.post("/api/fleet/plan", body(&rules)).await;
+    let p = entry(plan.ok(), "project", "pl");
+    assert_eq!(p["action"], "update", "{p}");
+    assert_eq!(
+        p["changes"],
+        json!([{"field": "board_flow", "from": "code", "to": "rules"}]),
+        "{p}"
+    );
+    let before = flow_audits(&td, "pl").await.len();
+    td.post("/api/fleet/apply", body(&rules)).await.ok();
+    assert_eq!(td.get("/api/projects/pl").await.ok()["board_flow"], "rules");
+    let audits = flow_audits(&td, "pl").await;
+    assert_eq!(audits.len(), before + 1, "{audits:?}");
+    assert!(
+        audits.iter().any(|r| r["detail"]["board_flow"] == "rules"),
+        "{audits:?}"
+    );
+
+    // Unchanged: no change in the plan, and the apply writes no flow.
+    let plan = td.post("/api/fleet/plan", body(&rules)).await;
+    assert_eq!(entry(plan.ok(), "project", "pl")["action"], "unchanged");
+    td.post("/api/fleet/apply", body(&rules)).await.ok();
+    assert_eq!(flow_audits(&td, "pl").await.len(), before + 1);
+    // The export of a `rules` board gives the key, and plans unchanged.
     let content = td.get("/api/fleet/export?project=pl").await.ok()["content"]
         .as_str()
         .unwrap()
         .to_owned();
     assert!(content.contains("board_flow = \"rules\""), "{content}");
     assert!(!content.contains("[[projects.columns]]"), "{content}");
-    // It plans with no change: `board_flow` is a key of a fleet project.
     let plan = td.post("/api/fleet/plan", body(&content)).await;
     assert_eq!(entry(plan.ok(), "project", "pl")["action"], "unchanged");
+
+    // A board on column rules: the plan shows the switch, and the apply
+    // refuses it with nothing written.
+    columns_flow(&td, "pl").await;
+    let plan = td.post("/api/fleet/plan", body(&rules)).await;
+    let p = entry(plan.ok(), "project", "pl");
+    assert_eq!(p["changes"][0]["field"], "board_flow", "{p}");
+    let r = td.post("/api/fleet/apply", body(&rules)).await;
+    r.err(422, "invalid");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("projects.pl.board_flow"),
+        "{}",
+        r.body
+    );
+    assert_eq!(
+        td.get("/api/projects/pl").await.ok()["board_flow"],
+        "columns"
+    );
 }
 
 /// TER-86: an export carries the spawn policy (with the bound fields of

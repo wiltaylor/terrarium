@@ -92,7 +92,15 @@ const PROJECT_KEYS: &[&str] = &[
 ];
 /// The keys of `[[projects.columns]]` (TER-1305), in the order of the
 /// schema.
-const COLUMN_KEYS: &[&str] = &["name", "role", "wip_limit", "checks", "queue", "rules"];
+const COLUMN_KEYS: &[&str] = &[
+    "name",
+    "title",
+    "role",
+    "wip_limit",
+    "checks",
+    "queue",
+    "rules",
+];
 /// The keys of `[projects.delivery]` (TER-87), in the order of the schema.
 const DELIVERY_KEYS: &[&str] = &[
     "merge_secrets",
@@ -266,16 +274,19 @@ pub struct FleetProject {
     pub columns: Vec<FleetColumn>,
 }
 
-/// One board column in a fleet file (TER-1305): its name, role, and WIP
-/// limit, and the `checks`, `queue`, and `rules` of `GET
+/// One board column in a fleet file (TER-1305): its name, title, role,
+/// and WIP limit, and the `checks`, `queue`, and `rules` of `GET
 /// /api/projects/{name}/board/columns/{column}/options`, without the rule
 /// IDs. The daemon reads and checks the values at the apply. An absent
-/// option keeps what the column has. The role and the WIP limit make a
+/// option keeps what the column has. The title, role, and WIP limit make a
 /// column that the board lacks; a column that the board has keeps its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetColumn {
     /// The name of a column of the board.
     pub name: String,
+    /// The display label. Absent: the default title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1528,6 +1539,10 @@ fn write_column(w: &mut Writer, c: &FleetColumn) {
     w.out.push_str("[[projects.columns]]\n");
     w.out
         .push_str(&format!("name = {}\n", toml::Value::String(c.name.clone())));
+    if let Some(x) = &c.title {
+        w.out
+            .push_str(&format!("title = {}\n", toml::Value::String(x.clone())));
+    }
     if let Some(r) = &c.role {
         w.out
             .push_str(&format!("role = {}\n", toml::Value::String(r.clone())));

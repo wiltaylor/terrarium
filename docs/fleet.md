@@ -148,19 +148,25 @@ Rules:
   table the apply leaves the config as it is. A file that drops a table
   that the fleet applied before clears the config (no queue).
 - `board_flow` is `code`, `rules`, or `columns`. `fleet export` writes it
-  when it is not `code`. A board on column rules (api.md §19.13, §19.14)
+  when it is not `code`. A plan compares it whenever the file gives it and
+  shows a switch as the `board_flow` field of the project. The apply writes
+  it only when it differs, as `PATCH /api/projects/{name}` does (audit
+  `project.update`). A board on column rules is not taken off them: a file
+  that gives it `code` or `rules` fails the apply with
+  `projects.<p>.board_flow`. A board on column rules (api.md §19.13, §19.14)
   exports as `board_flow = "columns"` and one `[[projects.columns]]` for
-  each column, in board order: its `name`, `role`, and `wip_limit`, and
+  each column, in board order: its `name`, `title` (only a title that is
+  not the default), `role`, and `wip_limit`, and
   the `checks`, `queue`, and `rules` of `GET
   /api/projects/{name}/board/columns/{column}/options`, without the rule
   IDs (TER-1305). `[[projects.columns]]` needs `board_flow = "columns"`,
   and `board_flow = "columns"` needs `[[projects.columns]]`.
   The apply switches the project to column rules first. Then it adds each
-  named column that the board lacks, with its role and WIP limit, after
+  named column that the board lacks, with its title, role, and WIP limit, after
   the nearest column before it in the file that the board has (one board
   change, as `PATCH /api/projects/{name}/board`). A role that another
   column of the board holds is an error: the apply does not move a role.
-  A column that the board has keeps its place, role, and WIP limit. Then
+  A column that the board has keeps its place, title, role, and WIP limit. Then
   it writes each named column as the options `PUT` does, with its checks:
   a rule matches the column's rule of the same name and keeps its ID, and
   an absent option keeps what the column has. A column that the file does
