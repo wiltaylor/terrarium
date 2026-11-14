@@ -1500,12 +1500,15 @@ async fn default_merge_group_sweep_repairs_stale_members_idempotently() {
         json!({"title":"b", "column":"review", "repo":"app"}),
     )
     .await;
-    store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
     let gid = card(&td, &a).await["group"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
+    // TER-1278: the repair keeps a member while its merge job is open.
+    fail_job(&td, &job, "red").await;
+    settle(&td).await;
     let members = [a.clone(), b.clone()];
     state(&td).db.write("test", move |t| {
         // Model old data with no move event for the new rule to handle.
@@ -1555,12 +1558,15 @@ async fn merge_group_repair_waits_for_a_pending_member_run_then_runs_anyway() {
         json!({"title":"b", "column":"review", "repo":"app"}),
     )
     .await;
-    store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
     let gid = card(&td, &a).await["group"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
+    // TER-1278: the repair keeps a member while its merge job is open.
+    fail_job(&td, &job, "red").await;
+    settle(&td).await;
     let (key, group) = (a.clone(), gid.clone());
     let (waited, kept, forced, kept_after) = state(&td)
         .db
@@ -1639,6 +1645,53 @@ async fn merge_group_repair_keeps_an_empty_group_while_its_rule_runs() {
     );
     assert!(!open_after, "the idle repair closes the empty group");
     assert_eq!(card(&td, &gid).await["archived"], true);
+}
+
+/// TER-1278: the repair keeps a member in `backlog` while its merge job
+/// is open, so the group of a running job is not closed as abandoned. Once
+/// the job has ended, the repair removes the member.
+#[tokio::test]
+async fn merge_group_repair_keeps_a_member_while_its_merge_job_is_open() {
+    use terrariumd::store::groups;
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"backlog", "repo":"app"}),
+    )
+    .await;
+    let job = store_job(&td, JobKind::Merge, &[&a]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (key, group) = (a.clone(), gid.clone());
+    let kept = state(&td)
+        .db
+        .write("test", move |t| {
+            groups::expire(t)?;
+            let g = groups::get(t, &group)?;
+            Ok(g.members.contains(&key) && g.closed_at.is_none())
+        })
+        .await
+        .unwrap();
+    assert!(kept, "the open merge job keeps the member and the group");
+    fail_job(&td, &job, "infra").await;
+    let (key, group) = (a.clone(), gid.clone());
+    let kept_after = state(&td)
+        .db
+        .write("test", move |t| {
+            groups::expire(t)?;
+            Ok(groups::get(t, &group)?.members.contains(&key))
+        })
+        .await
+        .unwrap();
+    assert!(
+        !kept_after,
+        "the ended job no longer keeps a backlog member"
+    );
 }
 
 #[tokio::test]
@@ -5143,6 +5196,51 @@ async fn column_rules_merge_a_batch_cut_a_version_and_build_it() {
     }
     assert_eq!(card(&td, &header).await["archived"], true);
     only_column_runs(&td).await;
+}
+
+/// TER-1280: a repair tick between a red end and the requeue keeps the
+/// `merge_queue` members of the open group, so the lead can queue it again.
+/// Without a live fix card the repair releases them (TER-333, the sweep
+/// test above).
+#[tokio::test]
+async fn merge_group_repair_keeps_red_batch_members_until_the_requeue() {
+    use terrariumd::store::groups;
+    let td = columns_merge_lab().await;
+    let (a, b) = two_cards(&td).await;
+    move_to(&td, &a, "merge_queue").await;
+    move_to(&td, &b, "merge_queue").await;
+    settle(&td).await;
+    let job = the_open_job(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    end_job(&td, &job, false).await;
+    // The red group waits for its requeue: it holds a live fix card.
+    let label = format!("merge-fix:{}", job.id);
+    let fix = state(&td)
+        .db
+        .read(move |c| terrariumd::store::board::find_open_by_label(c, "p", &label))
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("the red group has no fix card"));
+    assert_eq!(card(&td, &fix).await["group"]["id"], gid);
+    let (members, group) = ([a.clone(), b.clone()], gid.clone());
+    let kept = state(&td)
+        .db
+        .write("test", move |t| {
+            // The engine's tick: the red job has ended, no job is open.
+            groups::expire(t)?;
+            let g = groups::get(t, &group)?;
+            Ok(g.closed_at.is_none() && members.iter().all(|m| g.members.contains(m)))
+        })
+        .await
+        .unwrap();
+    assert!(kept, "{}", card(&td, &gid).await);
+    for id in [&a, &b] {
+        assert_eq!(column_of(&td, id).await, "merge_queue");
+        assert_eq!(card(&td, id).await["group"]["id"], gid);
+    }
 }
 
 /// The pack's red path on the batch merge queue: a red group gets a fix
