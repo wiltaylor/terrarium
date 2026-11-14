@@ -494,7 +494,7 @@ async fn the_upgrade_converts_every_board_once_at_the_start_and_mails_the_report
         "{mail:?}"
     );
     let count = |td: &TestDaemon| {
-        let db = state(td).db;
+        let db = state(td).db.clone();
         async move {
             db.read(|c| {
                 Ok(c.query_row(
