@@ -40,33 +40,33 @@
                                                                                                     Grok Build  1.0.77
 ===== idle-start =====
 
-  /s/gcheck-1312-grok-home/proj                                                               17K / 256K │ [Dashboard]
+  /s/gcheck-1312-grok-home/proj
 
 
-     ❯ Wrn exactly this shell command and nothing else: echo hi > out.txt                                    6:22 AM
 
 
-     ◆ Thought for 0.0s
+   ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+   │                                                                                                                │
+   │  ⠀⠀⠀⠀⠀⠀⣀⣀⡀⠀⠀⠀⢀⠄   Grok Build  1.0.77                                                                           │
+   │  ⠀⠀⠀⣠⣾⠿⠛⠛⠛⠛⢀⡴⠁⠀                                                                                                │
+   │  ⠀⠀⣼⡟⠁⠀⠀⠀⢀⡴⠻⣿⡀⠀   Grok 4.7 is here!                                                                            │
+   │  ⠀⠀⣿⡇⠀⠀⠀⠔⠁⠀⠀⣿⡇⠀   Select 'Grok 4.7' under /model.                                                              │
+   │  ⠀⠀⢹⣷⠀⠀⠀⠀⠀⢀⣴⡿⠀⠀                                                                                                │
+   │  ⠀⢀⠞⠁⠠⢶⣶⣶⣶⠿⠋⠀⠀⠀   Resume session                                                                       ctrl+r  │
+   │  ⠐⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀   New worktree                                                                         ctrl+w  │
+   │                   Changelog                                                                                    │
+   │                   Quit                                                                                 ctrl+q  │
+   │                                                                                                                │
+   ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
-     I'll run that command exactly as given.                                                                 6:22 AM
 
-     ◆ Ran write hi to out.txt
 
-     Ran echo hi > out.txt. The command finished successfully.                                               6:23 AM
-                                                                                                                       █
-     Worked for 44s                                                                                                    █
-                                                                                                                       █
-                                                                                                                       █
-                                                                                                                       █
-                                                                                                                       █
-                                                                                                                       █
-                                                                                                                       █
-                                                                                                                       █
-                                                                                                                       █
-                                                                                                                       █
-                                                                                                                       █
-                                                                                                                       █
-                                                                                                                       █
+
+
+
+
+
+
 
   Help improve Grok                                                                                 [Opt out] [Opt in]
   Off by default. Opt-in to allow SpaceXAI to retain coding data, e.g., prompts, traces, & metrics,
@@ -74,10 +74,8 @@
   Read Terms and Privacy Policy.
 
   ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-  │ ❯ Write the numbers from 1 to 400 in words, one per line. No tools.                                              │
+  │ ❯                                                                                                                │
   ╰──────────────────────────────────────────────────────────────────────────────────────────────── Grok 4.7 (high) ─╯
-
-  Enter:send  │  Alt+Enter:newline  │  Shift+Tab:mode  │  Ctrl+x:shortcuts
 ===== typed =====
 
   /s/gcheck-1312-grok-home/proj                                                              1.8K / 256K │ [Dashboard]
