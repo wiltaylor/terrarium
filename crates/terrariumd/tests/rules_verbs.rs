@@ -6127,6 +6127,8 @@ async fn a_card_admitted_from_review_unparks_its_agent_and_leaves_its_merge_grou
         .await
         .map(|p| serde_json::from_str(&p).unwrap())
         .unwrap();
+    // The converted `lands` rules match on this value (TER-1117).
+    assert_eq!(data["change"], "admitted", "{data}");
     assert_eq!(
         (&data["from"], &data["from_role"], &data["to"], &data["to_role"]),
         (
