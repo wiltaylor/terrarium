@@ -66,6 +66,7 @@ timeout_secs = 3600              # optional
 
 [[projects.columns]]             # optional: a column of a `board_flow = "columns"` board (TER-1305)
 name = "merge_queue"
+role = "merge_queue"             # role and wip_limit: for a column that the board lacks
 checks = { require_comment_on_enter = false, require_dependencies_met = false, terminal_for_members = false, clear_eta_on_enter = true }
 queue = { release = "batch", batch_size = 4, max_wait_seconds = 1800, max_batch_cards = 8 }
 rules = [
@@ -149,19 +150,24 @@ Rules:
 - `board_flow` is `code`, `rules`, or `columns`. `fleet export` writes it
   when it is not `code`. A board on column rules (api.md §19.13, §19.14)
   exports as `board_flow = "columns"` and one `[[projects.columns]]` for
-  each column, in board order: its `name` and the `checks`, `queue`, and
-  `rules` of `GET /api/projects/{name}/board/columns/{column}/options`,
-  without the rule IDs (TER-1305). `[[projects.columns]]` needs
-  `board_flow = "columns"`. The apply switches the project to column rules
-  first, then writes each named column as the options `PUT` does, with its
-  checks: the column must be on the board, a rule matches the column's
-  rule of the same name and keeps its ID, and an absent key keeps what the
-  column has. A column that the file does not name stays as it is. An
-  unchanged file writes nothing. A plan shows a change as the
-  `board_flow` and `columns` fields of the project. The file carries no
-  column names, roles, or WIP limits: the board is the one the project
-  has, or the board of a new project. A file does not take a board off
-  column rules. An export of a value that TOML cannot hold (a `null` in a
+  each column, in board order: its `name`, `role`, and `wip_limit`, and
+  the `checks`, `queue`, and `rules` of `GET
+  /api/projects/{name}/board/columns/{column}/options`, without the rule
+  IDs (TER-1305). `[[projects.columns]]` needs `board_flow = "columns"`.
+  The apply switches the project to column rules first. Then it adds each
+  named column that the board lacks, with its role and WIP limit, after
+  the nearest column before it in the file that the board has (one board
+  change, as `PATCH /api/projects/{name}/board`). A role that another
+  column of the board holds is an error: the apply does not move a role.
+  A column that the board has keeps its place, role, and WIP limit. Then
+  it writes each named column as the options `PUT` does, with its checks:
+  a rule matches the column's rule of the same name and keeps its ID, and
+  an absent option keeps what the column has. A column that the file does
+  not name stays as it is. An unchanged file writes nothing. A plan shows
+  a change as the `board_flow` and `columns` fields of the project. The
+  import writes no `board_conversions` row, so `POST .../board/convert`
+  `revert` answers `404` for it. A file does not take a board off column
+  rules. An export of a value that TOML cannot hold (a `null` in a
   list of a rule) fails and names the rule.
 - `policy.targets` names global targets and targets of the agent's own
   project.

@@ -906,8 +906,8 @@ fn rules_of(o: &Value) -> Vec<Value> {
 /// TER-1305: an export of a board on column rules carries the options of
 /// each column (checks, queue, rules), and an apply on a new daemon makes
 /// the same board. A second apply writes nothing; a rule that the file
-/// changes keeps its ID. A file that names a column the board does not
-/// have is refused with nothing written.
+/// changes keeps its ID. A new column whose role another column holds is
+/// refused with nothing written.
 #[tokio::test]
 async fn export_and_apply_carry_a_converted_board() {
     let td = TestDaemon::start().await;
@@ -961,6 +961,7 @@ async fn export_and_apply_carry_a_converted_board() {
         "{content}"
     );
     assert!(!content.contains(" id = \""), "{content}");
+    assert!(content.contains("role = \"merge_queue\""), "{content}");
     // The export plans with no change on its own daemon.
     let plan = td.post("/api/fleet/plan", body(&content)).await;
     let p = entry(plan.ok(), "project", "cb");
@@ -1041,7 +1042,7 @@ async fn export_and_apply_carry_a_converted_board() {
         .collect();
     assert_eq!(now, ids);
 
-    // A column that the board does not have: 422, nothing written.
+    // A new column with the role of `merge_queue`: 422, nothing written.
     let bad = edited.replacen("name = \"merge_queue\"", "name = \"no_such_column\"", 1);
     assert_ne!(bad, edited);
     let bad = bad.replacen("count = 3", "count = 4", 1);
@@ -1059,6 +1060,119 @@ async fn export_and_apply_carry_a_converted_board() {
         options(&nd, "cb", "review").await["rules"][0]["trigger"]["count"],
         3
     );
+    let board = nd.get("/api/projects/cb/board").await.ok().clone();
+    assert!(
+        board["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["name"] != "no_such_column"),
+        "{board}"
+    );
+}
+
+/// The column names of a board, in order.
+async fn column_names(td: &TestDaemon, project: &str) -> Vec<String> {
+    td.get(&format!("/api/projects/{project}/board"))
+        .await
+        .ok()["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Set the board of `project` to `columns`: each `(name, role, wip_limit)`,
+/// a column of the board keeping its title.
+async fn set_board(td: &TestDaemon, project: &str, columns: &[(&str, Option<&str>, Option<i64>)]) {
+    let cols: Vec<Value> = columns
+        .iter()
+        .map(|(n, r, w)| json!({"name": n, "role": r, "wip_limit": w}))
+        .collect();
+    td.patch(
+        &format!("/api/projects/{project}/board"),
+        json!({ "columns": cols }),
+    )
+    .await
+    .ok();
+}
+
+/// TER-1305, the legacy case: a converted board with a `validating`
+/// column (a WIP limit and a rule on it), exported and applied to a
+/// project whose board lacks the column. The apply adds it at its place,
+/// with its role and WIP limit, then its options; a second plan shows no
+/// change.
+#[tokio::test]
+async fn apply_adds_the_validating_column_of_a_legacy_board() {
+    let legacy: [(&str, Option<&str>, Option<i64>); 9] = [
+        ("backlog", None, None),
+        ("ready", None, None),
+        ("in_progress", Some("working"), None),
+        ("validating", Some("validating"), Some(2)),
+        ("review", Some("review"), None),
+        ("merge_queue", Some("merge_queue"), None),
+        ("accepted", Some("accepted"), None),
+        ("blocked", Some("blocked"), None),
+        ("done", None, None),
+    ];
+    let td = TestDaemon::start().await;
+    td.project("lg").await;
+    set_board(&td, "lg", &legacy).await;
+    columns_flow(&td, "lg").await;
+    let v = options(&td, "lg", "validating").await;
+    let rules = json!([
+        {"name": "validated", "trigger": {"kind": "lands"},
+         "actions": [{"verb": "mail", "args": {"to": ["operator"],
+                      "subject": "{{card.id}} validating"}}]},
+    ]);
+    td.put(
+        &options_path("lg", "validating"),
+        json!({"base_version": v["version"], "checks": v["checks"],
+               "queue": v["queue"], "rules": rules}),
+    )
+    .await
+    .ok();
+    let want = options(&td, "lg", "validating").await;
+    let content = td.get("/api/fleet/export?project=lg").await.ok()["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        content.contains("name = \"validating\"\nrole = \"validating\"\nwip_limit = 2\n"),
+        "{content}"
+    );
+
+    // The new project has the standard board: no validating column.
+    let nd = TestDaemon::start().await;
+    nd.project("lg").await;
+    let standard: Vec<(&str, Option<&str>, Option<i64>)> = legacy
+        .iter()
+        .copied()
+        .filter(|(n, _, _)| *n != "validating")
+        .collect();
+    set_board(&nd, "lg", &standard).await;
+    let r = nd.post("/api/fleet/apply", body(&content)).await;
+    assert_eq!(r.ok()["summary"]["conflict"], 0, "{}", r.body);
+    let names: Vec<&str> = legacy.iter().map(|(n, _, _)| *n).collect();
+    assert_eq!(column_names(&nd, "lg").await, names);
+    let board = nd.get("/api/projects/lg/board").await.ok().clone();
+    let col = board["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "validating")
+        .unwrap()
+        .clone();
+    assert_eq!(col["role"], "validating", "{col}");
+    assert_eq!(col["wip_limit"], 2, "{col}");
+    let got = options(&nd, "lg", "validating").await;
+    assert_eq!(got["checks"], want["checks"]);
+    assert_eq!(got["queue"], want["queue"]);
+    assert_eq!(rules_of(&got), rules_of(&want));
+    let plan = nd.post("/api/fleet/plan", body(&content)).await;
+    let p = entry(plan.ok(), "project", "lg");
+    assert_eq!(p["action"], "unchanged", "{p}");
 }
 
 /// TER-1305: a board that is not on column rules exports as before: no

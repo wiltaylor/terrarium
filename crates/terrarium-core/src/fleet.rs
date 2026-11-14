@@ -92,7 +92,7 @@ const PROJECT_KEYS: &[&str] = &[
 ];
 /// The keys of `[[projects.columns]]` (TER-1305), in the order of the
 /// schema.
-const COLUMN_KEYS: &[&str] = &["name", "checks", "queue", "rules"];
+const COLUMN_KEYS: &[&str] = &["name", "role", "wip_limit", "checks", "queue", "rules"];
 /// The keys of `[projects.delivery]` (TER-87), in the order of the schema.
 const DELIVERY_KEYS: &[&str] = &[
     "merge_secrets",
@@ -266,15 +266,20 @@ pub struct FleetProject {
     pub columns: Vec<FleetColumn>,
 }
 
-/// The options of one board column in a fleet file (TER-1305): the
-/// `checks`, `queue`, and `rules` of `GET
+/// One board column in a fleet file (TER-1305): its name, role, and WIP
+/// limit, and the `checks`, `queue`, and `rules` of `GET
 /// /api/projects/{name}/board/columns/{column}/options`, without the rule
-/// IDs. The daemon reads and checks the values at the apply. An absent key
-/// keeps what the column has.
+/// IDs. The daemon reads and checks the values at the apply. An absent
+/// option keeps what the column has. The role and the WIP limit make a
+/// column that the board lacks; a column that the board has keeps its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetColumn {
     /// The name of a column of the board.
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wip_limit: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1516,6 +1521,12 @@ fn write_column(w: &mut Writer, c: &FleetColumn) {
     w.out.push_str("[[projects.columns]]\n");
     w.out
         .push_str(&format!("name = {}\n", toml::Value::String(c.name.clone())));
+    if let Some(r) = &c.role {
+        w.out.push_str(&format!("role = {}\n", toml::Value::String(r.clone())));
+    }
+    if let Some(n) = c.wip_limit {
+        w.out.push_str(&format!("wip_limit = {n}\n"));
+    }
     let value = |v: &serde_json::Value| toml::Value::try_from(without_nulls(v)).ok();
     for (key, v) in [("checks", &c.checks), ("queue", &c.queue)] {
         if let Some(v) = v.as_ref().and_then(value) {
