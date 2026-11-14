@@ -5016,6 +5016,74 @@ export interface Tool {
 }
 
 
+// ---- Services (docs/api.md §17.12, TER-1264, TER-1269) ----
+
+/** The resources that one request of a service claims while it runs. */
+export interface ServiceResources {
+  cpu_millis?: number;
+  memory?: string;
+  gpus?: number;
+  gpu_exclusive?: boolean;
+  gpu_vram?: string;
+}
+
+/** A service (`GET /api/services`): a script or agent with a request queue. */
+export interface Service {
+  name: string;
+  description?: string;
+  kind: "script" | "agent";
+  target: string;
+  command?: string[];
+  template?: string;
+  prompt?: string;
+  resources?: ServiceResources;
+  max_run_time?: string;
+  concurrency?: number;
+  wait_limit?: string;
+  max_payload?: string;
+  max_retained?: string;
+  callers?: string[];
+  project?: string;
+  scope: "global" | "project";
+  source: "file" | "api";
+  /** Set when its file went while it had open requests: it takes no new call. */
+  removed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** `GET /api/services/{name}`: the service with its open request count and whether the caller may call it. */
+export interface ServiceDetail extends Service {
+  open_requests: number;
+  may_call: boolean;
+}
+
+export type ServiceRequestState = "queued" | "waiting" | "running" | "done" | "failed" | "cancelled" | "timed_out";
+
+/** One request of a service (`GET /api/services/{name}/requests`, `GET /api/service-requests/{id}`). */
+export interface ServiceRequest {
+  id: string;
+  service: string;
+  project?: string | null;
+  /** `operator` or `agent:<project>/<name>`. */
+  caller: string;
+  caller_agent?: string | null;
+  state: ServiceRequestState;
+  request: unknown;
+  payload_size: number;
+  payload_sha256?: string | null;
+  response?: unknown;
+  exit_code?: number | null;
+  error?: string | null;
+  wait_until: string;
+  created_at: string;
+  started_at?: string | null;
+  ended_at?: string | null;
+  payload_deleted_at?: string | null;
+  /** The place in the queue (1 is next), while it is `queued`. */
+  position?: number;
+}
+
 // ---- Board rules (docs/api.md §19.8, §19.9, §19.12, TER-171) ----
 
 /** Who runs the card flow of a project (§19.11). */
