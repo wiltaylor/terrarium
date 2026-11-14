@@ -456,7 +456,11 @@ mod tests {
     #[test]
     fn deeply_nested_paste_markers_strip_in_one_scan() {
         let depth = 100_000;
-        let text = format!("{}{PASTE_END}{}", "\x1b[20".repeat(depth), "1~".repeat(depth));
+        let text = format!(
+            "{}{PASTE_END}{}",
+            "\x1b[20".repeat(depth),
+            "1~".repeat(depth)
+        );
         assert_eq!(strip_paste_markers(&format!("a{text}b")), "ab");
     }
 
