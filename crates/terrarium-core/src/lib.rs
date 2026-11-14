@@ -8,6 +8,7 @@ pub mod adapter;
 pub mod agent_template;
 #[cfg(feature = "wcl")]
 pub mod board_convert;
+#[cfg(feature = "wcl")]
 pub mod board_rules;
 pub mod ci;
 pub mod cloud;
