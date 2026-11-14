@@ -31,6 +31,13 @@
 //! section. Each part is rendered with the variables below, and a blank
 //! line separates the parts.
 //!
+//! Two sections follow the template, in this order: the ephemeral section
+//! of a spawned agent (`crate::spawn::prompt_section`), then the list of the
+//! agent's effective skills, last ([`skills_section`], TER-1306). Both are
+//! in the prompt hash: a skill that is added, removed, or switched off
+//! starts a new session of a harness that keeps the prompt of a session
+//! (`new_session_on_prompt_change`).
+//!
 //! Variables:
 //!
 //! | Variable | Value |
@@ -199,6 +206,74 @@ pub fn compose(system_prompt: Option<&str>, template: &str, ctx: &PromptContext)
             render(base, ctx).trim_end(),
             protocol.trim_start()
         ),
+    }
+}
+
+/// The longest skill description in [`skills_section`], in characters. A
+/// longer one is cut at a word and ends with `...`: the list is one short
+/// line per skill, and the skill file has the whole text.
+pub const SKILL_LINE_MAX: usize = 160;
+
+/// The last section of the prompt (TER-1306): the agent's effective
+/// skills, as delivered at this start (the default-on skills and its
+/// `skills`, less `skills_off`), one line each: the name and the start of
+/// its description. `skills_dir` is the delivered dir (`harness/skills/`),
+/// at the same path in the sandbox. The section names the way the harness
+/// loads a skill. It only makes the agent aware of the skills: the skill
+/// tool and the skill files do not change. `None` with no skill.
+pub fn skills_section(
+    harness: terrarium_core::HarnessId,
+    skills_dir: &Path,
+    skills: &[terrarium_core::skills::Meta],
+) -> Option<String> {
+    use terrarium_core::HarnessId;
+    if skills.is_empty() {
+        return None;
+    }
+    let how = match harness {
+        HarnessId::Claude => "load it with the Skill tool as `terrarium:<name>`".to_owned(),
+        HarnessId::Copilot => "load it with the `skill` tool (the name only)".to_owned(),
+        HarnessId::Codex | HarnessId::Pi | HarnessId::Grok => format!(
+            "read `{}/<name>/SKILL.md` and follow it",
+            skills_dir.display()
+        ),
+    };
+    let mut out =
+        format!("# Your skills\n\nThese are your skills. Before a task that one fits, {how}.\n\n");
+    for m in skills {
+        out.push_str(&format!(
+            "- `{}`: {}\n",
+            m.name,
+            skill_line(&m.description, SKILL_LINE_MAX)
+        ));
+    }
+    Some(out.trim_end().to_owned())
+}
+
+/// `text` on one line (runs of white space are one space), at most `max`
+/// characters: a longer text is cut at the last space before the limit and
+/// ends with `...`.
+fn skill_line(text: &str, max: usize) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= max {
+        return line;
+    }
+    let keep = max.saturating_sub(3);
+    let cut: String = line.chars().take(keep).collect();
+    // A word that the limit splits goes, unless the limit is at its end.
+    let at_word_end = line.chars().nth(keep) == Some(' ');
+    let cut = match cut.rfind(' ') {
+        Some(i) if i > 0 && !at_word_end => &cut[..i],
+        _ => cut.as_str(),
+    };
+    format!("{}...", cut.trim_end_matches([',', ';', ':', '.', ' ']))
+}
+
+/// `section` after `text`, with a blank line between. `None`: `text`.
+pub fn append_section(text: String, section: Option<String>) -> String {
+    match section {
+        Some(s) => format!("{}\n\n{s}", text.trim_end()),
+        None => text,
     }
 }
 
@@ -1257,5 +1332,79 @@ mod tests {
         // The config repo copy of `default.md` wins over the built-in one.
         std::fs::write(dir.path().join("default.md"), "Edited").unwrap();
         assert_eq!(load_template(dir.path(), None).unwrap(), "Edited");
+    }
+
+    fn meta(name: &str, description: &str) -> terrarium_core::skills::Meta {
+        terrarium_core::skills::Meta {
+            name: name.into(),
+            description: description.into(),
+            default_on: false,
+        }
+    }
+
+    /// The skills section of each harness (TER-1306): the way to load a
+    /// skill, then one line per skill, in the given order.
+    #[test]
+    fn skills_section_per_harness() {
+        use terrarium_core::HarnessId;
+        let dir = Path::new("/state/agents/A/harness/skills");
+        let skills = [
+            meta("delivery-process", "The board flow."),
+            meta("terrarium-tests", "Push test results."),
+        ];
+        let list =
+            "\n\n- `delivery-process`: The board flow.\n- `terrarium-tests`: Push test results.";
+        let head = "# Your skills\n\nThese are your skills. Before a task that one fits, ";
+        let read = "read `/state/agents/A/harness/skills/<name>/SKILL.md` and follow it.";
+        for (harness, how) in [
+            (
+                HarnessId::Claude,
+                "load it with the Skill tool as `terrarium:<name>`.",
+            ),
+            (
+                HarnessId::Copilot,
+                "load it with the `skill` tool (the name only).",
+            ),
+            (HarnessId::Codex, read),
+            (HarnessId::Pi, read),
+            (HarnessId::Grok, read),
+        ] {
+            assert_eq!(
+                skills_section(harness, dir, &skills).as_deref(),
+                Some(format!("{head}{how}{list}").as_str()),
+                "{harness}"
+            );
+            assert_eq!(skills_section(harness, dir, &[]), None, "{harness}");
+        }
+    }
+
+    /// One line per skill: white space is one space, and a long description
+    /// is cut at a word, at most [`SKILL_LINE_MAX`] characters.
+    #[test]
+    fn skill_lines_are_short() {
+        assert_eq!(skill_line("Two\n  lines.", 160), "Two lines.");
+        assert_eq!(skill_line("alpha beta, gamma", 14), "alpha beta...");
+        assert_eq!(skill_line("abcdefghij", 6), "abc...");
+        assert_eq!(skill_line("Go on. Then stop.", 10), "Go on...");
+        let long = "word ".repeat(300);
+        let line = skill_line(&long, SKILL_LINE_MAX);
+        assert!(line.chars().count() <= SKILL_LINE_MAX, "{line}");
+        assert!(line.ends_with("word..."), "{line}");
+        // Not cut inside a multi-byte character.
+        let wide = "é".repeat(200);
+        assert_eq!(skill_line(&wide, 10).chars().count(), 10);
+    }
+
+    /// The skills come after everything else, also the ephemeral section.
+    #[test]
+    fn the_skills_section_is_last() {
+        let text = compose(Some("Base."), "P\n", &ctx());
+        let text = append_section(
+            // As the supervisor joins the ephemeral section.
+            format!("{}\n\nEphemeral.", text.trim_end()),
+            Some("# Your skills".into()),
+        );
+        assert_eq!(text, "Base.\n\nP\n\nEphemeral.\n\n# Your skills");
+        assert_eq!(append_section("P".into(), None), "P");
     }
 }

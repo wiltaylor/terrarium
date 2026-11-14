@@ -367,6 +367,9 @@ fn process_mode_bin() -> Option<PathBuf> {
 
 fn supervisor(root: &Path, adapter: Arc<FakeAdapter>) -> RunnerSupervisor {
     let home = root.join("auth/claude");
+    // A config repo only when the test made one first (its skill library).
+    let repo = root.join("config-repo");
+    let config_repo = repo.is_dir().then_some(repo);
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(root.join("config")).unwrap();
     let mut homes = HashMap::new();
@@ -415,6 +418,7 @@ fn supervisor(root: &Path, adapter: Arc<FakeAdapter>) -> RunnerSupervisor {
         ..RunnerTuning::default()
     };
     cfg.lead_nudge_interval = LEAD_NUDGE;
+    cfg.config_repo = config_repo;
     RunnerSupervisor::new(cfg)
 }
 
@@ -2365,6 +2369,95 @@ async fn system_prompt_is_composed_and_in_the_prompt_hash() {
     );
     // Cleared: the template alone, and a new session again.
     patch(Value::Null).await;
+    let started = cycle(4).await;
+    assert_eq!(started[3]["data"]["source"], "startup");
+    assert_eq!(std::fs::read_to_string(&prompt_file).unwrap(), "v1 bob");
+}
+
+/// The agent's effective skills are the last section of `prompt.md`
+/// (TER-1306): one line each, after the template. A skill that is switched
+/// off is not listed, and the changed list starts a new session of a
+/// harness that keeps the prompt of a session (`new_session_on_prompt_change`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn effective_skills_end_the_prompt_and_follow_a_change() {
+    let mut td = Td::start().await;
+    td.adapter
+        .frozen
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let prompts = td.dir.path().join("prompts");
+    std::fs::create_dir_all(&prompts).unwrap();
+    std::fs::write(prompts.join("t.md"), "v1 {{agent.name}}").unwrap();
+    // The library of the config repo: two default-on skills. The
+    // supervisor reads it at each start.
+    let library = td.dir.path().join("config-repo/skills");
+    for (name, description) in [
+        ("alpha-check", "Check the alpha ferns."),
+        ("beta-check", "Check the beta ferns."),
+    ] {
+        let dir = library.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!(
+                "---\nname: {name}\ndescription: {description}\nmetadata:\n  terrarium-default: \"true\"\n---\n\nDo it.\n"
+            ),
+        )
+        .unwrap();
+    }
+    // The supervisor takes the config repo when it is made.
+    td.restart_daemon().await;
+    let id = td.agent("demo", "bob", json!({"prompt": "t"})).await;
+    let harness_dir = td.dir.path().join("state/agents").join(&id).join("harness");
+    let prompt_file = harness_dir.join("prompt.md");
+    let cycle = async |want: usize| {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+        td.wait_events(&id, "session_started", |e| e.len() == want)
+            .await;
+        td.wait_status(&id, "idle").await;
+        td.post(&format!("/api/agents/{id}/stop"), None).await;
+        td.wait_status(&id, "stopped").await;
+        td.events(&id, "session_started").await
+    };
+    cycle(1).await;
+    let text = std::fs::read_to_string(&prompt_file).unwrap();
+    assert_eq!(
+        text,
+        "v1 bob\n\n# Your skills\n\nThese are your skills. Before a task that one fits, \
+         load it with the Skill tool as `terrarium:<name>`.\n\n\
+         - `alpha-check`: Check the alpha ferns.\n\
+         - `beta-check`: Check the beta ferns."
+    );
+    // The same skills: a resume.
+    let started = cycle(2).await;
+    assert_eq!(started[1]["data"]["source"], "resume");
+    // One switched off: not listed, and a new session.
+    let (s, b) = td
+        .req(
+            Method::PATCH,
+            &format!("/api/agents/{id}"),
+            Some(json!({"skills_off": ["beta-check"]})),
+            None,
+        )
+        .await;
+    assert!((200..300).contains(&s), "{s} {b}");
+    let started = cycle(3).await;
+    assert_eq!(started[2]["data"]["source"], "startup");
+    let text = std::fs::read_to_string(&prompt_file).unwrap();
+    assert!(
+        text.ends_with("- `alpha-check`: Check the alpha ferns."),
+        "{text}"
+    );
+    assert!(!text.contains("beta-check"), "{text}");
+    // No default skills: no section, and a new session again.
+    let (s, b) = td
+        .req(
+            Method::PATCH,
+            &format!("/api/agents/{id}"),
+            Some(json!({"default_skills": false})),
+            None,
+        )
+        .await;
+    assert!((200..300).contains(&s), "{s} {b}");
     let started = cycle(4).await;
     assert_eq!(started[3]["data"]["source"], "startup");
     assert_eq!(std::fs::read_to_string(&prompt_file).unwrap(), "v1 bob");
