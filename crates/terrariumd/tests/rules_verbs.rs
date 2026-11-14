@@ -1500,12 +1500,15 @@ async fn default_merge_group_sweep_repairs_stale_members_idempotently() {
         json!({"title":"b", "column":"review", "repo":"app"}),
     )
     .await;
-    store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
     let gid = card(&td, &a).await["group"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
+    // TER-1278: the repair keeps a member while its merge job is open.
+    fail_job(&td, &job, "red").await;
+    settle(&td).await;
     let members = [a.clone(), b.clone()];
     state(&td).db.write("test", move |t| {
         // Model old data with no move event for the new rule to handle.
@@ -1555,12 +1558,15 @@ async fn merge_group_repair_waits_for_a_pending_member_run_then_runs_anyway() {
         json!({"title":"b", "column":"review", "repo":"app"}),
     )
     .await;
-    store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
     let gid = card(&td, &a).await["group"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
+    // TER-1278: the repair keeps a member while its merge job is open.
+    fail_job(&td, &job, "red").await;
+    settle(&td).await;
     let (key, group) = (a.clone(), gid.clone());
     let (waited, kept, forced, kept_after) = state(&td)
         .db
