@@ -348,6 +348,7 @@ gives them to the routers and the mail code.
 | `TERRARIUM_THREAD_STALE` | `--thread-stale` | `14d` | The time that an Inbox thread waits on the operator with no activity before the daemon closes it as stale and mails its report-to lead (§6.13): a duration, or `off` (also `0`). |
 | `TERRARIUM_QUOTA_SAMPLE_KEEP` | `--quota-sample-keep` | `48h` | The quota probe samples (`quota_samples`, §16.6) younger than this stay; each hour the scheduler deletes the older ones in transactions of at most 500 rows, and the newest sample of each window stays at any age. The default history of `GET /api/subscriptions/{name}/quota` (§16.3). A duration of at least `24h`. |
 | `TERRARIUM_CARD_REMINDER` | none | `on` | The `card_reminder` of an agent that sets none (§6.2, "Card reminder"): `on` or `off` (also `1`, `true`, `yes`, and `0`, `false`, `no`). Empty or not valid: on. The daemon reads it once. |
+| `TERRARIUM_SERVICE_REQUEST_KEEP` | none | `30d` | The time that the row of an ended service request stays after its end (§17.12, "The sweep"); then the sweep deletes it, after its payload. A duration of at least `7d` (the payload retention) and at most `3650d`. Not valid: `30d`, with a warning. The daemon reads it once. |
 | `TERRARIUM_ARTIFACT_LISTEN` | `--artifact-listen` | `0.0.0.0:8081` | The artifact origin listener. Empty: none, and the dashboard port serves `/a/...`. |
 | `TERRARIUM_ARTIFACT_PUBLIC_URL` | `--artifact-public-url` | unset | The artifact origin in signed URLs and the CSP. |
 | `TERRARIUM_WS_QUERY_TOKEN` | `--ws-query-token` | `0` | `1`: take `?token=` on an upgrade. |
@@ -8809,8 +8810,13 @@ in order (Q3 A).
   mail from `system`, and the audit has `service.timed_out`.
 - The payload of an ended request whose call is more than 7 days old is
   deleted, and `payload_deleted_at` is set; its bytes stop counting toward
-  the caps (Q2 A). The payload of an open request stays. The request rows
-  stay: nothing prunes them yet.
+  the caps (Q2 A). The payload of an open request stays.
+- The row of an ended request whose payload is gone and that ended more
+  than `TERRARIUM_SERVICE_REQUEST_KEEP` ago (default 30 days) is deleted,
+  at most 500 rows each minute, the oldest end first, through the partial
+  index `service_requests_prunable` (TER-1285).
+  `GET /api/service-requests/{id}` then gives `404`. An open request is
+  never deleted.
 
 The audit actions: `service.create`, `service.update`, `service.delete`,
 `service.call`, `service.cancel`, `service.timed_out`.
