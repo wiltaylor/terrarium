@@ -1,4 +1,4 @@
--- Services C5 (TER-1268, `crate::service_mail`): the result mail and the
+-- Services C5 (TER-1268, `crate::service_result`): the result mail and the
 -- failure log.
 --
 -- `mailed_at`: the one result mail to the caller was written (or could

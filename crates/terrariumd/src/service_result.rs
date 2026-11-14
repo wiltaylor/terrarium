@@ -14,6 +14,9 @@
 //!   end a request. A caller that cancels its own request gets no mail.
 //! - **Failure:** no retry (Q4 A). The mail carries the error and the log
 //!   tail, and says how to send the request again.
+//! - **Secrets:** each text of the mail (the response JSON, the error, the
+//!   log tail) is redacted whole, then cut (PLAN §16b.6, as `waits.rs`
+//!   does): a secret across a cut point leaves no part of its value.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -35,8 +38,12 @@ pub const MAX_FILES: usize = 10_000;
 /// is in the result.
 pub const MAIL_RESPONSE_BYTES: usize = 16 * 1024;
 
-/// The log tail in a mail is cut to its last this many bytes.
-pub const MAIL_LOG_BYTES: usize = 8 * 1024;
+/// The log tail in a mail is cut to its last this many bytes (the store
+/// keeps at most as many, `store::services::MAX_TEXT`).
+pub const MAIL_LOG_BYTES: usize = 4 * 1024;
+
+/// The error line in a mail is cut at this many bytes.
+pub const MAIL_ERROR_BYTES: usize = 1024;
 
 /// One response file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -198,8 +205,14 @@ fn fenced(lang: &str, text: &str) -> String {
 }
 
 /// The subject and the body of the result mail of ended request `r`.
-/// `files`: the count and the bytes of its response files.
-pub fn mail_text(r: &RequestRow, files: (usize, u64)) -> (String, String) {
+/// `files`: the count and the bytes of its response files. `redact`
+/// replaces the secret values in a text; it runs on each whole text before
+/// the text is cut.
+pub fn mail_text(
+    r: &RequestRow,
+    files: (usize, u64),
+    redact: &dyn Fn(&str) -> String,
+) -> (String, String) {
     let state = match r.state {
         State::TimedOut => "timed out".to_owned(),
         s => s.to_string(),
@@ -228,7 +241,10 @@ pub fn mail_text(r: &RequestRow, files: (usize, u64)) -> (String, String) {
         b.push_str(&format!("- Exit code: {c}\n"));
     }
     if let Some(e) = &r.error {
-        b.push_str(&format!("- Error: {}\n", e.replace('\n', " ")));
+        let e = redact(e).replace('\n', " ");
+        let (shown, was_cut) = cut(&e, MAIL_ERROR_BYTES, false);
+        let more = if was_cut { " (cut)" } else { "" };
+        b.push_str(&format!("- Error: {shown}{more}\n"));
     }
     if let Some(at) = &r.ended_at {
         b.push_str(&format!("- Ended: {at}\n"));
@@ -238,7 +254,9 @@ pub fn mail_text(r: &RequestRow, files: (usize, u64)) -> (String, String) {
         files.0, files.1
     ));
     if let Some(resp) = &r.response {
-        let text = serde_json::to_string_pretty(resp).unwrap_or_else(|_| resp.to_string());
+        let text = redact(
+            &serde_json::to_string_pretty(resp).unwrap_or_else(|_| resp.to_string()),
+        );
         let (shown, was_cut) = cut(&text, MAIL_RESPONSE_BYTES, false);
         b.push_str("\nThe response JSON");
         if was_cut {
@@ -250,7 +268,8 @@ pub fn mail_text(r: &RequestRow, files: (usize, u64)) -> (String, String) {
         b.push_str(&fenced("json", shown));
     }
     if let Some(log) = r.log_tail.as_deref().filter(|l| !l.trim().is_empty()) {
-        let (shown, _) = cut(log, MAIL_LOG_BYTES, true);
+        let log = redact(log);
+        let (shown, _) = cut(&log, MAIL_LOG_BYTES, true);
         b.push_str("\nThe end of the log:\n\n");
         b.push_str(&fenced("", shown));
     }
@@ -319,7 +338,8 @@ pub async fn send_due(state: &Shared) -> ApiResult<usize> {
                     let Some(to) = caller_address(&row) else {
                         return Ok(false);
                     };
-                    let (subject, body) = mail_text(&row, summary);
+                    let redact = |s: &str| t.redact(s).into_owned();
+                    let (subject, body) = mail_text(&row, summary, &redact);
                     mail::send(
                         t,
                         Outgoing {
@@ -356,6 +376,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn same(s: &str) -> String {
+        s.to_owned()
+    }
+
     fn row(state: State) -> RequestRow {
         RequestRow {
             id: "01REQ".into(),
@@ -386,7 +410,7 @@ mod tests {
         let mut r = row(State::Done);
         r.exit_code = Some(0);
         r.response = Some(json!({"frames": 120}));
-        let (s, b) = mail_text(&r, (2, 300));
+        let (s, b) = mail_text(&r, (2, 300), &same);
         assert_eq!(s, "Service video-gen: request 01REQ done");
         assert!(b.contains("- Exit code: 0"), "{b}");
         assert!(b.contains("- Response files: 2 (300 bytes)"), "{b}");
@@ -404,7 +428,8 @@ mod tests {
         r.exit_code = Some(2);
         r.error = Some("the script exited with 2".into());
         r.log_tail = Some(format!("{}\nTraceback: ```boom```\n", "x".repeat(20_000)));
-        let (s, b) = mail_text(&r, (0, 0));
+        r.error = Some(format!("the script exited with 2: {}", "e".repeat(5_000)));
+        let (s, b) = mail_text(&r, (0, 0), &same);
         assert_eq!(s, "Service video-gen: request 01REQ failed");
         assert!(b.contains("It is not tried again"), "{b}");
         assert!(b.contains("Traceback: ```boom```"), "{b}");
@@ -413,17 +438,48 @@ mod tests {
         assert!(b.len() < MAIL_LOG_BYTES + 2_000, "{}", b.len());
         assert!(b.contains("terrarium service call video-gen"), "{b}");
         assert!(b.contains("terrarium service status 01REQ"), "{b}");
+        assert!(b.contains(" (cut)\n"), "{b}");
+    }
+
+    /// A secret across each cut point (the response JSON at 16 KiB, the
+    /// log tail at 4 KiB from its end, the error at 1 KiB) is redacted
+    /// before the cut: no part of its value is in the mail.
+    #[test]
+    fn a_secret_across_a_cut_is_redacted_before_the_cut() {
+        const SECRET: &str = "s3cr3t-VALUE-0123456789abcdef";
+        let redact = |s: &str| s.replace(SECRET, "[secret:tok]");
+        let mut r = row(State::Failed);
+        // `{"a": "<pad><SECRET>..."}` pretty-printed: the value starts after
+        // `{\n  "a": "` (10 bytes); put the secret across byte 16384.
+        let pad = MAIL_RESPONSE_BYTES - 10 - 5;
+        let value = format!("{}{SECRET}{}", "p".repeat(pad), "q".repeat(100));
+        r.response = Some(json!({ "a": value }));
+        // The log keeps its last 4096 bytes: the secret starts 10 bytes
+        // before that cut.
+        r.log_tail = Some(format!(
+            "{}{SECRET}{}",
+            "l".repeat(100),
+            "z".repeat(MAIL_LOG_BYTES - SECRET.len() + 10)
+        ));
+        r.error = Some(format!("{}{SECRET}", "e".repeat(MAIL_ERROR_BYTES - 5)));
+        let (_, b) = mail_text(&r, (0, 0), &redact);
+        for part in [&SECRET[..5], &SECRET[SECRET.len() - 8..], "VALUE"] {
+            assert!(!b.contains(part), "`{part}` is in the mail");
+        }
+        // Without the redaction first, a part would show.
+        let (_, raw) = mail_text(&r, (0, 0), &same);
+        assert!(raw.contains(&SECRET[..5]) || raw.contains(&SECRET[SECRET.len() - 8..]));
     }
 
     #[test]
     fn a_time_out_mail_tells_a_wait_from_a_run() {
         let mut r = row(State::TimedOut);
         r.started_at = None;
-        let (s, b) = mail_text(&r, (0, 0));
+        let (s, b) = mail_text(&r, (0, 0), &same);
         assert_eq!(s, "Service video-gen: request 01REQ timed out");
         assert!(b.contains("did not start before its wait limit"), "{b}");
         let r = row(State::TimedOut);
-        let (_, b) = mail_text(&r, (0, 0));
+        let (_, b) = mail_text(&r, (0, 0), &same);
         assert!(b.contains("maximum run time"), "{b}");
     }
 
@@ -431,7 +487,7 @@ mod tests {
     fn a_long_response_is_cut_at_a_char_boundary() {
         let mut r = row(State::Done);
         r.response = Some(json!({"text": "é".repeat(20_000)}));
-        let (_, b) = mail_text(&r, (0, 0));
+        let (_, b) = mail_text(&r, (0, 0), &same);
         assert!(b.contains("the result has all of it"), "{b}");
         assert!(b.len() < MAIL_RESPONSE_BYTES + 2_000);
     }

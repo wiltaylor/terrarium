@@ -320,3 +320,57 @@ async fn the_retention_counts_from_the_end() {
     assert_eq!(r.status, 404, "{}", r.body);
     assert!(r.body.to_string().contains("retention"), "{}", r.body);
 }
+
+/// Review rev-1268: a secret value in the log tail, the error, or the
+/// response JSON never reaches the store's text columns, the result, or
+/// the mail, also when it sits across a cut point (redact, then cut).
+#[tokio::test]
+async fn a_secret_is_redacted_before_each_cut() {
+    const TOKEN: &str = "tok-9f8e7d6c5b4a3210-SVCRESULT";
+    let td = setup().await;
+    td.put(
+        "/api/secrets/global/svc-tok",
+        json!({"kind": "token", "fields": {"value": TOKEN}}),
+    )
+    .await
+    .ok();
+    let id = call(&td, "p/w1").await;
+    let max = store::MAX_TEXT;
+    // Each text puts the token across its cut, so that a cut before the
+    // redaction would keep at least 6 bytes of it: the stored tail keeps
+    // the last 4 KiB (the token starts 10 bytes before that cut), the
+    // stored error its first 4 KiB, the mail the first 16 KiB of the
+    // response JSON (10 bytes of `{\n  "a": "` before the value).
+    let log = format!("{}{TOKEN}{}", "a".repeat(50), "b".repeat(max - TOKEN.len() + 10));
+    let error = format!("{}{TOKEN}", "c".repeat(max - 6));
+    let pad = terrariumd::service_result::MAIL_RESPONSE_BYTES - 16;
+    let value = format!("{}{TOKEN}", "d".repeat(pad));
+    end(
+        &td,
+        &id,
+        State::Failed,
+        Outcome {
+            response: Some(json!({ "a": value })),
+            exit_code: Some(1),
+            error: Some(error),
+            log_tail: Some(log),
+        },
+    )
+    .await;
+    terrariumd::service_result::send_due(&shared(&td)).await.unwrap();
+    let r = td
+        .get_as("p/w1", &format!("/api/service-requests/{id}/result"))
+        .await;
+    let v = r.ok().clone();
+    let tail = v["log_tail"].as_str().unwrap();
+    let err = v["error"].as_str().unwrap();
+    assert!(tail.len() <= max && err.len() <= max, "{} {}", tail.len(), err.len());
+    let got = mails(&td, "p/w1", &id).await;
+    assert_eq!(got.len(), 1, "{got:?}");
+    let body = body_of(&td, "p/w1", &got[0]).await;
+    for text in [tail, err, body.as_str()] {
+        for part in [&TOKEN[..6], &TOKEN[TOKEN.len() - 9..]] {
+            assert!(!text.contains(part), "`{part}` leaked: {text}");
+        }
+    }
+}

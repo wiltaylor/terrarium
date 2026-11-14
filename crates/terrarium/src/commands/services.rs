@@ -369,6 +369,71 @@ mod tests {
         assert_eq!(call_body(None, None).unwrap(), json!({"request": {}}));
     }
 
+    fn mock_ctx(mock: &crate::transport::mock::MockTransport) -> Ctx {
+        Ctx::for_test(std::sync::Arc::new(mock.clone()), None)
+    }
+
+    /// The list of request `01R` with one file `sub/a.txt` of `sha`.
+    fn listing(sha: &str) -> Value {
+        json!({"id": "01R", "state": "done", "exit_code": 0, "response": {"ok": true},
+               "files": [{"path": "sub/a.txt", "size": 5, "sha256": sha}],
+               "files_cut": false, "files_deleted_at": null})
+    }
+
+    const HELLO_SHA: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+    /// Review rev-1268 F4: the fetch writes `result.json` and `files/`,
+    /// reads each file in chunks, and refuses to overwrite without
+    /// `--force`.
+    #[tokio::test]
+    async fn the_fetch_writes_the_result_and_the_files() {
+        let mock = crate::transport::mock::MockTransport::new();
+        mock.reply(200, listing(HELLO_SHA))
+            .reply(200, json!({"data_base64": "aGVs", "eof": false}))
+            .reply(200, json!({"data_base64": "bG8=", "eof": true}));
+        let ctx = mock_ctx(&mock);
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        let v = fetch_result(&ctx, "01R", &out, false).await.unwrap();
+        assert_eq!(v["files"], 1);
+        assert_eq!(v["bytes"], 5);
+        assert_eq!(std::fs::read(out.join("files/sub/a.txt")).unwrap(), b"hello");
+        assert!(!out.join("files/sub/a.txt.partial").exists());
+        let rec: Value =
+            serde_json::from_slice(&std::fs::read(out.join("result.json")).unwrap()).unwrap();
+        assert_eq!(rec["response"], json!({"ok": true}));
+        let reqs = mock.requests();
+        assert_eq!(reqs[0].path, "/api/service-requests/01R/result");
+        assert_eq!(reqs[1].path, "/api/service-requests/01R/result/sub/a.txt");
+        let q = |i: usize| reqs[i].query.clone();
+        assert!(q(1).contains(&("offset".to_owned(), "0".to_owned())), "{:?}", q(1));
+        assert!(q(2).contains(&("offset".to_owned(), "3".to_owned())), "{:?}", q(2));
+        // Again: refused without --force, done with it.
+        mock.reply(200, listing(HELLO_SHA));
+        let e = fetch_result(&ctx, "01R", &out, false).await.unwrap_err();
+        assert!(e.to_string().contains("--force"), "{e}");
+        mock.reply(200, listing(HELLO_SHA))
+            .reply(200, json!({"data_base64": "aGVsbG8=", "eof": true}));
+        fetch_result(&ctx, "01R", &out, true).await.unwrap();
+    }
+
+    /// A file whose bytes do not match the list is refused, and nothing is
+    /// left of it.
+    #[tokio::test]
+    async fn the_fetch_refuses_a_bad_sha256() {
+        let mock = crate::transport::mock::MockTransport::new();
+        mock.reply(200, listing(&"0".repeat(64)))
+            .reply(200, json!({"data_base64": "aGVsbG8=", "eof": true}));
+        let ctx = mock_ctx(&mock);
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        let e = fetch_result(&ctx, "01R", &out, false).await.unwrap_err();
+        assert!(e.to_string().contains("sha256"), "{e}");
+        assert!(!out.join("files/sub/a.txt").exists());
+        assert!(!out.join("files/sub/a.txt.partial").exists());
+        assert!(!out.join("result.json").exists());
+    }
+
     #[test]
     fn a_result_path_must_be_plain() {
         assert_eq!(

@@ -15,7 +15,7 @@
 //!   files under `response/` ([`response_dir`], written by C3 and C4). The
 //!   caps are checked by [`check_payload_room`]; [`expired_payloads`] lists
 //!   those past the retention, which counts from the request's end.
-//! - **The result mail** (C5, `crate::service_mail`): an ended request
+//! - **The result mail** (C5, `crate::service_result`): an ended request
 //!   with no `mailed_at` is due its one mail ([`unmailed`], [`mark_mailed`]).
 
 use std::path::{Path, PathBuf};
@@ -552,10 +552,38 @@ pub struct Outcome {
     pub log_tail: Option<String>,
 }
 
+/// The most bytes of `error` and of `log_tail` that a request keeps
+/// (TER-1268 review: the 4 KiB tail of C3). The error keeps its start, the
+/// log tail its end.
+pub const MAX_TEXT: usize = 4 * 1024;
+
+/// `s` cut to at most `max` bytes at a char boundary: its start, or with
+/// `tail` its end.
+pub fn clip(s: &str, max: usize, tail: bool) -> String {
+    if s.len() <= max {
+        return s.to_owned();
+    }
+    if tail {
+        let mut i = s.len() - max;
+        while !s.is_char_boundary(i) {
+            i += 1;
+        }
+        s[i..].to_owned()
+    } else {
+        let mut i = max;
+        while !s.is_char_boundary(i) {
+            i -= 1;
+        }
+        s[..i].to_owned()
+    }
+}
+
 /// Move request `id` from `from` to `to`. A request that is not in `from`
 /// (another writer moved it) is `409`, and so is an edge that
 /// `State::can_go` refuses. `running` sets `started_at`; a final state
-/// sets `ended_at` and the outcome.
+/// sets `ended_at` and the outcome. The `error` and the `log_tail` are
+/// redacted whole, then cut to [`MAX_TEXT`] (TER-1268 review), so that the
+/// database never holds a secret value or a part of one.
 pub fn transition(
     t: &mut Tx<'_>,
     id: &str,
@@ -569,6 +597,14 @@ pub fn transition(
         )));
     }
     let at = now();
+    let error = out
+        .error
+        .as_deref()
+        .map(|e| clip(&t.redact(e), MAX_TEXT, false));
+    let log_tail = out
+        .log_tail
+        .as_deref()
+        .map(|l| clip(&t.redact(l), MAX_TEXT, true));
     let n = t.execute(
         "UPDATE service_requests SET state = ?3,
            started_at = CASE WHEN ?3 = 'running' THEN ?4 ELSE started_at END,
@@ -586,8 +622,8 @@ pub fn transition(
             to.is_final(),
             out.response.map(|v| v.to_string()),
             out.exit_code,
-            out.error,
-            out.log_tail,
+            error,
+            log_tail,
         ],
     )?;
     if n == 0 {
