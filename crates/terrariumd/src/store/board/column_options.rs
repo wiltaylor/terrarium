@@ -487,7 +487,9 @@ pub fn put_options(
     }
     let col = column(t, project, &col.name)?;
     record(t, project, &before, &read(t, project, &col)?)?;
-    // New queue options may release waiting cards (TER-1114).
+    // New queue options may release waiting cards (TER-1114). They are a
+    // change for a stale card (TER-1284).
+    super::queues::unmark_column(t, col.id)?;
     super::queues::release(t, col.id)?;
     read(t, project, &col)
 }

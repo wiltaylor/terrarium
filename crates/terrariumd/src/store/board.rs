@@ -3545,7 +3545,9 @@ pub fn set_columns(
         )
         .project(project),
     )?;
-    // A new WIP limit may free places in a column queue (TER-1114).
+    // A new WIP limit may free places in a column queue (TER-1114). A
+    // change of the columns is a change for a stale card (TER-1284).
+    queues::unmark_project(t, project)?;
     queues::release_project(t, project)?;
     get_board(t, project)
 }
