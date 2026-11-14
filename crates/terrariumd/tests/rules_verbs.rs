@@ -1682,7 +1682,10 @@ async fn merge_group_repair_keeps_a_member_while_its_merge_job_is_open() {
         })
         .await
         .unwrap();
-    assert!(!kept_after, "the ended job no longer keeps a backlog member");
+    assert!(
+        !kept_after,
+        "the ended job no longer keeps a backlog member"
+    );
 }
 
 #[tokio::test]
