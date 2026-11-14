@@ -338,3 +338,222 @@ async fn a_claim_on_a_target_that_cannot_reserve_is_refused() {
     )
     .await;
 }
+
+async fn reservation_rows(state: &Shared, request: &str) -> i64 {
+    let like = format!("% request {request}");
+    state
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM reservations WHERE json_extract(data, '$.reason') LIKE ?1",
+                [like],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+/// rev-1265 major 2: a refusal that waiting does not change fails the
+/// request at once with the reason and writes no reservation row; a busy
+/// host (here: the target runs) waits without a row and is tried again.
+#[tokio::test]
+async fn a_final_refusal_fails_at_once_and_a_busy_one_waits_without_a_row() {
+    let (td, server, client) = crate::reservations_api::setup().await;
+    let state = state_of(&td);
+    td.patch("/api/targets/p-box", json!({"ephemeral": true}))
+        .await
+        .ok();
+    // The host has 4 CPUs at 50%: 2 cores reservable. And 2 GPUs.
+    for (name, resources, says) in [
+        (
+            "big",
+            json!({"cpu_millis": 4000}),
+            "larger than the reservable capacity",
+        ),
+        (
+            "many",
+            json!({"gpus": 3, "gpu_exclusive": true}),
+            "GPU(s), and the service claims 3",
+        ),
+    ] {
+        define(
+            &td,
+            json!({"name": name, "kind": "script", "target": "p-box", "project": "p",
+                   "command": ["/opt/x"], "resources": resources}),
+        )
+        .await;
+        let id = call(&td, name).await;
+        tick(&state, Utc::now()).await;
+        let r = request(&state, &id).await;
+        assert_eq!(r.state.as_str(), "failed", "{name}: {r:?}");
+        assert!(r.error.as_deref().unwrap().contains(says), "{name}: {r:?}");
+        assert_eq!(reservation_rows(&state, &id).await, 0, "{name}");
+    }
+
+    define(
+        &td,
+        json!({"name": "gen", "kind": "script", "target": "p-box", "project": "p",
+               "command": ["/opt/gen"], "resources": {"gpus": 1, "gpu_exclusive": true}}),
+    )
+    .await;
+    let set_state = |s: &'static str| {
+        let state = state.clone();
+        async move {
+            state
+                .db
+                .write("system", move |t| {
+                    t.execute("UPDATE targets SET state = ?1 WHERE name = 'p-box'", [s])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    };
+    set_state("running").await;
+    let a = call(&td, "gen").await;
+    for _ in 0..3 {
+        tick(&state, Utc::now()).await;
+    }
+    let ra = request(&state, &a).await;
+    assert_eq!(ra.state.as_str(), "queued", "{ra:?}");
+    assert_eq!(reservation_rows(&state, &a).await, 0, "a busy wait makes no row");
+    set_state("stopped").await;
+    tick(&state, Utc::now() + chrono::Duration::seconds(61)).await;
+    let ra = request(&state, &a).await;
+    assert_eq!(ra.state.as_str(), "running", "{ra:?}");
+    assert_eq!(reservation_rows(&state, &a).await, 1);
+    client.abort();
+    server.abort();
+}
+
+/// rev-1265 major 2: a refusal of the reservation's own preflight (after
+/// its row is written) fails the request: one row per request at most.
+/// Here an exclusive GPU waits for a session on another container target.
+#[tokio::test]
+async fn a_preflight_refusal_fails_the_request_with_one_row() {
+    let (td, server, client) = crate::reservations_api::setup().await;
+    let state = state_of(&td);
+    td.patch("/api/targets/p-box", json!({"ephemeral": true}))
+        .await
+        .ok();
+    define(
+        &td,
+        json!({"name": "gen", "kind": "script", "target": "p-box", "project": "p",
+               "command": ["/opt/gen"], "resources": {"gpus": 1, "gpu_exclusive": true}}),
+    )
+    .await;
+    // A live session on p-box2, which an exclusive GPU cannot cover.
+    let mut other = state
+        .db
+        .read(|c| Ok(terrariumd::store::targets::get(c, "p-box2")?.def))
+        .await
+        .unwrap();
+    other.kind = terrarium_core::config::TargetKind::Host;
+    let cmd = terrariumd::executor::RemoteCmd {
+        argv: vec!["sh".into(), "-c".into(), "sleep 30".into()],
+        ..Default::default()
+    };
+    let running = terrariumd::executor::start_cmd(&state, &other, &cmd).unwrap();
+    let collected = tokio::spawn(running.collect(1024));
+    let a = call(&td, "gen").await;
+    tick(&state, Utc::now()).await;
+    tick(&state, Utc::now() + chrono::Duration::seconds(61)).await;
+    let ra = request(&state, &a).await;
+    assert_eq!(ra.state.as_str(), "failed", "{ra:?}");
+    assert!(
+        ra.error.as_deref().unwrap().contains("reservation was refused"),
+        "{ra:?}"
+    );
+    assert_eq!(reservation_rows(&state, &a).await, 1);
+    state
+        .executor
+        .end_resource_sessions(&["p-box2".to_owned()], None)
+        .await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), collected).await;
+    client.abort();
+    server.abort();
+}
+
+/// rev-1265 minor 3: a reservation of the scheduler that no request holds
+/// (the daemon stopped between the grant and its write) is given back.
+#[tokio::test]
+async fn an_orphan_reservation_is_given_back() {
+    let (td, server, client) = crate::reservations_api::setup().await;
+    let state = state_of(&td);
+    let r = td
+        .post(
+            "/api/hosts/h/reservations",
+            json!({"target": "p-box", "until": "30m", "amounts": {"cpu_millis": 1000},
+                   "reason": "service `gen` request 01ORPHAN"}),
+        )
+        .await;
+    let rid = r.ok()["id"].as_str().unwrap().to_owned();
+    // A reservation of someone else is left alone.
+    let mine = td
+        .post(
+            "/api/hosts/h/reservations",
+            json!({"target": "p-box2", "until": "30m", "amounts": {"cpu_millis": 500},
+                   "reason": "a lead's reservation"}),
+        )
+        .await;
+    let mine = mine.ok()["id"].as_str().unwrap().to_owned();
+    tick(&state, Utc::now()).await;
+    assert_eq!(reservation(&state, &rid).await.state, ResState::Retracted);
+    assert_eq!(reservation(&state, &mine).await.state, ResState::Active);
+    client.abort();
+    server.abort();
+}
+
+/// rev-1265 major 1 and minor 5: a claim on a docker target without an
+/// image, and on a target without a host, is refused at define time.
+#[tokio::test]
+async fn a_claim_needs_an_image_target_with_a_host() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    for t in [
+        json!({"name": "p-cont", "kind": "docker", "project": "p", "host": "helios",
+               "container": "c1"}),
+        json!({"name": "p-nohost", "kind": "docker", "project": "p", "host": "helios",
+               "image": "alpine", "ephemeral": true}),
+    ] {
+        let r = td.post("/api/targets", t.clone()).await;
+        assert_eq!(r.status, 201, "{t}: {}", r.body);
+    }
+    // A host-less row cannot come from the API (a docker target needs a
+    // host); an older row or a file might have one.
+    let state = state_of(&td);
+    state
+        .db
+        .write("system", |t| {
+            t.execute(
+                "UPDATE targets SET def = json_remove(def, '$.host') WHERE name = 'p-nohost'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for (target, resources, says) in [
+        ("p-cont", json!({"cpu_millis": 1000}), "managed image target"),
+        ("p-cont", json!({"memory": "1GiB"}), "managed image target"),
+        ("p-nohost", json!({"cpu_millis": 1000}), "has no host"),
+    ] {
+        let r = td
+            .post(
+                "/api/services",
+                json!({"name": "s", "kind": "script", "target": target, "project": "p",
+                       "command": ["/opt/x"], "resources": resources}),
+            )
+            .await;
+        assert_eq!(r.status, 422, "{target} {resources}: {}", r.body);
+        assert!(r.body.to_string().contains(says), "{}", r.body);
+    }
+    // No claim on the image-less target is fine.
+    define(
+        &td,
+        json!({"name": "s", "kind": "script", "target": "p-cont", "project": "p",
+               "command": ["/opt/x"]}),
+    )
+    .await;
+}

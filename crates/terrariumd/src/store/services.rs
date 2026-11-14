@@ -134,6 +134,15 @@ pub fn validate(conn: &Connection, def: &ServiceDef) -> ApiResult<()> {
                 def.name, def.target
             )));
         }
+        // `reservations.rs` preflight: "Docker reservations need a managed
+        // image target", for any claim.
+        if target.def.kind == TargetKind::Docker && target.def.image.is_none() {
+            return Err(ApiError::invalid(format!(
+                "service `{}` claims resources on docker target `{}`, which has no `image`: a \
+                 docker reservation needs a managed image target",
+                def.name, def.target
+            )));
+        }
     }
     Ok(())
 }

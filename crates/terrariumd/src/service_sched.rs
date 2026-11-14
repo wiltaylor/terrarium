@@ -24,6 +24,13 @@
 //!    reservation) leaves the request `queued` until `retry_at`; any other
 //!    refusal ends it as `failed`.
 //!
+//! A reservation refusal that waiting does not change (a missing host
+//! capability, a claim larger than the host, any refusal of the
+//! reservation's preflight) ends the request as `failed`; [`precheck`]
+//! finds the busy cases before a row is written. A reservation that no
+//! request holds (the daemon stopped between the grant and its write) is
+//! given back by [`release_orphans`].
+//!
 //! A target lease needs an agent. [`lease_run`] leases the target to the
 //! agent that runs a request (C4) until `run_until`; the release revokes
 //! it. A script run (C3) has no agent and no lease: its reservation holds
@@ -91,6 +98,8 @@ pub struct Tick {
     pub released: Vec<String>,
     /// Requests left `queued` after a `409` refusal.
     pub deferred: Vec<String>,
+    /// Reservations of the scheduler that no request held, given back.
+    pub orphans: Vec<String>,
 }
 
 /// One pass at a time: the background task and a test's call do not
@@ -109,7 +118,48 @@ pub async fn tick(state: &Shared, at: DateTime<Utc>) -> ApiResult<Tick> {
     // A request that a step above ended (a refusal, a reservation that
     // ended) is released in the same pass.
     release_ended(state, &mut out).await?;
+    release_orphans(state, &mut out).await?;
     Ok(out)
+}
+
+/// The open reservations that the scheduler made (its reason names a
+/// request) and that no request holds: the daemon stopped between the
+/// grant and the write of `reservation_id`. A grant and its write run in
+/// one pass under [`TICK_LOCK`], so at this point no grant is half done.
+async fn release_orphans(state: &Shared, out: &mut Tick) -> ApiResult<()> {
+    let ids = state
+        .db
+        .read(|c| {
+            open_ids(
+                c,
+                "SELECT id FROM reservations
+                 WHERE state IN ('queued', 'starting', 'active')
+                   AND json_extract(data, '$.granted_by') = 'operator'
+                   AND json_extract(data, '$.holder.kind') = 'target'
+                   AND json_extract(data, '$.reason') LIKE 'service `%` request %'
+                   AND id NOT IN (SELECT reservation_id FROM service_requests
+                                  WHERE reservation_id IS NOT NULL)
+                 ORDER BY id",
+                &[],
+            )
+        })
+        .await?;
+    for id in ids {
+        let rid = id.clone();
+        let r = state.db.read(move |c| res_store::get(c, &rid)).await?;
+        let done = match r.state {
+            ResState::Queued => crate::reservations::cancel(state, &Actor::Operator, &id).await,
+            _ => crate::reservations::retract(state, &Actor::Operator, &id).await,
+        };
+        match done {
+            Ok(_) => {
+                info!(reservation = %id, "released a service reservation that no request holds");
+                out.orphans.push(id);
+            }
+            Err(e) => warn!(reservation = %id, "cannot release an orphan service reservation: {}", e.message),
+        }
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------ the steps
@@ -456,15 +506,31 @@ async fn start_one(
         }
         return Ok(());
     }
-    let body = match reservation_body(state, def, r, at).await {
+    let (host, body) = match reservation_body(state, def, r, at).await {
         Ok(b) => b,
-        Err(e) => return refused(state, r, e, at, out).await,
+        Err(e) => return refused(state, r, Refusal::of(e), at, out).await,
     };
-    let host = body.0.clone();
-    let granted = crate::reservations::grant(state, &Actor::Operator, &host, body.1).await;
+    if let Err(why) = precheck(state, def, &host).await {
+        return refused(state, r, why, at, out).await;
+    }
+    let reason = body.reason.clone();
+    let before = rows_with_reason(state, &host, &reason).await?;
+    let granted = crate::reservations::grant(state, &Actor::Operator, &host, body).await;
     let res = match granted {
         Ok(res) => res,
-        Err(e) => return refused(state, r, e, at, out).await,
+        Err(e) => {
+            // A refusal after the row was written comes from the
+            // reservation's preflight. The pre-check above lets through
+            // only what waiting does not change, so it is final: one row
+            // and one round of mail per request at most.
+            let made = rows_with_reason(state, &host, &reason).await? > before;
+            let why = if made {
+                Refusal::Final(e.message)
+            } else {
+                Refusal::of(e)
+            };
+            return refused(state, r, why, at, out).await;
+        }
     };
     // Keep the reservation on the request first: when another writer ended
     // the request meanwhile, the release gives it back.
@@ -495,17 +561,40 @@ async fn start_one(
     Ok(())
 }
 
-/// A refused reservation: a `409` or `resource_busy` waits for
-/// [`RETRY`]; anything else ends the request as `failed`.
+/// Why a reservation was not made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Refusal {
+    /// The resources or the host are busy for now: try again after
+    /// [`RETRY`]. No reservation row was written.
+    Busy(String),
+    /// Waiting does not change it: the request fails.
+    Final(String),
+}
+
+impl Refusal {
+    /// A `409` or `resource_busy` before any row was written is busy;
+    /// anything else is final.
+    fn of(e: ApiError) -> Self {
+        if matches!(e.code, Code::Conflict | Code::ResourceBusy) {
+            Self::Busy(e.message)
+        } else {
+            Self::Final(e.message)
+        }
+    }
+}
+
+/// A refused reservation: [`Refusal::Busy`] waits for [`RETRY`];
+/// [`Refusal::Final`] ends the request as `failed` with the reason.
 async fn refused(
     state: &Shared,
     r: &RequestRow,
-    e: ApiError,
+    why: Refusal,
     at: DateTime<Utc>,
     out: &mut Tick,
 ) -> ApiResult<()> {
-    if matches!(e.code, Code::Conflict | Code::ResourceBusy) {
-        debug!(request = %r.id, "service reservation refused for now: {}", e.message);
+    let message = match why {
+        Refusal::Busy(m) => {
+            debug!(request = %r.id, "service reservation refused for now: {m}");
         let (id, next) = (r.id.clone(), fmt(add(at, RETRY)));
         state
             .db
@@ -517,15 +606,177 @@ async fn refused(
                 Ok(())
             })
             .await?;
-        out.deferred.push(r.id.clone());
-        return Ok(());
-    }
-    let why = format!("the reservation was refused: {}", e.message);
+            out.deferred.push(r.id.clone());
+            return Ok(());
+        }
+        Refusal::Final(m) => m,
+    };
+    let why = format!("the reservation was refused: {message}");
     if end(state, &r.id, State::Failed, why).await? {
-        info!(request = %r.id, "service request failed: {}", e.message);
+        info!(request = %r.id, "service request failed: {message}");
         out.ended.push(r.id.clone());
     }
     Ok(())
+}
+
+/// The reservation rows on `host` made for one request (by their reason).
+async fn rows_with_reason(state: &Shared, host: &str, reason: &str) -> ApiResult<i64> {
+    let (host, reason) = (host.to_owned(), reason.to_owned());
+    state
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM reservations
+                 WHERE host = ?1 AND json_extract(data, '$.reason') = ?2",
+                params![host, reason],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+}
+
+/// The reason of the reservation of request `id`. The orphan sweep reads
+/// the request ID back from it.
+fn reason_of(service: &str, id: &str) -> String {
+    format!("service `{service}` request {id}")
+}
+
+/// The checks of `crate::reservations` (its `preflight`) that run after
+/// the row is written, done before the grant: the ones that waiting does
+/// not change fail the request; the busy ones wait without a row.
+async fn precheck(state: &Shared, def: &ServiceDef, host: &str) -> Result<(), Refusal> {
+    use terrarium_core::config::TargetKind;
+    let Some(caps) = state.executor.hosts.capabilities(host) else {
+        return Err(Refusal::Busy(format!("host `{host}` is offline")));
+    };
+    if !caps.reservations {
+        return Err(Refusal::Final(format!(
+            "host `{host}` is missing the reservations capability; upgrade its host agent"
+        )));
+    }
+    let res = &def.resources;
+    let n = usize::try_from(res.gpus).unwrap_or(usize::MAX);
+    if n > 0 && !caps.gpu_reservations {
+        return Err(Refusal::Final(format!(
+            "host `{host}` lacks GPU reservation support"
+        )));
+    }
+    if caps.gpus.len() < n {
+        return Err(Refusal::Final(format!(
+            "host `{host}` has {} GPU(s), and the service claims {n}",
+            caps.gpus.len()
+        )));
+    }
+    if !res.gpu_exclusive
+        && let Some(v) = res.gpu_vram.as_deref().and_then(core::parse_size)
+        && caps.gpus.iter().filter(|g| g.memory_bytes >= v).count() < n
+    {
+        return Err(Refusal::Final(format!(
+            "host `{host}` has fewer than {n} GPU(s) with {v} bytes of memory"
+        )));
+    }
+    let amounts = claim_amounts(def).map_err(|e| Refusal::Final(e.message))?;
+    let (target, name, h) = (def.target.clone(), host.to_owned(), host.to_owned());
+    let read = state
+        .db
+        .read(move |c| {
+            let t = crate::store::targets::get(c, &target)?;
+            let others: Vec<_> = crate::store::targets::list(c)?
+                .into_iter()
+                .filter(|o| o.def.host.as_deref() == Some(&h) && o.def.name != target)
+                .collect();
+            let budget = res_store::capacity(c, &h).map(|(_, b, _)| b);
+            let agent_held = res_store::list(c, &h)?.iter().any(|x| {
+                matches!(x.holder, res_store::Holder::Agent(_))
+                    && matches!(
+                        x.state,
+                        ResState::Starting | ResState::Active | ResState::Ending
+                    )
+            });
+            Ok((t, others, budget, agent_held))
+        })
+        .await
+        .map_err(|e| Refusal::Final(e.message))?;
+    let (target, others, budget, agent_held) = read;
+    match budget {
+        Ok(b) if b.remaining_after(&amounts).is_none() => {
+            return Err(Refusal::Final(format!(
+                "the claim is larger than the reservable capacity of host `{name}`"
+            )));
+        }
+        Ok(_) => {}
+        Err(e) => return Err(Refusal::Busy(e.message)),
+    }
+    let limits = terrarium_core::resources::RuntimeLimits {
+        limits: terrarium_core::limits::Limits {
+            cpu_millis: u32::try_from(amounts.cpu_millis).ok().filter(|c| *c > 0),
+            memory_bytes: (amounts.memory_bytes > 0).then_some(amounts.memory_bytes),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let support = if target.def.kind == TargetKind::Docker {
+        limits.limits.docker_support(caps.limits.as_ref())
+    } else {
+        limits.host_support(caps.limits.as_ref())
+    };
+    if let Err(e) = support {
+        return Err(Refusal::Final(format!(
+            "host `{name}` cannot apply the claim: {e}"
+        )));
+    }
+    // Busy: these change when other work on the host ends.
+    if agent_held {
+        return Err(Refusal::Busy(format!(
+            "an agent holds a reservation on host `{name}`"
+        )));
+    }
+    if n > 0 && target.def.kind == TargetKind::Docker && target.state == "running" {
+        return Err(Refusal::Busy(format!(
+            "target `{}` runs; a GPU reservation needs it stopped",
+            target.def.name
+        )));
+    }
+    if res.gpu_exclusive {
+        let busy: Vec<String> = others
+            .iter()
+            .filter(|o| o.def.kind != TargetKind::Host && o.state == "running")
+            .map(|o| o.def.name.clone())
+            .collect();
+        if !busy.is_empty() {
+            return Err(Refusal::Busy(format!(
+                "an exclusive GPU waits for these targets to stop: {}",
+                busy.join(", ")
+            )));
+        }
+    }
+    if target.def.kind == TargetKind::Host
+        && !state
+            .executor
+            .resource_sessions(std::slice::from_ref(&target.def.name), None)
+            .is_empty()
+    {
+        return Err(Refusal::Busy(format!(
+            "target `{}` has sessions that are not in a reservation",
+            target.def.name
+        )));
+    }
+    Ok(())
+}
+
+/// The CPU and memory of the claim.
+fn claim_amounts(def: &ServiceDef) -> ApiResult<Amounts> {
+    let memory_bytes = match &def.resources.memory {
+        Some(m) => {
+            core::parse_size(m).ok_or_else(|| ApiError::invalid(format!("bad memory `{m}`")))?
+        }
+        None => 0,
+    };
+    Ok(Amounts {
+        cpu_millis: def.resources.cpu_millis,
+        memory_bytes,
+        io: Default::default(),
+    })
 }
 
 /// The host and the reservation body of request `r`.
@@ -554,24 +805,14 @@ async fn reservation_body(
             Ok((host, gpus))
         })
         .await?;
-    let memory_bytes = match &def.resources.memory {
-        Some(m) => {
-            core::parse_size(m).ok_or_else(|| ApiError::invalid(format!("bad memory `{m}`")))?
-        }
-        None => 0,
-    };
     let body = crate::reservations::NewBody {
         gpus,
         target: def.target.clone(),
         agent: None,
-        amounts: Amounts {
-            cpu_millis: def.resources.cpu_millis,
-            memory_bytes,
-            io: Default::default(),
-        },
+        amounts: claim_amounts(def)?,
         until: fmt(add(at, def.max_run_time())),
         exclusive: false,
-        reason: format!("service `{}` request {}", def.name, r.id),
+        reason: reason_of(&def.name, &r.id),
         queue: true,
         queue_timeout: Some(format!("{left}s")),
     };
@@ -598,8 +839,13 @@ fn pick_gpus(
             .cloned()
             .unwrap_or_else(|| serde_json::json!([])),
     )?;
-    if devices.len() < n {
+    if devices.is_empty() {
         return Err(ApiError::conflict(format!(
+            "host `{host}` has not reported its GPUs"
+        )));
+    }
+    if devices.len() < n {
+        return Err(ApiError::invalid(format!(
             "host `{host}` reports {} GPU(s), and the service claims {n}",
             devices.len()
         )));
@@ -672,20 +918,44 @@ pub async fn lease_run(
             agent: agent.to_owned(),
             until: r.run_until.clone(),
             exclusive: false,
-            reason: Some(format!("service `{}` request {id}", def.name)),
+            reason: Some(reason_of(&def.name, id)),
         },
     )
     .await?;
+    // The check and the write in one transaction: a second call, or an end
+    // of the request since the read above, gives the new lease back.
     let (rid, lid) = (id.to_owned(), lease.lease.id.clone());
-    state
+    let kept = state
         .db
         .write("system", move |t| {
+            let cur = store::get_request(t, &rid)?;
+            if cur.state != State::Running || cur.lease_id.is_some() {
+                return Ok(Err(format!(
+                    "service request `{rid}` is {}{}",
+                    cur.state,
+                    if cur.lease_id.is_some() {
+                        " and has a target lease already"
+                    } else {
+                        ", not running"
+                    }
+                )));
+            }
             t.execute(
                 "UPDATE service_requests SET lease_id = ?2 WHERE id = ?1",
                 params![rid, lid],
             )?;
-            Ok(())
+            Ok(Ok(()))
         })
         .await?;
+    if let Err(why) = kept {
+        crate::leases::revoke(
+            state,
+            &Actor::Operator,
+            &lease.lease.target,
+            &lease.lease.agent,
+        )
+        .await?;
+        return Err(ApiError::conflict(why));
+    }
     Ok(lease)
 }
