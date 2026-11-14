@@ -5369,3 +5369,422 @@ async fn column_rules_fix_then_split_a_red_merge_batch() {
     }
     only_column_runs(&td).await;
 }
+
+// ------------------------------------------- merge_queue parity (TER-1204)
+//
+// C5 converts the `merge-queue-batch` rule to the merge_queue column with
+// the batch release 4/1800/8 and one `lands` rule that queues the batch
+// merge. On a `columns` board that column does what the rule does: no
+// batch below 4 cards, one batch of the first 4 in order, the next cards
+// wait while the batch is in the column (the merge lane), and one card
+// goes alone after 30 minutes. `pick_batch` leaves out the cards that
+// wait in the column queue (rev-1114 finding 5).
+
+/// The cards of the merge_queue column that `pick_batch` leaves out
+/// because they wait in the column queue.
+async fn waiting_in_queue(td: &TestDaemon) -> Vec<String> {
+    let pick = state(td)
+        .db
+        .read(|c| terrariumd::rules_verbs::pick_batch(c, "p", "merge_queue", Some(8)))
+        .await
+        .unwrap();
+    pick.left_out
+        .iter()
+        .filter(|x| x["reason"] == "waits in the column queue")
+        .map(|x| x["card"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_batch_merge_queue_column_does_what_merge_queue_batch_does() {
+    let td = queue_lab().await;
+    let path = "/api/projects/p/board/columns/merge_queue/options";
+    let o = td.get(path).await.ok().clone();
+    td.put(
+        path,
+        json!({"base_version": o["version"], "checks": o["checks"],
+               "queue": {"release": "batch", "batch_size": 4, "max_wait_seconds": 1800,
+                         "max_batch_cards": 8},
+               "rules": [{"name": "batch", "trigger": {"kind": "lands"},
+                          "actions": [{"verb": "job.queue",
+                                       "args": {"kind": "batch", "from": "@merge_queue",
+                                                "limit": 8}}]}]}),
+    )
+    .await
+    .ok();
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        ids.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review"}),
+            )
+            .await,
+        );
+    }
+    settle(&td).await;
+    state(&td)
+        .db
+        .write("operator", |t| {
+            terrariumd::store::projects::set_columns_flow(t, "p")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    // 3 cards wait in the column queue: no batch, and `pick_batch` leaves
+    // them out.
+    for id in &ids[..3] {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    assert!(open_jobs(&td).await.is_empty(), "3 cards wait: no batch");
+    for (i, id) in ids[..3].iter().enumerate() {
+        assert_eq!(card(&td, id).await["queued"]["place"], i + 1);
+    }
+    assert_eq!(waiting_in_queue(&td).await, ids[..3].to_vec());
+
+    // The 4th card: one batch merge of the 4, in order, by the column rule.
+    move_to(&td, &ids[3], "merge_queue").await;
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    let cards: Vec<&str> = open[0].batch.iter().map(|x| x.card.as_str()).collect();
+    let want: Vec<&str> = ids[..4].iter().map(String::as_str).collect();
+    assert_eq!(cards, want);
+    assert_eq!(open[0].kind, JobKind::Merge);
+    assert_eq!(open[0].created_by, "rule:p/merge_queue/batch");
+
+    // A 5th card waits while the batch is in the column (the merge lane).
+    move_to(&td, &ids[4], "merge_queue").await;
+    settle(&td).await;
+    assert_eq!(card(&td, &ids[4]).await["queued"]["place"], 1);
+    assert_eq!(waiting_in_queue(&td).await, vec![ids[4].clone()]);
+    assert_eq!(open_jobs(&td).await.len(), 1);
+
+    // The batch ends and its cards leave: 1 of 4 waits, no batch yet.
+    let lane = open[0].id.clone();
+    state(&td)
+        .db
+        .write("operator", move |t| {
+            jobs::cancel(t, &lane)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for id in &ids[..4] {
+        move_to(&td, id, "accepted").await;
+    }
+    state(&td)
+        .db
+        .write("system", terrariumd::store::board::queues::sweep_all)
+        .await
+        .unwrap();
+    settle(&td).await;
+    assert_eq!(card(&td, &ids[4]).await["queued"]["place"], 1);
+    assert!(open_jobs(&td).await.is_empty());
+
+    // 30 minutes after it came, the card goes alone.
+    state(&td)
+        .db
+        .write("operator", |t| {
+            let at = (chrono::Utc::now() - chrono::Duration::minutes(30))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            t.execute(
+                "UPDATE card_queue SET queued_at = ?1 WHERE admitted_at IS NULL",
+                [at],
+            )?;
+            terrariumd::store::board::queues::sweep_all(t)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    settle(&td).await;
+    assert!(card(&td, &ids[4]).await.get("queued").is_none());
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].card, ids[4]);
+    assert!(open[0].batch.is_empty(), "{open:?}");
+}
+
+/// The merge_queue column of project `p` as C5 sets it: batch 4/1800/8 and
+/// one `lands` rule that queues the batch merge. Then `p` goes to the
+/// `columns` flow.
+async fn batch_merge_column(td: &TestDaemon) {
+    let path = "/api/projects/p/board/columns/merge_queue/options";
+    let o = td.get(path).await.ok().clone();
+    td.put(
+        path,
+        json!({"base_version": o["version"], "checks": o["checks"],
+               "queue": {"release": "batch", "batch_size": 4, "max_wait_seconds": 1800,
+                         "max_batch_cards": 8},
+               "rules": [{"name": "batch", "trigger": {"kind": "lands"},
+                          "actions": [{"verb": "job.queue",
+                                       "args": {"kind": "batch", "from": "@merge_queue",
+                                                "limit": 8}}]}]}),
+    )
+    .await
+    .ok();
+    state(td)
+        .db
+        .write("operator", |t| {
+            terrariumd::store::projects::set_columns_flow(t, "p")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+async fn sweep_queues(td: &TestDaemon) {
+    state(td)
+        .db
+        .write("system", terrariumd::store::board::queues::sweep_all)
+        .await
+        .unwrap();
+}
+
+/// Make card `id` held by the GitHub author gate.
+async fn hold(td: &TestDaemon, id: &str) {
+    let id = id.to_owned();
+    state(td)
+        .db
+        .write("test", move |t| {
+            t.execute(
+                "UPDATE cards SET labels = json_insert(labels, '$[#]', 'github', '$[#]', 'hold')
+                  WHERE id = ?1",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// Give card `id` a branch that is not on the remote: its move into the
+/// merge queue records no reviewed commit.
+async fn no_head(td: &TestDaemon, id: &str) {
+    let r = td
+        .patch(
+            &format!("/api/cards/{id}"),
+            json!({"branch": "no-such-branch"}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
+/// rev-1204 finding 1, rev-1204b finding 3: the merge_queue column counts
+/// and admits only the cards that a batch merge takes now, as
+/// `merge-queue-batch` counts them. A card with no reviewed commit, a held
+/// card and a card of another repo wait and never hold the merge lane;
+/// the card of the other repo goes when it is the first ready repo.
+#[tokio::test]
+async fn left_out_cards_of_a_batch_do_not_hold_the_merge_lane() {
+    let td = queue_lab().await;
+    add_repo(&td, "lib").await;
+    let r = td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-build", "recipe": "true", "next_repos": ["app", "lib"]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let mk = |title: String, repo: &'static str| json!({"title": title, "column": "review", "repo": repo});
+    let n = new_card(&td, "p", mk("n".into(), "app")).await;
+    let b = new_card(&td, "p", mk("b".into(), "lib")).await;
+    let h = new_card(&td, "p", mk("h".into(), "app")).await;
+    let mut ready = Vec::new();
+    for i in 0..4 {
+        ready.push(new_card(&td, "p", mk(format!("a{i}"), "app")).await);
+    }
+    settle(&td).await;
+    batch_merge_column(&td).await;
+    hold(&td, &h).await;
+    no_head(&td, &n).await;
+    for id in [&n, &h] {
+        move_to(&td, id, "merge_queue").await;
+    }
+    for id in &ready[..3] {
+        move_to(&td, id, "merge_queue").await;
+    }
+    // B can go, but its repo is not the repo of the first ready card.
+    move_to(&td, &b, "merge_queue").await;
+    settle(&td).await;
+    // 6 cards wait, 3 of them make the batch of repo app: no batch yet.
+    assert!(open_jobs(&td).await.is_empty());
+    for id in [&n, &b, &h].into_iter().chain(&ready[..3]) {
+        assert!(card(&td, id).await["queued"].is_object(), "{id}");
+    }
+
+    // The 4th ready card of the repo: one batch of the 4.
+    move_to(&td, &ready[3], "merge_queue").await;
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    let cards: Vec<&str> = open[0].batch.iter().map(|x| x.card.as_str()).collect();
+    let want: Vec<&str> = ready.iter().map(String::as_str).collect();
+    assert_eq!(cards, want);
+    for id in [&n, &b, &h] {
+        assert!(card(&td, id).await["queued"].is_object(), "{id}");
+    }
+
+    // The batch ends and goes on. B, of the other repo, is the first
+    // ready repo now; it goes alone after the wait.
+    let lane = open[0].id.clone();
+    state(&td)
+        .db
+        .write("operator", move |t| {
+            jobs::cancel(t, &lane)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for id in &ready {
+        move_to(&td, id, "accepted").await;
+    }
+    sweep_queues(&td).await;
+    assert!(card(&td, &b).await["queued"].is_object());
+    state(&td)
+        .db
+        .write("operator", |t| {
+            let at = (chrono::Utc::now() - chrono::Duration::minutes(31))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            t.execute(
+                "UPDATE card_queue SET queued_at = ?1 WHERE admitted_at IS NULL",
+                [at],
+            )?;
+            terrariumd::store::board::queues::sweep_all(t)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].card, b);
+    assert_eq!(open[0].repo, "lib");
+    assert!(card(&td, &n).await["queued"].is_object());
+    assert!(card(&td, &h).await["queued"].is_object());
+}
+
+/// rev-1204b finding 1: a release-blocker that cannot go (held, no
+/// reviewed commit, an open job, a repo that `next_repos` does not serve)
+/// waits like any card and never takes or holds the merge lane: 4 ready
+/// cards make their batch.
+#[tokio::test]
+async fn an_unready_release_blocker_does_not_stop_the_merge_queue() {
+    let td = queue_lab().await;
+    add_repo(&td, "lib").await;
+    let rb = |title: &'static str, repo: &'static str| json!({"title": title, "column": "review", "repo": repo, "labels": ["release-blocker"]});
+    let held = new_card(&td, "p", rb("held", "app")).await;
+    let headless = new_card(&td, "p", rb("headless", "app")).await;
+    let busy = new_card(&td, "p", rb("busy", "app")).await;
+    let other = new_card(&td, "p", rb("other", "lib")).await;
+    let mut ready = Vec::new();
+    for i in 0..4 {
+        ready.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review", "repo": "app"}),
+            )
+            .await,
+        );
+    }
+    settle(&td).await;
+    batch_merge_column(&td).await;
+    hold(&td, &held).await;
+    store_job(&td, JobKind::Validate, &[&busy]).await;
+    no_head(&td, &headless).await;
+    for id in [&held, &headless, &busy, &other] {
+        move_to(&td, id, "merge_queue").await;
+    }
+    sweep_queues(&td).await;
+    for id in [&held, &headless, &busy, &other] {
+        assert!(card(&td, id).await["queued"].is_object(), "{id}");
+    }
+    for id in &ready {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    let merges: Vec<Job> = open_jobs(&td)
+        .await
+        .into_iter()
+        .filter(|j| j.kind == JobKind::Merge)
+        .collect();
+    assert_eq!(merges.len(), 1, "{merges:?}");
+    let cards: Vec<&str> = merges[0].batch.iter().map(|x| x.card.as_str()).collect();
+    let want: Vec<&str> = ready.iter().map(String::as_str).collect();
+    assert_eq!(cards, want);
+    for id in [&held, &headless, &busy, &other] {
+        assert!(card(&td, id).await["queued"].is_object(), "{id}");
+    }
+}
+
+/// rev-1204 finding 1, the C5 case: cards that wait in merge_queue with no
+/// job when the board converts have no queue row. They do not hold the
+/// lane: the sweep puts them in the queue, and they go with the next batch.
+#[tokio::test]
+async fn cards_in_merge_queue_at_the_conversion_go_with_the_next_batch() {
+    let td = queue_lab().await;
+    let mut ids = Vec::new();
+    for i in 0..4 {
+        ids.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review"}),
+            )
+            .await,
+        );
+    }
+    settle(&td).await;
+    // Before the conversion: two cards wait in merge_queue, no job.
+    for id in &ids[..2] {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    assert!(open_jobs(&td).await.is_empty());
+    batch_merge_column(&td).await;
+    sweep_queues(&td).await;
+    assert_eq!(card(&td, &ids[0]).await["queued"]["place"], 1);
+    assert_eq!(card(&td, &ids[1]).await["queued"]["place"], 2);
+    for id in &ids[2..] {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    let cards: Vec<&str> = open[0].batch.iter().map(|x| x.card.as_str()).collect();
+    let want: Vec<&str> = ids.iter().map(String::as_str).collect();
+    assert_eq!(cards, want);
+}
+
+/// rev-1204 finding 2: a release-blocker card is a batch alone, at once,
+/// as `merge-queue-batch` sends it (TER-607): no wait for 4 cards or 30
+/// minutes. The cards before it keep waiting.
+#[tokio::test]
+async fn a_release_blocker_goes_alone_at_once_from_the_batch_column() {
+    let td = queue_lab().await;
+    let a = new_card(&td, "p", json!({"title": "a", "column": "review"})).await;
+    let b = new_card(&td, "p", json!({"title": "b", "column": "review"})).await;
+    let fix = new_card(
+        &td,
+        "p",
+        json!({"title": "fix", "column": "review", "labels": ["release-blocker"]}),
+    )
+    .await;
+    settle(&td).await;
+    batch_merge_column(&td).await;
+    move_to(&td, &a, "merge_queue").await;
+    move_to(&td, &b, "merge_queue").await;
+    move_to(&td, &fix, "merge_queue").await;
+    settle(&td).await;
+    assert!(card(&td, &fix).await.get("queued").is_none());
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].card, fix);
+    assert!(open[0].batch.is_empty(), "{open:?}");
+    assert_eq!(card(&td, &a).await["queued"]["place"], 1);
+    assert_eq!(card(&td, &b).await["queued"]["place"], 2);
+}

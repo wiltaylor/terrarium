@@ -1122,14 +1122,21 @@ pub async fn record_accepted_heads(state: &Shared) -> usize {
             .db
             .write("system", move |t| match &read {
                 // The cutoff at the write: the reads before took time.
-                Ok((branch, head)) => accepted_heads::record(
-                    t,
-                    &card,
-                    &round,
-                    branch,
-                    head,
-                    &accepted_heads::fill_cutoff(),
-                ),
+                Ok((branch, head)) => {
+                    let done = accepted_heads::record(
+                        t,
+                        &card,
+                        &round,
+                        branch,
+                        head,
+                        &accepted_heads::fill_cutoff(),
+                    )?;
+                    // A merge_queue batch may take the card now (TER-1204).
+                    if done {
+                        crate::store::board::queues::release_card_column(t, &card)?;
+                    }
+                    Ok(done)
+                }
                 Err(why) => accepted_heads::note(t, &card, &round, why).map(|()| false),
             })
             .await;

@@ -1008,3 +1008,218 @@ async fn an_options_write_releases_waiting_cards() {
     set_options(&td, "review", json!({"release": "job"}), json!([])).await;
     assert!(card(&td, &b).await.get("queued").is_none());
 }
+
+/// The stored `eta_at` and `eta_set_by` of card `id`.
+async fn db_eta(td: &TestDaemon, id: &str) -> (Option<String>, Option<String>) {
+    let id = id.to_owned();
+    state(td)
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT eta_at, eta_set_by FROM cards WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+/// TER-1204 (rev-1114 findings 1 and 2): with `clear_eta_on_enter = false`
+/// a card that waits in the queue has no ETA, so no `eta_overdue` fires
+/// while it waits. The kept ETA is held and set again at its admission. A
+/// held ETA set on another actor's card is audited.
+#[tokio::test]
+async fn a_waiting_card_holds_a_kept_eta_and_another_actors_change_is_audited() {
+    let td = setup().await;
+    td.agent("flow", "w1", json!({})).await;
+    set_wip(&td, "review", 1).await;
+    let o = td.get(&path("review")).await.ok().clone();
+    let mut checks = o["checks"].clone();
+    checks["clear_eta_on_enter"] = json!(false);
+    td.put(
+        &path("review"),
+        json!({"base_version": o["version"], "checks": checks,
+               "queue": {"release": "wip"}, "rules": []}),
+    )
+    .await
+    .ok();
+    switch(&td).await;
+    let a = new_card(&td, "a").await;
+    let b = new_card(&td, "b").await;
+    let c = new_card(&td, "c").await;
+    move_to(&td, &a, "review").await;
+
+    // B: claimed by w1 with an ETA, then into the full review column.
+    for id in [&b, &c] {
+        td.post_empty_as("flow/w1", &format!("/api/cards/{id}/claim"))
+            .await
+            .ok();
+    }
+    let kb = td
+        .patch_as(
+            "flow/w1",
+            &format!("/api/cards/{b}"),
+            json!({"eta_at": "2h"}),
+        )
+        .await
+        .ok()
+        .clone();
+    let eta = kb["eta_at"].as_str().unwrap().to_owned();
+    let mb = td
+        .post_as(
+            "flow/w1",
+            &format!("/api/cards/{b}/move"),
+            json!({"column": "review"}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(mb["queued"]["place"], 1, "{mb}");
+    assert!(mb.get("eta_at").is_none(), "{mb}");
+    assert_eq!(mb["queued"]["held_eta"], json!(eta), "{mb}");
+    let (raw, _) = db_eta(&td, &b).await;
+    assert!(raw.is_none(), "a waiting card has no eta_at: {raw:?}");
+
+    // A leaves: B is admitted with its kept ETA.
+    move_to(&td, &a, "ready").await;
+    let kb = card(&td, &b).await;
+    assert!(kb.get("queued").is_none(), "{kb}");
+    // The review column shows the review ETA: read the stored one.
+    let (at, by) = db_eta(&td, &b).await;
+    assert_eq!(at.as_deref(), Some(eta.as_str()), "{kb}");
+    assert_eq!(by.as_deref(), kb["assignee"].as_str(), "{kb}");
+
+    // C waits; w1's own held ETA is not audited, the operator's is.
+    let mc = td
+        .post_as(
+            "flow/w1",
+            &format!("/api/cards/{c}/move"),
+            json!({"column": "review"}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(mc["queued"]["place"], 1, "{mc}");
+    td.patch_as(
+        "flow/w1",
+        &format!("/api/cards/{c}"),
+        json!({"eta_at": "3h"}),
+    )
+    .await
+    .ok();
+    let audit = td.get("/api/audit?action=card.eta").await.ok().clone();
+    assert!(audit.as_array().unwrap().is_empty(), "{audit}");
+    td.patch(&format!("/api/cards/{c}"), json!({"eta_at": "1h"}))
+        .await
+        .ok();
+    let audit = td.get("/api/audit?action=card.eta").await.ok().clone();
+    assert_eq!(audit.as_array().unwrap().len(), 1, "{audit}");
+    assert_eq!(card(&td, &c).await["queued"]["held_eta"], "1h");
+}
+
+/// TER-1204 (rev-1114 finding 3): a job of the card from the previous
+/// column that ends after the admission does not free the `job` slot. A
+/// job queued after the admission does.
+#[tokio::test]
+async fn an_older_job_of_the_card_does_not_free_the_job_slot() {
+    let td = setup().await;
+    set_options(&td, "validating", json!({"release": "job"}), json!([])).await;
+    switch(&td).await;
+    let a = new_card(&td, "a").await;
+    let b = new_card(&td, "b").await;
+    // A job of A runs while A is still in review.
+    move_to(&td, &a, "review").await;
+    job(&td, "JOLD", &a, "running").await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert!(move_to(&td, &a, "validating").await.get("queued").is_none());
+    assert_eq!(move_to(&td, &b, "validating").await["queued"]["place"], 1);
+    // The old job ends: the slot stays with A.
+    state(&td)
+        .db
+        .write("operator", |t| {
+            terrariumd::store::jobs::cancel(t, "JOLD")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    sweep(&td).await;
+    assert_eq!(card(&td, &b).await["queued"]["place"], 1);
+    // A job of A queued in validating ends: B gets the slot.
+    job(&td, "JNEW", &a, "running").await;
+    state(&td)
+        .db
+        .write("operator", |t| {
+            terrariumd::store::jobs::cancel(t, "JNEW")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(card(&td, &b).await.get("queued").is_none());
+}
+
+/// TER-1204 (rev-1114 finding 4, rev-1204 finding 1): a column that
+/// changes from `wip` to `batch` with a card admitted under `wip` and no
+/// job puts that card back in its queue, first: it does not hold the lane,
+/// and it goes with the next batch.
+#[tokio::test]
+async fn a_change_from_wip_to_batch_puts_a_card_with_no_job_back_in_the_queue() {
+    let td = setup().await;
+    set_options(&td, "merge_queue", json!({"release": "wip"}), json!([])).await;
+    switch(&td).await;
+    let a = new_card(&td, "a").await;
+    let b = new_card(&td, "b").await;
+    let c = new_card(&td, "c").await;
+    assert!(
+        move_to(&td, &a, "merge_queue")
+            .await
+            .get("queued")
+            .is_none()
+    );
+    set_options(
+        &td,
+        "merge_queue",
+        json!({"release": "batch", "batch_size": 2, "max_wait_seconds": 3600,
+               "max_batch_cards": 2}),
+        json!([]),
+    )
+    .await;
+    assert_eq!(card(&td, &a).await["queued"]["place"], 1);
+    // B makes the batch of two with A; C waits for the next one.
+    move_to(&td, &b, "merge_queue").await;
+    move_to(&td, &c, "merge_queue").await;
+    sweep(&td).await;
+    assert!(card(&td, &a).await.get("queued").is_none());
+    assert!(card(&td, &b).await.get("queued").is_none());
+    assert_eq!(card(&td, &c).await["queued"]["place"], 1);
+}
+
+/// TER-1204 (rev-1204 finding 3): the ETA of a job of a waiting card is
+/// held for its admission, so no `eta_overdue` fires while it waits.
+#[tokio::test]
+async fn a_job_eta_of_a_waiting_card_is_held() {
+    let td = setup().await;
+    set_wip(&td, "review", 1).await;
+    switch(&td).await;
+    let a = new_card(&td, "a").await;
+    let b = new_card(&td, "b").await;
+    move_to(&td, &a, "review").await;
+    assert_eq!(move_to(&td, &b, "review").await["queued"]["place"], 1);
+    let at = (chrono::Utc::now() + chrono::Duration::hours(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let (id, when) = (b.clone(), at.clone());
+    state(&td)
+        .db
+        .write("operator", move |t| {
+            terrariumd::store::board::set_job_eta(t, &id, Some(&when), "agent:w1")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (raw, _) = db_eta(&td, &b).await;
+    assert!(raw.is_none(), "{raw:?}");
+    assert_eq!(card(&td, &b).await["queued"]["held_eta"], json!(at));
+    move_to(&td, &a, "ready").await;
+    let (raw, _) = db_eta(&td, &b).await;
+    assert_eq!(raw.as_deref(), Some(at.as_str()));
+}
