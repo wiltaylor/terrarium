@@ -20,6 +20,7 @@ import type { ColumnOptions, ColumnOptionsPut, EffectiveRules, RuleCatalog, Rule
 import type { NewThread, Thread, ThreadClose, ThreadQuery } from "./types";
 import type { CalendarEvent, CalendarGrant, CalendarGrantResult, CalendarInput, CalendarRange, CalendarView, CalendarWatcher, CalendarWatchResult } from "./types";
 import type { NewSecret, NewSecretGrant, RevealedSecret, Secret, SecretGenerate, SecretGrant, SecretPut, TargetPatch, TargetTestReport } from "./types";
+import type { Service, ServiceDetail, ServiceRequest, ServiceRequestState } from "./types";
 import type {
   SessionDetail,
   SessionRef,
@@ -983,6 +984,23 @@ export interface Api {
     revoke(name: string, grantee: string): Promise<void>;
   };
 
+  /**
+   * Services (docs/api.md §17.12). The daemon applies the rights of the CLI:
+   * an admin of a service sees all its requests, any other caller only its own.
+   */
+  services: {
+    /** `GET /api/services`: the services the actor may see. */
+    list(): Promise<Service[]>;
+    /** `GET /api/services/{name}`: with `open_requests` and `may_call`. */
+    get(name: string): Promise<ServiceDetail>;
+    /** `GET /api/services/{name}/requests`: newest first; `limit` default 100, at most 1000. */
+    requests(name: string, q?: { state?: ServiceRequestState; limit?: number }): Promise<ServiceRequest[]>;
+    /** `GET /api/service-requests/{id}`. */
+    request(id: string): Promise<ServiceRequest>;
+    /** `POST /api/service-requests/{id}/cancel`: `409` when the request has ended. */
+    cancel(id: string): Promise<ServiceRequest>;
+  };
+
   skills: {
     list(): Promise<SkillSummary[]>;
     get(name: string): Promise<SkillDetail>;
@@ -1650,6 +1668,13 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       grants: (name) => get(`/api/tools/${seg(name)}/grants`),
       grant: (name, grantee) => post(`/api/tools/${seg(name)}/grants`, { grantee }),
       revoke: (name, grantee) => del(`/api/tools/${seg(name)}/grants`, { grantee }),
+    },
+    services: {
+      list: () => get("/api/services"),
+      get: (name) => get(`/api/services/${seg(name)}`),
+      requests: (name, q = {}) => get(`/api/services/${seg(name)}/requests`, { ...q }),
+      request: (id) => get(`/api/service-requests/${seg(id)}`),
+      cancel: (id) => post(`/api/service-requests/${seg(id)}/cancel`),
     },
     skills: {
       list: () => get("/api/skills"),

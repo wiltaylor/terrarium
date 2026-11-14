@@ -122,8 +122,9 @@ describe("navigation", () => {
     expect(app).toMatch(/path="\/schedules" component=\{SchedulesPage\}/);
   });
 
-  it("has Home, Inbox, Threads, Logs, Schedules, then Calendar above the project tree, with a route, and no Questions item", () => {
-    expect(TOP_ITEMS.map((i) => i.href)).toEqual(["/", "/inbox", "/threads", "/logs", "/schedules", "/calendar"]);
+  it("has Home, Inbox, Threads, Logs, Schedules, Services, then Calendar above the project tree, with a route, and no Questions item", () => {
+    expect(TOP_ITEMS.map((i) => i.href)).toEqual(["/", "/inbox", "/threads", "/logs", "/schedules", "/services", "/calendar"]);
+    expect(app).toMatch(/path="\/services" component=\{ServicesPage\}/);
     expect(TOP_ITEMS.find((i) => i.href === "/inbox")?.label).toBe("Inbox");
     expect(TOP_ITEMS.map((i) => i.href)).not.toContain("/questions");
     expect(app).toMatch(/path="\/inbox" component=\{InboxPage\}/);
