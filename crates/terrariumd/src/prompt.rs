@@ -266,10 +266,7 @@ fn skill_line(text: &str, max: usize) -> String {
         Some(i) if i > 0 && !at_word_end => &cut[..i],
         _ => cut.as_str(),
     };
-    format!(
-        "{}...",
-        cut.trim_end_matches([',', ';', ':', '.', ' '])
-    )
+    format!("{}...", cut.trim_end_matches([',', ';', ':', '.', ' ']))
 }
 
 /// `section` after `text`, with a blank line between. `None`: `text`.
