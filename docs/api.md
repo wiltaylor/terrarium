@@ -5035,6 +5035,16 @@ no open job is stale: the release puts it back first in the queue (the
 A card that was in a `batch` column before it had that release (a change of
 the release, or the conversion of a board) is stale at once.
 
+A card that goes back after a batch in which it got no job of its own (a
+column whose `lands` rules queue no job, or a card that the batch job left
+out) is marked stale (TER-1284): `queue_returned` has `stale: true`. A
+marked card does not count for a batch and is not admitted again until
+something changes: a new card in the queue, the end of a job of a card of
+the column, an edit of the card, its reviewed commit, an options `PUT`, or
+a board `PATCH`. So the column writes its `queue_returned` and `admitted`
+events once, not every 120 seconds. A card that had a job goes back
+unmarked, as before.
+
 The column with the role or name `merge_queue` counts and admits only the
 cards that a batch merge takes now, as the `merge-queue-batch` rule does:
 cards that are not held, have no open job, have a reviewed commit, and have
@@ -5049,7 +5059,11 @@ options `PUT`. The rule engine's tick also releases every queue (the wait
 of a batch, and any release that no cause triggered).
 
 A card that waits shows `queued: {column, since, place, held_eta}` (place 1
-goes next); a board column shows `queued`, the number that wait (absent
+goes next). A single card read (`GET /api/cards/{id}`, `card show`) adds
+`queued.reason` when the card is not in the next batch (TER-1284): it is
+marked stale, or in a merge_queue column with a merge lane the reason a
+merge does not take it now (`held`, `open job <id>`, no reviewed commit, a
+repo that is not in `next_repos`, or another repo goes first); a board column shows `queued`, the number that wait (absent
 when 0); `count` counts them too. An ETA set on a waiting card (`PATCH
 eta_at`, `card claim --eta`) is held, not set: it is set when the card is
 admitted, and a duration counts from then. A waiting card has no ETA, so it

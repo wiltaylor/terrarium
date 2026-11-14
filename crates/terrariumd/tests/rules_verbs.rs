@@ -1500,12 +1500,15 @@ async fn default_merge_group_sweep_repairs_stale_members_idempotently() {
         json!({"title":"b", "column":"review", "repo":"app"}),
     )
     .await;
-    store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
     let gid = card(&td, &a).await["group"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
+    // TER-1278: the repair keeps a member while its merge job is open.
+    fail_job(&td, &job, "red").await;
+    settle(&td).await;
     let members = [a.clone(), b.clone()];
     state(&td).db.write("test", move |t| {
         // Model old data with no move event for the new rule to handle.
@@ -1555,12 +1558,15 @@ async fn merge_group_repair_waits_for_a_pending_member_run_then_runs_anyway() {
         json!({"title":"b", "column":"review", "repo":"app"}),
     )
     .await;
-    store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
     let gid = card(&td, &a).await["group"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
+    // TER-1278: the repair keeps a member while its merge job is open.
+    fail_job(&td, &job, "red").await;
+    settle(&td).await;
     let (key, group) = (a.clone(), gid.clone());
     let (waited, kept, forced, kept_after) = state(&td)
         .db
@@ -1639,6 +1645,53 @@ async fn merge_group_repair_keeps_an_empty_group_while_its_rule_runs() {
     );
     assert!(!open_after, "the idle repair closes the empty group");
     assert_eq!(card(&td, &gid).await["archived"], true);
+}
+
+/// TER-1278: the repair keeps a member in `backlog` while its merge job
+/// is open, so the group of a running job is not closed as abandoned. Once
+/// the job has ended, the repair removes the member.
+#[tokio::test]
+async fn merge_group_repair_keeps_a_member_while_its_merge_job_is_open() {
+    use terrariumd::store::groups;
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"backlog", "repo":"app"}),
+    )
+    .await;
+    let job = store_job(&td, JobKind::Merge, &[&a]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (key, group) = (a.clone(), gid.clone());
+    let kept = state(&td)
+        .db
+        .write("test", move |t| {
+            groups::expire(t)?;
+            let g = groups::get(t, &group)?;
+            Ok(g.members.contains(&key) && g.closed_at.is_none())
+        })
+        .await
+        .unwrap();
+    assert!(kept, "the open merge job keeps the member and the group");
+    fail_job(&td, &job, "infra").await;
+    let (key, group) = (a.clone(), gid.clone());
+    let kept_after = state(&td)
+        .db
+        .write("test", move |t| {
+            groups::expire(t)?;
+            Ok(groups::get(t, &group)?.members.contains(&key))
+        })
+        .await
+        .unwrap();
+    assert!(
+        !kept_after,
+        "the ended job no longer keeps a backlog member"
+    );
 }
 
 #[tokio::test]
@@ -5145,6 +5198,51 @@ async fn column_rules_merge_a_batch_cut_a_version_and_build_it() {
     only_column_runs(&td).await;
 }
 
+/// TER-1280: a repair tick between a red end and the requeue keeps the
+/// `merge_queue` members of the open group, so the lead can queue it again.
+/// Without a live fix card the repair releases them (TER-333, the sweep
+/// test above).
+#[tokio::test]
+async fn merge_group_repair_keeps_red_batch_members_until_the_requeue() {
+    use terrariumd::store::groups;
+    let td = columns_merge_lab().await;
+    let (a, b) = two_cards(&td).await;
+    move_to(&td, &a, "merge_queue").await;
+    move_to(&td, &b, "merge_queue").await;
+    settle(&td).await;
+    let job = the_open_job(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    end_job(&td, &job, false).await;
+    // The red group waits for its requeue: it holds a live fix card.
+    let label = format!("merge-fix:{}", job.id);
+    let fix = state(&td)
+        .db
+        .read(move |c| terrariumd::store::board::find_open_by_label(c, "p", &label))
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("the red group has no fix card"));
+    assert_eq!(card(&td, &fix).await["group"]["id"], gid);
+    let (members, group) = ([a.clone(), b.clone()], gid.clone());
+    let kept = state(&td)
+        .db
+        .write("test", move |t| {
+            // The engine's tick: the red job has ended, no job is open.
+            groups::expire(t)?;
+            let g = groups::get(t, &group)?;
+            Ok(g.closed_at.is_none() && members.iter().all(|m| g.members.contains(m)))
+        })
+        .await
+        .unwrap();
+    assert!(kept, "{}", card(&td, &gid).await);
+    for id in [&a, &b] {
+        assert_eq!(column_of(&td, id).await, "merge_queue");
+        assert_eq!(card(&td, id).await["group"]["id"], gid);
+    }
+}
+
 /// The pack's red path on the batch merge queue: a red group gets a fix
 /// card (at most 3); the lead queues the group again with the newest fix
 /// card first; the 4th red run splits the batch. A red half of one card
@@ -5615,6 +5713,18 @@ async fn left_out_cards_of_a_batch_do_not_hold_the_merge_lane() {
     for id in [&n, &b, &h].into_iter().chain(&ready[..3]) {
         assert!(card(&td, id).await["queued"].is_object(), "{id}");
     }
+    // `card show` says why a card is not in the batch (TER-1284); a card
+    // of the batch has no reason.
+    let reason = |k: Value| k["queued"]["reason"].as_str().map(str::to_owned);
+    assert_eq!(reason(card(&td, &h).await).as_deref(), Some("held"));
+    let why = reason(card(&td, &n).await).unwrap_or_default();
+    assert!(why.contains("not recorded"), "{why}");
+    let why = reason(card(&td, &b).await).unwrap_or_default();
+    assert_eq!(
+        why, "another repo goes first: the next batch is of repo `app`",
+        "{why}"
+    );
+    assert_eq!(reason(card(&td, &ready[0]).await), None);
 
     // The 4th ready card of the repo: one batch of the 4.
     move_to(&td, &ready[3], "merge_queue").await;
@@ -5665,6 +5775,85 @@ async fn left_out_cards_of_a_batch_do_not_hold_the_merge_lane() {
     assert_eq!(open[0].repo, "lib");
     assert!(card(&td, &n).await["queued"].is_object());
     assert!(card(&td, &h).await["queued"].is_object());
+}
+
+/// TER-1284 (rev-1204c finding 2): a reviewed commit that the background
+/// read records (`jobs::record_accepted_heads`, not the move's pre-read)
+/// releases the merge_queue column at once: the card makes the batch of 4.
+#[tokio::test]
+async fn a_reviewed_commit_recorded_in_the_background_releases_the_batch() {
+    let td = queue_lab().await;
+    let mut ids = Vec::new();
+    for i in 0..4 {
+        ids.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review"}),
+            )
+            .await,
+        );
+    }
+    settle(&td).await;
+    batch_merge_column(&td).await;
+    let late = ids[0].clone();
+    // The background read waits; the pre-read of the move is lost, as when
+    // the remote did not answer.
+    state(&td).job_queue.hold_accepted_reads(true);
+    for id in &ids[..3] {
+        move_to(&td, id, "merge_queue").await;
+    }
+    let id = late.clone();
+    state(&td)
+        .db
+        .write("test", move |t| {
+            t.execute(
+                "UPDATE card_accepted_heads SET commit_sha = NULL, branch = NULL,
+                        recorded_at = NULL, tried_at = NULL WHERE card = ?1",
+                [&id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    move_to(&td, &ids[3], "merge_queue").await;
+    settle(&td).await;
+    // 3 cards can go: no batch, and the late card says why it waits.
+    assert!(open_jobs(&td).await.is_empty());
+    let k = card(&td, &late).await;
+    assert!(
+        k["queued"]["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("not recorded")),
+        "{k}"
+    );
+    // The background read records it: the 4 are one batch merge.
+    state(&td).job_queue.hold_accepted_reads(false);
+    let recorded = terrariumd::jobs::record_accepted_heads(&state(&td)).await;
+    let n = state(&td)
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM card_accepted_heads WHERE commit_sha IS NOT NULL",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    // A kick of the job queue may have read it first: the same code path.
+    assert!(recorded <= 1 && n == 4, "recorded {recorded}, rows {n}");
+    for id in &ids {
+        assert!(card(&td, id).await.get("queued").is_none(), "{id}");
+    }
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    let mut cards: Vec<&str> = open[0].batch.iter().map(|x| x.card.as_str()).collect();
+    cards.sort_unstable();
+    let mut want: Vec<&str> = ids.iter().map(String::as_str).collect();
+    want.sort_unstable();
+    assert_eq!(cards, want);
 }
 
 /// rev-1204b finding 1: a release-blocker that cannot go (held, no

@@ -15,6 +15,19 @@ use tracing::{debug, warn};
 const MERGE_JOB_ENDED_SQL: &str = "SELECT EXISTS(SELECT 1 FROM jobs
     WHERE id = ?1 AND project = ?2 AND state IN ('passed', 'failed', 'cancelled'))";
 
+/// The card has an open (queued or running) merge job, alone or in a batch.
+const MERGE_JOB_OPEN_SQL: &str = "SELECT EXISTS(SELECT 1 FROM jobs
+    WHERE kind = 'merge' AND state IN ('queued', 'running')
+      AND (card = ?1 OR EXISTS (SELECT 1 FROM json_each(jobs.batch)
+                                WHERE json_extract(value, '$.card') = ?1)))";
+
+/// The card's newest merge job, alone or in a batch, ended `failed` (red).
+const MERGE_JOB_RED_SQL: &str = "SELECT coalesce((SELECT state = 'failed' FROM jobs
+    WHERE kind = 'merge'
+      AND (card = ?1 OR EXISTS (SELECT 1 FROM json_each(jobs.batch)
+                                WHERE json_extract(value, '$.card') = ?1))
+    ORDER BY created_at DESC, id DESC LIMIT 1), 0)";
+
 fn event(t: &mut Tx<'_>, id: &str, change: &str) -> ApiResult<()> {
     let project = board::project_of(t, id)?;
     t.emit(
@@ -651,6 +664,18 @@ fn pending_run(conn: &Connection, id: &str) -> ApiResult<Option<String>> {
 /// write, only after a `plan_events` that read the log to its end, so each
 /// event before that write has its runs.
 ///
+/// A member with an open merge job stays, in any column (TER-1278): the
+/// repair closed the group of a running job as abandoned when its card sat
+/// in `backlog`, and the job's later step writes found the group closed.
+/// The repair removes such a member once the job has ended.
+///
+/// A `merge_queue` member whose newest merge job ended red also stays while
+/// the group holds a live fix card (`merge-fix:`, not archived, not done):
+/// the lead queues that group again, so the repair must not drop it between
+/// the red end and the requeue (TER-1280). Without a live fix card the
+/// group waits for nothing, and the member is released so it can join a
+/// new group (TER-333).
+///
 /// `waiting` holds when each waiting group was first skipped. A group that
 /// waited [`RECONCILE_WAIT`] is repaired anyway. Returns the groups that
 /// wait now, with that time.
@@ -684,6 +709,13 @@ pub fn reconcile_merge_groups(
             params![g.key.strip_prefix("merge:").unwrap_or_default(), board::project_of(t, &id)?],
             |r| r.get::<_, bool>(0),
         )?;
+        let mut awaits_requeue = false;
+        for member in &g.members {
+            let card = board::get_card(t, member)?;
+            awaits_requeue |= !card.archived
+                && card.column != "done"
+                && card.labels.iter().any(|l| l.starts_with("merge-fix:"));
+        }
         for member in &g.members {
             let card = board::get_card(t, member)?;
             let role: Option<String> = t.query_row(
@@ -694,10 +726,13 @@ pub fn reconcile_merge_groups(
             // Ready, backlog and done have no roles on the default board.
             // Working and blocked use roles so renamed columns work too.
             let repair = card.labels.iter().any(|l| l.starts_with("merge-fix:"));
+            let merging = t.query_row(MERGE_JOB_OPEN_SQL, [member], |r| r.get::<_, bool>(0))?;
             if card.archived || (repair && card.column == "done")
-                || (!repair
+                || (!repair && !merging
                     && ((job_ended && role.as_deref() == Some("merge_queue")
-                            && super::jobs::open_of_card(t, member)?.is_none())
+                            && super::jobs::open_of_card(t, member)?.is_none()
+                            && !(awaits_requeue
+                                && t.query_row(MERGE_JOB_RED_SQL, [member], |r| r.get::<_, bool>(0))?))
                         || matches!(role.as_deref(), Some("working" | "blocked"))
                         || (role.is_none() && matches!(card.column.as_str(), "ready" | "backlog"))))
             {

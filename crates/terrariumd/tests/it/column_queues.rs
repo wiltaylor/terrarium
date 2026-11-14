@@ -1223,3 +1223,140 @@ async fn a_job_eta_of_a_waiting_card_is_held() {
     let (raw, _) = db_eta(&td, &b).await;
     assert_eq!(raw.as_deref(), Some(at.as_str()));
 }
+
+/// The `card` events with change `change` of card `id`.
+async fn changes(td: &TestDaemon, id: &str, change: &'static str) -> i64 {
+    let id = id.to_owned();
+    state(td)
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM events WHERE card = ?1 AND kind = 'card'
+                   AND json_extract(payload, '$.change') = ?2",
+                rusqlite::params![id, change],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+/// TER-1284 (rev-1204c finding 1): a `batch` column whose rules queue no
+/// job puts a card back once, marked stale, and does not admit it again
+/// every 120 seconds. A new card in the queue, a job end of the column, or
+/// an edit of the card is a change: then it is admitted again.
+#[tokio::test]
+async fn a_batch_card_with_no_job_is_returned_once_and_waits_for_a_change() {
+    let td = setup().await;
+    set_options(
+        &td,
+        "review",
+        json!({"release": "batch", "batch_size": 1, "max_wait_seconds": 60}),
+        json!([]),
+    )
+    .await;
+    switch(&td).await;
+    let a = new_card(&td, "a").await;
+    move_to(&td, &a, "review").await;
+    assert!(card(&td, &a).await.get("queued").is_none());
+    assert_eq!(changes(&td, &a, "admitted").await, 1);
+    let age = "UPDATE card_queue SET admitted_at = '2000-01-01T00:00:00.000Z'
+                WHERE admitted_at IS NOT NULL";
+
+    // The grace is over and no job came: A goes back, marked stale.
+    sql(&td, age).await;
+    sweep(&td).await;
+    let k = card(&td, &a).await;
+    assert_eq!(k["queued"]["place"], 1, "{k}");
+    assert!(
+        k["queued"]["reason"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("stale")),
+        "{k}"
+    );
+    assert_eq!(changes(&td, &a, "queue_returned").await, 1);
+    // Nothing changes: it is not admitted again, also after its wait.
+    sql(
+        &td,
+        "UPDATE card_queue SET queued_at = '2000-01-01T00:00:00.000Z' WHERE admitted_at IS NULL",
+    )
+    .await;
+    for _ in 0..3 {
+        sweep(&td).await;
+    }
+    assert_eq!(card(&td, &a).await["queued"]["place"], 1);
+    assert_eq!(changes(&td, &a, "admitted").await, 1);
+    assert_eq!(changes(&td, &a, "queue_returned").await, 1);
+
+    // A new card in the queue is a change: A, first, is admitted again.
+    let b = new_card(&td, "b").await;
+    move_to(&td, &b, "review").await;
+    assert!(card(&td, &a).await.get("queued").is_none());
+    assert_eq!(changes(&td, &a, "admitted").await, 2);
+    assert_eq!(card(&td, &b).await["queued"]["place"], 1);
+
+    // A goes back marked again; B, not marked, is the next batch.
+    sql(&td, age).await;
+    sweep(&td).await;
+    assert_eq!(card(&td, &a).await["queued"]["place"], 1);
+    assert!(card(&td, &b).await.get("queued").is_none());
+    assert_eq!(changes(&td, &a, "queue_returned").await, 2);
+
+    // B gets a job of its own. Its end clears A's mark. After the grace B
+    // goes back unmarked and, first in the queue, is admitted again.
+    job(&td, "JB", &b, "running").await;
+    state(&td)
+        .db
+        .write("operator", |t| {
+            terrariumd::store::jobs::cancel(t, "JB")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    sql(
+        &td,
+        "UPDATE card_queue SET admitted_at = '2000-01-01T00:00:00.000Z'
+          WHERE admitted_at IS NOT NULL;
+         UPDATE jobs SET created_at = '2000-01-01T00:00:00.500Z',
+                         ended_at = '2000-01-01T00:00:01.000Z' WHERE id = 'JB'",
+    )
+    .await;
+    sweep(&td).await;
+    assert!(card(&td, &b).await.get("queued").is_none());
+    assert_eq!(changes(&td, &b, "queue_returned").await, 1);
+    assert_eq!(changes(&td, &b, "admitted").await, 2);
+    let ka = card(&td, &a).await;
+    assert_eq!(ka["queued"]["place"], 1, "{ka}");
+    assert!(ka["queued"].get("reason").is_none(), "{ka}");
+
+    // B got no job in this batch (JB is older than the admission): it
+    // goes back marked, and A is admitted. Then A goes back marked too:
+    // both wait, nothing is admitted.
+    let later = "UPDATE card_queue SET admitted_at = '2001-01-01T00:00:00.000Z'
+                  WHERE admitted_at IS NOT NULL";
+    sql(&td, later).await;
+    sweep(&td).await;
+    assert_eq!(changes(&td, &b, "queue_returned").await, 2);
+    assert_eq!(changes(&td, &a, "admitted").await, 3);
+    sql(&td, later).await;
+    sweep(&td).await;
+    sweep(&td).await;
+    assert_eq!(changes(&td, &a, "queue_returned").await, 3);
+    assert_eq!(changes(&td, &a, "admitted").await, 3);
+    assert_eq!(changes(&td, &b, "admitted").await, 2);
+
+    // An edit of B is a change for B only.
+    td.patch(&format!("/api/cards/{b}"), json!({"title": "b2"}))
+        .await
+        .ok();
+    sweep(&td).await;
+    assert!(card(&td, &b).await.get("queued").is_none());
+    assert_eq!(changes(&td, &b, "admitted").await, 3);
+    let ka = card(&td, &a).await;
+    assert!(
+        ka["queued"]["reason"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("stale")),
+        "{ka}"
+    );
+}
