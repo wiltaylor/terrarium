@@ -3397,9 +3397,15 @@ The rules:
 - A notice needs `card`, except when `priority` is `critical`.
   Otherwise it is `422 invalid`, including urgent notices and replies.
   Post in an open topic thread instead, or a lead opens one.
-  The default Inbox lists only open questions and critical notices. Explicit
-  kind and status queries remain available for history and diagnostics,
-  reached only by an explicit UI filter, never by default.
+  The default Inbox (`GET /api/inbox` with no `kind`, status `open`) lists
+  the open questions and every open notice, normal, urgent, and critical,
+  outside Inbox threads. Its counts (`open`, `notice`, `urgent`, `critical`,
+  and the `x-inbox-*` headers) count the same rows, so a notice raises the
+  nav badge until it is acknowledged (TER-1324; TER-688 had kept only the
+  critical notices, and the operator missed the others). Mail to the
+  operator, system items, and watches stay on their own kind views.
+  Explicit kind and status queries remain available for history and
+  diagnostics.
   `POST /api/projects/{project}/version-thread/messages` takes
   `{"version", "changed", "test"}` and requires project admin rights.
   It creates or reuses the project's standing Versions thread and posts one

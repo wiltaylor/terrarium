@@ -13,7 +13,7 @@ const item = (id: string, over: Partial<InboxItem> = {}): InboxItem => ({
 });
 
 describe("inbox model", () => {
-  it("keeps only open questions and critical notices in the default Inbox", () => {
+  it("keeps open questions and every open notice in the default Inbox, urgent first (TER-1324)", () => {
     const rows = [
       item("question"), item("normal", { kind: "notice" }),
       item("urgent", { kind: "notice", urgent: true }),
@@ -21,8 +21,11 @@ describe("inbox model", () => {
       item("mail", { kind: "mail" }), item("system", { kind: "system" }),
       item("closed", { open: false }),
     ];
-    expect(rows.filter((i) => matchesTabs(i, "all", "open")).map((i) => i.id)).toEqual(["question", "critical"]);
-    expect(countItems(rows)).toMatchObject({ open: 2, question: 1, notice: 1, critical: 1, urgent: 1 });
+    expect(sortItems(rows.filter((i) => matchesTabs(i, "all", "open"))).map((i) => i.id)).toEqual(["critical", "urgent", "question", "normal"]);
+    const c = countItems(rows);
+    expect(c).toMatchObject({ open: 4, question: 1, notice: 3, critical: 1, urgent: 2 });
+    expect(badge(c)).toMatchObject({ n: 4, cls: "nav-count" });
+    expect(badge(c)!.title).toContain("3 notice");
   });
   it("sorts urgent first, then the newest", () => {
     const list = [

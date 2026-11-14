@@ -96,9 +96,11 @@ async fn default_inbox_pages_do_not_hydrate_excluded_or_unselected_questions() {
         for i in 0..4000 {
             // The malformed typed field is a hydration sentinel: reading one
             // of these bodies as a Question fails rather than silently passing.
+            // Acknowledged notices are outside the default Inbox (TER-1324:
+            // every open notice is in it).
             t.execute(
-                "INSERT INTO questions (id,agent,project,text,thread_id,created_at,updated_at,kind,priority,answer_option)
-                 VALUES (?1,?2,'p',?3,?1,'2026-11-08T00:00:00Z','2026-11-08T00:00:00Z','notice',?4,'must not hydrate')",
+                "INSERT INTO questions (id,agent,project,text,thread_id,created_at,updated_at,kind,priority,status,answer_option)
+                 VALUES (?1,?2,'p',?3,?1,'2026-11-08T00:00:00Z','2026-11-08T00:00:00Z','notice',?4,'acknowledged','must not hydrate')",
                 params![format!("ordinary-{i}"), agent, "Notice body. ".repeat(300), if i % 2 == 0 { "normal" } else { "urgent" }],
             )?;
         }

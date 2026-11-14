@@ -681,8 +681,10 @@ type Cursor = (bool, bool, bool, String, String);
 
 // Keep aligned with the partial questions_default_inbox index. The page and
 // badge use exactly the same predicate, including the thread exclusion.
+// Every open notice is in it, whatever its priority (TER-1324: TER-688 left
+// out the normal and urgent ones, and the operator missed them).
 const DEFAULT_QUESTION_WHERE: &str = "status = 'open' AND thread IS NULL
-    AND (kind IN ('question', 'bundle', 'tool_run') OR (kind = 'notice' AND priority = 'critical'))";
+    AND kind IN ('question', 'bundle', 'tool_run', 'notice')";
 
 fn default_page(
     conn: &Connection,
@@ -694,7 +696,7 @@ fn default_page(
         return Ok(Vec::new());
     }
     // Select only keys, with a SQL LIMIT, before hydrating any question. The
-    // covering partial index contains no ordinary or urgent notice bodies.
+    // covering partial index holds only the open rows outside threads.
     let mut st = conn.prepare(&format!(
         "SELECT id FROM questions INDEXED BY questions_default_inbox
          WHERE {DEFAULT_QUESTION_WHERE} AND (?1 IS NULL OR project = ?1)

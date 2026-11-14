@@ -1739,8 +1739,9 @@ terrarium admin inbox resume <thread-id> [-m note]
 
 - `notify` requires `--card` unless `--critical`. Neither `--urgent` nor
   `--reply-to` exempts it. Otherwise use `thread post` in the open topic
-  thread, or a lead opens one. The default Inbox shows only open questions
-  and critical notices. Explicit kind and history queries remain available.
+  thread, or a lead opens one. The default Inbox shows the open questions
+  and every open notice (normal, urgent, and critical), and its badge counts
+  them. Explicit kind and history queries remain available.
   At each pre-release publish, the lead runs
   `thread version <version> --changed <text|-> --test <text|->` to post one
   quiet update in the project's standing Versions thread without raising

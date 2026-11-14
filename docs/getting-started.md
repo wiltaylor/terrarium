@@ -489,6 +489,14 @@ urgent or critical. The Inbox has four kinds of items:
 - **Notices.** A lead answers you, reports one done per request you made,
   or reports a real problem (security, data loss, outage, spent budget) with
   `terrarium notify`. Milestones, deploys, and progress do not get notices.
+
+  **Where notices show.** Every open notice, from any project, shows in the
+  All tab and the Notices tab of the Inbox, and on the questions panel of
+  its card. The critical ones come first, then the urgent ones, then the
+  newest. Each one adds to the number on the Inbox item of the sidebar
+  until you acknowledge it. The number is red while an urgent or critical
+  item is open. A notice asked in an Inbox thread shows in that thread
+  instead. Notices send no mail and no browser notification.
 - **Mail to you.** Each mail to `operator` stays here until you
   acknowledge it.
 - **System.** A thread that the loop guard paused, and the messages that

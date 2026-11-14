@@ -24,8 +24,10 @@ describe("the inbox in the mock", () => {
     const api = mock();
     const open = await api.inbox.list();
     // Without the Inbox thread that waits for the operator (./threads.ts): only `kind=thread` lists it (TER-466).
-    expect(open.length).toBe(3);
-    expect(open.every((i) => i.kind === "question" || (i.kind === "notice" && i.critical))).toBe(true);
+    // Every open notice is in it, a normal one too (TER-1324).
+    expect(open.length).toBe(4);
+    expect(open.every((i) => i.kind === "question" || i.kind === "notice")).toBe(true);
+    expect(open.some((i) => i.kind === "notice" && !i.urgent)).toBe(true);
     expect(open.some((i) => i.kind === "thread")).toBe(false);
     expect((await api.inbox.list({ kind: "thread" })).map((i) => i.kind)).toEqual(["thread"]);
     expect(open[0]).toMatchObject({ kind: "question", urgent: true, open: true });
@@ -69,7 +71,7 @@ describe("the inbox in the mock", () => {
     const api = mock();
     // The bundle counts once, as a question.
     // The questions of a thread count in its thread item, not as questions; the threads count for the Threads badge, not in `open` (TER-466).
-    expect(await api.inbox.counts()).toEqual({ open: 3, urgent: 1, critical: 0, question: 3, notice: 0, mail: 3, system: 1, watch: 0, thread: 1, thread_urgent: 0, thread_critical: 0 });
+    expect(await api.inbox.counts()).toEqual({ open: 4, urgent: 1, critical: 0, question: 3, notice: 1, mail: 3, system: 1, watch: 0, thread: 1, thread_urgent: 0, thread_critical: 0 });
     expect(await api.inbox.counts("webshop")).toEqual({ open: 1, urgent: 0, critical: 0, question: 1, notice: 0, mail: 0, system: 0, watch: 0, thread: 0, thread_urgent: 0, thread_critical: 0 });
   });
 

@@ -509,10 +509,11 @@ async fn chatty_thread(td: &TestDaemon, from: &str, to: &str) -> (String, Value)
     (thread.unwrap(), last)
 }
 
-/// The Inbox mixes the kinds, urgent first, with the counts; the filters
-/// work; an agent cannot read it.
+/// The default Inbox lists the open questions and every open notice,
+/// urgent first, with the counts; mail and threads stay on their own views;
+/// the filters work; an agent cannot read it.
 #[tokio::test]
-async fn the_default_inbox_only_lists_open_questions_and_critical_notices() {
+async fn the_default_inbox_lists_open_questions_and_every_open_notice() {
     let World {
         td, lead, w1, w2, ..
     } = setup().await;
@@ -548,14 +549,19 @@ async fn the_default_inbox_only_lists_open_questions_and_critical_notices() {
 
     let (rows, counts) = inbox(&td, "").await;
     let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
-    assert_eq!(ids.len(), 1, "{rows:#?}");
-    assert!(ids.contains(&format!("question:{}", id(&q)).as_str()));
-    assert!(!ids.contains(&format!("notice:{}", id(&n)).as_str()));
+    assert_eq!(
+        ids,
+        vec![
+            format!("notice:{}", id(&n)),
+            format!("question:{}", id(&q)),
+        ],
+        "{rows:#?}"
+    );
     assert!(!ids.contains(&format!("mail:{}", id(&m)).as_str()));
     assert!(!ids.contains(&format!("thread:{thread}").as_str()));
     assert_eq!(
         counts,
-        json!({"open": 1, "urgent": 0, "critical": 0, "question": 1, "notice": 0, "mail": 1, "system": 1, "watch": 0,
+        json!({"open": 2, "urgent": 1, "critical": 0, "question": 1, "notice": 1, "mail": 1, "system": 1, "watch": 0,
                "thread": 0, "thread_urgent": 0, "thread_critical": 0})
     );
     // The pause notice to the operator is the system item, not a mail item.
@@ -657,6 +663,7 @@ async fn a_critical_notice_goes_first_and_counts() {
         ids,
         vec![
             format!("notice:{}", id(&critical)),
+            format!("notice:{}", id(&urgent)),
             format!("question:{}", id(&normal)),
         ],
         "{rows:#?}"
@@ -667,10 +674,14 @@ async fn a_critical_notice_goes_first_and_counts() {
     );
     assert_eq!(
         (rows[1]["critical"].clone(), rows[1]["urgent"].clone()),
+        (json!(false), json!(true))
+    );
+    assert_eq!(
+        (rows[2]["critical"].clone(), rows[2]["urgent"].clone()),
         (json!(false), json!(false))
     );
     assert_eq!(counts["critical"], 1);
-    assert_eq!(counts["urgent"], 1);
+    assert_eq!(counts["urgent"], 2);
     let r = td.get("/api/inbox").await;
     assert_eq!(r.headers["x-inbox-critical"], "1");
 
@@ -700,6 +711,60 @@ async fn a_critical_notice_goes_first_and_counts() {
     assert_eq!(
         (counts["critical"].clone(), counts["urgent"].clone()),
         (json!(0), json!(0))
+    );
+}
+
+/// TER-1324: a normal and an urgent card notice from a project lead show in
+/// the operator's default Inbox, urgent first, and raise the badge counts
+/// (`/api/inbox/counts` and the `x-inbox-*` headers) until he acknowledges
+/// them. Before, only critical notices did, and he missed the others.
+#[tokio::test]
+async fn normal_and_urgent_notices_from_a_project_lead_show_with_the_badge() {
+    let World { td, lead, .. } = setup().await;
+    let normal = notify(&td, &lead, json!({"text": "Device code ABCD-1234."})).await;
+    let urgent = notify(
+        &td,
+        &lead,
+        json!({"text": "Device code WXYZ-9876, expires in 10 min.", "priority": "urgent"}),
+    )
+    .await;
+    assert_eq!(normal["priority"], "normal");
+
+    let (rows, counts) = inbox(&td, "").await;
+    let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            format!("notice:{}", id(&urgent)).as_str(),
+            format!("notice:{}", id(&normal)).as_str(),
+        ],
+        "{rows:#?}"
+    );
+    assert!(rows.iter().all(|r| r["project"] == "p" && r["open"] == true));
+    assert_eq!(rows[0]["urgent"], true);
+    assert_eq!(rows[1]["urgent"], false);
+    assert_eq!(
+        (counts["open"].clone(), counts["notice"].clone(), counts["urgent"].clone()),
+        (json!(2), json!(2), json!(1))
+    );
+    let r = td.get("/api/inbox").await;
+    assert_eq!(r.headers["x-inbox-open"], "2");
+    assert_eq!(r.headers["x-inbox-urgent"], "1");
+    // The project's view shows them too.
+    let (in_p, _) = inbox(&td, "?project=p").await;
+    assert_eq!(in_p.len(), 2);
+
+    // Acknowledged: they leave the default Inbox and the badge.
+    for n in [&normal, &urgent] {
+        td.post_empty(&format!("/api/questions/{}/ack", id(n)))
+            .await
+            .ok();
+    }
+    let (rows, counts) = inbox(&td, "").await;
+    assert!(rows.is_empty(), "{rows:#?}");
+    assert_eq!(
+        (counts["open"].clone(), counts["notice"].clone(), counts["urgent"].clone()),
+        (json!(0), json!(0), json!(0))
     );
 }
 

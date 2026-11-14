@@ -100,7 +100,8 @@ export function matchesTabs(i: InboxItem, tab: InboxTab, status: InboxStatusTab,
   if (status === "asked") return i.kind === "watch" && i.open;
   if (tab !== "all" && i.kind !== tab) return false;
   if (status === "open") {
-    if (tab === "all") return i.open && (i.kind === "question" || (i.kind === "notice" && isCritical(i)));
+    // The default view: open questions and every open notice (TER-1324: TER-688 kept only critical notices).
+    if (tab === "all") return i.open && (i.kind === "question" || i.kind === "notice");
     return i.open && i.kind !== "watch";
   }
   return !i.open && i.kind !== "system";
@@ -121,7 +122,7 @@ export function putItem(list: InboxItem[], item: InboxItem, keep: (i: InboxItem)
  */
 export function countItems(items: InboxItem[]): InboxCounts {
   const all = items.filter((i) => i.open);
-  const open = all.filter((i) => i.kind === "question" || (i.kind === "notice" && isCritical(i)));
+  const open = all.filter((i) => i.kind === "question" || i.kind === "notice");
   const threads = all.filter((i) => i.kind === "thread");
   const n = (k: InboxKind) => all.filter((i) => i.kind === k).length;
   return {

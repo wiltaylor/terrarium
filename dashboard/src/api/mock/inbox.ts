@@ -222,7 +222,7 @@ export function createInboxMock(c: InboxMockContext) {
   const counts = (project?: string): InboxCounts => {
     const all = items().filter((i) => i.open && (!project || i.project === project));
     // A watch waits for an agent, and a thread counts on the Threads screen (TER-466): neither is in `open`.
-    const open = all.filter((i) => i.kind === "question" || (i.kind === "notice" && i.critical));
+    const open = all.filter((i) => i.kind === "question" || i.kind === "notice");
     const threads = all.filter((i) => i.kind === "thread");
     const n = (k: InboxKind) => all.filter((i) => i.kind === k).length;
     return {
@@ -262,7 +262,7 @@ export function createInboxMock(c: InboxMockContext) {
         if (q.kind && !["question", "notice", "mail", "system", "watch", "thread"].includes(q.kind)) fail(422, "invalid", `bad kind \`${q.kind}\`: use question, notice, mail, system, watch, or thread`);
         return items()
           // Only `kind=thread` lists the threads (TER-466).
-          .filter((i) => (status === "all" || (status === "open") === i.open) && (q.kind ? i.kind === q.kind : i.kind !== "thread" && (status !== "open" || i.kind === "question" || (i.kind === "notice" && i.critical))) && (!q.project || i.project === q.project))
+          .filter((i) => (status === "all" || (status === "open") === i.open) && (q.kind ? i.kind === q.kind : i.kind !== "thread" && (status !== "open" || i.kind === "question" || i.kind === "notice")) && (!q.project || i.project === q.project))
           .sort(order);
       }),
     counts: (project) => reply(() => counts(project)),
