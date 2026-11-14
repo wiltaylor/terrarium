@@ -5009,6 +5009,13 @@ Cards leave the queue first in, first out; a new card never overtakes one
 that waits. When a card gets its slot the daemon writes the `card` event
 `admitted` (with `queued_at` and `to_count`, the admitted cards of the
 column), and the `lands` and `count_reached` rules of the column run on it.
+Like `moved`, the event has `from` and `from_role` (the column of the move
+that queued the card, and its role) and `to` and `to_role` (the column that
+admits it), so a `lands` rule with a `data.from_role` condition matches a
+card that returns from a wait column into a full one (TER-1304). A card put
+back in a `batch` queue keeps the `from` of its first move; a row that no
+move wrote (a card admitted under `wip` and put back after a change to
+`batch`) has `from: null`.
 A card that leaves the queue (a move or an archive) never landed: its
 column runs no `leaves` or `archived` rule for it (`from_queued: true` on
 the `moved` event, `queued: true` on `archived`).
@@ -8808,6 +8815,14 @@ in order (Q3 A).
 
 The audit actions: `service.create`, `service.update`, `service.delete`,
 `service.call`, `service.cancel`, `service.timed_out`.
+
+**The dashboard** (TER-1269) has a Services page at `/services`: each
+service the actor may see with its definition, `open_requests` of its
+queue, the count of each state among the loaded requests (the newest 100;
+the API has no count by state), its requests (newest first, a filter by
+state), and cancel of an open request. It uses the routes above, so it has
+the rights of the CLI. A reload every 15 seconds keeps an open row, the
+filter, and an open cancel confirm.
 
 ## 18. Fleet
 

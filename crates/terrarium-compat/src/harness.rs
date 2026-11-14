@@ -10,6 +10,7 @@ use terrarium_adapter_claude::{ClaudeAdapter, ClaudeOptions};
 use terrarium_adapter_codex::{CodexAdapter, CodexOptions};
 use terrarium_adapter_copilot::auth::CredentialSource;
 use terrarium_adapter_copilot::{CopilotAdapter, CopilotOptions};
+use terrarium_adapter_grok::{GrokAdapter, GrokOptions};
 use terrarium_adapter_pi::{PiAdapter, PiOptions};
 use terrarium_core::config::SubscriptionDef;
 use terrarium_core::{Adapter, Agent, FileOverlay, HarnessId, HarnessSessionId, LaunchSpec};
@@ -567,6 +568,103 @@ impl Harness for Pi {
         let samples = terrarium_adapter_pi::usage::parse_session(&text);
         let model = samples.first().map(|s| s.model.clone()).unwrap_or_default();
         Ok((samples.len(), model))
+    }
+}
+
+// ------------------------------------------------------------------ grok
+
+/// Grok Build. Only the dry run (fixtures, no login) is part of the suite
+/// so far: a real run is a signed-in, metered check, which needs the
+/// operator's OK through the lead (TER-1192 release gate).
+pub struct Grok {
+    home: PathBuf,
+    model: String,
+    adapter: Arc<GrokAdapter>,
+}
+
+impl Grok {
+    pub fn new(settings: &Settings, home: PathBuf) -> Self {
+        let adapter = GrokAdapter::new(GrokOptions {
+            home_dir: home.clone(),
+            host_home_dir: None,
+            harness_workspace: None,
+            hook_program: settings.cli.display().to_string(),
+            ..GrokOptions::default()
+        });
+        Self {
+            home,
+            model: settings.model(HarnessId::Grok),
+            adapter: Arc::new(adapter),
+        }
+    }
+}
+
+impl Harness for Grok {
+    fn id(&self) -> HarnessId {
+        HarnessId::Grok
+    }
+    fn adapter(&self) -> Arc<dyn Adapter> {
+        self.adapter.clone()
+    }
+    fn home(&self) -> &Path {
+        &self.home
+    }
+    fn model(&self) -> &str {
+        &self.model
+    }
+    /// A stored `auth.json` with a login. The values are never read out.
+    fn auth(&self) -> Result<String, String> {
+        let file = self.home.join("auth.json");
+        let usable = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| v.as_object().map(|o| !o.is_empty()))
+            .unwrap_or(false);
+        let what = format!("{} holds a login: {usable}", file.display());
+        if usable { Ok(what) } else { Err(what) }
+    }
+    fn materialize(
+        &self,
+        agent: &Agent,
+        home: &Path,
+        prompt: Option<&str>,
+    ) -> Result<Vec<FileOverlay>, String> {
+        self.adapter
+            .materialize(agent, home, prompt)
+            .map_err(|e| e.to_string())
+    }
+    fn launch(&self, agent: &Agent, resume: Option<&HarnessSessionId>) -> LaunchSpec {
+        self.adapter.launch(agent, resume)
+    }
+    fn exit_keys(&self) -> Vec<u8> {
+        terrarium_adapter_grok::keys::exit()
+    }
+    fn turn_hooks(&self) -> [&'static str; 2] {
+        ["UserPromptSubmit", "Stop"]
+    }
+    fn payload_fields(&self) -> &'static [&'static str] {
+        &["hookEventName", "sessionId", "cwd", "workspaceRoot"]
+    }
+    fn resume_source(&self) -> Option<&'static str> {
+        None
+    }
+    /// The session file layout is not captured yet.
+    fn transcript(&self, _agent: &Agent, _sid: &HarnessSessionId) -> Option<PathBuf> {
+        None
+    }
+    fn usage(&self, _path: &Path) -> Result<(usize, String), String> {
+        Err("grok usage is not read yet (its schema is not captured)".into())
+    }
+    /// `hooks/*.json` of the shared home: under bwrap the per-agent
+    /// `hooks/` covers them.
+    fn user_hooks(&self) -> Vec<String> {
+        let dir = self.home.join(terrarium_adapter_grok::config::HOOKS_DIR);
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        files.sort();
+        files.iter().filter_map(|f| hook_events_in(f)).collect()
     }
 }
 

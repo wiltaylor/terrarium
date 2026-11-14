@@ -2045,7 +2045,12 @@ fn apply_move(
         params![card.id, to.id, at, now(), same, to.name == DONE, keep_eta],
     )?;
     if queued {
-        queues::enqueue(t, &card.id, to.id)?;
+        queues::enqueue(
+            t,
+            &card.id,
+            to.id,
+            (&card.column, card.column_role.as_deref()),
+        )?;
         if let Some((eta, by)) = &kept {
             let by = by.clone().unwrap_or_else(|| actor.address());
             queues::hold_eta(t, &card.id, Some(eta), &by)?;

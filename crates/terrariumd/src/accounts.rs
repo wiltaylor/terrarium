@@ -711,6 +711,32 @@ pub fn grok_secret_values(state_dir: &Path) -> Vec<(String, Vec<String>)> {
     out
 }
 
+/// The stamp of one Grok `auth.json`: the account, and the size, the
+/// change time, and the inode of the file. No content.
+pub type GrokStamp = (String, u64, Option<std::time::SystemTime>, u64);
+
+/// The stamp of each Grok `auth.json` in the accounts, in name order
+/// (TER-1192). A change of a stamp means grok (or the daemon) wrote the
+/// file: the redaction matcher is built again
+/// (`crate::secrets::redact::watch_grok_logins`).
+pub fn grok_auth_stamps(state_dir: &Path) -> Vec<GrokStamp> {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = fs::read_dir(credentials_dir(state_dir).join(ACCOUNTS_DIR)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<GrokStamp> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let path = credential_path(&store_dir(state_dir, &name), HarnessId::Grok);
+            let m = fs::symlink_metadata(&path).ok()?;
+            Some((name, m.len(), m.modified().ok(), m.ino()))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// The string values of the Grok `auth.json` at `path`; empty when there
 /// is no such file or it is not JSON. Secrets.
 fn grok_values_in(path: &Path) -> Vec<String> {

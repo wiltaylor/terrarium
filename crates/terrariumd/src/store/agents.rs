@@ -783,6 +783,9 @@ fn check_def(def: &AgentDef) -> ApiResult<()> {
             "policy.cross_project entry `{bad}` must be `project/agent` or `project/*`"
         )));
     }
+    if let Some(model) = &def.model {
+        terrarium_core::config::check_model(model).map_err(ApiError::invalid)?;
+    }
     if let Some(text) = &def.system_prompt {
         check_system_prompt(text).map_err(ApiError::invalid)?;
     }
@@ -1030,6 +1033,9 @@ where
 
 /// Write the definition fields of an agent.
 pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
+    if let Some(Some(model)) = &p.model {
+        terrarium_core::config::check_model(model).map_err(ApiError::invalid)?;
+    }
     if let Some(policy) = &p.policy {
         check_def(&AgentDef {
             name: "x".into(),
@@ -1895,6 +1901,38 @@ mod tests {
     use super::*;
     use crate::db::Db;
     use crate::events::EventHub;
+
+    /// rev-1192 F4: the config check refuses a model that reads as a flag
+    /// or has white space, for a new agent and for a change.
+    #[tokio::test]
+    async fn a_model_that_reads_as_a_flag_is_refused() {
+        let def = |model: &str| -> AgentDef {
+            serde_json::from_value(serde_json::json!({
+                "name": "a", "project": "p", "harness": "grok", "model": model
+            }))
+            .unwrap()
+        };
+        assert!(check_def(&def("grok-build")).is_ok());
+        for bad in ["--trust", "-m", "grok build"] {
+            let e = check_def(&def(bad)).unwrap_err();
+            assert!(e.message.contains("is not valid"), "{}", e.message);
+        }
+        let db = db();
+        let patch: AgentPatch =
+            serde_json::from_value(serde_json::json!({"model": "--yolo"})).unwrap();
+        let e = db
+            .write("system", move |t| write_def(t, "A1", &patch))
+            .await
+            .unwrap_err();
+        assert!(e.message.contains("is not valid"), "{}", e.message);
+        let model: Option<String> = db
+            .read(
+                |c| Ok(c.query_row("SELECT model FROM agents WHERE id = 'A1'", [], |r| r.get(0))?),
+            )
+            .await
+            .unwrap();
+        assert_eq!(model, None);
+    }
 
     #[test]
     fn event_context_needs_only_the_agent_identity_row() {

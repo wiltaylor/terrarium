@@ -5977,3 +5977,187 @@ async fn a_release_blocker_goes_alone_at_once_from_the_batch_column() {
     assert_eq!(card(&td, &a).await["queued"]["place"], 1);
     assert_eq!(card(&td, &b).await["queued"]["place"], 2);
 }
+
+// ------------------------------ a card admitted from a wait column (TER-1304)
+
+/// The pack card rule `name` as a `lands` rule, as the C5 conversion
+/// places it (TER-1117): the `data.to*` conditions go, a `data.from*`
+/// condition stays, and with `queued` the `data.change` takes `admitted`
+/// too, for a column that queues.
+fn pack_as_lands_rule(name: &str, queued: bool) -> Value {
+    let r = terrarium_core::rules_file::default_pack()
+        .rules
+        .iter()
+        .find(|r| r.name == name)
+        .unwrap_or_else(|| panic!("no pack rule {name}"))
+        .clone();
+    let when: Vec<_> = r
+        .when
+        .into_iter()
+        .filter(|m| !m.path.starts_with("data.to"))
+        .map(|mut m| {
+            if queued && m.path == "data.change" {
+                m.op = terrarium_core::schedule::MatchOp::In;
+                m.value = json!(["moved", "admitted"]);
+            }
+            m
+        })
+        .collect();
+    json!({"name": r.name, "trigger": {"kind": "lands"}, "when": when, "if_card": r.if_card,
+           "max_per_hour": r.max_per_hour, "actions": r.actions})
+}
+
+/// A card that returns from review into a full `in_progress` waits in its
+/// queue. When it is admitted, the `lands` rules of `in_progress` see the
+/// `from_role` of the queuing move: its parked agent wakes and it leaves
+/// its merge group, from column rules only (TER-1304).
+#[tokio::test]
+async fn a_card_admitted_from_review_unparks_its_agent_and_leaves_its_merge_group() {
+    let td = queue_lab().await;
+    let s = state(&td);
+    s.lifecycle.set_tuning(terrariumd::lifecycle::Tuning {
+        idle_stop: IdleStop::Off,
+        tick: Duration::from_millis(20),
+        compact_on_idle: false,
+        compact_max_age: CompactMaxAge::Off,
+        compact_wait: Duration::from_secs(5),
+    });
+    let r = td
+        .post(
+            "/api/templates",
+            json!({"name": "w-claude", "project": "p", "spec": {"harness": "claude"}}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let lead = td
+        .agent(
+            "p",
+            "lead",
+            json!({"roles": ["project_admin"],
+                   "policy": {"spawn": {"templates": ["project:*"], "max_concurrent": 2,
+                                        "max_lifetime": "1h", "bound": true}}}),
+        )
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    put_column_rules(
+        &td,
+        "review",
+        json!([
+            pack_as_lands_rule("agent-park", false),
+            pack_as_column_rule("merge-queued"),
+            pack_as_column_rule("merge-group-started"),
+        ]),
+    )
+    .await;
+    let path = "/api/projects/p/board/columns/in_progress/options";
+    let o = td.get(path).await.ok().clone();
+    let r = td
+        .put(
+            path,
+            json!({"base_version": o["version"], "checks": o["checks"],
+                   "queue": {"release": "wip"},
+                   "rules": [pack_as_lands_rule("agent-unpark", true),
+                             pack_as_lands_rule("merge-group-returned", true)]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    s.db.write("operator", |t| {
+        t.execute(
+            "UPDATE board_columns SET wip_limit = 1 WHERE project = 'p' AND name = 'in_progress'",
+            [],
+        )?;
+        terrariumd::store::projects::set_columns_flow(t, "p")?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let a = new_card(&td, "p", json!({"title": "a", "column": "in_progress"})).await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title": "b", "column": "ready", "repo": "app"}),
+    )
+    .await;
+    let c = new_card(
+        &td,
+        "p",
+        json!({"title": "c", "column": "review", "repo": "app"}),
+    )
+    .await;
+    let r = td
+        .post_as(
+            &lead,
+            &format!("/api/agents/{lead}/spawn"),
+            json!({"template": "w-claude", "task": "do it", "bind": format!("card:{b}")}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let eph = r.body["id"].as_str().unwrap().to_owned();
+    td.wait_status(&eph, "idle").await;
+    let spawn = |id: String| {
+        let td = &td;
+        async move { td.get(&format!("/api/spawns/{id}")).await.ok().clone() }
+    };
+
+    // B goes to review: the `lands` rule of review parks its agent, and a
+    // merge job of B and C opens their merge group.
+    move_to(&td, &b, "review").await;
+    settle(&td).await;
+    assert!(spawn(eph.clone()).await["parked_at"].is_string());
+    store_job(&td, JobKind::Merge, &[&b, &c]).await;
+    settle(&td).await;
+    assert_eq!(card(&td, &b).await["group"]["members"], json!([b, c]));
+
+    // B returns to the full in_progress: it waits, so nothing lands yet.
+    move_to(&td, &b, "in_progress").await;
+    settle(&td).await;
+    assert_eq!(card(&td, &b).await["queued"]["place"], 1);
+    assert!(spawn(eph.clone()).await["parked_at"].is_string());
+    assert!(card(&td, &b).await["group"].is_object());
+
+    // A leaves: B is admitted, and the `lands` rules see where it came from.
+    move_to(&td, &a, "ready").await;
+    settle(&td).await;
+    let kb = card(&td, &b).await;
+    assert!(kb.get("queued").is_none(), "{kb}");
+    let id = b.clone();
+    let read = move |c: &rusqlite::Connection| {
+        Ok(c.query_row(
+            "SELECT payload FROM events WHERE kind = 'card' AND card = ?1
+                AND json_extract(payload, '$.change') = 'admitted'",
+            [&id],
+            |r| r.get::<_, String>(0),
+        )?)
+    };
+    let payload = s.db.read(read).await.unwrap();
+    let data: Value = serde_json::from_str(&payload).unwrap();
+    // The converted `lands` rules match on this value (TER-1117).
+    assert_eq!(data["change"], "admitted", "{data}");
+    assert_eq!(
+        (
+            &data["from"],
+            &data["from_role"],
+            &data["to"],
+            &data["to_role"]
+        ),
+        (
+            &json!("review"),
+            &json!("review"),
+            &json!("in_progress"),
+            &json!("working")
+        ),
+        "{data}"
+    );
+    let unpark = runs_of(&td, "p", "in_progress/agent-unpark").await;
+    assert_eq!(states(&unpark), vec!["done"], "{unpark:?}");
+    assert!(spawn(eph.clone()).await["parked_at"].is_null());
+    let returned = runs_of(&td, "p", "in_progress/merge-group-returned").await;
+    assert_eq!(states(&returned), vec!["done"], "{returned:?}");
+    assert!(card(&td, &b).await.get("group").is_none());
+    assert_eq!(card(&td, &c).await["group"]["members"], json!([c]));
+    // Nothing ran from the pack.
+    assert!(runs(&td, "p").await.iter().all(|r| r["column"].is_string()));
+}

@@ -4151,6 +4151,110 @@ mod tests {
         assert_eq!(migrate(&mut conn).unwrap(), 0);
     }
 
+    /// TER-1192: `agents.harness` takes 'grok'. The column swap keeps each
+    /// agent row, every column value, the rows that name an agent, and
+    /// every foreign key to `agents` (a DROP TABLE would cascade).
+    #[test]
+    fn the_agents_harness_check_takes_grok_and_keeps_every_row() {
+        const NAME: &str = "ter-1192-grok-agents.sql";
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
+        let before: Vec<_> = NAMED_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|(name, _)| *name != NAME)
+            .collect();
+        assert_eq!(before.len() + 1, NAMED_MIGRATIONS.len());
+        migrate_named(&mut conn, &before).unwrap();
+        let insert = "INSERT INTO agents (id, name, project, harness, model, workspace, \
+                      created_at, updated_at) VALUES (?1, ?2, 'p', ?3, ?4, '/w', 't', 't')";
+        for (id, harness) in [("a1", "claude"), ("a2", "codex"), ("a3", "pi")] {
+            conn.execute(
+                insert,
+                rusqlite::params![id, id, harness, "m-".to_owned() + id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO sessions (id, agent_id, started_at) VALUES ('s1', 'a1', 't')",
+            [],
+        )
+        .unwrap();
+        let columns = |conn: &Connection| -> Vec<String> {
+            let mut names: Vec<String> = conn
+                .prepare("SELECT name FROM pragma_table_info('agents')")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            names.sort();
+            names
+        };
+        let dump = |conn: &Connection| -> Vec<String> {
+            conn.prepare("SELECT json_object('id', id, 'name', name, 'harness', harness, 'model', model, 'status', status, 'source', source, 'workspace', workspace) FROM agents ORDER BY id")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let references = |conn: &Connection| -> Vec<String> {
+            conn.prepare(
+                "SELECT m.name || '.' || f.\"from\" || ' ' || f.on_delete \
+                 FROM sqlite_master m, pragma_foreign_key_list(m.name) f \
+                 WHERE m.type = 'table' AND f.\"table\" = 'agents' ORDER BY 1",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        let cols = columns(&conn);
+        let rows = dump(&conn);
+        let refs = references(&conn);
+        assert!(refs.len() > 3, "{refs:?}");
+        let refused = conn.execute(insert, rusqlite::params!["g0", "g0", "grok", "m"]);
+        assert!(
+            refused
+                .unwrap_err()
+                .to_string()
+                .contains("CHECK constraint failed")
+        );
+
+        assert_eq!(migrate(&mut conn).unwrap(), 1);
+        assert_eq!(columns(&conn), cols);
+        assert_eq!(dump(&conn), rows);
+        let sessions: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sessions WHERE agent_id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sessions, 1);
+        conn.execute(insert, rusqlite::params!["g1", "g1", "grok", "grok-build"])
+            .unwrap();
+        let other = conn.execute(insert, rusqlite::params!["c1", "c1", "cursor", "m"]);
+        assert!(
+            other
+                .unwrap_err()
+                .to_string()
+                .contains("CHECK constraint failed")
+        );
+        let broken: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(broken, 0);
+        // Every reference to `agents` is still there, with its action.
+        assert_eq!(references(&conn), refs);
+        assert_eq!(migrate(&mut conn).unwrap(), 0);
+    }
+
     /// TER-1123: the rebuild of `pending_pointers` keeps the card, lead,
     /// and lease rows and the one-row-per-key rule, and takes a
     /// `reservation` row, which the CHECK of migration 15 refused.
