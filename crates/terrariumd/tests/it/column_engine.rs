@@ -622,6 +622,96 @@ async fn a_role_clear_with_a_rename_of_that_column_keeps_the_ref_on_it() {
 }
 
 #[tokio::test]
+async fn a_new_role_that_moves_a_by_name_ref_to_another_column_is_refused() {
+    let td = setup().await;
+    let b = "/api/projects/flow/board";
+    // The column `review` loses its role (an absent role is kept), and a
+    // new column `qa` comes.
+    td.patch(
+        b,
+        board_qa(None, Some(json!({"name": "review", "role": null}))),
+    )
+    .await
+    .ok();
+    // `@review` now names the column `review` by name.
+    set_rules(
+        &td,
+        "flow",
+        "accepted",
+        json!([{"name": "back", "trigger": {"kind": "lands"},
+                "actions": [{"verb": "card.move", "args": {"to": "@review"}}]}]),
+    )
+    .await;
+    let before = td.get(b).await.ok().clone();
+    // The role `review` goes to `qa`: `@review` would move from the
+    // column `review` to `qa` (TER-1252).
+    let r = td
+        .patch(b, board_qa(Some("review"), Some(json!({"name": "review"}))))
+        .await;
+    r.err(409, "conflict");
+    let d = &r.body["error"]["details"];
+    assert_eq!(d["reason"], "role_in_use", "{}", r.body);
+    assert_eq!(d["roles"], json!(["review"]));
+    assert_eq!(d["rules"][0]["rule"], "back");
+    assert_eq!(d["rules"][0]["names"], "@review");
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(!msg.contains("  "), "{msg}");
+    assert_eq!(td.get(b).await.ok().clone(), before);
+    // The role goes to the column `review` itself: allowed, the ref stays.
+    td.patch(
+        b,
+        board_qa(None, Some(json!({"name": "review", "role": "review"}))),
+    )
+    .await
+    .ok();
+    let o = options(&td, "flow", "accepted").await;
+    assert_eq!(o["rules"][0]["actions"][0]["args"]["to"], "@review");
+}
+
+#[tokio::test]
+async fn removing_the_role_column_while_another_column_has_the_name_is_refused() {
+    let td = setup().await;
+    set_rules(
+        &td,
+        "flow",
+        "accepted",
+        json!([{"name": "back", "trigger": {"kind": "lands"},
+                "actions": [{"verb": "card.move", "args": {"to": "@review"}}]}]),
+    )
+    .await;
+    let b = "/api/projects/flow/board";
+    // The column with the role `review` is renamed to `qa`, then a new
+    // column is named `review`.
+    let mut renamed = board_qa(Some("review"), None);
+    for c in renamed["columns"].as_array_mut().unwrap() {
+        if c["name"] == "qa" {
+            c["rename_from"] = "review".into();
+        }
+    }
+    td.patch(b, renamed).await.ok();
+    td.patch(b, board_qa(Some("review"), Some(json!({"name": "review"}))))
+        .await
+        .ok();
+    let before = td.get(b).await.ok().clone();
+    // `qa` (role `review`) is removed and no column takes the role:
+    // `@review` would fall back to the column `review` by name
+    // (TER-1246 R5).
+    let mut gone = board(Some("ready"));
+    for c in gone["columns"].as_array_mut().unwrap() {
+        if c["name"] == "review" {
+            c["role"] = Value::Null;
+        }
+    }
+    let r = td.patch(b, gone).await;
+    r.err(409, "conflict");
+    let d = &r.body["error"]["details"];
+    assert_eq!(d["reason"], "column_in_use", "{}", r.body);
+    assert_eq!(d["columns"], json!(["qa"]));
+    assert_eq!(d["rules"][0]["rule"], "back");
+    assert_eq!(td.get(b).await.ok().clone(), before);
+}
+
+#[tokio::test]
 async fn wait_met_runs_the_rules_of_the_cards_column() {
     let td = setup().await;
     set_rules(
