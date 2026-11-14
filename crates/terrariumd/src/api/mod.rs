@@ -45,6 +45,7 @@ mod screen;
 mod secret_grants;
 mod secrets;
 mod secrets_generate;
+mod services;
 pub mod session;
 mod session_links;
 mod skills;
@@ -343,6 +344,7 @@ fn routes_with_registry(
         .merge(reservations::routes())
         .merge(targets::routes())
         .merge(tools::routes())
+        .merge(services::routes())
         .route(
             "/reload",
             post(system::reload),

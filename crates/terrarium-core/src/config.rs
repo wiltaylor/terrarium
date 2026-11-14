@@ -1373,7 +1373,12 @@ macro_rules! named {
         }
     )*};
 }
-named!(TargetDef, SubscriptionDef, crate::tool::ToolDef);
+named!(
+    TargetDef,
+    SubscriptionDef,
+    crate::tool::ToolDef,
+    crate::service::ServiceDef
+);
 
 impl Named for AgentDef {
     fn name_mut(&mut self) -> &mut String {
@@ -1479,6 +1484,8 @@ pub struct Definitions {
     pub subscriptions: Vec<SubscriptionDef>,
     /// `tools/<name>.toml`: the tool proxies (`crate::tool`).
     pub tools: Vec<crate::tool::ToolDef>,
+    /// `services/<name>.toml`: the services (`crate::service`, TER-1264).
+    pub services: Vec<crate::service::ServiceDef>,
     /// `projects/<project>.rules.wcl`: the board rules files (TER-166).
     /// The daemon checks them (`crate::rules_file`) when it syncs them.
     pub rules: Vec<RulesFile>,
@@ -1543,6 +1550,7 @@ impl Definitions {
             targets: load_kind(&dir.join("targets"), &mut errors),
             subscriptions: load_kind(&dir.join("subscriptions"), &mut errors),
             tools: load_kind(&dir.join("tools"), &mut errors),
+            services: load_kind(&dir.join("services"), &mut errors),
             rules: load_rules(&dir.join("projects"), &mut errors),
         };
         (defs, errors)

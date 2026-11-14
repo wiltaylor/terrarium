@@ -41,6 +41,7 @@ pub mod run_cleanup;
 pub mod schedules;
 pub mod session_refs;
 pub mod spawns;
+pub mod services;
 pub mod subscriptions;
 pub mod sync;
 pub mod target_grants;
