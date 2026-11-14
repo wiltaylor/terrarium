@@ -24,6 +24,9 @@ validate: require-uv
 	export RUSTUP_TOOLCHAIN=1.97.1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 	# Stable test-only inputs across slot checkouts. Release builds do not use this gate.
 	export TERRARIUM_GIT_REF=ci-test TERRARIUM_TEST_BUILD=1 SOURCE_DATE_EPOCH=0
+	# The card check slots share a cargo target dir: make the build scripts of this checkout and their
+	# watched files newer than an older tree's build output, so cargo runs them again (TER-1315)
+	uv run python scripts/touch_build_inputs.py
 	uv run python scripts/affected.py --check-commit-trailers
 	# A release validation (the cut, TER-683) or a merge job also runs the
 	# uid 1001 pass, and both test passes rerun their failed tests once.
@@ -44,6 +47,8 @@ validate-affected: require-uv
 	set -euo pipefail
 	export RUSTUP_TOOLCHAIN=1.97.1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 	export TERRARIUM_GIT_REF=ci-test TERRARIUM_TEST_BUILD=1 SOURCE_DATE_EPOCH=0
+	# Before cargo runs: see ci::validate (TER-1315)
+	uv run python scripts/touch_build_inputs.py
 	kind=${TERRARIUM_JOB_KIND:-}
 	list=${TERRARIUM_CHANGED_FILES:-}
 	if [ "$kind" = merge ]; then
