@@ -547,6 +547,9 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
+        for p in &plans {
+            println!("plan: {p}");
+        }
         assert!(
             plans
                 .iter()
