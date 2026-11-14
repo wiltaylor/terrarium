@@ -6075,8 +6075,18 @@ async fn a_card_admitted_from_review_unparks_its_agent_and_leaves_its_merge_grou
     .unwrap();
 
     let a = new_card(&td, "p", json!({"title": "a", "column": "in_progress"})).await;
-    let b = new_card(&td, "p", json!({"title": "b", "column": "ready", "repo": "app"})).await;
-    let c = new_card(&td, "p", json!({"title": "c", "column": "review", "repo": "app"})).await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title": "b", "column": "ready", "repo": "app"}),
+    )
+    .await;
+    let c = new_card(
+        &td,
+        "p",
+        json!({"title": "c", "column": "review", "repo": "app"}),
+    )
+    .await;
     let r = td
         .post_as(
             &lead,
@@ -6114,23 +6124,25 @@ async fn a_card_admitted_from_review_unparks_its_agent_and_leaves_its_merge_grou
     let kb = card(&td, &b).await;
     assert!(kb.get("queued").is_none(), "{kb}");
     let id = b.clone();
-    let data: Value = s
-        .db
-        .read(move |c| {
-            Ok(c.query_row(
-                "SELECT payload FROM events WHERE kind = 'card' AND card = ?1
-                    AND json_extract(payload, '$.change') = 'admitted'",
-                [&id],
-                |r| r.get::<_, String>(0),
-            )?)
-        })
-        .await
-        .map(|p| serde_json::from_str(&p).unwrap())
-        .unwrap();
+    let read = move |c: &rusqlite::Connection| {
+        Ok(c.query_row(
+            "SELECT payload FROM events WHERE kind = 'card' AND card = ?1
+                AND json_extract(payload, '$.change') = 'admitted'",
+            [&id],
+            |r| r.get::<_, String>(0),
+        )?)
+    };
+    let payload = s.db.read(read).await.unwrap();
+    let data: Value = serde_json::from_str(&payload).unwrap();
     // The converted `lands` rules match on this value (TER-1117).
     assert_eq!(data["change"], "admitted", "{data}");
     assert_eq!(
-        (&data["from"], &data["from_role"], &data["to"], &data["to_role"]),
+        (
+            &data["from"],
+            &data["from_role"],
+            &data["to"],
+            &data["to_role"]
+        ),
         (
             &json!("review"),
             &json!("review"),
