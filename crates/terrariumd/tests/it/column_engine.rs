@@ -879,9 +879,9 @@ async fn no_entry_but_the_upgrade_sets_columns() {
         td.get("/api/projects/flow").await.ok()["board_flow"],
         "code"
     );
-    // The fleet import: a fleet file gives no `board_flow` at all (only a
-    // project file does, and there `columns` does not read: the core test
-    // `a_project_file_cannot_give_the_columns_flow`).
+    // The fleet import: a fleet file gives `board_flow = "columns"` only
+    // with the columns of an exported board (TER-1305), and a project file
+    // not at all (the core test `a_project_file_cannot_give_the_columns_flow`).
     let fleet = "name = \"colfleet\"\n[[projects]]\nname = \"fc\"\nboard_flow = \"columns\"\n\
                  [[projects.agents]]\nname = \"a\"\nharness = \"claude\"\n";
     let r = td.post("/api/fleet/apply", json!({"content": fleet})).await;

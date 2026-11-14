@@ -153,7 +153,8 @@ Rules:
   each column, in board order: its `name`, `role`, and `wip_limit`, and
   the `checks`, `queue`, and `rules` of `GET
   /api/projects/{name}/board/columns/{column}/options`, without the rule
-  IDs (TER-1305). `[[projects.columns]]` needs `board_flow = "columns"`.
+  IDs (TER-1305). `[[projects.columns]]` needs `board_flow = "columns"`,
+  and `board_flow = "columns"` needs `[[projects.columns]]`.
   The apply switches the project to column rules first. Then it adds each
   named column that the board lacks, with its role and WIP limit, after
   the nearest column before it in the file that the board has (one board

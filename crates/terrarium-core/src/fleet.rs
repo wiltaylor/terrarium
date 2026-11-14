@@ -859,6 +859,13 @@ fn project(
     let columns_flow = t.get("board_flow").and_then(toml::Value::as_str) == Some("columns");
     if columns_flow {
         t.remove("board_flow");
+        if columns.is_empty() {
+            issues.push(Issue::error(
+                at,
+                "`board_flow = \"columns\"` comes only with the board: one \
+                 `[[projects.columns]]` for each column (`fleet export` writes them)",
+            ));
+        }
     } else if !columns.is_empty() {
         issues.push(Issue::error(
             format!("{at}.columns"),
@@ -1934,6 +1941,15 @@ board_flow = "rules"
             .unwrap_or_else(|e| panic!("{e:#?}\n{out}"));
         assert_eq!(f, again, "{out}");
         assert!(a.columns.iter().all(|c| c.toml_problem().is_none()));
+        // The columns flow without the board: no (TER-1113 keeps the switch
+        // to the upgrade and to an exported board).
+        let bare = "[[projects]]\nname = \"alpha\"\nboard_flow = \"columns\"\n";
+        let errs = parse(bare, Some("cb")).ok().unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|i| i.at == "projects.alpha" && i.message.contains("board_flow")),
+            "{errs:#?}"
+        );
 
         // A null in a list cannot be written: the export names the rule.
         let mut c = a.columns[0].clone();
