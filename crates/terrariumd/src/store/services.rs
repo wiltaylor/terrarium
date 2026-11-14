@@ -652,6 +652,43 @@ pub fn retained_bytes(conn: &Connection, service: Option<&str>) -> ApiResult<u64
 /// The free space of a filesystem: `(available, total)` bytes.
 pub type FreeSpace = (u64, u64);
 
+/// A free space that [`free_space`] reports in place of the real one.
+static FREE_SPACE_OVERRIDE: std::sync::RwLock<Option<FreeSpace>> = std::sync::RwLock::new(None);
+
+/// Tests: make [`free_space`] report `v` (`None`: the real filesystem
+/// again), so a test does not depend on the disk of the machine that runs
+/// it.
+#[doc(hidden)]
+pub fn override_free_space(v: Option<FreeSpace>) {
+    if let Ok(mut g) = FREE_SPACE_OVERRIDE.write() {
+        *g = v;
+    }
+}
+
+/// The free space of the filesystem of `dir` (the daemon's state
+/// directory), `None` when it cannot be read.
+pub fn free_space(dir: &Path) -> Option<FreeSpace> {
+    if let Some(v) = FREE_SPACE_OVERRIDE.read().ok().and_then(|g| *g) {
+        return Some(v);
+    }
+    #[cfg(unix)]
+    {
+        let s = nix::sys::statvfs::statvfs(dir).ok()?;
+        #[allow(clippy::unnecessary_cast)]
+        let frag = s.fragment_size() as u64;
+        #[allow(clippy::unnecessary_cast)]
+        Some((
+            (s.blocks_available() as u64).saturating_mul(frag),
+            (s.blocks() as u64).saturating_mul(frag),
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
 /// May `size` more payload bytes of `service` be stored? The per-payload
 /// and the per-service limits of the service, the global cap, and the
 /// free-space floor of the state filesystem (O2). `free`: `None` when the
@@ -732,4 +769,68 @@ pub fn mark_payload_deleted(conn: &Connection, id: &str) -> ApiResult<()> {
         params![id, now()],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn service(max_payload: &str, max_retained: &str) -> ServiceRow {
+        let mut def: ServiceDef = serde_json::from_value(serde_json::json!({
+            "kind": "script", "target": "t", "command": ["/x"],
+            "max_payload": max_payload, "max_retained": max_retained,
+        }))
+        .unwrap();
+        def.name = "s".into();
+        ServiceRow {
+            def,
+            scope: "global",
+            source: "api".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// O2: the per-payload limit, the per-service limit, and the 20% floor
+    /// of the state filesystem.
+    #[test]
+    fn the_payload_room_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("t.db")).unwrap();
+        let s = service("100", "150");
+        let plenty = Some((900, 1000));
+        check_payload_room(&conn, &s, 100, plenty).unwrap();
+        let e = check_payload_room(&conn, &s, 101, plenty).unwrap_err();
+        assert_eq!(e.code, Code::TooLarge, "{}", e.message);
+        // 299 of 1000 free; 100 more leaves 19.9%: refused.
+        let e = check_payload_room(&conn, &s, 100, Some((299, 1000))).unwrap_err();
+        assert_eq!(e.code, Code::Unavailable, "{}", e.message);
+        assert!(e.message.contains("20%"), "{}", e.message);
+        // Exactly 20% left passes; an empty payload is never refused by it.
+        check_payload_room(&conn, &s, 100, Some((300, 1000))).unwrap();
+        check_payload_room(&conn, &s, 0, Some((0, 1000))).unwrap();
+        // Unknown free space: the floor is not checked.
+        check_payload_room(&conn, &s, 100, None).unwrap();
+        // Retained bytes of the service count toward max_retained.
+        conn.execute(
+            "INSERT INTO service_requests (id, service, caller, request, payload_size, wait_until, created_at)
+             VALUES ('r1', 's', 'operator', '{}', 100, 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        check_payload_room(&conn, &s, 50, plenty).unwrap();
+        let e = check_payload_room(&conn, &s, 51, plenty).unwrap_err();
+        assert!(e.message.contains("keeps 100"), "{}", e.message);
+    }
+
+    #[test]
+    fn the_override_replaces_the_real_free_space() {
+        let dir = tempfile::tempdir().unwrap();
+        override_free_space(Some((1, 2)));
+        assert_eq!(free_space(dir.path()), Some((1, 2)));
+        override_free_space(None);
+        #[cfg(unix)]
+        assert!(free_space(dir.path()).is_some_and(|(_, t)| t > 0));
+    }
 }

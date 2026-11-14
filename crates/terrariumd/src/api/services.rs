@@ -313,26 +313,6 @@ fn parse_call(headers: &HeaderMap, body: &[u8]) -> ApiResult<Call> {
     Ok(Call { request, payload })
 }
 
-/// The free space of the daemon's state filesystem.
-fn free_space(dir: &std::path::Path) -> Option<store::FreeSpace> {
-    #[cfg(unix)]
-    {
-        let s = nix::sys::statvfs::statvfs(dir).ok()?;
-        #[allow(clippy::unnecessary_cast)]
-        let frag = s.fragment_size() as u64;
-        #[allow(clippy::unnecessary_cast)]
-        Some((
-            (s.blocks_available() as u64).saturating_mul(frag),
-            (s.blocks() as u64).saturating_mul(frag),
-        ))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-        None
-    }
-}
-
 fn write_payload(dir: &std::path::Path, id: &str, data: &[u8]) -> std::io::Result<()> {
     let d = store::payload_dir(dir, id);
     std::fs::create_dir_all(&d)?;
@@ -391,7 +371,7 @@ async fn call(
     let parsed = parse_call(&headers, &bytes)?;
     drop(bytes);
     let size = parsed.payload.as_ref().map_or(0, |p| p.len() as u64);
-    let free = free_space(&state.state_dir);
+    let free = store::free_space(&state.state_dir);
     if free.is_none() && size > 0 {
         tracing::warn!(
             "cannot read the free space of the state directory; the 20% floor is not checked"

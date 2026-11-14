@@ -235,6 +235,9 @@ async fn who_calls_and_who_sees_a_request() {
 /// per service, and the download.
 #[tokio::test]
 async fn payloads_are_stored_and_limited() {
+    // Plenty of free space, whatever the disk of this machine has (the
+    // 20% floor has its unit test in `store::services`).
+    terrariumd::store::services::override_free_space(Some((900 << 30, 1000 << 30)));
     let td = setup().await;
     td.post(
         "/api/services",
