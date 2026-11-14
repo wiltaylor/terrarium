@@ -530,7 +530,10 @@ mod tests {
 
     /// `RERUN_SETTLED` reads `events` only by the card index and the
     /// rowid range after the cursor, never by a scan (TER-1254: a scan of
-    /// `events` read over 700k rows on each move and sweep).
+    /// `events` read over 700k rows on each move and sweep). The
+    /// later-attempt subquery reads only the jobs of the same project and
+    /// `created_at` (TER-1277: by `jobs_project_state` it read every job of
+    /// the project).
     #[test]
     fn rerun_settled_scans_no_table() {
         let mut c = Connection::open_in_memory().unwrap();
@@ -551,5 +554,10 @@ mod tests {
             "{plans:?}"
         );
         assert!(!plans.iter().any(|p| p.starts_with("SCAN")), "{plans:?}");
+        assert!(
+            plans.iter().any(|p| p
+                == "SEARCH k USING INDEX jobs_project_created_at (project=? AND created_at=?)"),
+            "{plans:?}"
+        );
     }
 }
