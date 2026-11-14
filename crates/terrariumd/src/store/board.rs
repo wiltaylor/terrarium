@@ -427,12 +427,12 @@ pub fn column_roles(conn: &Connection, project: &str) -> ApiResult<Vec<(String, 
         .collect())
 }
 
+/// One column of [`column_layout`]: `(name, role, wip_limit)`.
+pub type ColumnLayout = (String, Option<String>, Option<i64>);
+
 /// The columns of the board of `project` as `(name, role, wip_limit)`, in
 /// order, without the cards. The fleet export reads them (TER-1305).
-pub fn column_layout(
-    conn: &Connection,
-    project: &str,
-) -> ApiResult<Vec<(String, Option<String>, Option<i64>)>> {
+pub fn column_layout(conn: &Connection, project: &str) -> ApiResult<Vec<ColumnLayout>> {
     Ok(column_rows(conn, project)?
         .into_iter()
         .map(|c| (c.name, c.role, c.wip_limit))
