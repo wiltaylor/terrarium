@@ -417,7 +417,11 @@ async fn a_final_refusal_fails_at_once_and_a_busy_one_waits_without_a_row() {
     }
     let ra = request(&state, &a).await;
     assert_eq!(ra.state.as_str(), "queued", "{ra:?}");
-    assert_eq!(reservation_rows(&state, &a).await, 0, "a busy wait makes no row");
+    assert_eq!(
+        reservation_rows(&state, &a).await,
+        0,
+        "a busy wait makes no row"
+    );
     set_state("stopped").await;
     tick(&state, Utc::now() + chrono::Duration::seconds(61)).await;
     let ra = request(&state, &a).await;
@@ -462,7 +466,10 @@ async fn a_preflight_refusal_fails_the_request_with_one_row() {
     let ra = request(&state, &a).await;
     assert_eq!(ra.state.as_str(), "failed", "{ra:?}");
     assert!(
-        ra.error.as_deref().unwrap().contains("reservation was refused"),
+        ra.error
+            .as_deref()
+            .unwrap()
+            .contains("reservation was refused"),
         "{ra:?}"
     );
     assert_eq!(reservation_rows(&state, &a).await, 1);
@@ -535,7 +542,11 @@ async fn a_claim_needs_an_image_target_with_a_host() {
         .await
         .unwrap();
     for (target, resources, says) in [
-        ("p-cont", json!({"cpu_millis": 1000}), "managed image target"),
+        (
+            "p-cont",
+            json!({"cpu_millis": 1000}),
+            "managed image target",
+        ),
         ("p-cont", json!({"memory": "1GiB"}), "managed image target"),
         ("p-nohost", json!({"cpu_millis": 1000}), "has no host"),
     ] {

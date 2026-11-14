@@ -156,7 +156,9 @@ async fn release_orphans(state: &Shared, out: &mut Tick) -> ApiResult<()> {
                 info!(reservation = %id, "released a service reservation that no request holds");
                 out.orphans.push(id);
             }
-            Err(e) => warn!(reservation = %id, "cannot release an orphan service reservation: {}", e.message),
+            Err(e) => {
+                warn!(reservation = %id, "cannot release an orphan service reservation: {}", e.message)
+            }
         }
     }
     Ok(())
@@ -595,17 +597,17 @@ async fn refused(
     let message = match why {
         Refusal::Busy(m) => {
             debug!(request = %r.id, "service reservation refused for now: {m}");
-        let (id, next) = (r.id.clone(), fmt(add(at, RETRY)));
-        state
-            .db
-            .write("system", move |t| {
-                t.execute(
-                    "UPDATE service_requests SET retry_at = ?2 WHERE id = ?1",
-                    params![id, next],
-                )?;
-                Ok(())
-            })
-            .await?;
+            let (id, next) = (r.id.clone(), fmt(add(at, RETRY)));
+            state
+                .db
+                .write("system", move |t| {
+                    t.execute(
+                        "UPDATE service_requests SET retry_at = ?2 WHERE id = ?1",
+                        params![id, next],
+                    )?;
+                    Ok(())
+                })
+                .await?;
             out.deferred.push(r.id.clone());
             return Ok(());
         }
