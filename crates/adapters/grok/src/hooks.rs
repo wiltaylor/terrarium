@@ -12,10 +12,13 @@
 //! `toolInput`, and `toolResult` after the call.
 //!
 //! - `UserPromptSubmit` opens a turn and `Stop` closes it (`reason`
-//!   `end_turn`). `StopFailure` closes it too, with a notice. A turn
-//!   cancelled with Ctrl+C sends NO `Stop`: the runner ends it from the
-//!   screen. `/quit` sends `SessionEnd` and then a `Stop` with `reason`
-//!   `shutdown`.
+//!   `end_turn`). `StopFailure` closes it too, with a notice. A turn that
+//!   ends without completing (Ctrl+C, a declined permission question,
+//!   `--max-turns`) sends `StopCancelled` instead of `Stop` (docs
+//!   10-hooks.md); it closes the turn too. The capture had no
+//!   `StopCancelled` handler, so it saw no stop event for its Ctrl+C turn;
+//!   the runner also ends an interrupted turn from the screen. `/quit`
+//!   sends `SessionEnd` and then a `Stop` with `reason` `shutdown`.
 //! - `PermissionDenied` is a denial, NOT a permission request: it is a
 //!   notice, never a question.
 //! - `Notification` is a notice, except `notificationType`
@@ -134,7 +137,7 @@ pub fn hook_events(hook: &HookPayload) -> Vec<Event> {
         "UserPromptSubmit" => vec![Event::TurnStart {
             prompt: s(b, &["prompt", "userPrompt", "user_prompt"]).map(str::to_owned),
         }],
-        "Stop" => vec![Event::TurnEnd],
+        "Stop" | "StopCancelled" => vec![Event::TurnEnd],
         "StopFailure" => vec![
             Event::System {
                 message: format!(
@@ -222,6 +225,12 @@ mod tests {
             }]
         );
         assert_eq!(hook_events(&fixture("Stop")), [Event::TurnEnd]);
+        let cancelled = HookPayload {
+            harness: HarnessId::Grok,
+            hook: "x".into(),
+            body: serde_json::json!({"hookEventName": "stop_cancelled", "sessionId": "s"}),
+        };
+        assert_eq!(hook_events(&cancelled), [Event::TurnEnd]);
         let failed = hook_events(&fixture("StopFailure"));
         assert_eq!(failed.len(), 2);
         assert!(

@@ -56,6 +56,9 @@ pub const GROK_1_0: GrokFlags = GrokFlags {
         "UserPromptSubmit",
         "Stop",
         "StopFailure",
+        // A turn that ends without completing: Ctrl+C, a declined
+        // permission question, `--max-turns` (docs 10-hooks.md, grok 1.0.77).
+        "StopCancelled",
         "PreToolUse",
         "PostToolUse",
         "PostToolUseFailure",

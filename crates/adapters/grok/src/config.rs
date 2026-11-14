@@ -9,7 +9,7 @@
 //!
 //! | File in `<agent dir>/grok/` | Bound over (in the Grok home) | Mode | Why |
 //! |---|---|---|---|
-//! | `hooks/terrarium.json` (in `hooks/`) | `hooks/` | ro | Terrarium's status bridge as PERSONAL hooks ([`hooks_json`]). Personal hooks need no trust: no `--trust` and no `/hooks-trust`. The whole directory is bound, so the operator's own personal hooks stay out of the agents. |
+//! | `hooks/terrarium.json` (in `hooks/`) | `hooks/` | ro | Terrarium's status bridge as PERSONAL hooks ([`hooks_json`]). In grok 1.0.77 an untrusted folder holds back personal hooks too, and with a personal hook installed grok asks the folder trust question in every folder (docs 10-hooks.md, TER-1312 F5): until the folder is trusted no Terrarium hook fires (TER-1327). The whole directory is bound, so the operator's own personal hooks stay out of the agents. |
 //! | `sessions/` | `sessions/` | rw | The sessions (`~/.grok/sessions`, shared by the TUI, headless, and ACP). Shared, each agent could read and resume the sessions of every other agent. |
 //! | `config.toml` | `config.toml` | rw | A copy of the shared `config.toml`, written again at each launch ([`materialize`]). Shared, one agent could change the config of every other agent (rev-1192 F1). A change that grok makes stays in the agent's copy until its next start. |
 //! | `trusted_folders.toml` | `trusted_folders.toml` | rw | Empty at each launch. Grok stores its trust decisions there (`/hooks-trust`, `--trust`). Shared, one agent could trust a folder for every other agent (rev-1192 F1). The operator's own trust list does not reach the agents either. |
@@ -23,7 +23,9 @@
 //!
 //! Grok also reads Claude Code hook files (`.claude/settings.json`) and
 //! Cursor ones from the project; project hooks run only after a trust
-//! decision, which the adapter never gives.
+//! decision, which the adapter never gives. A trust grant covers MCP,
+//! LSP, hooks, project instructions and project skills of the folder
+//! together (docs 10-hooks.md).
 //!
 //! In sandbox mode `none` the overlays are not bound, so the shared home's
 //! own `hooks/` counts, and no Terrarium hook fires: the runner reads the
