@@ -73,6 +73,7 @@ services:
       TERRARIUM_WS_QUERY_TOKEN: ${TERRARIUM_WS_QUERY_TOKEN:-}
       # Staged default OFF. C7 alone owns deployment activation after proof.
       TERRARIUM_PROJECT_PAGES_V2: ${TERRARIUM_PROJECT_PAGES_V2:-0}
+      TERRARIUM_BOARD_COLUMNS: ${TERRARIUM_BOARD_COLUMNS:-1}
       # The operator password at the first start, when none is set (remove it
       # from .env after that), and the session lives (docs/api.md §1.1).
       TERRARIUM_PASSWORD: ${TERRARIUM_PASSWORD:-}
