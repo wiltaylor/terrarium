@@ -5,6 +5,8 @@
 # The harness pins: crates/terrarium-core/build.rs reads it.
 !harnesses.toml
 !crates/**
+# The cargo build env (bundled SQLite flags, TER-1314).
+!.cargo/config.toml
 !dashboard/**
 dashboard/node_modules
 dashboard/dist

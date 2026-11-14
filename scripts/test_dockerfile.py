@@ -41,6 +41,27 @@ class HostArtifacts(unittest.TestCase):
         self.assertIn("COPY compose.yaml ./compose.yaml", DOCKERFILE)
         self.assertIn("\n!compose.yaml\n", ignore)
 
+    def test_every_cargo_stage_has_the_cargo_config(self):
+        # TER-1314: .cargo/config.toml sets LIBSQLITE3_FLAGS. Without it an
+        # image stage builds a different SQLite than the tests use.
+        ignore = (REPO / "docker/Dockerfile.dockerignore").read_text()
+        config = (REPO / ".cargo/config.toml").read_text()
+        self.assertIn("\n!.cargo/config.toml\n", ignore)
+        self.assertIn('LIBSQLITE3_FLAGS = "-DSQLITE_DEFAULT_MEMSTATUS=0"', config)
+        code = "\n".join(
+            line for line in DOCKERFILE.splitlines() if not line.lstrip().startswith("#")
+        )
+        # The text before the first FROM is no stage.
+        stages = code.split("\nFROM ")[1:]
+        cargo_stages = [s for s in stages if "cargo build" in s]
+        self.assertGreaterEqual(len(cargo_stages), 3)
+        for stage in cargo_stages:
+            name = stage.split("\n", 1)[0]
+            with self.subTest(stage=name):
+                copy = stage.find("COPY .cargo ./.cargo\n")
+                self.assertNotEqual(copy, -1)
+                self.assertLess(copy, stage.find("cargo build"))
+
     def test_labels_the_image(self):
         for label in ("source", "licenses", "revision", "version"):
             with self.subTest(label=label):

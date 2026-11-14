@@ -58,6 +58,9 @@ ARG TERRARIUM_RELEASE_PUBKEY
 WORKDIR /src
 COPY Cargo.toml Cargo.lock harnesses.toml ./
 COPY crates ./crates
+# .cargo/config.toml holds the build env every cargo build uses, the bundled
+# SQLite flags among them (TER-1314): the image builds what the tests test.
+COPY .cargo ./.cargo
 # terrariumd embeds the host installer (GET /install/host.sh).
 COPY scripts/install-host.sh ./scripts/install-host.sh
 # terrariumd embeds compose.yaml: `terrariumd release-env-keys` lists its
@@ -87,6 +90,7 @@ RUN apt-get update \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock harnesses.toml ./
 COPY crates ./crates
+COPY .cargo ./.cargo
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/src/target,id=terrarium-host-target \
@@ -122,6 +126,7 @@ RUN test "$(rustc --version | awk '{print $2}')" = "$(cat /tmp/expected-rust-ver
 WORKDIR /src
 COPY Cargo.toml Cargo.lock harnesses.toml ./
 COPY crates ./crates
+COPY .cargo ./.cargo
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/src/target,id=terrarium-windows-host-target \
