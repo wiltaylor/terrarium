@@ -816,20 +816,25 @@ pub fn mark_payload_deleted(conn: &Connection, id: &str) -> ApiResult<()> {
 /// The most request rows that one sweep deletes (TER-1285).
 pub const PRUNE_BATCH: usize = 500;
 
+/// The prune of [`prune_ended`]. It walks `service_requests_prunable`
+/// (migration `ter-1285-service-request-prune.sql`) in `ended_at` order
+/// and stops after the batch. `+state` keeps the planner off
+/// `service_requests_state`, which would read every ended row and sort
+/// them. Every final state sets `ended_at` (`transition`), so a row with
+/// no `ended_at` is not ended and stays.
+pub const PRUNE_SQL: &str = "DELETE FROM service_requests WHERE id IN (
+       SELECT id FROM service_requests
+       WHERE payload_deleted_at IS NOT NULL AND ended_at < ?1
+         AND +state IN ('done', 'failed', 'cancelled', 'timed_out')
+       ORDER BY ended_at LIMIT ?2)";
+
 /// Delete at most `limit` ended request rows that ended before `cutoff`
-/// and whose payload is gone (TER-1285). An open request, or one whose
-/// payload is still there, stays. Returns the number deleted.
+/// and whose payload is gone, the oldest end first (TER-1285). An open
+/// request, or one whose payload is still there, stays. Returns the
+/// number deleted.
 pub fn prune_ended(conn: &Connection, cutoff: &str, limit: usize) -> ApiResult<usize> {
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-    let n = conn.execute(
-        "DELETE FROM service_requests WHERE id IN (
-           SELECT id FROM service_requests
-           WHERE state IN ('done', 'failed', 'cancelled', 'timed_out')
-             AND payload_deleted_at IS NOT NULL
-             AND COALESCE(ended_at, created_at) < ?1
-           ORDER BY id LIMIT ?2)",
-        params![cutoff, limit],
-    )?;
+    let n = conn.execute(PRUNE_SQL, params![cutoff, limit])?;
     Ok(n)
 }
 
@@ -847,12 +852,14 @@ mod tests {
         let rows = [
             // id, state, ended_at, payload_deleted_at
             ("r1", "done", Some("2026-01-01"), Some("2026-01-08")),
-            ("r2", "failed", Some("2026-01-01"), Some("2026-01-08")),
-            ("r3", "timed_out", Some("2026-01-01"), Some("2026-01-08")),
+            ("r2", "failed", Some("2026-01-03"), Some("2026-01-08")),
+            ("r3", "timed_out", Some("2026-01-02"), Some("2026-01-08")),
             ("r4", "cancelled", Some("2026-01-01"), None),
             ("r5", "done", Some("2026-03-01"), Some("2026-03-08")),
             ("r6", "running", None, Some("2026-01-08")),
             ("r7", "queued", None, Some("2026-01-08")),
+            // No `ended_at`: not ended, whatever the state says.
+            ("r8", "done", None, Some("2026-01-08")),
         ];
         for (id, state, ended, deleted) in rows {
             conn.execute(
@@ -873,11 +880,34 @@ mod tests {
                 .collect::<Result<_, _>>()
                 .unwrap()
         };
+        // The oldest ends go first: r1, then r3.
         assert_eq!(prune_ended(&conn, "2026-02-01", 2).unwrap(), 2);
-        assert_eq!(left(&conn), ["r3", "r4", "r5", "r6", "r7"]);
+        assert_eq!(left(&conn), ["r2", "r4", "r5", "r6", "r7", "r8"]);
         assert_eq!(prune_ended(&conn, "2026-02-01", 2).unwrap(), 1);
         assert_eq!(prune_ended(&conn, "2026-02-01", 2).unwrap(), 0);
-        assert_eq!(left(&conn), ["r4", "r5", "r6", "r7"]);
+        assert_eq!(left(&conn), ["r4", "r5", "r6", "r7", "r8"]);
+    }
+
+    /// TER-1285: the prune walks the partial `ended_at` index and stops
+    /// after its batch: no scan of the ended rows, no sort.
+    #[test]
+    fn prune_ended_uses_the_prunable_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("t.db")).unwrap();
+        let mut st = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {PRUNE_SQL}"))
+            .unwrap();
+        let plan = st
+            .query_map(params!["2026-01-01T00:00:00.000Z", 500], |r| {
+                r.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(plan.contains("service_requests_prunable"), "{plan}");
+        assert!(!plan.contains("service_requests_state"), "{plan}");
+        assert!(!plan.contains("USE TEMP B-TREE"), "{plan}");
     }
 
     fn service(max_payload: &str, max_retained: &str) -> ServiceRow {

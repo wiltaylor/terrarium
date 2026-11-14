@@ -514,6 +514,11 @@ async fn payloads_go_after_the_seven_day_retention() {
         .get_as("p/w1", &format!("/api/service-requests/{ended}"))
         .await;
     assert_eq!(row.status, 200, "{}", row.body);
+    // A keep time with no valid cutoff skips the prune; the sweep does
+    // not panic.
+    terrariumd::service_sweep::sweep_with(&state, now, std::time::Duration::MAX)
+        .await
+        .unwrap();
     terrariumd::service_sweep::sweep(&state, now + chrono::Duration::days(31))
         .await
         .unwrap();

@@ -25,13 +25,23 @@ pub const ENV_REQUEST_KEEP: &str = "TERRARIUM_SERVICE_REQUEST_KEEP";
 /// The default of [`ENV_REQUEST_KEEP`].
 pub const DEFAULT_REQUEST_KEEP: Duration = Duration::from_secs(30 * 24 * 3600);
 
+/// The longest value of [`ENV_REQUEST_KEEP`]: 3650 days.
+pub const MAX_REQUEST_KEEP: Duration = Duration::from_secs(3650 * 24 * 3600);
+
 /// A value of [`ENV_REQUEST_KEEP`]: a duration of at least the payload
-/// retention, so that a row goes only after its payload.
+/// retention, so that a row goes only after its payload, and at most
+/// [`MAX_REQUEST_KEEP`], so that the cutoff is always a valid time.
 pub fn parse_request_keep(s: &str) -> Result<Duration, String> {
     let d = crate::settings::parse_duration(s)?;
     if d < terrarium_core::service::RETENTION {
         return Err(format!(
             "`{}`: keep the request rows at least 7d (the payload retention)",
+            s.trim()
+        ));
+    }
+    if d > MAX_REQUEST_KEEP {
+        return Err(format!(
+            "`{}`: keep the request rows at most 3650d",
             s.trim()
         ));
     }
@@ -137,8 +147,15 @@ pub async fn sweep_with(
     }
     // The rows go after their payload: a row whose payload is still there
     // stays (TER-1285).
-    let keep = chrono::Duration::from_std(keep).unwrap_or_else(|_| chrono::Duration::days(30));
-    let cutoff = fmt(at - keep);
+    // A keep time with no valid cutoff skips the prune; the sweep goes on.
+    let Some(cutoff) = chrono::Duration::from_std(keep)
+        .ok()
+        .and_then(|k| at.checked_sub_signed(k))
+    else {
+        warn!("the service request keep time is out of range: no prune");
+        return Ok((timed_out.len(), deleted));
+    };
+    let cutoff = fmt(cutoff);
     let pruned = state
         .db
         .write("system", move |t| {
@@ -202,6 +219,9 @@ mod tests {
             terrarium_core::service::RETENTION
         );
         assert!(parse_request_keep("6d").unwrap_err().contains("7d"));
+        assert_eq!(parse_request_keep("3650d").unwrap(), MAX_REQUEST_KEEP);
+        assert!(parse_request_keep("3651d").unwrap_err().contains("3650d"));
+        assert!(parse_request_keep("100000000d").is_err());
         assert!(parse_request_keep("soon").is_err());
     }
 }
