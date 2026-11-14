@@ -3368,8 +3368,9 @@ pub fn set_columns(
         .collect();
     // A rule of a column that stays may not name a removed column
     // (TER-1159), nor a role that no column has after the change
-    // (TER-1210): refused before anything is written. The references
-    // resolve on the board after the change (TER-1199).
+    // (TER-1210), nor move `@x` to another column, by name or by a new
+    // role (TER-1246, TER-1252): refused before anything is written. The
+    // references resolve on the board after the change (TER-1199).
     let removed: Vec<&ColumnRow> = current.iter().filter(|c| !kept.contains(&c.id)).collect();
     let after: Vec<terrarium_core::rules_file::BoardColumn> = wanted
         .iter()
