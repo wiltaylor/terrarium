@@ -11,8 +11,12 @@
 //! - **Requests.** `service_requests`, one row per call, in arrival order
 //!   (the ULID). The states and their edges are `terrarium_core::service::State`.
 //! - **Payloads.** Files in `<state>/services/payloads/<id>/`
-//!   ([`payload_dir`]). The caps are checked by [`check_payload_room`];
-//!   [`expired_payloads`] lists those past the retention.
+//!   ([`payload_dir`]): the request payload `request`, and the response
+//!   files under `response/` ([`response_dir`], written by C3 and C4). The
+//!   caps are checked by [`check_payload_room`]; [`expired_payloads`] lists
+//!   those past the retention, which counts from the request's end.
+//! - **The result mail** (C5, `crate::service_mail`): an ended request
+//!   with no `mailed_at` is due its one mail ([`unmailed`], [`mark_mailed`]).
 
 use std::path::{Path, PathBuf};
 
@@ -376,6 +380,10 @@ pub struct RequestRow {
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub payload_deleted_at: Option<String>,
+    /// The end of the run's log, for a failed run (TER-1268).
+    pub log_tail: Option<String>,
+    /// When the result mail was written (TER-1268); `None` while it is due.
+    pub mailed_at: Option<String>,
     /// The place in the service's queue (1 is next), for a queued request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<u64>,
@@ -383,7 +391,7 @@ pub struct RequestRow {
 
 const REQ_COLS: &str = "id, service, project, caller, caller_agent, state, request, payload_size, \
      payload_sha256, response, exit_code, error, wait_until, created_at, started_at, ended_at, \
-     payload_deleted_at";
+     payload_deleted_at, log_tail, mailed_at";
 
 fn json_col(s: Option<String>, i: usize) -> rusqlite::Result<Option<Value>> {
     s.map(|s| {
@@ -422,6 +430,8 @@ fn req_row(r: &Row<'_>) -> rusqlite::Result<RequestRow> {
         started_at: r.get(14)?,
         ended_at: r.get(15)?,
         payload_deleted_at: r.get(16)?,
+        log_tail: r.get(17)?,
+        mailed_at: r.get(18)?,
         position: None,
     })
 }
@@ -538,6 +548,8 @@ pub struct Outcome {
     pub response: Option<Value>,
     pub exit_code: Option<i64>,
     pub error: Option<String>,
+    /// The end of the run's log (a failed run: the failure mail carries it).
+    pub log_tail: Option<String>,
 }
 
 /// Move request `id` from `from` to `to`. A request that is not in `from`
@@ -563,7 +575,8 @@ pub fn transition(
            ended_at = CASE WHEN ?5 THEN ?4 ELSE ended_at END,
            response = COALESCE(?6, response),
            exit_code = COALESCE(?7, exit_code),
-           error = COALESCE(?8, error)
+           error = COALESCE(?8, error),
+           log_tail = COALESCE(?9, log_tail)
          WHERE id = ?1 AND state = ?2",
         params![
             id,
@@ -574,6 +587,7 @@ pub fn transition(
             out.response.map(|v| v.to_string()),
             out.exit_code,
             out.error,
+            out.log_tail,
         ],
     )?;
     if n == 0 {
@@ -674,6 +688,14 @@ pub fn payload_dir(state_dir: &Path, id: &str) -> PathBuf {
 /// The request payload file of request `id`.
 pub fn payload_file(state_dir: &Path, id: &str) -> PathBuf {
     payload_dir(state_dir, id).join("request")
+}
+
+/// The response files of request `id` (TER-1268): C3 and C4 put the files
+/// of the run's output directory here, and `GET
+/// /api/service-requests/{id}/result` lists them. The retention deletes
+/// them with the request payload.
+pub fn response_dir(state_dir: &Path, id: &str) -> PathBuf {
+    payload_dir(state_dir, id).join("response")
 }
 
 /// The payload bytes kept for `service`, or for every service.
@@ -788,13 +810,15 @@ fn full(msg: String) -> ApiError {
     ApiError::new(Code::Unavailable, msg)
 }
 
-/// The requests whose payload is past the retention (created before
-/// `cutoff`) and not yet deleted. Only ended requests: a payload of an
-/// open request stays.
+/// The requests whose payloads are past the retention (ended before
+/// `cutoff`) and not yet deleted. Only ended requests: the payload of an
+/// open request stays. The retention counts from the end, not from the
+/// call (TER-1268, rev-1264b minor 2): a response written at the end of a
+/// long wait and run is kept the full 7 days.
 pub fn expired_payloads(conn: &Connection, cutoff: &str) -> ApiResult<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT id FROM service_requests
-         WHERE payload_deleted_at IS NULL AND created_at < ?1
+         WHERE payload_deleted_at IS NULL AND ended_at < ?1
            AND state IN ('done', 'failed', 'cancelled', 'timed_out')
          ORDER BY id",
     )?;
@@ -802,6 +826,30 @@ pub fn expired_payloads(conn: &Connection, cutoff: &str) -> ApiResult<Vec<String
         .query_map([cutoff], |r| r.get(0))?
         .collect::<Result<Vec<String>, _>>()?;
     Ok(ids)
+}
+
+/// The ended requests whose result mail is due, oldest first, at most
+/// `limit` (TER-1268).
+pub fn unmailed(conn: &Connection, limit: usize) -> ApiResult<Vec<RequestRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {REQ_COLS} FROM service_requests
+         WHERE mailed_at IS NULL AND state IN ('done', 'failed', 'cancelled', 'timed_out')
+         ORDER BY id LIMIT ?1"
+    ))?;
+    let rows = stmt
+        .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], req_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Mark the result mail of `id` as written. `false`: it was marked
+/// already (another writer sent it), so the caller must not send it again.
+pub fn mark_mailed(conn: &Connection, id: &str) -> ApiResult<bool> {
+    let n = conn.execute(
+        "UPDATE service_requests SET mailed_at = ?2 WHERE id = ?1 AND mailed_at IS NULL",
+        params![id, now()],
+    )?;
+    Ok(n == 1)
 }
 
 /// The payload files of `id` are gone.

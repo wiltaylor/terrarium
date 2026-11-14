@@ -4186,6 +4186,19 @@ pub enum ServiceCmd {
     Status { id: String },
     /// Cancel a request that has not ended
     Cancel { id: String },
+    /// Fetch the result of an ended request: `<dir>/result.json` (the
+    /// state, exit code, error, log tail, and response JSON) and the
+    /// response files under `<dir>/files/`, each checked against its
+    /// sha256. Kept 7 days from the end of the request
+    Result {
+        id: String,
+        /// The directory to write to; made when missing
+        #[arg(long)]
+        out: std::path::PathBuf,
+        /// Overwrite files that are there already
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// `terrarium skill ...` (docs/api.md §26).

@@ -1,7 +1,8 @@
 //! The service request sweep (TER-1264, design D3 and Q2 A): every minute,
 //! the requests that did not start within their wait limit end as
-//! `timed_out` and their callers get a mail; the payloads of ended
-//! requests older than the 7-day retention are deleted.
+//! `timed_out`; each ended request whose result mail is due gets it
+//! (TER-1268); the payloads of requests that ended more than the 7-day
+//! retention ago are deleted.
 
 use std::time::Duration;
 
@@ -10,8 +11,7 @@ use tracing::{info, warn};
 
 use crate::api::Shared;
 use crate::error::ApiResult;
-use crate::store::mail::{self, Address, Outgoing};
-use crate::store::services::{self as store, RequestRow};
+use crate::store::services as store;
 
 /// How often the sweep runs.
 pub const TICK: Duration = Duration::from_secs(60);
@@ -51,19 +51,11 @@ pub async fn sweep(state: &Shared, at: chrono::DateTime<chrono::Utc>) -> ApiResu
         .await?;
     for r in &timed_out {
         info!(request = %r.id, service = %r.service, "service request timed out waiting");
-        // One mail per request, each in its own write: a caller that is
-        // gone does not hold back the others.
-        let r = r.clone();
-        if let Err(e) = state
-            .db
-            .write("system", move |t| mail_timed_out(t, &r))
-            .await
-        {
-            warn!(
-                "cannot mail the time-out of a service request: {}",
-                e.message
-            );
-        }
+    }
+    // The result mail of each request that ended (here, in a run, or by a
+    // cancel) and has none yet (TER-1268, `crate::service_result`).
+    if let Err(e) = crate::service_result::send_due(state).await {
+        warn!("cannot send the service result mails: {}", e.message);
     }
     let retention = chrono::Duration::from_std(terrarium_core::service::RETENTION)
         .unwrap_or_else(|_| chrono::Duration::days(7));
@@ -90,42 +82,4 @@ pub async fn sweep(state: &Shared, at: chrono::DateTime<chrono::Utc>) -> ApiResu
         deleted += 1;
     }
     Ok((timed_out.len(), deleted))
-}
-
-/// The caller's address of `r`: the operator, or the agent of its label.
-fn caller_address(r: &RequestRow) -> Option<Address> {
-    let Some(id) = &r.caller_agent else {
-        return Some(Address::Operator);
-    };
-    let (project, name) = r.caller.strip_prefix("agent:")?.split_once('/')?;
-    Some(Address::Agent {
-        id: id.clone(),
-        name: name.to_owned(),
-        project: project.to_owned(),
-    })
-}
-
-fn mail_timed_out(t: &mut crate::db::Tx<'_>, r: &RequestRow) -> ApiResult<()> {
-    let Some(to) = caller_address(r) else {
-        return Ok(());
-    };
-    let subject = format!("Service {}: request {} timed out", r.service, r.id);
-    let body = format!(
-        "Your request `{}` to service `{}` did not start before its wait limit ({}), so it \
-         ended as `timed_out`. It was not run.\n\nSend it again with `terrarium service call {}` \
-         when the service has room. See it with `terrarium service status {}`.",
-        r.id, r.service, r.wait_until, r.service, r.id
-    );
-    mail::send(
-        t,
-        Outgoing {
-            from: &Address::System,
-            to: &to,
-            subject: &subject,
-            body: &body,
-            thread: None,
-            in_reply_to: None,
-        },
-    )?;
-    Ok(())
 }

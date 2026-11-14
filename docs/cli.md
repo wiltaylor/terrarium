@@ -851,11 +851,14 @@ terrarium service call <name> [--request <json|@file>] [--payload <file>]   queu
 terrarium service requests <name> [--state <s>] [--limit <n>]   the requests: all for its admins, else your own
 terrarium service status <id>                one request: its state, its place in the queue, its result
 terrarium service cancel <id>                cancel a request that has not ended
+terrarium service result <id> --out <dir> [--force]   fetch the result of an ended request
 ```
 
 - `--request` is the request JSON (not `--json`: that is the global output flag).
 - The payload goes as base64 in the JSON body, so a payload of 64 MiB is a body of about 86 MiB.
 - A request waits at most the service's `wait_limit` (default 24h) to start; then it ends as `timed_out` and you get a mail.
+- At the end you get one mail (TER-1268): the request ID, the state, the exit code, the response JSON, the number and size of the response files, and the fetch command. A failure mail also has the error and the end of the log; nothing is tried again. A cancel of your own request sends no mail.
+- `result` writes `<dir>/result.json` (the state, exit code, error, log tail, and response JSON) and the response files under `<dir>/files/`. Each file comes in chunks of at most 8 MiB and is checked against its size and sha256. It refuses to overwrite a file without `--force`. Only the caller and the service's admins may fetch a result. It is kept 7 days from the end of the request.
 
 ### System prompts
 

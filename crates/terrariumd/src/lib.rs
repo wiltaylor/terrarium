@@ -75,6 +75,7 @@ pub mod sandbox;
 pub mod scheduler;
 pub mod secrets;
 pub mod self_update;
+pub mod service_result;
 pub mod service_sweep;
 pub mod session_archive;
 pub mod settings;

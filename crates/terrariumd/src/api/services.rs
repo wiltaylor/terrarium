@@ -14,6 +14,10 @@
 //! field and part is optional. The answer is `201`
 //! `{id, service, state, position, status_url}` at once.
 //!
+//! The result of an ended request and its fetch are in
+//! `api::service_results` (TER-1268, C5); the result mail is
+//! `crate::service_result`.
+//!
 //! Each change writes an audit row: `service.create`, `service.update`,
 //! `service.delete`, `service.call`, `service.cancel`.
 
@@ -532,7 +536,7 @@ async fn requests_of(
     ))
 }
 
-async fn visible_request(state: &Shared, actor: &Actor, id: &str) -> ApiResult<RequestRow> {
+pub(super) async fn visible_request(state: &Shared, actor: &Actor, id: &str) -> ApiResult<RequestRow> {
     let i = id.to_owned();
     state
         .db
@@ -555,21 +559,33 @@ async fn request_cancel(
     actor: Actor,
     Path(id): Path<String>,
 ) -> ApiResult<Json<RequestRow>> {
-    visible_request(&state, &actor, &id).await?;
+    let cur = visible_request(&state, &actor, &id).await?;
     let why = format!("cancelled by {}", caller_of(&actor).label());
+    // The caller who cancels its own request knows: no result mail
+    // (TER-1268). An admin's cancel mails the caller.
+    let own = match actor.agent() {
+        Some(a) => cur.caller_agent.as_deref() == Some(a.id.as_str()),
+        None => cur.caller_agent.is_none(),
+    };
     let r = state
         .db
         .write(actor.label(), move |t| {
             let r = store::cancel(t, &id, &why)?;
+            if own {
+                store::mark_mailed(t, &r.id)?;
+            }
             t.audit(
                 "service.cancel",
                 &r.service,
                 r.project.as_deref(),
                 json!({"request": r.id}),
             )?;
-            Ok(r)
+            store::get_request(t, &r.id)
         })
         .await?;
+    if !own && let Err(e) = crate::service_result::send_due(&state).await {
+        tracing::warn!("cannot send the service result mails: {}", e.message);
+    }
     Ok(Json(r))
 }
 

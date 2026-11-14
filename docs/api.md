@@ -8662,9 +8662,8 @@ TER-1264 (Services C1, design D1-D3 of Inbox thread
 request queue. A caller sends a request (JSON and an optional payload file)
 and gets a request ID at once; the daemon runs the request later on the
 service's target. This section has the definition, the queue, the request
-states, and the payload store. Scheduling and the run (C2-C4), the result
-mail and fetch (C5), and outside HTTP callers (C6) come later: in C1 a
-request stays `queued` until it is cancelled or times out.
+states, the payload store, and the result mail and fetch (C5, TER-1268).
+Scheduling and the run (C2-C4) and outside HTTP callers (C6) come later.
 
 **Definition.** `services/<name>.toml` in the config repo (source `file`;
 `POST /api/reload` picks up a change), or `POST /api/services` (source
@@ -8735,6 +8734,8 @@ that finds its file again, and the file checks, makes it active again.
 | `GET /api/service-requests/{id}` | the caller or an admin of the service | one request |
 | `POST /api/service-requests/{id}/cancel` | the same | `409` when it has ended |
 | `GET /api/service-requests/{id}/payload` | the same | the payload, `application/octet-stream`, with `x-terrarium-sha256`; `404` when there is none or the retention deleted it |
+| `GET /api/service-requests/{id}/result` | the same | the result of an ended request (below); `409` before the end |
+| `GET /api/service-requests/{id}/result/{path}` | the same | one response file (below) |
 
 **A call.** The body is one of:
 
@@ -8767,8 +8768,10 @@ refused by the space limits.
 `project`, `caller` (`operator` or `agent:<project>/<name>`),
 `caller_agent`, `state`, `request`, `payload_size`, `payload_sha256`,
 `response`, `exit_code`, `error`, `wait_until`, `created_at`,
-`started_at`, `ended_at`, `payload_deleted_at`, and `position` (the place
-in the queue, 1 is next) while it is `queued`.
+`started_at`, `ended_at`, `payload_deleted_at`, `log_tail` (the end of the
+run's log, for a failed run), `mailed_at` (when the result mail was
+written), and `position` (the place in the queue, 1 is next) while it is
+`queued`.
 
 | State | Meaning | Next |
 |---|---|---|
@@ -8784,15 +8787,66 @@ in order (Q3 A).
 **The sweep** runs each minute:
 
 - A `queued` or `waiting` request still there at `wait_until` (the call
-  time plus `wait_limit`) ends as `timed_out` (Q5 A). Its caller gets a
-  mail from `system`, and the audit has `service.timed_out`.
-- The payload of an ended request whose call is more than 7 days old is
-  deleted, and `payload_deleted_at` is set; its bytes stop counting toward
-  the caps (Q2 A). The payload of an open request stays. The request rows
-  stay: nothing prunes them yet.
+  time plus `wait_limit`) ends as `timed_out` (Q5 A), and the audit has
+  `service.timed_out`. Its caller gets the result mail (below).
+- Each ended request whose result mail is due gets it.
+- The payload directory of a request that ended more than 7 days ago
+  (the request payload and the response files) is deleted, and
+  `payload_deleted_at` is set; its bytes stop counting toward the caps
+  (Q2 A). The retention counts from `ended_at`, not from the call
+  (TER-1268, rev-1264b minor 2): a response written after a long wait and
+  run is kept the full 7 days. The payload of an open request stays. The
+  request rows stay: nothing prunes them yet.
+
+**The result mail** (C5, design D6, TER-1268). Each request gets one mail
+from `system` to its caller when it ends, whatever ended it: a run (C3,
+C4), the wait limit, or a cancel. The subject is `Service <name>: request
+<id> <state>`. The body has the request ID, the state, the exit code, the
+error, the end time, the number and bytes of the response files, the
+response JSON (the first 16 KiB), and the fetch command `terrarium service
+result <id> --out <dir>`. A `failed` or `timed_out` mail adds the last
+8 KiB of `log_tail` and says to send the request again: nothing is tried
+again (Q4 A). The mail is redacted as every mail is. The mail has no
+attachment: the files are fetched.
+
+The mail is an outbox: an ended request with no `mailed_at` is due, and
+one write sends the mail and sets `mailed_at`, so a request never gets two.
+The sweep sends the due mails each minute; the cancel route sends at once;
+C3 and C4 call `service_result::send_due` after they end a request. A
+caller that cancels its own request gets no mail. A mail that cannot be
+written (the caller is gone) is marked with a warning in the log.
+
+**The result.** `GET /api/service-requests/{id}/result` (the caller or an
+admin of the service; others `404`; `409` before the end):
+
+```json
+{"id": "01M7...", "service": "video-gen", "state": "done", "exit_code": 0,
+ "error": null, "log_tail": null, "response": {"frames": 120},
+ "started_at": "...", "ended_at": "...", "files_deleted_at": null,
+ "files": [{"path": "out/video.mp4", "size": 1048576, "sha256": "..."}],
+ "files_cut": false}
+```
+
+The response files are the regular files under
+`<state>/services/payloads/<id>/response/`, where C3 and C4 put the
+run's output. The list leaves out symbolic links and special files, does
+not follow a linked directory, and has at most 10000 files (`files_cut`
+when there are more). After the retention, `files` is empty and
+`files_deleted_at` is set.
+
+`GET /api/service-requests/{id}/result/{path}` answers one listed file:
+the bytes as `application/octet-stream` (`Content-Disposition:
+attachment`, `nosniff`, a sandbox CSP), or with `?format=json` one chunk
+`{path, size, offset, length, eof, data_base64}` of at most 8 MiB from
+`?offset=` (default 0), `?length=` to ask for less. The agent transports
+carry JSON only, so the CLI uses the chunks. A path with a root, `.`,
+`..`, an empty part, or a symbolic link on the way is `404`, and so is a
+file past the retention.
+
 
 The audit actions: `service.create`, `service.update`, `service.delete`,
-`service.call`, `service.cancel`, `service.timed_out`.
+`service.call`, `service.cancel`, `service.timed_out`. A result fetch is a
+read and writes no audit row.
 
 ## 18. Fleet
 
