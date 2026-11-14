@@ -471,9 +471,8 @@ pub fn insert_request(t: &mut Tx<'_>, n: &NewRequest<'_>) -> ApiResult<RequestRo
     let at = chrono::Utc::now();
     let wait = chrono::Duration::from_std(n.service.def.wait_limit())
         .map_err(|e| ApiError::internal(format!("bad wait limit: {e}")))?;
-    let fmt = |d: chrono::DateTime<chrono::Utc>| {
-        d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-    };
+    let fmt =
+        |d: chrono::DateTime<chrono::Utc>| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     t.execute(
         "INSERT INTO service_requests
            (id, service, project, caller, caller_agent, state, request, payload_size,
@@ -603,7 +602,9 @@ pub fn time_out_waits(t: &mut Tx<'_>, at: &str) -> ApiResult<Vec<RequestRow>> {
          WHERE state IN ('queued', 'waiting') AND wait_until <= ?1 ORDER BY id",
     )?;
     let due = stmt
-        .query_map([at], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .query_map([at], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
     let mut out = Vec::new();
@@ -693,7 +694,8 @@ pub fn check_payload_room(
     }
     if let Some((avail, total)) = free
         && total > 0
-        && avail.saturating_sub(size).saturating_mul(100) < total.saturating_mul(core::MIN_FREE_PERCENT)
+        && avail.saturating_sub(size).saturating_mul(100)
+            < total.saturating_mul(core::MIN_FREE_PERCENT)
     {
         return Err(full(format!(
             "the state filesystem would have under {}% free: no new payloads",

@@ -34,7 +34,8 @@ async fn setup() -> TestDaemon {
 }
 
 fn script(name: &str, project: Option<&str>, target: &str) -> Value {
-    let mut v = json!({"name": name, "kind": "script", "target": target, "command": ["/opt/svc/run"]});
+    let mut v =
+        json!({"name": name, "kind": "script", "target": target, "command": ["/opt/svc/run"]});
     if let Some(p) = project {
         v["project"] = p.into();
     }
@@ -73,10 +74,22 @@ async fn a_definition_follows_the_rules() {
             422,
             "not a docker target",
         ),
-        (script("t2", Some("p"), "q-box"), 422, "not a target of project"),
+        (
+            script("t2", Some("p"), "q-box"),
+            422,
+            "not a target of project",
+        ),
         (script("t3", None, "nope"), 422, "no target"),
-        (with(script("t4", None, "box"), json!({"concurrency": 0})), 422, "concurrency"),
-        (with(script("t5", None, "box"), json!({"shell": true})), 400, ""),
+        (
+            with(script("t4", None, "box"), json!({"concurrency": 0})),
+            422,
+            "concurrency",
+        ),
+        (
+            with(script("t5", None, "box"), json!({"shell": true})),
+            400,
+            "",
+        ),
         (script("video-gen", Some("p"), "p-gpu"), 409, "exists"),
     ] {
         let r = td.post("/api/services", body.clone()).await;
@@ -145,7 +158,11 @@ async fn who_calls_and_who_sees_a_request() {
         .ok();
     // An empty callers list: the project's agents.
     let r = td
-        .post_as("p/w1", "/api/services/own/requests", json!({"request": {"n": 1}}))
+        .post_as(
+            "p/w1",
+            "/api/services/own/requests",
+            json!({"request": {"n": 1}}),
+        )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let id = r.body["id"].as_str().unwrap().to_owned();
@@ -172,8 +189,14 @@ async fn who_calls_and_who_sees_a_request() {
             .map(|s| s["name"].as_str().unwrap().to_owned())
             .collect()
     };
-    assert_eq!(names(td.get_as("q/x1", "/api/services").await.ok()), ["shared"]);
-    assert_eq!(names(td.get_as("p/w2", "/api/services").await.ok()), ["own"]);
+    assert_eq!(
+        names(td.get_as("q/x1", "/api/services").await.ok()),
+        ["shared"]
+    );
+    assert_eq!(
+        names(td.get_as("p/w2", "/api/services").await.ok()),
+        ["own"]
+    );
     assert_eq!(names(td.get("/api/services").await.ok()).len(), 3);
     // The request: its caller and the lead see it; another member does not.
     let path = format!("/api/service-requests/{id}");
@@ -195,9 +218,13 @@ async fn who_calls_and_who_sees_a_request() {
     td.post_as("p/w2", &format!("{path}/cancel"), json!({}))
         .await
         .err(404, "not_found");
-    let r = td.post_as("p/w1", &format!("{path}/cancel"), json!({})).await;
+    let r = td
+        .post_as("p/w1", &format!("{path}/cancel"), json!({}))
+        .await;
     assert_eq!(r.ok()["state"], "cancelled");
-    let r = td.post_as("p/w1", &format!("{path}/cancel"), json!({})).await;
+    let r = td
+        .post_as("p/w1", &format!("{path}/cancel"), json!({}))
+        .await;
     assert_eq!(r.status, 409, "{}", r.body);
     // A service with an open request is not removed.
     let r = td.delete("/api/services/own").await;
@@ -218,18 +245,21 @@ async fn payloads_are_stored_and_limited() {
     )
     .await
     .ok();
-    let call = |b64: &str| {
-        json!({"request": {"x": 1}, "payload_base64": b64})
-    };
+    let call = |b64: &str| json!({"request": {"x": 1}, "payload_base64": b64});
     // "BYTES" (5 bytes).
     let r = td
         .post_as("p/w1", "/api/services/small/requests", call("QllURVM="))
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let id = r.body["id"].as_str().unwrap().to_owned();
-    let row = td.get_as("p/w1", &format!("/api/service-requests/{id}")).await;
+    let row = td
+        .get_as("p/w1", &format!("/api/service-requests/{id}"))
+        .await;
     assert_eq!(row.ok()["payload_size"], 5);
-    assert_eq!(row.ok()["payload_sha256"], "7beb23b48f4fe9109f7cf593f427eec383dee0c07cea52c37a2feee28c3a8c5f");
+    assert_eq!(
+        row.ok()["payload_sha256"],
+        "7beb23b48f4fe9109f7cf593f427eec383dee0c07cea52c37a2feee28c3a8c5f"
+    );
     let file = td.state.join("services/payloads").join(&id).join("request");
     assert_eq!(std::fs::read(&file).unwrap(), b"BYTES");
     let dl = td
@@ -318,7 +348,9 @@ async fn a_request_past_its_wait_limit_times_out_with_a_mail() {
         .await
         .unwrap();
     assert_eq!(n, 1);
-    let row = td.get_as("p/w1", &format!("/api/service-requests/{id}")).await;
+    let row = td
+        .get_as("p/w1", &format!("/api/service-requests/{id}"))
+        .await;
     assert_eq!(row.ok()["state"], "timed_out");
     assert!(row.ok()["ended_at"].is_string());
     let mail = td.mail_of("p/w1").await;

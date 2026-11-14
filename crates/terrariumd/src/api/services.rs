@@ -133,7 +133,9 @@ fn no_request(id: &str) -> ApiError {
 
 async fn list(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Vec<ServiceRow>>> {
     let rows = state.db.read(store::list).await?;
-    Ok(Json(rows.into_iter().filter(|r| may_see(&actor, r)).collect()))
+    Ok(Json(
+        rows.into_iter().filter(|r| may_see(&actor, r)).collect(),
+    ))
 }
 
 async fn show(
@@ -152,7 +154,9 @@ async fn show(
         .ok_or_else(|| no_service(&name))?;
     let mut v = serde_json::to_value(&row)?;
     v["open_requests"] = json!(open);
-    v["may_call"] = json!(manages(&actor, row.def.project()) || store::in_callers(&row.def, &caller_of(&actor)));
+    v["may_call"] = json!(
+        manages(&actor, row.def.project()) || store::in_callers(&row.def, &caller_of(&actor))
+    );
     Ok(Json(v))
 }
 
@@ -389,7 +393,9 @@ async fn call(
     let size = parsed.payload.as_ref().map_or(0, |p| p.len() as u64);
     let free = free_space(&state.state_dir);
     if free.is_none() && size > 0 {
-        tracing::warn!("cannot read the free space of the state directory; the 20% floor is not checked");
+        tracing::warn!(
+            "cannot read the free space of the state directory; the 20% floor is not checked"
+        );
     }
     // The caps before the file is written; the insert checks them again.
     let r2 = row.clone();
@@ -582,7 +588,9 @@ async fn request_payload(
     use tokio::io::AsyncReadExt as _;
     let r = visible_request(&state, &actor, &id).await?;
     if r.payload_sha256.is_none() {
-        return Err(ApiError::not_found(format!("service request `{id}` has no payload")));
+        return Err(ApiError::not_found(format!(
+            "service request `{id}` has no payload"
+        )));
     }
     if r.payload_deleted_at.is_some() {
         return Err(ApiError::not_found(format!(
@@ -635,7 +643,11 @@ mod tests {
 
     #[test]
     fn a_call_body_parses_as_json_or_multipart() {
-        let c = parse_call(&headers("application/json"), br#"{"request":{"seconds":5}}"#).unwrap();
+        let c = parse_call(
+            &headers("application/json"),
+            br#"{"request":{"seconds":5}}"#,
+        )
+        .unwrap();
         assert_eq!(c.request, json!({"seconds": 5}));
         assert!(c.payload.is_none());
         let c = parse_call(
@@ -644,9 +656,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.payload.as_deref(), Some(&b"BYTES"[..]));
-        assert!(
-            parse_call(&headers("application/json"), br#"{"payload_base64":"%%"}"#).is_err()
-        );
+        assert!(parse_call(&headers("application/json"), br#"{"payload_base64":"%%"}"#).is_err());
         let c = parse_call(&headers("application/json"), b"").unwrap();
         assert_eq!(c.request, json!({}));
         assert!(parse_call(&headers("application/json"), br#"{"req":1}"#).is_err());

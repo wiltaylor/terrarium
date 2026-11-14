@@ -164,9 +164,9 @@ fn duration(field: &str, v: &str, min: Duration, max: Duration) -> Result<Durati
 
 fn human(d: Duration) -> String {
     let s = d.as_secs();
-    if s % 86_400 == 0 {
+    if s.is_multiple_of(86_400) {
         format!("{}d", s / 86_400)
-    } else if s % 3600 == 0 {
+    } else if s.is_multiple_of(3600) {
         format!("{}h", s / 3600)
     } else {
         format!("{}m", s / 60)
@@ -269,7 +269,10 @@ impl ServiceDef {
             }
             size("resources.gpu_vram", v)?;
         } else if r.gpus > 0 && !r.gpu_exclusive {
-            return Err("a shared GPU needs resources.gpu_vram (its share), or set resources.gpu_exclusive".into());
+            return Err(
+                "a shared GPU needs resources.gpu_vram (its share), or set resources.gpu_exclusive"
+                    .into(),
+            );
         }
         if let Some(v) = &self.max_run_time {
             duration("max_run_time", v, LIMIT_MIN, MAX_RUN_TIME_MAX)?;
@@ -415,7 +418,8 @@ impl std::fmt::Display for State {
 mod tests {
     use super::*;
 
-    const SCRIPT: &str = "kind = \"script\"\ntarget = \"helios-docker\"\ncommand = [\"/opt/svc/run\"]\n";
+    const SCRIPT: &str =
+        "kind = \"script\"\ntarget = \"helios-docker\"\ncommand = [\"/opt/svc/run\"]\n";
 
     fn def(extra: &str) -> ServiceDef {
         let mut d: ServiceDef = toml::from_str(&format!("{SCRIPT}{extra}")).unwrap();
@@ -425,9 +429,11 @@ mod tests {
 
     #[test]
     fn a_full_definition_parses_and_checks() {
-        let d = def("description = \"Video\"\nmax_run_time = \"2h\"\nconcurrency = 2\nwait_limit = \"12h\"\n\
+        let d = def(
+            "description = \"Video\"\nmax_run_time = \"2h\"\nconcurrency = 2\nwait_limit = \"12h\"\n\
              max_payload = \"128MiB\"\nmax_retained = \"2GiB\"\ncallers = [\"project:terrarium\", \"agent:meta/lead\"]\n\
-             project = \"terrarium\"\n[resources]\ncpu_millis = 4000\nmemory = \"16GiB\"\ngpus = 1\ngpu_exclusive = true\n");
+             project = \"terrarium\"\n[resources]\ncpu_millis = 4000\nmemory = \"16GiB\"\ngpus = 1\ngpu_exclusive = true\n",
+        );
         d.check().unwrap();
         assert_eq!(d.max_run_time(), Duration::from_secs(7200));
         assert_eq!(d.wait_limit(), Duration::from_secs(12 * 3600));
@@ -487,12 +493,18 @@ mod tests {
             ("concurrency = 17\n", "concurrency"),
             ("max_payload = \"2GiB\"\n", "over 1GiB"),
             ("max_payload = \"lots\"\n", "bad max_payload"),
-            ("max_payload = \"512MiB\"\nmax_retained = \"256MiB\"\n", "smaller"),
+            (
+                "max_payload = \"512MiB\"\nmax_retained = \"256MiB\"\n",
+                "smaller",
+            ),
             ("callers = [\"everyone\"]\n", "bad caller"),
             ("callers = [\"agent:lead\"]\n", "bad caller"),
             ("[resources]\ngpu_exclusive = true\n", "gpus of 1"),
             ("[resources]\ngpus = 1\n", "gpu_vram"),
-            ("[resources]\ngpus = 1\ngpu_exclusive = true\ngpu_vram = \"8GiB\"\n", "shared GPU"),
+            (
+                "[resources]\ngpus = 1\ngpu_exclusive = true\ngpu_vram = \"8GiB\"\n",
+                "shared GPU",
+            ),
             ("[resources]\nmemory = \"lots\"\n", "resources.memory"),
         ] {
             let e = def(extra).check().unwrap_err();
@@ -542,9 +554,6 @@ mod tests {
         for s in State::ALL {
             assert_eq!(State::parse(s.as_str()), Some(s));
         }
-        assert_eq!(
-            serde_json::to_string(&TimedOut).unwrap(),
-            "\"timed_out\""
-        );
+        assert_eq!(serde_json::to_string(&TimedOut).unwrap(), "\"timed_out\"");
     }
 }

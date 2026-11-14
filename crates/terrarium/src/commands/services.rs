@@ -39,8 +39,8 @@ fn ls_row(mut s: Value) -> Value {
 
 /// The body of `service new`: the TOML file as the API's JSON, named.
 fn new_body(name: Option<&str>, file: &std::path::Path) -> anyhow::Result<Value> {
-    let text = std::fs::read_to_string(file)
-        .with_context(|| format!("cannot read {}", file.display()))?;
+    let text =
+        std::fs::read_to_string(file).with_context(|| format!("cannot read {}", file.display()))?;
     let mut def = ServiceDef::from_toml(&text)
         .map_err(|e| CliError::usage(format!("{}: {e}", file.display())))?;
     def.name = match name {
@@ -61,7 +61,9 @@ fn call_body(json_arg: Option<&str>, payload: Option<&std::path::Path>) -> anyho
         None => json!({}),
         Some(a) => {
             let text = match a.strip_prefix('@') {
-                Some(f) => std::fs::read_to_string(f).with_context(|| format!("cannot read {f}"))?,
+                Some(f) => {
+                    std::fs::read_to_string(f).with_context(|| format!("cannot read {f}"))?
+                }
                 None => a.to_owned(),
             };
             serde_json::from_str(&text)
@@ -163,10 +165,7 @@ pub async fn service(ctx: &Ctx, cmd: &ServiceCmd) -> anyhow::Result<()> {
                 .api
                 .get(
                     &format!("{}/requests", path(name)),
-                    query([
-                        ("state", state.clone()),
-                        ("limit", Some(limit.to_string())),
-                    ]),
+                    query([("state", state.clone()), ("limit", Some(limit.to_string()))]),
                 )
                 .await?;
             ctx.emit(&v, |c, v| {
@@ -204,7 +203,10 @@ mod tests {
         let p = dir.path().join("in.bin");
         std::fs::write(&p, b"BYTES").unwrap();
         let b = call_body(Some(r#"{"seconds":5}"#), Some(&p)).unwrap();
-        assert_eq!(b, json!({"request": {"seconds": 5}, "payload_base64": "QllURVM="}));
+        assert_eq!(
+            b,
+            json!({"request": {"seconds": 5}, "payload_base64": "QllURVM="})
+        );
         let j = dir.path().join("r.json");
         std::fs::write(&j, r#"{"a":1}"#).unwrap();
         let b = call_body(Some(&format!("@{}", j.display())), None).unwrap();

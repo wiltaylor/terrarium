@@ -59,7 +59,10 @@ pub async fn sweep(state: &Shared, at: chrono::DateTime<chrono::Utc>) -> ApiResu
             .write("system", move |t| mail_timed_out(t, &r))
             .await
         {
-            warn!("cannot mail the time-out of a service request: {}", e.message);
+            warn!(
+                "cannot mail the time-out of a service request: {}",
+                e.message
+            );
         }
     }
     let retention = chrono::Duration::from_std(terrarium_core::service::RETENTION)
