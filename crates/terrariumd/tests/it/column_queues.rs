@@ -552,6 +552,372 @@ async fn a_rerun_keeps_the_job_slot_until_it_ends() {
     assert!(card(&td, &b).await.get("queued").is_none());
 }
 
+/// End job `id` as failed; `verdict`: also write its `job.verdict`.
+async fn fail_job(td: &TestDaemon, id: &str, verdict: bool) {
+    let id = id.to_owned();
+    state(td)
+        .db
+        .write("system", move |t| {
+            let end = terrariumd::store::jobs::JobEnd {
+                passed: false,
+                outcome: Some("failed".into()),
+                exit_code: Some(1),
+                tail: None,
+                head: None,
+                batch: None,
+            };
+            let j = terrariumd::store::jobs::finish(t, &id, &end)?.unwrap();
+            if verdict {
+                terrariumd::jobs::emit_verdicts(t, &j)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// Start queued job `id` (a rerun).
+async fn start_job(td: &TestDaemon, id: &str) {
+    let id = id.to_owned();
+    state(td)
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "UPDATE jobs SET state = 'running', started_at = ?2 WHERE id = ?1",
+                rusqlite::params![id, terrariumd::db::now()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// The queued attempt `attempt` of the job of card `card`.
+async fn rerun_id(td: &TestDaemon, card: &str, attempt: i64) -> String {
+    let card = card.to_owned();
+    state(td)
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT id FROM jobs WHERE card = ?1 AND attempt = ?2 AND state = 'queued'",
+                rusqlite::params![card, attempt],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+/// Run `before`, the sweep, then `after` in one write, so the rule engine
+/// cannot act in between. Does card `waiter` still wait after the sweep?
+async fn waits_after_sweep<B, A>(td: &TestDaemon, waiter: &str, before: B, after: A) -> bool
+where
+    B: FnOnce(&rusqlite::Connection) -> rusqlite::Result<()> + Send + 'static,
+    A: FnOnce(&rusqlite::Connection) -> rusqlite::Result<()> + Send + 'static,
+{
+    let waiter = waiter.to_owned();
+    state(td)
+        .db
+        .write("system", move |t| {
+            before(t)?;
+            terrariumd::store::board::queues::sweep_all(t)?;
+            let waits: bool = t.query_row(
+                "SELECT coalesce((SELECT admitted_at IS NULL FROM card_queue WHERE card = ?1), 0)",
+                [&waiter],
+                |r| r.get(0),
+            )?;
+            after(t)?;
+            Ok(waits)
+        })
+        .await
+        .unwrap()
+}
+
+/// Move the end of job `job` 11 minutes back and the admission of the
+/// admitted card 20 minutes back: past the 10 minutes of `RERUN_SETTLED`.
+fn aged(job: &'static str) -> impl Fn(&rusqlite::Connection) -> rusqlite::Result<()> + Copy {
+    move |c| {
+        c.execute(
+            "UPDATE jobs SET ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-660 seconds')
+              WHERE id = ?1",
+            [job],
+        )?;
+        c.execute(
+            "UPDATE card_queue
+                SET admitted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1200 seconds')
+              WHERE admitted_at IS NOT NULL",
+            [],
+        )?;
+        Ok(())
+    }
+}
+
+/// A pending rule run of event `seq`, last active `age` seconds ago.
+fn pending_run(
+    seq: i64,
+    age: i64,
+) -> impl Fn(&rusqlite::Connection) -> rusqlite::Result<()> + Copy {
+    move |c| {
+        c.execute(
+            "INSERT INTO rule_runs (id, project, rule, rule_hash, ord, event_seq, card, lane,
+                                    rule_json, cause, state, created_at, updated_at)
+             VALUES ('RR-TER-1254', 'flow', 'held', 'h', 0, ?1, NULL, 'flow', '{}', '{}',
+                     'pending', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2),
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2))",
+            rusqlite::params![seq, format!("-{age} seconds")],
+        )
+        .map(|_| ())
+    }
+}
+
+fn drop_run(c: &rusqlite::Connection) -> rusqlite::Result<()> {
+    c.execute("DELETE FROM rule_runs WHERE id = 'RR-TER-1254'", [])
+        .map(|_| ())
+}
+
+fn set_cursor(seq: i64) -> impl Fn(&rusqlite::Connection) -> rusqlite::Result<()> + Copy {
+    move |c| {
+        c.execute("UPDATE rule_cursor SET seq = ?1 WHERE id = 1", [seq])
+            .map(|_| ())
+    }
+}
+
+/// The first `job` or `job.verdict` event of job `job`.
+async fn first_event(td: &TestDaemon, job: &'static str) -> i64 {
+    state(td)
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT min(seq) FROM events WHERE kind IN ('job', 'job.verdict')
+                   AND coalesce(json_extract(payload, '$.job'),
+                                json_extract(payload, '$.id')) = ?1",
+                [job],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+/// Column `validating` with a `job` release and `rules`, and `n` cards
+/// moved into it: the first holds the slot, the others wait in order.
+async fn job_column(td: &TestDaemon, rules: Value, n: usize) -> Vec<String> {
+    set_options(td, "validating", json!({"release": "job"}), rules).await;
+    switch(td).await;
+    let mut cards = Vec::new();
+    for i in 0..n {
+        let c = new_card(td, &format!("c{i}")).await;
+        let moved = move_to(td, &c, "validating").await;
+        if i == 0 {
+            assert!(moved.get("queued").is_none());
+        } else {
+            assert_eq!(moved["queued"]["place"], i);
+        }
+        cards.push(c);
+    }
+    cards
+}
+
+/// A failed job frees the `job` slot 10 minutes after its end without a
+/// verdict, and 10 minutes after a rule run of it was last active when
+/// that run is lost (TER-1254).
+#[tokio::test]
+async fn a_missing_verdict_or_a_lost_rule_run_frees_the_job_slot_after_10_minutes() {
+    let td = setup().await;
+    let cards = job_column(&td, json!([note("in", "lands", "landed")]), 3).await;
+    let (a, b, c) = (&cards[0], &cards[1], &cards[2]);
+
+    // A's job fails and no verdict is written: A holds the slot ...
+    job(&td, "JA", a, "running").await;
+    fail_job(&td, "JA", false).await;
+    settle(&td).await;
+    sweep(&td).await;
+    assert_eq!(card(&td, b).await["queued"]["place"], 1);
+    // ... until 10 minutes after the end.
+    assert!(!waits_after_sweep(&td, b, aged("JA"), |_| Ok(())).await);
+    assert_eq!(card(&td, c).await["queued"]["place"], 1);
+
+    // B's job fails with a verdict. A rule run of its end is pending and
+    // was active just now: B holds the slot, also 10 minutes after the end.
+    job(&td, "JB", b, "running").await;
+    fail_job(&td, "JB", true).await;
+    settle(&td).await;
+    let seq = first_event(&td, "JB").await;
+    let held = move |c: &rusqlite::Connection| {
+        pending_run(seq, 0)(c)?;
+        aged("JB")(c)
+    };
+    assert!(waits_after_sweep(&td, c, held, drop_run).await);
+    // The run was last active 11 minutes ago (lost): C gets the slot.
+    let lost = move |c: &rusqlite::Connection| {
+        pending_run(seq, 660)(c)?;
+        aged("JB")(c)
+    };
+    assert!(!waits_after_sweep(&td, c, lost, drop_run).await);
+    assert!(card(&td, c).await.get("queued").is_none());
+}
+
+/// After a daemon stop the sweep runs before the engine reads the log
+/// (TER-1254 review): an end the rules have not read holds the slot at
+/// any age, and a run that the engine resumes counts its 10 minutes from
+/// the start.
+#[tokio::test]
+async fn after_a_daemon_stop_the_job_slot_waits_for_the_rules() {
+    let td = setup().await;
+    let cards = job_column(&td, json!([note("in", "lands", "landed")]), 2).await;
+    let (a, b) = (&cards[0], &cards[1]);
+    job(&td, "JA", a, "running").await;
+    fail_job(&td, "JA", true).await;
+    settle(&td).await;
+    let seq = first_event(&td, "JA").await;
+    let read_to: i64 = state(&td)
+        .db
+        .read(|c| Ok(rules_engine::cursor(c)?.unwrap()))
+        .await
+        .unwrap();
+    assert!(read_to >= seq);
+
+    // The cursor is before the end, which is 11 minutes old: held.
+    let unread = move |c: &rusqlite::Connection| {
+        set_cursor(seq - 1)(c)?;
+        aged("JA")(c)
+    };
+    assert!(waits_after_sweep(&td, b, unread, set_cursor(read_to)).await);
+
+    // A run left pending 45 minutes ago, and the engine starts: held.
+    let resumed = move |c: &rusqlite::Connection| {
+        pending_run(seq, 2700)(c)?;
+        aged("JA")(c)?;
+        rules_engine::resume_pending(c).unwrap();
+        Ok(())
+    };
+    assert!(waits_after_sweep(&td, b, resumed, drop_run).await);
+    assert_eq!(card(&td, b).await["queued"]["place"], 1);
+
+    // The same run, not resumed (lost): B gets the slot.
+    let lost = move |c: &rusqlite::Connection| {
+        pending_run(seq, 2700)(c)?;
+        aged("JA")(c)
+    };
+    assert!(!waits_after_sweep(&td, b, lost, drop_run).await);
+    assert!(card(&td, b).await.get("queued").is_none());
+}
+
+/// A rule run of lane `flow` with ID `RR-TER-1277-<name>`: pending on
+/// event `seq`, last active `age` seconds ago.
+fn lane_run(
+    name: &'static str,
+    seq: i64,
+    age: i64,
+) -> impl Fn(&rusqlite::Connection) -> rusqlite::Result<()> + Copy {
+    move |c| {
+        c.execute(
+            "INSERT INTO rule_runs (id, project, rule, rule_hash, ord, event_seq, card, lane,
+                                    rule_json, cause, state, created_at, updated_at)
+             VALUES ('RR-TER-1277-' || ?1, 'flow', ?1, 'h', 0, ?2, NULL, 'flow', '{}', '{}',
+                     'pending', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?3),
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?3))",
+            rusqlite::params![name, seq, format!("-{age} seconds")],
+        )
+        .map(|_| ())
+    }
+}
+
+fn drop_lane_runs(c: &rusqlite::Connection) -> rusqlite::Result<()> {
+    c.execute("DELETE FROM rule_runs WHERE id LIKE 'RR-TER-1277-%'", [])
+        .map(|_| ())
+}
+
+/// After an outage, a lane with a backlog over 10 minutes holds the slot
+/// while it makes progress, whatever the age of the run of the job end
+/// (TER-1277, rev-1254b minor 3). A lane that made no progress for 10
+/// minutes frees it.
+#[tokio::test]
+async fn a_lane_backlog_holds_the_job_slot_whatever_the_age() {
+    let td = setup().await;
+    let cards = job_column(&td, json!([note("in", "lands", "landed")]), 2).await;
+    let (a, b) = (&cards[0], &cards[1]);
+    job(&td, "JA", a, "running").await;
+    fail_job(&td, "JA", true).await;
+    settle(&td).await;
+    let seq = first_event(&td, "JA").await;
+
+    // The run of the end has waited 45 minutes behind an earlier run of
+    // its lane, which the engine works on now: held.
+    let backlog = move |c: &rusqlite::Connection| {
+        lane_run("head", seq - 1, 0)(c)?;
+        lane_run("end", seq, 2700)(c)?;
+        aged("JA")(c)
+    };
+    assert!(waits_after_sweep(&td, b, backlog, drop_lane_runs).await);
+    assert_eq!(card(&td, b).await["queued"]["place"], 1);
+
+    // The same lane made no progress for 11 minutes (stalled): B gets the
+    // slot.
+    let stalled = move |c: &rusqlite::Connection| {
+        lane_run("head", seq - 1, 660)(c)?;
+        lane_run("end", seq, 2700)(c)?;
+        aged("JA")(c)
+    };
+    assert!(!waits_after_sweep(&td, b, stalled, drop_lane_runs).await);
+    assert!(card(&td, b).await.get("queued").is_none());
+}
+
+/// A failed rerun holds the slot until the rules act on its own end,
+/// though the first failed job is settled (TER-1254, rev-1250 minor 3).
+#[tokio::test]
+async fn a_second_rerun_keeps_the_job_slot_until_it_ends() {
+    let td = setup().await;
+    let cards = job_column(
+        &td,
+        json!([{"name": "again", "trigger": {"kind": "job_result", "events": ["verdict"]},
+                "actions": [{"verb": "job.rerun", "args": {"max_attempts": 3}}]}]),
+        2,
+    )
+    .await;
+    let (a, b) = (&cards[0], &cards[1]);
+
+    job(&td, "JA", a, "running").await;
+    fail_job(&td, "JA", true).await;
+    settle(&td).await;
+    sweep(&td).await;
+    let second = rerun_id(&td, a, 2).await;
+    assert_eq!(card(&td, b).await["queued"]["place"], 1);
+
+    // The second attempt fails: JA is settled, but its rerun is not.
+    start_job(&td, &second).await;
+    fail_job(&td, &second, true).await;
+    assert_eq!(card(&td, b).await["queued"]["place"], 1);
+    sweep(&td).await;
+    assert_eq!(card(&td, b).await["queued"]["place"], 1);
+
+    // The rule queues the third attempt: A still holds the slot.
+    settle(&td).await;
+    sweep(&td).await;
+    let third = rerun_id(&td, a, 3).await;
+    assert_eq!(card(&td, b).await["queued"]["place"], 1);
+
+    // The third attempt passes: B gets the slot.
+    start_job(&td, &third).await;
+    state(&td)
+        .db
+        .write("system", move |t| {
+            let end = terrariumd::store::jobs::JobEnd {
+                passed: true,
+                outcome: Some("passed".into()),
+                exit_code: Some(0),
+                tail: None,
+                head: None,
+                batch: None,
+            };
+            terrariumd::store::jobs::finish(t, &third, &end)?.unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(card(&td, b).await.get("queued").is_none());
+}
+
 /// Insert job `id` of card `card` in state `state`.
 async fn job(td: &TestDaemon, id: &'static str, card: &str, state_: &'static str) {
     let card = card.to_owned();
@@ -641,4 +1007,219 @@ async fn an_options_write_releases_waiting_cards() {
     set_wip(&td, "review", 2).await;
     set_options(&td, "review", json!({"release": "job"}), json!([])).await;
     assert!(card(&td, &b).await.get("queued").is_none());
+}
+
+/// The stored `eta_at` and `eta_set_by` of card `id`.
+async fn db_eta(td: &TestDaemon, id: &str) -> (Option<String>, Option<String>) {
+    let id = id.to_owned();
+    state(td)
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT eta_at, eta_set_by FROM cards WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+/// TER-1204 (rev-1114 findings 1 and 2): with `clear_eta_on_enter = false`
+/// a card that waits in the queue has no ETA, so no `eta_overdue` fires
+/// while it waits. The kept ETA is held and set again at its admission. A
+/// held ETA set on another actor's card is audited.
+#[tokio::test]
+async fn a_waiting_card_holds_a_kept_eta_and_another_actors_change_is_audited() {
+    let td = setup().await;
+    td.agent("flow", "w1", json!({})).await;
+    set_wip(&td, "review", 1).await;
+    let o = td.get(&path("review")).await.ok().clone();
+    let mut checks = o["checks"].clone();
+    checks["clear_eta_on_enter"] = json!(false);
+    td.put(
+        &path("review"),
+        json!({"base_version": o["version"], "checks": checks,
+               "queue": {"release": "wip"}, "rules": []}),
+    )
+    .await
+    .ok();
+    switch(&td).await;
+    let a = new_card(&td, "a").await;
+    let b = new_card(&td, "b").await;
+    let c = new_card(&td, "c").await;
+    move_to(&td, &a, "review").await;
+
+    // B: claimed by w1 with an ETA, then into the full review column.
+    for id in [&b, &c] {
+        td.post_empty_as("flow/w1", &format!("/api/cards/{id}/claim"))
+            .await
+            .ok();
+    }
+    let kb = td
+        .patch_as(
+            "flow/w1",
+            &format!("/api/cards/{b}"),
+            json!({"eta_at": "2h"}),
+        )
+        .await
+        .ok()
+        .clone();
+    let eta = kb["eta_at"].as_str().unwrap().to_owned();
+    let mb = td
+        .post_as(
+            "flow/w1",
+            &format!("/api/cards/{b}/move"),
+            json!({"column": "review"}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(mb["queued"]["place"], 1, "{mb}");
+    assert!(mb.get("eta_at").is_none(), "{mb}");
+    assert_eq!(mb["queued"]["held_eta"], json!(eta), "{mb}");
+    let (raw, _) = db_eta(&td, &b).await;
+    assert!(raw.is_none(), "a waiting card has no eta_at: {raw:?}");
+
+    // A leaves: B is admitted with its kept ETA.
+    move_to(&td, &a, "ready").await;
+    let kb = card(&td, &b).await;
+    assert!(kb.get("queued").is_none(), "{kb}");
+    // The review column shows the review ETA: read the stored one.
+    let (at, by) = db_eta(&td, &b).await;
+    assert_eq!(at.as_deref(), Some(eta.as_str()), "{kb}");
+    assert_eq!(by.as_deref(), kb["assignee"].as_str(), "{kb}");
+
+    // C waits; w1's own held ETA is not audited, the operator's is.
+    let mc = td
+        .post_as(
+            "flow/w1",
+            &format!("/api/cards/{c}/move"),
+            json!({"column": "review"}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(mc["queued"]["place"], 1, "{mc}");
+    td.patch_as(
+        "flow/w1",
+        &format!("/api/cards/{c}"),
+        json!({"eta_at": "3h"}),
+    )
+    .await
+    .ok();
+    let audit = td.get("/api/audit?action=card.eta").await.ok().clone();
+    assert!(audit.as_array().unwrap().is_empty(), "{audit}");
+    td.patch(&format!("/api/cards/{c}"), json!({"eta_at": "1h"}))
+        .await
+        .ok();
+    let audit = td.get("/api/audit?action=card.eta").await.ok().clone();
+    assert_eq!(audit.as_array().unwrap().len(), 1, "{audit}");
+    assert_eq!(card(&td, &c).await["queued"]["held_eta"], "1h");
+}
+
+/// TER-1204 (rev-1114 finding 3): a job of the card from the previous
+/// column that ends after the admission does not free the `job` slot. A
+/// job queued after the admission does.
+#[tokio::test]
+async fn an_older_job_of_the_card_does_not_free_the_job_slot() {
+    let td = setup().await;
+    set_options(&td, "validating", json!({"release": "job"}), json!([])).await;
+    switch(&td).await;
+    let a = new_card(&td, "a").await;
+    let b = new_card(&td, "b").await;
+    // A job of A runs while A is still in review.
+    move_to(&td, &a, "review").await;
+    job(&td, "JOLD", &a, "running").await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert!(move_to(&td, &a, "validating").await.get("queued").is_none());
+    assert_eq!(move_to(&td, &b, "validating").await["queued"]["place"], 1);
+    // The old job ends: the slot stays with A.
+    state(&td)
+        .db
+        .write("operator", |t| {
+            terrariumd::store::jobs::cancel(t, "JOLD")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    sweep(&td).await;
+    assert_eq!(card(&td, &b).await["queued"]["place"], 1);
+    // A job of A queued in validating ends: B gets the slot.
+    job(&td, "JNEW", &a, "running").await;
+    state(&td)
+        .db
+        .write("operator", |t| {
+            terrariumd::store::jobs::cancel(t, "JNEW")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(card(&td, &b).await.get("queued").is_none());
+}
+
+/// TER-1204 (rev-1114 finding 4, rev-1204 finding 1): a column that
+/// changes from `wip` to `batch` with a card admitted under `wip` and no
+/// job puts that card back in its queue, first: it does not hold the lane,
+/// and it goes with the next batch.
+#[tokio::test]
+async fn a_change_from_wip_to_batch_puts_a_card_with_no_job_back_in_the_queue() {
+    let td = setup().await;
+    set_options(&td, "merge_queue", json!({"release": "wip"}), json!([])).await;
+    switch(&td).await;
+    let a = new_card(&td, "a").await;
+    let b = new_card(&td, "b").await;
+    let c = new_card(&td, "c").await;
+    assert!(
+        move_to(&td, &a, "merge_queue")
+            .await
+            .get("queued")
+            .is_none()
+    );
+    set_options(
+        &td,
+        "merge_queue",
+        json!({"release": "batch", "batch_size": 2, "max_wait_seconds": 3600,
+               "max_batch_cards": 2}),
+        json!([]),
+    )
+    .await;
+    assert_eq!(card(&td, &a).await["queued"]["place"], 1);
+    // B makes the batch of two with A; C waits for the next one.
+    move_to(&td, &b, "merge_queue").await;
+    move_to(&td, &c, "merge_queue").await;
+    sweep(&td).await;
+    assert!(card(&td, &a).await.get("queued").is_none());
+    assert!(card(&td, &b).await.get("queued").is_none());
+    assert_eq!(card(&td, &c).await["queued"]["place"], 1);
+}
+
+/// TER-1204 (rev-1204 finding 3): the ETA of a job of a waiting card is
+/// held for its admission, so no `eta_overdue` fires while it waits.
+#[tokio::test]
+async fn a_job_eta_of_a_waiting_card_is_held() {
+    let td = setup().await;
+    set_wip(&td, "review", 1).await;
+    switch(&td).await;
+    let a = new_card(&td, "a").await;
+    let b = new_card(&td, "b").await;
+    move_to(&td, &a, "review").await;
+    assert_eq!(move_to(&td, &b, "review").await["queued"]["place"], 1);
+    let at = (chrono::Utc::now() + chrono::Duration::hours(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let (id, when) = (b.clone(), at.clone());
+    state(&td)
+        .db
+        .write("operator", move |t| {
+            terrariumd::store::board::set_job_eta(t, &id, Some(&when), "agent:w1")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (raw, _) = db_eta(&td, &b).await;
+    assert!(raw.is_none(), "{raw:?}");
+    assert_eq!(card(&td, &b).await["queued"]["held_eta"], json!(at));
+    move_to(&td, &a, "ready").await;
+    let (raw, _) = db_eta(&td, &b).await;
+    assert_eq!(raw.as_deref(), Some(at.as_str()));
 }

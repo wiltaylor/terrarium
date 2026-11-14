@@ -119,6 +119,43 @@ jobs, and they do not run `ci::compat`.
   need no slot, but use `CARGO_BUILD_JOBS=8` and `RUST_TEST_THREADS=8`.
   The whole terrariumd lib or `it` binary must run inside a slot. Any run
   using a slot's shared target directory must hold that slot's lock.
+- Dev runs use the shared `CARGO_TARGET_DIR=/src/terrarium-dev-target`.
+  Do not make a per-card target directory. If a card really needs one,
+  first run `python3 scripts/build_target_cleanup.py floor /src` in your
+  checkout on the target: it exits 1 below 20 percent free, and then you
+  make none and tell the lead.
+- Keep at most one checkout per card head, named
+  `/src/<agent>-<card>-<short sha>`, and remove your older ones when you push
+  a new head. Put logs and results under names that start with `<agent>-`.
+
+### Cleanup of finished cards (lead)
+
+After each merge batch and each cut, when the bound agents of the cards
+have ended, the lead runs `scripts/build_target_cleanup.py` on the target
+from its own checkout (TER-1282). Every command is a dry run until
+`--apply` is added; read the dry run first.
+
+```sh
+# Live agents: every name in `terrarium agents ls`. Done pairs: the by:<agent>
+# label of each accepted or done card.
+python3 scripts/build_target_cleanup.py clean --live lead,svc-1264 --done grok-1192:TER-1192 --done jobs-1277:TER-1277
+python3 scripts/build_target_cleanup.py clean --live ... --done ... --apply
+# Shared targets over the cap are emptied, only while their slot lock and cargo locks are free.
+python3 scripts/build_target_cleanup.py cap --cap-gib 80
+```
+
+`clean` removes only direct entries of `/src` named for a done pair (the
+header of the script lists the patterns), and keeps the `terrarium*`
+entries, symlinks, every entry of a live agent and every entry that a
+running process uses. It prints each path with its size and the total
+freed. `cap` never removes a shared target dir, only its build output,
+and only while its own lock and every `.cargo-lock` in it are free and no
+process uses it. Run both as root. When the script cannot read the cwd
+of a process in `/proc` (on build2, root has no CAP_SYS_PTRACE, so the
+non-dumpable uid 1001 processes are unreadable), it keeps everything and
+names the pids. Read their `cat /proc/<pid>/cmdline`, and pass
+`--ignore-pid <pid>` for each one that uses no candidate. A failed delete is reported,
+the run goes on, and the exit code is 1.
 
 ### Run it on a clean checkout of a pushed commit
 

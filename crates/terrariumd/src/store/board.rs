@@ -1969,6 +1969,12 @@ fn apply_move(
     let same = to.id == card.column_id;
     // The column queues (TER-1114): the card leaves the queue of its old
     // column, and waits in the queue of the new one when it has no slot.
+    // A held ETA of the old queue goes with the card (TER-1204).
+    let held_before = if same {
+        None
+    } else {
+        queues::held_of(t, &card.id)?
+    };
     let from_queued = !same && queues::leave(t, &card.id)?;
     let queued = !same && queues::must_queue(t, &card.project, to.id)?;
     // Take the card out of its column, then put it in at the new place.
@@ -1992,8 +1998,17 @@ fn apply_move(
     // A move to another column ends the idle mark (TER-67) and clears the
     // ETA (TER-155 D1): an ETA is for the work of one column. The
     // `clear_eta_on_enter` option of the target (TER-1112, on by default)
-    // can keep it. The `moved` event keeps the old ETA.
-    let keep_eta = same || !to.checks.clear_eta_on_enter;
+    // can keep it. The `moved` event keeps the old ETA. A card that waits
+    // in the queue of the target has no ETA (no `eta_overdue` while it
+    // waits): a kept ETA is held and set again at its admission
+    // (TER-1204).
+    let keep_eta = same || (!to.checks.clear_eta_on_enter && !queued);
+    let kept = (!same && !to.checks.clear_eta_on_enter)
+        .then(|| match &card.eta_at {
+            Some(eta) => Some((eta.clone(), card.eta_set_by.clone())),
+            None => held_before.clone(),
+        })
+        .flatten();
     t.execute(
         "UPDATE cards SET column_id = ?2, position = ?3, updated_at = ?4,
             done_at = CASE WHEN ?5 THEN done_at WHEN ?6 THEN ?4 ELSE NULL END,
@@ -2006,8 +2021,18 @@ fn apply_move(
     )?;
     if queued {
         queues::enqueue(t, &card.id, to.id)?;
+        if let Some((eta, by)) = &kept {
+            let by = by.clone().unwrap_or_else(|| actor.address());
+            queues::hold_eta(t, &card.id, Some(eta), &by)?;
+        }
     } else if !same {
         queues::landed(t, &card.id, to.id)?;
+        // A card that waited with a held ETA lands with it.
+        if card.eta_at.is_none()
+            && let Some((eta, by)) = &kept
+        {
+            queues::set_held(t, &card.id, eta, by.as_deref())?;
+        }
     }
     let author = author_of(t, actor);
     if let Some(c) = comment {
@@ -2879,12 +2904,14 @@ pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> Ap
             // (TER-1114): the ETA is for the work of the column, which
             // starts with the slot (TER-155 D1).
             if queues::hold_eta(t, &card.id, Some(v.trim()), &actor.address())? {
+                audit_held_eta(t, actor, &card, Some(v.trim()))?;
                 card_event(t, &card, "eta_held", json!({"held_eta": v.trim()}))?;
                 return get_card(t, &card.id);
             }
             Some(crate::time_param::stored(at))
         }
         None if queues::hold_eta(t, &card.id, None, &actor.address())? => {
+            audit_held_eta(t, actor, &card, None)?;
             return get_card(t, &card.id);
         }
         None if card.eta_at.is_none() => return get_card(t, &card.id),
@@ -2919,6 +2946,26 @@ pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> Ap
     get_card(t, &card.id)
 }
 
+/// The audit of [`set_eta`] for the held ETA of a waiting card (TER-1204):
+/// a change to the ETA of a card that is not the actor's is audited, as
+/// for an admitted card.
+fn audit_held_eta(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    card: &CardRow,
+    eta: Option<&str>,
+) -> ApiResult<()> {
+    if owns(actor, card) {
+        return Ok(());
+    }
+    t.audit(
+        "card.eta",
+        &card.id,
+        Some(&card.project),
+        json!({"held_eta": eta}),
+    )
+}
+
 /// Set or clear the ETA of a card for its job (TER-155 D2), as the
 /// daemon: `at` is the job start plus the planned duration, or `None`
 /// while the job waits in the queue. `by` is the actor label of the
@@ -2930,11 +2977,19 @@ pub fn set_job_eta(t: &mut Tx<'_>, id: &str, at: Option<&str>, by: &str) -> ApiR
         Err(e) if e.code == Code::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
-    if card.archived || card.column == DONE || card.eta_at.as_deref() == at {
+    if card.archived || card.column == DONE {
+        return Ok(());
+    }
+    let by = by.strip_prefix("agent:").unwrap_or(by);
+    // A card that waits in a column queue has no ETA: the job's ETA is
+    // held for its admission, as `set_eta` does (TER-1204).
+    if queues::hold_eta(t, &card.id, at, by)? {
+        return Ok(());
+    }
+    if card.eta_at.as_deref() == at {
         return Ok(());
     }
     let stamp = now();
-    let by = by.strip_prefix("agent:").unwrap_or(by);
     let (set_at, set_by) = match at {
         Some(_) => (Some(stamp.as_str()), Some(by)),
         None => (None, None),

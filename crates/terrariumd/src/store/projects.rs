@@ -533,6 +533,7 @@ pub fn delete(t: &mut Tx<'_>, name: &str) -> ApiResult<()> {
     crate::secrets::grants::on_project_deleted(t, name)?;
     // Its tools and the tool grants to it (`crate::store::tools`).
     crate::store::tools::on_project_deleted(t, name)?;
+    crate::store::services::on_project_deleted(t, name)?;
     t.audit("project.delete", name, Some(name), json!({}))?;
     Ok(())
 }

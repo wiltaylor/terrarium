@@ -1122,14 +1122,21 @@ pub async fn record_accepted_heads(state: &Shared) -> usize {
             .db
             .write("system", move |t| match &read {
                 // The cutoff at the write: the reads before took time.
-                Ok((branch, head)) => accepted_heads::record(
-                    t,
-                    &card,
-                    &round,
-                    branch,
-                    head,
-                    &accepted_heads::fill_cutoff(),
-                ),
+                Ok((branch, head)) => {
+                    let done = accepted_heads::record(
+                        t,
+                        &card,
+                        &round,
+                        branch,
+                        head,
+                        &accepted_heads::fill_cutoff(),
+                    )?;
+                    // A merge_queue batch may take the card now (TER-1204).
+                    if done {
+                        crate::store::board::queues::release_card_column(t, &card)?;
+                    }
+                    Ok(done)
+                }
                 Err(why) => accepted_heads::note(t, &card, &round, why).map(|()| false),
             })
             .await;
@@ -1380,6 +1387,15 @@ async fn finish_job(state: &Shared, id: &str, end: JobEnd) {
         Ok(None) => debug!(job = %id, "the job was cancelled while it ran"),
         Err(e) => warn!(job = %id, "cannot end a job: {e}"),
     }
+}
+
+/// End running job `id` with `end` as a finished run does
+/// ([`finish_job`]): the store end, then [`on_end`] (the verdicts, and
+/// the coded card flow on a `code` board). For the tests, which have no
+/// host to run the recipe (TER-1215).
+#[doc(hidden)]
+pub async fn finish_for_test(state: &Shared, id: &str, end: JobEnd) {
+    finish_job(state, id, end).await;
 }
 
 pub(crate) type HostRetries = std::collections::HashMap<String, (Instant, Duration)>;

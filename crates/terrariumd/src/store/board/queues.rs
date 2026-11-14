@@ -18,15 +18,20 @@
 //!   - `wip`: admit while the admitted cards are fewer than the limit.
 //!   - `job`: one job at a time in the column (TER-1112 Q4). A card admitted
 //!     by `job` holds the job slot from its admission until a job of the
-//!     card has ended after it (passed, failed, or cancelled) and it has no
-//!     open job, or it leaves the column. Then the next card is admitted.
-//!     A failed job ends only when the rules have acted on it, so its
-//!     rerun keeps the slot (TER-1250, `RERUN_SETTLED`).
-//!   - `batch`: when no card of the last batch is still in the column, and
-//!     `batch_size` cards wait or the first one has waited
-//!     `max_wait_seconds`: admit up to `max_batch_cards` (default
-//!     `batch_size`) in queue order. The last batch out means the lane is
-//!     free, as the `merge-queue-batch` rule did.
+//!     card that was queued after it has ended (passed, failed, or
+//!     cancelled) and it has no open job, or it leaves the column. Then the
+//!     next card is admitted. A job from the previous column does not free
+//!     the slot (TER-1204). A failed job ends only when the rules have
+//!     acted on it, so its rerun keeps the slot (TER-1250, `RERUN_SETTLED`);
+//!     a pending rule run holds it for at most 10 minutes (TER-1254).
+//!   - `batch`: when the last batch no longer holds the lane (an admitted
+//!     card with an open job, or in [`BATCH_GRACE_SECONDS`] after its
+//!     admission or job end; a stale card goes back to the queue), and
+//!     `batch_size` cards wait or one has waited `max_wait_seconds`: admit
+//!     up to `max_batch_cards` (default `batch_size`) in queue order. The
+//!     merge_queue column counts and admits only the cards that a merge
+//!     takes now, and a ready release-blocker alone, at once, as the
+//!     `merge-queue-batch` rule did ([`merge_candidates`]).
 //! - **When.** [`release`] runs in the transaction of its cause: a move into
 //!   or out of the column, an archive, a job end ([`on_job_end`]), and a
 //!   change of the column's WIP limit or queue options. The rule engine's
@@ -57,6 +62,7 @@ pub struct CardQueue {
 
 struct Settings {
     id: i64,
+    name: String,
     project: String,
     wip_limit: Option<i64>,
     release: QueueRelease,
@@ -64,18 +70,23 @@ struct Settings {
     max_wait_seconds: Option<i64>,
     max_batch_cards: Option<i64>,
     research: bool,
+    /// The merge queue column (role or name `merge_queue`): its batch
+    /// waits while a merge job of the project holds the merge lane.
+    merge_lane: bool,
 }
 
 fn settings(conn: &Connection, column_id: i64) -> ApiResult<Option<Settings>> {
     Ok(conn
         .query_row(
             "SELECT id, project, wip_limit, queue_release, queue_batch_size,
-                    queue_max_wait_seconds, queue_max_batch_cards, name
+                    queue_max_wait_seconds, queue_max_batch_cards, name,
+                    coalesce(role, name) = 'merge_queue'
              FROM board_columns WHERE id = ?1",
             [column_id],
             |r| {
                 Ok(Settings {
                     id: r.get(0)?,
+                    name: r.get(7)?,
                     project: r.get(1)?,
                     wip_limit: r.get(2)?,
                     release: QueueRelease::parse(&r.get::<_, String>(3)?)?,
@@ -83,6 +94,7 @@ fn settings(conn: &Connection, column_id: i64) -> ApiResult<Option<Settings>> {
                     max_wait_seconds: r.get(5)?,
                     max_batch_cards: r.get(6)?,
                     research: r.get::<_, String>(7)?.eq_ignore_ascii_case("research"),
+                    merge_lane: r.get(8)?,
                 })
             },
         )
@@ -152,51 +164,235 @@ const JOB_OF_CARD: &str = "(j.card = q.card OR EXISTS (SELECT 1 FROM json_each(j
 
 /// The rerun of ended job `j` is settled (TER-1250): `j` did not fail, or
 /// the board rules have acted on its end. A failed job frees the `job`
-/// slot only when its `job.verdict` is written (by `after_end`, after the
-/// end; a kind with no verdict, or 10 minutes after the end, without
-/// one), the rule engine's cursor is past its `job` and `job.verdict`
-/// events, and no rule run of them is pending. A rerun that a rule queued
-/// is then an open job, so the slot stays held until the rerun ends.
+/// slot only when:
+/// - no later attempt of `j` exists (TER-1254): a rerun that a rule
+///   queued decides for itself, so a failed rerun holds the slot until the
+///   rules act on its own end;
+/// - its `job.verdict` is written (by `after_end`, after the end; a kind
+///   with no verdict, or 10 minutes after the end, without one);
+/// - the rule engine's cursor is past its `job` and `job.verdict` events.
+///   No time limit: after a daemon stop, the sweep runs before the engine
+///   reads the log, and the end must not free the slot before its rule
+///   ran. The cursor is a scalar subquery, so the clause reads only the
+///   events after it (a rowid range, never a scan of `events`); with no
+///   cursor yet (the engine starts at the end of the log) none is after it;
+/// - no rule run of those events is pending in a lane that was active in
+///   the last 10 minutes (TER-1254, TER-1277): a pending run of the same
+///   lane has `updated_at` in that time. A lost or stalled lane cannot
+///   hold the slot for ever, but a lane that works through a backlog holds
+///   it whatever the age of the run: each action and each end of a run
+///   stamps the lane ([`crate::rules_engine`] `finish` stamps the next
+///   pending run of the lane). The engine marks its pending runs active
+///   when it starts ([`crate::rules_engine::resume_pending`]), so the 10
+///   minutes count from the last progress of the lane or from the daemon
+///   start, whichever is later. Known limit: a lane that waits over 10
+///   minutes for a free lane task (`MAX_LANES`) counts as stalled.
+///
+/// A rerun that a rule queued is then an open job, so the slot stays held
+/// until the rerun ends.
 const RERUN_SETTLED: &str = "(j.state <> 'failed'
-    OR ((j.kind IN ('e2e', 'release')
-         OR j.ended_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-600 seconds')
-         OR EXISTS (SELECT 1 FROM events e WHERE e.card = j.card AND e.kind = 'job.verdict'
-                      AND json_extract(e.payload, '$.job') = j.id))
+    OR (NOT EXISTS (SELECT 1 FROM jobs k
+                     WHERE k.project = j.project AND k.created_at = j.created_at
+                       AND k.kind = j.kind AND k.repo = j.repo
+                       AND k.split_path = j.split_path
+                       AND coalesce(k.parent, '') = coalesce(j.parent, '')
+                       AND k.attempt > j.attempt)
+        AND (j.kind IN ('e2e', 'release')
+             OR j.ended_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-600 seconds')
+             OR EXISTS (SELECT 1 FROM events e WHERE e.card = j.card AND e.kind = 'job.verdict'
+                          AND json_extract(e.payload, '$.job') = j.id))
         AND NOT EXISTS (SELECT 1 FROM events e
-                         WHERE e.seq > coalesce((SELECT seq FROM rule_cursor WHERE id = 1), e.seq)
+                         WHERE e.seq > (SELECT coalesce(max(seq), (SELECT max(seq) FROM events))
+                                          FROM rule_cursor WHERE id = 1)
                            AND e.kind IN ('job', 'job.verdict')
                            AND coalesce(json_extract(e.payload, '$.job'),
                                         json_extract(e.payload, '$.id')) = j.id)
         AND NOT EXISTS (SELECT 1 FROM rule_runs r JOIN events e ON e.seq = r.event_seq
-                         WHERE r.state = 'pending' AND e.kind IN ('job', 'job.verdict')
+                         WHERE r.state = 'pending'
+                           AND EXISTS (SELECT 1 FROM rule_runs h
+                                        WHERE h.state = 'pending' AND h.lane = r.lane
+                                          AND h.updated_at >= strftime('%Y-%m-%dT%H:%M:%fZ',
+                                                                       'now', '-600 seconds'))
+                           AND e.kind IN ('job', 'job.verdict')
                            AND coalesce(json_extract(e.payload, '$.job'),
                                         json_extract(e.payload, '$.id')) = j.id)))";
 
+/// A job of card `q.card` that was queued at or after its admission, has
+/// ended, and whose rerun is settled ([`RERUN_SETTLED`]): it frees the
+/// `job` slot. An older job (one still running from the previous column)
+/// does not (TER-1204).
+fn slot_job_ended() -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM jobs j
+                  WHERE j.state IN ('passed', 'failed', 'cancelled')
+                    AND j.created_at >= q.admitted_at
+                    AND j.ended_at >= q.admitted_at
+                    AND {JOB_OF_CARD}
+                    AND {RERUN_SETTLED})"
+    )
+}
+
 /// Does a card of column `column_id` hold its job slot (release `job`)?
 fn job_slot_busy(conn: &Connection, column_id: i64) -> ApiResult<bool> {
+    let ended = slot_job_ended();
     let sql = format!(
         "SELECT EXISTS (SELECT 1 FROM card_queue q JOIN cards c ON c.id = q.card
           WHERE q.column_id = ?1 AND q.admitted_at IS NOT NULL AND c.archived = 0
             AND c.column_id = q.column_id
             AND (EXISTS (SELECT 1 FROM jobs j WHERE j.state IN ('queued', 'running')
                            AND {JOB_OF_CARD})
-                 OR NOT EXISTS (SELECT 1 FROM jobs j
-                           WHERE j.state IN ('passed', 'failed', 'cancelled')
-                             AND j.ended_at >= q.admitted_at AND {JOB_OF_CARD}
-                             AND {RERUN_SETTLED})))"
+                 OR NOT {ended}))"
     );
     Ok(conn.query_row(&sql, [column_id], |r| r.get(0))?)
 }
 
-/// Is a card of the last batch of column `column_id` still in it?
+/// How long an admitted card of a `batch` column holds the lane with no
+/// open job (TER-1204): the time for its `lands` rules to queue the job,
+/// counted from its admission or from the end of its last job (for the
+/// rules that move it on). After it, the card is stale.
+pub const BATCH_GRACE_SECONDS: i64 = 120;
+
+/// A job of card `c.id` (its own job, or a batch job that has it).
+const JOB_OF_C: &str = "(j.card = c.id OR EXISTS (SELECT 1 FROM json_each(j.batch)
+                         WHERE json_extract(value, '$.card') = c.id))";
+
+/// The admitted cards of column `?1` that are stale in its batch, in
+/// board order: no open job, and neither admitted nor with a job end at
+/// or after the cutoff `?2`. A card with no queue row (it was in the
+/// column before the `batch` release, or before the conversion of the
+/// board) has no admission time. Only a job queued at or after the
+/// admission counts (the batch job comes after it), so the jobs are read
+/// by `jobs_project_created_at`, and the open ones by `jobs_project_state`
+/// (TER-1204).
+fn stale_sql() -> String {
+    format!(
+        "SELECT c.id FROM cards c
+          WHERE c.column_id = ?1 AND c.archived = 0 AND c.kind = 'card'
+            AND NOT EXISTS (SELECT 1 FROM card_queue q
+                             WHERE q.card = c.id AND q.admitted_at IS NULL)
+            AND coalesce((SELECT q.admitted_at FROM card_queue q WHERE q.card = c.id), '') < ?2
+            AND NOT EXISTS (SELECT 1 FROM jobs j INDEXED BY jobs_project_state
+                             WHERE j.project = c.project AND j.state IN ('queued', 'running')
+                               AND {JOB_OF_C})
+            AND NOT EXISTS (SELECT 1 FROM jobs j INDEXED BY jobs_project_created_at
+                             WHERE j.project = c.project
+                               AND j.created_at >= coalesce(
+                                     (SELECT q.admitted_at FROM card_queue q WHERE q.card = c.id), '')
+                               AND j.ended_at >= ?2
+                               AND j.state IN ('passed', 'failed', 'cancelled')
+                               AND {JOB_OF_C})
+          ORDER BY c.position"
+    )
+}
+
+fn stale_in_batch(conn: &Connection, column_id: i64, cutoff: &str) -> ApiResult<Vec<String>> {
+    let mut st = conn.prepare(&stale_sql())?;
+    let rows = st
+        .query_map(params![column_id, cutoff], |r| r.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn grace_cutoff() -> String {
+    crate::time_param::stored(chrono::Utc::now() - chrono::Duration::seconds(BATCH_GRACE_SECONDS))
+}
+
+/// Does a batch still hold the lane of `batch` column `column_id`? An
+/// admitted card holds it while it has an open job, or in the grace time
+/// after its admission or its last job end ([`BATCH_GRACE_SECONDS`]). A
+/// card that the batch job left out does not hold it after that, so it
+/// never stops the queue (TER-1204).
 fn batch_open(conn: &Connection, column_id: i64) -> ApiResult<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM card_queue q JOIN cards c ON c.id = q.card
-          WHERE q.column_id = ?1 AND q.admitted_at IS NOT NULL AND c.archived = 0
-            AND c.column_id = q.column_id)",
+    let stale = stale_in_batch(conn, column_id, &grace_cutoff())?.len() as i64;
+    Ok(admitted_count(conn, column_id)? > stale)
+}
+
+/// Put the stale admitted cards of `batch` column `column_id` back in its
+/// queue, first, in board order (TER-1204). Their wait starts again, so a
+/// card that no batch takes is tried once per `max_wait_seconds`, and an
+/// ETA is held for the next admission.
+fn return_stale(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
+    let stale = stale_in_batch(t, column_id, &grace_cutoff())?;
+    if stale.is_empty() {
+        return Ok(());
+    }
+    let first: i64 = t.query_row(
+        "SELECT coalesce(min(seq), 1) FROM card_queue WHERE column_id = ?1",
         [column_id],
         |r| r.get(0),
-    )?)
+    )?;
+    let at = now();
+    let n = stale.len() as i64;
+    for (i, card) in stale.iter().enumerate() {
+        t.execute(
+            "INSERT OR REPLACE INTO card_queue (card, column_id, seq, queued_at, held_eta, held_eta_by)
+             SELECT id, ?2, ?3, ?4, eta_at, eta_set_by FROM cards WHERE id = ?1",
+            params![card, column_id, first - n + i as i64, at],
+        )?;
+        t.execute(
+            "UPDATE cards SET eta_at = NULL, eta_set_at = NULL, eta_set_by = NULL WHERE id = ?1",
+            [card],
+        )?;
+        let row = find_row(t, card)?;
+        card_event(
+            t,
+            &row,
+            "queue_returned",
+            json!({"reason": "no open job in the batch", "assignee": row.assignee}),
+        )?;
+    }
+    Ok(())
+}
+
+/// [`merge_candidates`]: the cards a batch takes, and a release-blocker.
+type Candidates = (Vec<(String, String)>, Option<String>);
+
+/// The waiting cards of merge_queue column `s` that a batch merge takes
+/// now, as `merge-queue-batch` counts them (TER-1204): only cards that can
+/// go ([`crate::rules_verbs::merge_ready`]) with a repo in `next_repos`,
+/// and of one repo, the repo of the first one, in queue order:
+/// `(card, queued_at)`. The others wait, and never hold the lane. The
+/// second value is the first such card with the release-blocker label,
+/// of any repo: it goes alone, at once (TER-607).
+fn merge_candidates(
+    conn: &Connection,
+    s: &Settings,
+    queue: &[(String, String)],
+) -> ApiResult<Candidates> {
+    let served = crate::store::jobs::delivery(conn, &s.project)?.next_repos;
+    // A project with no `next` repo has no merge lane: the column is a
+    // plain `batch` column.
+    if served.is_empty() {
+        return Ok((queue.to_vec(), None));
+    }
+    let cards: std::collections::HashMap<String, Card> =
+        selection_cards(conn, &s.project, &s.name)?
+            .into_iter()
+            .map(|c| (c.id.clone(), c))
+            .collect();
+    let mut repo: Option<String> = None;
+    let mut out = Vec::new();
+    let mut blocker = None;
+    for (id, at) in queue {
+        let Some(c) = cards.get(id) else { continue };
+        let Ok(r) = crate::rules_verbs::merge_ready(conn, c)? else {
+            continue;
+        };
+        if !served.contains(&r) {
+            continue;
+        }
+        if blocker.is_none()
+            && c.labels
+                .iter()
+                .any(|l| l == crate::rules_verbs::RELEASE_BLOCKER)
+        {
+            blocker = Some(id.clone());
+        }
+        if repo.get_or_insert_with(|| r.clone()) == &r {
+            out.push((id.clone(), at.clone()));
+        }
+    }
+    Ok((out, blocker))
 }
 
 /// The free places of the column: `None` without a WIP limit.
@@ -356,25 +552,46 @@ fn admit(t: &mut Tx<'_>, card: &str, keep: bool) -> ApiResult<()> {
                "to_count": admitted_count(t, row.column_id)?}),
     )?;
     if let Some(eta) = held {
-        // A held ETA that no longer reads (a time in the past is fine) is
-        // dropped: the card is admitted all the same.
-        if let Ok(when) = terrarium_core::eta::resolve(&eta, chrono::Utc::now()) {
-            let when = crate::time_param::stored(when);
-            t.execute(
-                "UPDATE cards SET eta_at = ?2, eta_set_at = ?3, eta_set_by = ?4 WHERE id = ?1",
-                params![row.id, when, at, held_by],
-            )?;
-            let row = find_row(t, card)?;
-            card_event(
-                t,
-                &row,
-                "eta",
-                json!({"eta_at": when, "previous": null, "held": true,
-                       "labels": json_col::<Vec<String>>(&row.labels)}),
-            )?;
-        }
+        set_held(t, card, &eta, held_by.as_deref())?;
     }
     Ok(())
+}
+
+/// The held ETA of waiting card `card` and who set it.
+pub(super) fn held_of(
+    conn: &Connection,
+    card: &str,
+) -> ApiResult<Option<(String, Option<String>)>> {
+    Ok(conn
+        .query_row(
+            "SELECT held_eta, held_eta_by FROM card_queue
+              WHERE card = ?1 AND admitted_at IS NULL AND held_eta IS NOT NULL",
+            [card],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// Set held ETA `eta` (a time or a duration, counted from now) of card
+/// `card`, by `by`. A held ETA that no longer reads (a time that has
+/// passed by now) is dropped.
+pub(super) fn set_held(t: &mut Tx<'_>, card: &str, eta: &str, by: Option<&str>) -> ApiResult<()> {
+    let Ok(when) = terrarium_core::eta::resolve(eta, chrono::Utc::now()) else {
+        return Ok(());
+    };
+    let when = crate::time_param::stored(when);
+    t.execute(
+        "UPDATE cards SET eta_at = ?2, eta_set_at = ?3, eta_set_by = ?4 WHERE id = ?1",
+        params![card, when, now(), by],
+    )?;
+    let row = find_row(t, card)?;
+    card_event(
+        t,
+        &row,
+        "eta",
+        json!({"eta_at": when, "previous": null, "held": true,
+               "labels": json_col::<Vec<String>>(&row.labels)}),
+    )
 }
 
 /// Admit the cards that the queue of column `column_id` releases now.
@@ -388,6 +605,7 @@ pub fn release(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
     }
     // A `job` slot that is free again, or a row of a card that left: the row
     // goes, so the table holds only the cards that wait or hold a slot.
+    let ended = slot_job_ended();
     t.execute(
         &format!(
             "DELETE FROM card_queue WHERE rowid IN (
@@ -396,16 +614,16 @@ pub fn release(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
                   AND (c.archived = 1 OR c.column_id <> q.column_id
                        OR (?2 AND NOT EXISTS (SELECT 1 FROM jobs j
                                 WHERE j.state IN ('queued', 'running') AND {JOB_OF_CARD})
-                              AND EXISTS (SELECT 1 FROM jobs j
-                                WHERE j.state IN ('passed', 'failed', 'cancelled')
-                                  AND j.ended_at >= q.admitted_at AND {JOB_OF_CARD}
-                                  AND {RERUN_SETTLED}))))"
+                              AND {ended})))"
         ),
         params![s.id, s.release == QueueRelease::Job],
     )?;
+    if s.release == QueueRelease::Batch {
+        return_stale(t, s.id)?;
+    }
     loop {
         let queue = waiting(t, s.id)?;
-        let Some((first, first_at)) = queue.first().cloned() else {
+        let Some((first, _)) = queue.first().cloned() else {
             return Ok(());
         };
         let room = room(t, &s)?;
@@ -424,26 +642,63 @@ pub fn release(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
                 if batch_open(t, s.id)? {
                     return Ok(());
                 }
+                // The merge lane of the project is busy (a direct merge):
+                // the batch waits for its end, as the rule did (TER-644).
+                if s.merge_lane && crate::store::jobs::open_merge(t, &s.project)?.is_some() {
+                    return Ok(());
+                }
+                let ready = if s.merge_lane {
+                    let (ready, blocker) = merge_candidates(t, &s, &queue)?;
+                    if let Some(card) = blocker {
+                        admit(t, &card, true)?;
+                        return Ok(());
+                    }
+                    ready
+                } else {
+                    queue
+                };
                 let size = s.batch_size.unwrap_or(1).max(1);
                 let waited_out = s.max_wait_seconds.is_some_and(|w| {
                     let cutoff = crate::time_param::stored(
                         chrono::Utc::now() - chrono::Duration::seconds(w),
                     );
-                    first_at <= cutoff
+                    // The longest wait: a card put back (stale) is first
+                    // in the queue, but its wait started again.
+                    ready
+                        .iter()
+                        .map(|q| q.1.as_str())
+                        .min()
+                        .is_some_and(|m| m <= cutoff.as_str())
                 });
-                if (queue.len() as i64) < size && !waited_out {
+                if ready.is_empty() || ((ready.len() as i64) < size && !waited_out) {
                     return Ok(());
                 }
-                let mut n = s.max_batch_cards.unwrap_or(size).min(queue.len() as i64);
+                let mut n = s.max_batch_cards.unwrap_or(size).min(ready.len() as i64);
                 if let Some(r) = room {
                     n = n.min(r);
                 }
-                for (card, _) in queue.iter().take(usize::try_from(n).unwrap_or(0)) {
+                for (card, _) in ready.iter().take(usize::try_from(n).unwrap_or(0)) {
                     admit(t, card, true)?;
                 }
                 return Ok(());
             }
         }
+    }
+}
+
+/// [`release`] for the column of card `card`: its reviewed commit is
+/// recorded now, so a merge_queue batch may take it (TER-1204).
+pub fn release_card_column(t: &mut Tx<'_>, card: &str) -> ApiResult<()> {
+    let column: Option<i64> = t
+        .query_row(
+            "SELECT column_id FROM cards WHERE id = ?1 AND archived = 0",
+            [card],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match column {
+        Some(c) => release(t, c),
+        None => Ok(()),
     }
 }
 
@@ -479,9 +734,13 @@ pub fn on_job_end(t: &mut Tx<'_>, job: &str) -> ApiResult<()> {
 /// The projects with a card in a queue ([`sweep_all`]).
 fn projects_with_queues(conn: &Connection) -> ApiResult<Vec<String>> {
     let mut st = conn.prepare(
-        "SELECT DISTINCT k.project FROM card_queue q
+        "SELECT k.project FROM card_queue q
            JOIN board_columns k ON k.id = q.column_id
-          WHERE q.admitted_at IS NULL ORDER BY k.project",
+          WHERE q.admitted_at IS NULL
+         UNION
+         SELECT k.project FROM board_columns k JOIN cards c ON c.column_id = k.id
+          WHERE k.queue_release = 'batch' AND c.archived = 0 AND c.kind = 'card'
+         ORDER BY 1",
     )?;
     let rows = st
         .query_map([], |r| r.get(0))?
@@ -489,11 +748,92 @@ fn projects_with_queues(conn: &Connection) -> ApiResult<Vec<String>> {
     Ok(rows)
 }
 
-/// Release every queue that has a waiting card: the wait of a batch, and
-/// any release that no cause triggered. The rule engine's tick runs it.
+/// Release every queue that has a waiting card, and every `batch` column
+/// with a card in it: the wait of a batch, the stale cards of a batch
+/// (TER-1204), and any release that no cause triggered. The rule engine's
+/// tick runs it.
 pub fn sweep_all(t: &mut Tx<'_>) -> ApiResult<()> {
     for project in projects_with_queues(t)? {
         release_project(t, &project)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    /// `RERUN_SETTLED` reads `events` only by the card index and the
+    /// rowid range after the cursor, never by a scan (TER-1254: a scan of
+    /// `events` read over 700k rows on each move and sweep). The
+    /// later-attempt subquery reads only the jobs of the same project and
+    /// `created_at` (TER-1277: by `jobs_project_state` it read every job of
+    /// the project).
+    #[test]
+    fn rerun_settled_scans_no_table() {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        let sql =
+            format!("EXPLAIN QUERY PLAN SELECT 1 FROM jobs j WHERE j.id = 'J' AND {RERUN_SETTLED}");
+        let plans: Vec<String> = c
+            .prepare(&sql)
+            .unwrap()
+            .query_map([], |r| r.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for p in &plans {
+            println!("plan: {p}");
+        }
+        assert!(
+            plans
+                .iter()
+                .any(|p| p.contains("SEARCH e USING INTEGER PRIMARY KEY (rowid>?)")),
+            "{plans:?}"
+        );
+        assert!(!plans.iter().any(|p| p.starts_with("SCAN")), "{plans:?}");
+        assert!(
+            plans.iter().any(|p| p
+                == "SEARCH k USING INDEX jobs_project_created_at (project=? AND created_at=?)"),
+            "{plans:?}"
+        );
+        assert!(
+            plans.iter().any(|p| p.starts_with("SEARCH h USING ")
+                && p.ends_with("INDEX rule_runs_lane_pending (lane=? AND updated_at>?)")),
+            "{plans:?}"
+        );
+    }
+
+    /// The stale test of a batch reads jobs by index, never by a scan
+    /// (rev-1204b finding 5). Run with `--nocapture` for the plan.
+    #[test]
+    fn the_stale_test_reads_jobs_by_index() {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        let mut q = c
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", stale_sql()))
+            .unwrap();
+        let plans: Vec<String> = q
+            .query_map(params![1, "2026-11-14T00:00:00.000Z"], |r| r.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        println!("{}", plans.join("\n"));
+        // `SCAN json_each` (a batch list) is fine; a scan of a table is not.
+        let scans = |t: &str| {
+            plans
+                .iter()
+                .any(|p| p == &format!("SCAN {t}") || p.starts_with(&format!("SCAN {t} ")))
+        };
+        assert!(!scans("j") && !scans("c") && !scans("q"), "{plans:?}");
+        assert!(
+            plans.iter().any(|p| p.contains("jobs_project_created_at")),
+            "{plans:?}"
+        );
+        assert!(
+            plans.iter().any(|p| p.contains("jobs_project_state")),
+            "{plans:?}"
+        );
+    }
 }
