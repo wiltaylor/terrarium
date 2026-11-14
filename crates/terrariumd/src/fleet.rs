@@ -32,11 +32,11 @@ use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult, Code};
 use crate::policy;
 use crate::store::agents::{self, AgentPatch, AgentView};
-use crate::store::projects::{
-    self, NewProject, NewRepo, ProjectPatch, SOURCE_API, SOURCE_FILE, fleet_source,
-};
 use crate::store::board::column_options::{
     self, ColumnChecks, ColumnOptions, ColumnQueue, OptionsPut,
+};
+use crate::store::projects::{
+    self, NewProject, NewRepo, ProjectPatch, SOURCE_API, SOURCE_FILE, fleet_source,
 };
 use crate::store::{Page, board, jobs, repos, schedules, subscriptions, targets, templates};
 

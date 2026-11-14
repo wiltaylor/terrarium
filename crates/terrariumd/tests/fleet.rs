@@ -1010,7 +1010,9 @@ async fn export_and_apply_carry_a_converted_board() {
 
     // The project admin changes one rule: the plan names `columns`, and
     // the rule keeps its ID.
-    let lead = nd.agent("cb", "lead", json!({"roles": ["project_admin"]})).await["id"]
+    let lead = nd
+        .agent("cb", "lead", json!({"roles": ["project_admin"]}))
+        .await["id"]
         .as_str()
         .unwrap()
         .to_owned();

@@ -298,7 +298,9 @@ impl FleetColumn {
         }
         for (i, r) in self.rules.iter().flatten().enumerate() {
             if let Some(e) = bad(r) {
-                let name = r["name"].as_str().map_or_else(String::new, |n| format!(" ({n})"));
+                let name = r["name"]
+                    .as_str()
+                    .map_or_else(String::new, |n| format!(" ({n})"));
                 return Some(format!("rules[{i}]{name}: {e}"));
             }
         }
@@ -1512,10 +1514,8 @@ fn write_column(w: &mut Writer, c: &FleetColumn) {
         w.out.push('\n');
     }
     w.out.push_str("[[projects.columns]]\n");
-    w.out.push_str(&format!(
-        "name = {}\n",
-        toml::Value::String(c.name.clone())
-    ));
+    w.out
+        .push_str(&format!("name = {}\n", toml::Value::String(c.name.clone())));
     let value = |v: &serde_json::Value| toml::Value::try_from(without_nulls(v)).ok();
     for (key, v) in [("checks", &c.checks), ("queue", &c.queue)] {
         if let Some(v) = v.as_ref().and_then(value) {
@@ -1903,7 +1903,10 @@ board_flow = "rules"
         assert_eq!(names, ["review", "merge_queue", "done"]);
         let rules = a.columns[0].rules.as_ref().unwrap();
         assert_eq!(rules[0]["trigger"]["count"], 2);
-        assert_eq!(rules[0]["actions"][0]["args"]["subject"], "two\nin \"review\"");
+        assert_eq!(
+            rules[0]["actions"][0]["args"]["subject"],
+            "two\nin \"review\""
+        );
         assert!(a.columns[1].checks.is_none() && a.columns[1].rules.is_none());
         assert_eq!(a.columns[2].rules, Some(Vec::new()));
         assert_eq!(
@@ -1922,8 +1925,7 @@ board_flow = "rules"
 
         // A null in a list cannot be written: the export names the rule.
         let mut c = a.columns[0].clone();
-        c.rules.as_mut().unwrap()[1]["actions"][0]["args"]["to"] =
-            serde_json::json!([null]);
+        c.rules.as_mut().unwrap()[1]["actions"][0]["args"]["to"] = serde_json::json!([null]);
         let p = c.toml_problem().unwrap();
         assert!(p.starts_with("rules[1] (back):"), "{p}");
 
@@ -1950,8 +1952,7 @@ board_flow = "rules"
             let bad = text.replacen(from, to, 1);
             let errs = parse(&bad, Some("cb")).ok().unwrap_err();
             assert!(
-                errs.iter()
-                    .any(|i| i.at == at && i.message.contains(word)),
+                errs.iter().any(|i| i.at == at && i.message.contains(word)),
                 "{from}: {errs:#?}"
             );
         }
