@@ -301,7 +301,6 @@ async fn finish(
                     response,
                     exit_code,
                     error,
-                    ..Outcome::default()
                 },
             )?;
             t.audit(
@@ -322,7 +321,10 @@ async fn finish(
     }
 }
 
-async fn target_def(state: &Shared, svc: &ServiceRow) -> ApiResult<terrarium_core::config::TargetDef> {
+async fn target_def(
+    state: &Shared,
+    svc: &ServiceRow,
+) -> ApiResult<terrarium_core::config::TargetDef> {
     let name = svc.def.target.clone();
     let what = format!("service `{}` on the target", svc.def.name);
     let row = state
@@ -547,9 +549,7 @@ async fn run_steps(
     }
     if code != Some(0) {
         let why = match &end {
-            End::Exit {
-                code: Some(c), ..
-            } => format!("the script exited with code {c}"),
+            End::Exit { code: Some(c), .. } => format!("the script exited with code {c}"),
             End::Exit {
                 signal: Some(s), ..
             } => format!("the script ended by signal {s}"),
@@ -630,7 +630,10 @@ async fn push_payload(
     if !c.end().success() {
         return Err(step_error("copying the payload to the target", &c));
     }
-    let got = String::from_utf8_lossy(&c.stdout).trim().parse::<u64>().ok();
+    let got = String::from_utf8_lossy(&c.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok();
     if got != Some(size) {
         return Err(ApiError::internal(format!(
             "copying the payload to the target wrote {} bytes of {size}",
@@ -849,11 +852,16 @@ async fn collect_into(
     part: &Path,
     room: u64,
 ) -> ApiResult<u64> {
-    let io = |e: std::io::Error| ApiError::internal(format!("cannot store the response files: {e}"));
+    let io =
+        |e: std::io::Error| ApiError::internal(format!("cannot store the response files: {e}"));
     // The tar stream: the file bytes, plus up to 1 KiB of header and
     // padding for each entry, plus the end blocks.
     let cap = room
-        .saturating_add(u64::try_from(MAX_FILES * 2 + 16).unwrap_or(u64::MAX).saturating_mul(1024))
+        .saturating_add(
+            u64::try_from(MAX_FILES * 2 + 16)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(1024),
+        )
         .saturating_add(20 * 1024);
     let mut run = executor::start_cmd(
         state,
@@ -911,7 +919,8 @@ async fn collect_into(
 /// `room` bytes together. Other entries (links, devices) are left out.
 pub fn unpack(tar: &Path, dst: &Path, room: u64) -> ApiResult<u64> {
     use std::io::Read as _;
-    let io = |e: std::io::Error| ApiError::internal(format!("cannot unpack the response files: {e}"));
+    let io =
+        |e: std::io::Error| ApiError::internal(format!("cannot unpack the response files: {e}"));
     let _ = std::fs::remove_dir_all(dst);
     std::fs::create_dir_all(dst).map_err(io)?;
     let f = std::fs::File::open(tar).map_err(io)?;

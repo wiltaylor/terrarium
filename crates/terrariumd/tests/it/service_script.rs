@@ -98,9 +98,7 @@ impl Lab {
     async fn call_running(&self, service: &str, request: Value, payload: Option<&[u8]>) -> String {
         let mut body = json!({"request": request});
         if let Some(p) = payload {
-            body["payload_base64"] = base64::engine::general_purpose::STANDARD
-                .encode(p)
-                .into();
+            body["payload_base64"] = base64::engine::general_purpose::STANDARD.encode(p).into();
         }
         let r = self
             .td
@@ -235,7 +233,9 @@ async fn a_failing_script_fails_with_a_redacted_log_tail() {
                        "command": [script], "env_secrets": {"HF_TOKEN": "tt"}}))
         .await;
     let id = lab.call_running("fail", json!({}), None).await;
-    terrariumd::service_script::tick(&lab.state()).await.unwrap();
+    terrariumd::service_script::tick(&lab.state())
+        .await
+        .unwrap();
     let r = lab.ended(&id).await;
     assert_eq!(r["state"], "failed", "{r}");
     assert_eq!(r["exit_code"], 3, "{r}");
@@ -260,7 +260,9 @@ async fn a_cancel_kills_the_run_and_removes_its_dir() {
     lab.service(json!({"name": "slow", "kind": "script", "target": "box", "command": [script]}))
         .await;
     let id = lab.call_running("slow", json!({}), None).await;
-    terrariumd::service_script::tick(&lab.state()).await.unwrap();
+    terrariumd::service_script::tick(&lab.state())
+        .await
+        .unwrap();
     let line = wait_file(&pid).await;
     let (pid, dir) = line.split_once(' ').unwrap();
     let r = lab
@@ -295,7 +297,9 @@ async fn a_run_lost_in_a_restart_fails_and_is_not_run_again() {
         })
         .await
         .unwrap();
-    let t = terrariumd::service_script::tick(&lab.state()).await.unwrap();
+    let t = terrariumd::service_script::tick(&lab.state())
+        .await
+        .unwrap();
     assert_eq!(t.lost, vec![id.clone()]);
     assert!(t.started.is_empty());
     let r = lab.ended(&id).await;
@@ -309,11 +313,15 @@ async fn a_project_service_needs_a_grant_for_a_global_secret() {
     let lab = lab().await;
     let ran = lab.mark("ran");
     let script = lab.script("p", &format!("echo ran >> {ran}"));
-    lab.service(json!({"name": "psvc", "kind": "script", "target": "p-box", "project": "p",
-                       "command": [script], "env_secrets": {"HF_TOKEN": "tt"}}))
-        .await;
+    lab.service(
+        json!({"name": "psvc", "kind": "script", "target": "p-box", "project": "p",
+                       "command": [script], "env_secrets": {"HF_TOKEN": "tt"}}),
+    )
+    .await;
     let id = lab.call_running("psvc", json!({}), None).await;
-    terrariumd::service_script::tick(&lab.state()).await.unwrap();
+    terrariumd::service_script::tick(&lab.state())
+        .await
+        .unwrap();
     let r = lab.ended(&id).await;
     assert_eq!(r["state"], "failed", "{r}");
     assert!(r["error"].as_str().unwrap().contains("no grant"), "{r}");

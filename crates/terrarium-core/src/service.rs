@@ -255,7 +255,9 @@ impl ServiceDef {
                     return Err("`template` and `prompt` are for an agent service".into());
                 }
                 if self.env_secrets.len() > ENV_SECRETS_MAX {
-                    return Err(format!("env_secrets has more than {ENV_SECRETS_MAX} entries"));
+                    return Err(format!(
+                        "env_secrets has more than {ENV_SECRETS_MAX} entries"
+                    ));
                 }
                 for (env, secret) in &self.env_secrets {
                     crate::tool::check_env(env)?;
@@ -521,7 +523,10 @@ mod tests {
         for (extra, says) in [
             ("env_secrets = { token = \"t\" }\n", "bad env name"),
             ("env_secrets = { PATH = \"t\" }\n", "may not set"),
-            ("env_secrets = { TERRARIUM_SERVICE_DIR = \"t\" }\n", "may not set"),
+            (
+                "env_secrets = { TERRARIUM_SERVICE_DIR = \"t\" }\n",
+                "may not set",
+            ),
             ("env_secrets = { TOKEN = \" \" }\n", "names no secret"),
         ] {
             let e = def(extra).check().unwrap_err();
