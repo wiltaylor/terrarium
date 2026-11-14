@@ -383,16 +383,29 @@ fn set_cursor(t: &Tx<'_>, seq: i64) -> ApiResult<()> {
     Ok(())
 }
 
-/// At the first start, set the cursor to the end of the log.
+/// At the first start, set the cursor to the end of the log. At each
+/// start, mark the pending runs active ([`resume_pending`]).
 pub async fn startup(db: &Db) -> ApiResult<()> {
     db.write("system", |t| {
         if cursor(t)?.is_none() {
             let last = events::last_seq(t)?;
             set_cursor(t, last)?;
         }
+        resume_pending(t)?;
         Ok(())
     })
     .await
+}
+
+/// The engine resumes the pending runs that the last daemon left: their
+/// `updated_at` is now. The `job` slot of a column waits up to 10 minutes
+/// for a pending run of a failed job (TER-1254, `RERUN_SETTLED`), so after
+/// a daemon stop those minutes count from the start, not from the stop.
+pub fn resume_pending(c: &Connection) -> ApiResult<usize> {
+    Ok(c.execute(
+        "UPDATE rule_runs SET updated_at = ?1 WHERE state = 'pending'",
+        [now()],
+    )?)
 }
 
 // ------------------------------------------------------------ the guards
