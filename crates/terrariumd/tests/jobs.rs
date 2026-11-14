@@ -4935,7 +4935,8 @@ async fn a_lost_or_cancelled_release_never_runs_again() {
                    "work_dir": lab._dirs.path().join("jobs"),
                    "release_target": "gbox",
                    "release_recipe": format!(
-                       "echo \"$TERRARIUM_JOB_ID\" >> '{m}/runs'; touch \"{m}/ran-$TERRARIUM_JOB_ID\"; sleep 600")}),
+                       "echo \"$TERRARIUM_JOB_ID\" >> '{m}/runs'; echo $$ > \"{m}/pid-$TERRARIUM_JOB_ID\"; \
+                        touch \"{m}/ran-$TERRARIUM_JOB_ID\"; sleep 600")}),
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
@@ -5000,6 +5001,20 @@ async fn a_lost_or_cancelled_release_never_runs_again() {
         "{j:#}"
     );
     assert_eq!(j["attempt"], 1, "{j:#}");
+    // TER-1286: the job ends only after the kill of its lost run, so the
+    // run is gone now. A run that is still there holds the release slot,
+    // and case 3 below could not start: fail here, with the reason.
+    let pid: u32 = std::fs::read_to_string(marks.path().join(format!("pid-{id}")))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    if alive(pid) {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+        panic!("the kill of the lost release run did not end it (PID {pid}): {j:#}");
+    }
 
     // 2. A release that was running when the daemon stopped.
     let lost = ulid::Ulid::new().to_string();
