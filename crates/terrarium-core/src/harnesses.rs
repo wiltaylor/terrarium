@@ -64,6 +64,7 @@ mod tests {
         assert_eq!(codex::PACKAGE, pin(HarnessId::Codex).package);
         assert_eq!(copilot::PACKAGE, pin(HarnessId::Copilot).package);
         assert_eq!(pi::BINARY, pin(HarnessId::Pi).binary);
+        assert_eq!(grok::PACKAGE, pin(HarnessId::Grok).package);
         let ext = v["extension"].as_table().expect("[extension]");
         assert_eq!(ext.len(), EXTENSIONS.len());
         for e in EXTENSIONS {

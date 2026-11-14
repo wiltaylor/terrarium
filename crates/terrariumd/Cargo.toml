@@ -39,6 +39,7 @@ terrarium-adapter-claude.workspace = true
 terrarium-adapter-codex.workspace = true
 terrarium-adapter-copilot.workspace = true
 terrarium-adapter-pi.workspace = true
+terrarium-adapter-grok.workspace = true
 # The host agent wire protocol (docs/host-protocol.md); lib + bin crate.
 terrarium-host = { path = "../terrarium-host" }
 # The updater protocol and client (docs/api.md §34): the lib only, no bin.
