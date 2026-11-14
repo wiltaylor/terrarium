@@ -803,6 +803,66 @@ async fn after_a_daemon_stop_the_job_slot_waits_for_the_rules() {
     assert!(card(&td, b).await.get("queued").is_none());
 }
 
+/// A rule run of lane `flow` with ID `RR-TER-1277-<name>`: pending on
+/// event `seq`, last active `age` seconds ago.
+fn lane_run(
+    name: &'static str,
+    seq: i64,
+    age: i64,
+) -> impl Fn(&rusqlite::Connection) -> rusqlite::Result<()> + Copy {
+    move |c| {
+        c.execute(
+            "INSERT INTO rule_runs (id, project, rule, rule_hash, ord, event_seq, card, lane,
+                                    rule_json, cause, state, created_at, updated_at)
+             VALUES ('RR-TER-1277-' || ?1, 'flow', ?1, 'h', 0, ?2, NULL, 'flow', '{}', '{}',
+                     'pending', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?3),
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?3))",
+            rusqlite::params![name, seq, format!("-{age} seconds")],
+        )
+        .map(|_| ())
+    }
+}
+
+fn drop_lane_runs(c: &rusqlite::Connection) -> rusqlite::Result<()> {
+    c.execute("DELETE FROM rule_runs WHERE id LIKE 'RR-TER-1277-%'", [])
+        .map(|_| ())
+}
+
+/// After an outage, a lane with a backlog over 10 minutes holds the slot
+/// while it makes progress, whatever the age of the run of the job end
+/// (TER-1277, rev-1254b minor 3). A lane that made no progress for 10
+/// minutes frees it.
+#[tokio::test]
+async fn a_lane_backlog_holds_the_job_slot_whatever_the_age() {
+    let td = setup().await;
+    let cards = job_column(&td, json!([note("in", "lands", "landed")]), 2).await;
+    let (a, b) = (&cards[0], &cards[1]);
+    job(&td, "JA", a, "running").await;
+    fail_job(&td, "JA", true).await;
+    settle(&td).await;
+    let seq = first_event(&td, "JA").await;
+
+    // The run of the end has waited 45 minutes behind an earlier run of
+    // its lane, which the engine works on now: held.
+    let backlog = move |c: &rusqlite::Connection| {
+        lane_run("head", seq - 1, 0)(c)?;
+        lane_run("end", seq, 2700)(c)?;
+        aged("JA")(c)
+    };
+    assert!(waits_after_sweep(&td, b, backlog, drop_lane_runs).await);
+    assert_eq!(card(&td, b).await["queued"]["place"], 1);
+
+    // The same lane made no progress for 11 minutes (stalled): B gets the
+    // slot.
+    let stalled = move |c: &rusqlite::Connection| {
+        lane_run("head", seq - 1, 660)(c)?;
+        lane_run("end", seq, 2700)(c)?;
+        aged("JA")(c)
+    };
+    assert!(!waits_after_sweep(&td, b, stalled, drop_lane_runs).await);
+    assert!(card(&td, b).await.get("queued").is_none());
+}
+
 /// A failed rerun holds the slot until the rules act on its own end,
 /// though the first failed job is settled (TER-1254, rev-1250 minor 3).
 #[tokio::test]

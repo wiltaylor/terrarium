@@ -176,11 +176,17 @@ const JOB_OF_CARD: &str = "(j.card = q.card OR EXISTS (SELECT 1 FROM json_each(j
 ///   ran. The cursor is a scalar subquery, so the clause reads only the
 ///   events after it (a rowid range, never a scan of `events`); with no
 ///   cursor yet (the engine starts at the end of the log) none is after it;
-/// - no rule run of those events is pending and was active in the last 10
-///   minutes (TER-1254), so a lost or stalled run cannot hold the slot for
-///   ever. The engine marks its pending runs active when it starts
-///   ([`crate::rules_engine::resume_pending`]), so the 10 minutes count
-///   from the run or from the daemon start, whichever is later.
+/// - no rule run of those events is pending in a lane that was active in
+///   the last 10 minutes (TER-1254, TER-1277): a pending run of the same
+///   lane has `updated_at` in that time. A lost or stalled lane cannot
+///   hold the slot for ever, but a lane that works through a backlog holds
+///   it whatever the age of the run: each action and each end of a run
+///   stamps the lane ([`crate::rules_engine`] `finish` stamps the next
+///   pending run of the lane). The engine marks its pending runs active
+///   when it starts ([`crate::rules_engine::resume_pending`]), so the 10
+///   minutes count from the last progress of the lane or from the daemon
+///   start, whichever is later. Known limit: a lane that waits over 10
+///   minutes for a free lane task (`MAX_LANES`) counts as stalled.
 ///
 /// A rerun that a rule queued is then an open job, so the slot stays held
 /// until the rerun ends.
@@ -203,7 +209,10 @@ const RERUN_SETTLED: &str = "(j.state <> 'failed'
                                         json_extract(e.payload, '$.id')) = j.id)
         AND NOT EXISTS (SELECT 1 FROM rule_runs r JOIN events e ON e.seq = r.event_seq
                          WHERE r.state = 'pending'
-                           AND r.updated_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-600 seconds')
+                           AND EXISTS (SELECT 1 FROM rule_runs h
+                                        WHERE h.state = 'pending' AND h.lane = r.lane
+                                          AND h.updated_at >= strftime('%Y-%m-%dT%H:%M:%fZ',
+                                                                       'now', '-600 seconds'))
                            AND e.kind IN ('job', 'job.verdict')
                            AND coalesce(json_extract(e.payload, '$.job'),
                                         json_extract(e.payload, '$.id')) = j.id)))";
@@ -757,7 +766,10 @@ mod tests {
 
     /// `RERUN_SETTLED` reads `events` only by the card index and the
     /// rowid range after the cursor, never by a scan (TER-1254: a scan of
-    /// `events` read over 700k rows on each move and sweep).
+    /// `events` read over 700k rows on each move and sweep). The
+    /// later-attempt subquery reads only the jobs of the same project and
+    /// `created_at` (TER-1277: by `jobs_project_state` it read every job of
+    /// the project).
     #[test]
     fn rerun_settled_scans_no_table() {
         let mut c = Connection::open_in_memory().unwrap();
@@ -771,6 +783,9 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
+        for p in &plans {
+            println!("plan: {p}");
+        }
         assert!(
             plans
                 .iter()
@@ -778,6 +793,16 @@ mod tests {
             "{plans:?}"
         );
         assert!(!plans.iter().any(|p| p.starts_with("SCAN")), "{plans:?}");
+        assert!(
+            plans.iter().any(|p| p
+                == "SEARCH k USING INDEX jobs_project_created_at (project=? AND created_at=?)"),
+            "{plans:?}"
+        );
+        assert!(
+            plans.iter().any(|p| p.starts_with("SEARCH h USING ")
+                && p.ends_with("INDEX rule_runs_lane_pending (lane=? AND updated_at>?)")),
+            "{plans:?}"
+        );
     }
 
     /// The stale test of a batch reads jobs by index, never by a scan

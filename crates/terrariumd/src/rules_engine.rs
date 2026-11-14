@@ -1186,10 +1186,22 @@ fn action_failure(e: &ApiError) -> Option<Step> {
     })
 }
 
+/// End run `id`, and stamp the next pending run of its lane: the lane made
+/// progress, so a column's `job` slot keeps waiting for that run however
+/// long it has been queued (TER-1277, `RERUN_SETTLED`).
 fn finish(t: &Tx<'_>, id: &str, state: &str, reason: Option<&str>) -> ApiResult<()> {
+    let at = now();
     t.execute(
         "UPDATE rule_runs SET state = ?2, reason = ?3, updated_at = ?4 WHERE id = ?1",
-        params![id, state, reason, now()],
+        params![id, state, reason, at],
+    )?;
+    t.execute(
+        "UPDATE rule_runs SET updated_at = ?2
+          WHERE id = (SELECT n.id FROM rule_runs n
+                       WHERE n.state = 'pending'
+                         AND n.lane = (SELECT lane FROM rule_runs WHERE id = ?1)
+                       ORDER BY n.event_seq, n.ord, n.id LIMIT 1)",
+        params![id, at],
     )?;
     Ok(())
 }
@@ -2381,6 +2393,82 @@ fn planned_action(a: &Action, ctx: &RunCtx) -> Value {
         "args": args,
         "implemented": implemented(&a.verb),
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod pending_tests {
+    use super::*;
+
+    /// A migrated database with project `p` and these rule runs:
+    /// `(id, lane, event_seq, state, age in seconds)`.
+    fn db_with_runs(runs: &[(&str, &str, i64, &str, i64)]) -> Db {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        c.execute(
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('p', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        for (id, lane, seq, state, age) in runs {
+            c.execute(
+                "INSERT INTO rule_runs (id, project, rule, rule_hash, ord, event_seq, lane,
+                                        rule_json, cause, state, created_at, updated_at)
+                 VALUES (?1, 'p', ?1, 'h', 0, ?3, ?2, '{}', '{}', ?4,
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?5),
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?5))",
+                params![id, lane, seq, state, format!("-{age} seconds")],
+            )
+            .unwrap();
+        }
+        Db::new(c, events::EventHub::default())
+    }
+
+    /// The runs whose `updated_at` is in the last minute, by ID.
+    async fn fresh(db: &Db) -> Vec<String> {
+        db.read(|c| {
+            let mut st = c.prepare(
+                "SELECT id FROM rule_runs
+                  WHERE updated_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-60 seconds')
+                  ORDER BY id",
+            )?;
+            Ok(st
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<Vec<String>, _>>()?)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// The end of a run stamps the next pending run of its lane, and only
+    /// that one (TER-1277): a lane that works through a backlog stays
+    /// active for the `job` slot of a column.
+    #[tokio::test]
+    async fn the_end_of_a_run_stamps_the_next_pending_run_of_its_lane() {
+        let db = db_with_runs(&[
+            ("a1", "L", 1, "pending", 2700),
+            ("a2", "L", 2, "pending", 2700),
+            ("a3", "L", 3, "pending", 2700),
+            ("b1", "M", 2, "pending", 2700),
+        ]);
+        db.write("system", |t| finish(t, "a1", "done", None))
+            .await
+            .unwrap();
+        assert_eq!(fresh(&db).await, ["a1", "a2"]);
+    }
+
+    /// The daemon start resumes the pending runs and only those (TER-1277,
+    /// rev-1254b minor 4): their 10 minutes count from the start.
+    #[tokio::test]
+    async fn startup_resumes_the_pending_runs() {
+        let db = db_with_runs(&[
+            ("p1", "L", 1, "pending", 2700),
+            ("p2", "M", 2, "pending", 2700),
+            ("d1", "L", 0, "done", 2700),
+        ]);
+        startup(&db).await.unwrap();
+        assert_eq!(fresh(&db).await, ["p1", "p2"]);
+    }
 }
 
 #[cfg(test)]
