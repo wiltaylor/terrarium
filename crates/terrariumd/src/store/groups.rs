@@ -15,6 +15,12 @@ use tracing::{debug, warn};
 const MERGE_JOB_ENDED_SQL: &str = "SELECT EXISTS(SELECT 1 FROM jobs
     WHERE id = ?1 AND project = ?2 AND state IN ('passed', 'failed', 'cancelled'))";
 
+/// The card has an open (queued or running) merge job, alone or in a batch.
+const MERGE_JOB_OPEN_SQL: &str = "SELECT EXISTS(SELECT 1 FROM jobs
+    WHERE kind = 'merge' AND state IN ('queued', 'running')
+      AND (card = ?1 OR EXISTS (SELECT 1 FROM json_each(jobs.batch)
+                                WHERE json_extract(value, '$.card') = ?1)))";
+
 fn event(t: &mut Tx<'_>, id: &str, change: &str) -> ApiResult<()> {
     let project = board::project_of(t, id)?;
     t.emit(
@@ -651,6 +657,11 @@ fn pending_run(conn: &Connection, id: &str) -> ApiResult<Option<String>> {
 /// write, only after a `plan_events` that read the log to its end, so each
 /// event before that write has its runs.
 ///
+/// A member with an open merge job stays, in any column (TER-1278): the
+/// repair closed the group of a running job as abandoned when its card sat
+/// in `backlog`, and the job's later step writes found the group closed.
+/// The repair removes such a member once the job has ended.
+///
 /// `waiting` holds when each waiting group was first skipped. A group that
 /// waited [`RECONCILE_WAIT`] is repaired anyway. Returns the groups that
 /// wait now, with that time.
@@ -694,8 +705,9 @@ pub fn reconcile_merge_groups(
             // Ready, backlog and done have no roles on the default board.
             // Working and blocked use roles so renamed columns work too.
             let repair = card.labels.iter().any(|l| l.starts_with("merge-fix:"));
+            let merging = t.query_row(MERGE_JOB_OPEN_SQL, [member], |r| r.get::<_, bool>(0))?;
             if card.archived || (repair && card.column == "done")
-                || (!repair
+                || (!repair && !merging
                     && ((job_ended && role.as_deref() == Some("merge_queue")
                             && super::jobs::open_of_card(t, member)?.is_none())
                         || matches!(role.as_deref(), Some("working" | "blocked"))

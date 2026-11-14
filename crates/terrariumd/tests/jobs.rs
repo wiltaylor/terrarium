@@ -2054,18 +2054,8 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str
     // A merge pass: the name `accepted` is the fallback.
     let head = lab.branch("ter-c", "next", &[("OK", "yes\n")]);
     let b = lab.card("by name", "ter-c").await;
-    // TER-1278: merge from the review role column, as a lead does. The merge
-    // group repair drops a member in `backlog` (returned for more work); when
-    // it ran before the job ended, it closed the group with `e2e` running.
-    let r = lab
-        .td
-        .post_as(
-            &lab.lead,
-            &format!("/api/cards/{b}/move"),
-            json!({"column": "qa"}),
-        )
-        .await;
-    assert_eq!(r.status, 200, "{}", r.body);
+    // TER-1278: the card stays in `backlog` while its merge job runs. The
+    // merge group repair keeps it: it has an open merge job.
     let r = lab
         .td
         .post_as(&lab.lead, &format!("/api/cards/{b}/merge"), json!({}))

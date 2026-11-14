@@ -1641,6 +1641,50 @@ async fn merge_group_repair_keeps_an_empty_group_while_its_rule_runs() {
     assert_eq!(card(&td, &gid).await["archived"], true);
 }
 
+/// TER-1278: the repair keeps a member in `backlog` while its merge job
+/// is open, so the group of a running job is not closed as abandoned. Once
+/// the job has ended, the repair removes the member.
+#[tokio::test]
+async fn merge_group_repair_keeps_a_member_while_its_merge_job_is_open() {
+    use terrariumd::store::groups;
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"backlog", "repo":"app"}),
+    )
+    .await;
+    let job = store_job(&td, JobKind::Merge, &[&a]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (key, group) = (a.clone(), gid.clone());
+    let kept = state(&td)
+        .db
+        .write("test", move |t| {
+            groups::expire(t)?;
+            let g = groups::get(t, &group)?;
+            Ok(g.members.contains(&key) && g.closed_at.is_none())
+        })
+        .await
+        .unwrap();
+    assert!(kept, "the open merge job keeps the member and the group");
+    fail_job(&td, &job, "infra").await;
+    let (key, group) = (a.clone(), gid.clone());
+    let kept_after = state(&td)
+        .db
+        .write("test", move |t| {
+            groups::expire(t)?;
+            Ok(groups::get(t, &group)?.members.contains(&key))
+        })
+        .await
+        .unwrap();
+    assert!(!kept_after, "the ended job no longer keeps a backlog member");
+}
+
 #[tokio::test]
 async fn default_merge_group_waits_for_every_member_and_passed_recipe() {
     let td = queue_lab().await;
