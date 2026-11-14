@@ -1382,6 +1382,15 @@ async fn finish_job(state: &Shared, id: &str, end: JobEnd) {
     }
 }
 
+/// End running job `id` with `end` as a finished run does
+/// ([`finish_job`]): the store end, then [`on_end`] (the verdicts, and
+/// the coded card flow on a `code` board). For the tests, which have no
+/// host to run the recipe (TER-1215).
+#[doc(hidden)]
+pub async fn finish_for_test(state: &Shared, id: &str, end: JobEnd) {
+    finish_job(state, id, end).await;
+}
+
 pub(crate) type HostRetries = std::collections::HashMap<String, (Instant, Duration)>;
 
 /// Resolve new names outside DB closures. API calls neither retry failed pins
