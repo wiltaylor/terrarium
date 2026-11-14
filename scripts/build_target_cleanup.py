@@ -10,8 +10,8 @@ python3 (no dependencies).
 
 `clean --live A,B,... --done AGENT:CARD ... [--apply]`
 
-  `--live` is required: the names of every agent that is still alive
-  (`terrarium agents ls`). `--done` names a finished card (accepted or done)
+  `--live` is required and may not be empty: the names of every agent that
+  is still alive (`terrarium agents ls`). `--done` names a finished card (accepted or done)
   and its agent (the `by:<agent>` label). Only direct entries of the root
   (`/src`) are looked at, and only these are selected for a pair:
 
@@ -24,18 +24,25 @@ python3 (no dependencies).
   targets, the slot locks, the lead's tree), a symlink, an entry of a live
   agent (`<live>` or `<live>-*`), and an entry that is the working
   directory or the `CARGO_TARGET_DIR` of a running process, or holds one.
+  When the cwd or environ of some process cannot be read (another user),
+  nothing is removed and the reason names those pids.
   Each selected and kept path is printed with its size and the reason, and
   the total freed (or that a dry run would free) is printed at the end.
+  An entry that fails to delete is reported as `error`, the run goes on,
+  and the exit code is 1.
 
 `cap --cap-gib N [--apply]`
 
   The shared targets `terrarium-cardcheck-target-<s>` (lock
-  `terrarium-cardcheck-<s>.lock`), `terrarium-queue-target-<s>` (lock
-  `terrarium-queue-<s>.lock`) and `terrarium-dev-target` are never removed.
-  One that is over N GiB is emptied, the same as `cargo clean`, only while
-  this script holds its slot lock and every cargo `.cargo-lock` in it with
-  a non-blocking flock. A held lock skips that dir. The `.cargo-lock` files
-  stay, so a cargo that starts during the clean waits on them.
+  `terrarium-cardcheck-<s>.lock`, which must exist), `terrarium-queue-target-<s>`
+  (lock `terrarium-queue-<s>.lock`) and `terrarium-dev-target` (lock
+  `terrarium-dev-target.lock`) are never removed. One that is over N GiB is
+  emptied, the same as `cargo clean`, only while this script holds its own
+  lock and every cargo `.cargo-lock` in it with a non-blocking flock, and
+  no running process uses it (the same check as `clean`). A held lock or a
+  busy dir skips it. The `.cargo-lock` files stay, so a cargo that starts
+  during the clean waits on them; a dir with a new `.cargo-lock` is left
+  alone. An entry that fails to delete is reported, and the exit code is 1.
 
 `floor [PATH] [--min-free-pct 20]`
 
@@ -43,8 +50,8 @@ python3 (no dependencies).
   less than the floor free (20 percent, the floor of the services payload
   store, TER-1264). Run it before making a per-card target dir.
 
-Common: `--root` (default /src) and `--json`. Exit 0, or 1 for a floor
-below the limit, 2 for bad arguments.
+Common: `--root` (default /src) and `--json`. Exit 0, 1 for a floor below
+the limit or a failed delete, 2 for bad arguments.
 """
 
 from __future__ import annotations
@@ -67,10 +74,18 @@ GIB = 1024**3
 AGENT_RE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
 CARD_RE = re.compile(r"[A-Za-z]+-(\d+)")
 BOUND_RE = re.compile(r"[a-z]+-(\d+)")
+# The shared targets and their own lock: (pattern, lock name, the lock must
+# already exist). The card check takes `terrarium-cardcheck-<s>.lock`
+# (AGENTS.md, the card check loop). No code takes the other two names: the
+# daemon's job slots lock `<work_dir>/<project>/slot-<n>.lock` and build in
+# `slot-<n>/target`, outside /src (crates/terrariumd/src/jobs.rs:912, :932,
+# docs/api.md "Each slot has one work tree"). For those two the script
+# makes and takes its own lock, so two cleanups do not run at once, and
+# relies on the cargo locks and the process check.
 SHARED = [
-    (re.compile(r"terrarium-cardcheck-target-(\d+)"), "terrarium-cardcheck-{}.lock"),
-    (re.compile(r"terrarium-queue-target-(\d+)"), "terrarium-queue-{}.lock"),
-    (re.compile(r"terrarium-dev-target"), None),
+    (re.compile(r"terrarium-cardcheck-target-(\d+)"), "terrarium-cardcheck-{}.lock", True),
+    (re.compile(r"terrarium-queue-target-(\d+)"), "terrarium-queue-{}.lock", False),
+    (re.compile(r"terrarium-dev-target"), "terrarium-dev-target.lock", False),
 ]
 
 
@@ -127,6 +142,9 @@ def parse_done(items: list[str]) -> list[tuple[str, str]]:
 
 def parse_live(value: str) -> list[str]:
     names = [n.strip() for n in value.split(",") if n.strip()]
+    if not names:
+        # The lead itself is always live: an empty list is a mistake.
+        raise UsageError("--live is empty: give every live agent (terrarium agents ls)")
     for n in names:
         if not AGENT_RE.fullmatch(n):
             raise UsageError(f"bad live agent name {n!r}")
@@ -149,19 +167,33 @@ def matches(name: str, agent: str, card: str) -> bool:
     return low == c or low.startswith(c + "-") or rest.startswith(("target", "dev"))
 
 
-def busy_paths(proc: Path) -> list[Path]:
-    """The working dirs and CARGO_TARGET_DIRs of the running processes."""
-    out = []
+def busy_paths(proc: Path) -> tuple[list[Path], list[str]]:
+    """The working dirs and CARGO_TARGET_DIRs of the running processes, and
+    the pids whose cwd or environ could not be read (not a process that
+    ended while it was read)."""
+    out: list[Path] = []
+    unreadable: list[str] = []
     for d in proc.iterdir() if proc.is_dir() else []:
         if not d.name.isdigit():
             continue
-        with contextlib.suppress(OSError):
+        failed = False
+        try:
             out.append(Path(os.readlink(d / "cwd")))
-        with contextlib.suppress(OSError):
+        except (FileNotFoundError, ProcessLookupError):
+            pass  # the process ended, or is a zombie with no cwd
+        except OSError:
+            failed = True
+        try:
             for var in (d / "environ").read_bytes().split(b"\0"):
                 if var.startswith(b"CARGO_TARGET_DIR="):
                     out.append(Path(os.fsdecode(var.split(b"=", 1)[1])))
-    return out
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+        except OSError:
+            failed = True
+        if failed:
+            unreadable.append(d.name)
+    return out, unreadable
 
 
 def in_use(path: Path, busy: list[Path]) -> bool:
@@ -171,7 +203,17 @@ def in_use(path: Path, busy: list[Path]) -> bool:
     return False
 
 
-def select(root: Path, done: list[tuple[str, str]], live: list[str], busy: list[Path]):
+def busy_reason(path: Path, proc: Path) -> str | None:
+    """Why a path must be kept for a running process, or None."""
+    busy, unreadable = busy_paths(proc)
+    if in_use(path, busy):
+        return "used by a running process"
+    if unreadable:
+        return f"cannot read {len(unreadable)} processes in {proc} (pids {', '.join(unreadable[:5])}), so their trees are unknown"
+    return None
+
+
+def select(root: Path, done: list[tuple[str, str]], live: list[str], proc: Path):
     """Each entry of root that a done pair names, as (path, action, reason)."""
     rows = []
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
@@ -189,8 +231,8 @@ def select(root: Path, done: list[tuple[str, str]], live: list[str], busy: list[
             rows.append((entry, "keep", "outside the root"))
         elif owner:
             rows.append((entry, "keep", f"live agent {owner}"))
-        elif in_use(entry, busy):
-            rows.append((entry, "keep", "used by a running process"))
+        elif why := busy_reason(entry, proc):
+            rows.append((entry, "keep", why))
         else:
             rows.append((entry, "remove", f"{agent} {card}"))
     return rows
@@ -208,38 +250,54 @@ def cmd_clean(args, out) -> int:
     done = parse_done(args.done)
     live = parse_live(args.live)
     proc = Path(args.proc)
-    rows = select(root, done, live, busy_paths(proc))
+    rows = select(root, done, live, proc)
     freed = 0
+    errors = 0
     report = []
     for path, action, reason in rows:
         size = du(path)
+        gone = size
         if action == "remove" and args.apply:
             # Check again just before the delete: a run may have started.
-            if in_use(path, busy_paths(proc)):
-                action, reason = "keep", "used by a running process"
+            why = busy_reason(path, proc)
+            if why:
+                action, reason = "keep", why
             else:
-                remove(path)
-        if action == "remove":
-            freed += size
+                try:
+                    remove(path)
+                except OSError as e:
+                    errors += 1
+                    gone = size - du(path)
+                    action, reason = "error", f"{type(e).__name__}: {e}"
+        if action in ("remove", "error"):
+            freed += gone
         report.append({"path": str(path), "action": action, "reason": reason, "bytes": size})
     mode = "freed" if args.apply else "dry run, would free"
     if args.json:
-        json.dump({"apply": args.apply, "freed_bytes": freed, "entries": report}, out, indent=2)
+        json.dump({"apply": args.apply, "freed_bytes": freed, "errors": errors, "entries": report}, out, indent=2)
         out.write("\n")
     else:
         for r in report:
             out.write(f"{r['action']:6} {human(r['bytes']):>10}  {r['path']}  ({r['reason']})\n")
         out.write(f"{mode}: {human(freed)} in {sum(r['action'] == 'remove' for r in report)} entries\n")
-    return 0
+        if errors:
+            out.write(f"errors: {errors} entries could not be removed\n")
+    return 1 if errors else 0
 
 
 @contextlib.contextmanager
-def try_locks(paths: list[Path]):
-    """Yield True when every lock is taken with a non-blocking flock."""
+def try_locks(paths: list[Path], create: bool = False):
+    """Yield True when every lock is taken with a non-blocking flock. A
+    missing lock file is made only when `create` is set, else skipped."""
     held = []
     try:
         for p in paths:
-            fd = os.open(p, os.O_RDONLY)
+            if p.exists():
+                fd = os.open(p, os.O_RDONLY)
+            elif create:
+                fd = os.open(p, os.O_RDWR | os.O_CREAT, 0o644)
+            else:
+                continue
             held.append(fd)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -256,9 +314,14 @@ def cargo_locks(target: Path) -> list[Path]:
     return sorted(set(target.glob(".cargo-lock")) | set(target.glob("*/.cargo-lock")) | set(target.glob("*/*/.cargo-lock")))
 
 
-def empty_target(target: Path) -> None:
-    """Remove the build output of a target dir, keep its `.cargo-lock` files."""
+def empty_target(target: Path) -> list[str]:
+    """Remove the build output of a target dir, keep its `.cargo-lock` files.
+
+    A dir that holds a `.cargo-lock` that was not there at the start (a
+    cargo that began a new profile during the clean) is left alone. Returns
+    the errors; each failed entry is skipped and the clean goes on."""
     keep = set(cargo_locks(target))
+    errors = []
     for top, dirs, files in os.walk(target, topdown=True):
         here = Path(top)
         for name in list(dirs):
@@ -266,64 +329,80 @@ def empty_target(target: Path) -> None:
             if any(sub in k.parents for k in keep) and not sub.is_symlink():
                 continue  # walk into it, keep its lock
             dirs.remove(name)
-            if sub.is_symlink():
-                sub.unlink()
-            else:
-                shutil.rmtree(sub)
+            if not sub.is_symlink() and set(cargo_locks(sub)) - keep:
+                errors.append(f"{sub}: a new .cargo-lock appeared, left alone")
+                continue
+            try:
+                if sub.is_symlink():
+                    sub.unlink()
+                else:
+                    shutil.rmtree(sub)
+            except OSError as e:
+                errors.append(f"{sub}: {type(e).__name__}: {e}")
         for name in files:
             f = here / name
             if f not in keep and name != "CACHEDIR.TAG":
-                f.unlink()
+                try:
+                    f.unlink()
+                except OSError as e:
+                    errors.append(f"{f}: {type(e).__name__}: {e}")
+    return errors
 
 
 def cmd_cap(args, out) -> int:
     root = check_root(args.root)
     cap = int(args.cap_gib * GIB)
+    proc = Path(args.proc)
     report = []
     freed = 0
+    errors = 0
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
         lock_name = None
-        for rx, lock in SHARED:
+        for rx, lock, required in SHARED:
             m = rx.fullmatch(entry.name)
             if m:
-                lock_name = lock.format(m.group(1)) if lock else ""
+                lock_name = lock.format(*m.groups())
                 break
         if lock_name is None or entry.is_symlink() or not entry.is_dir():
             continue
         size = du(entry)
         row = {"path": str(entry), "bytes": size}
+        report.append(row)
         if size <= cap:
             row.update(action="keep", reason="under the cap")
-        else:
-            locks = cargo_locks(entry)
-            if lock_name:
-                slot = root / lock_name
-                if not slot.is_file():
-                    row.update(action="keep", reason=f"no slot lock {slot}")
-                    report.append(row)
-                    continue
-                locks = [slot] + locks
-            with try_locks(locks) as ok:
-                if not ok:
-                    row.update(action="keep", reason="over the cap, a lock is held")
-                elif args.apply:
-                    empty_target(entry)
-                    after = du(entry)
-                    freed += size - after
-                    row.update(action="clean", reason="over the cap", after=after)
-                else:
-                    freed += size
-                    row.update(action="clean", reason="over the cap")
-        report.append(row)
+            continue
+        own = root / lock_name
+        if required and not own.is_file():
+            row.update(action="keep", reason=f"no slot lock {own}")
+            continue
+        with try_locks([own] + cargo_locks(entry), create=args.apply) as ok:
+            why = busy_reason(entry, proc)
+            if not ok:
+                row.update(action="keep", reason="over the cap, a lock is held")
+            elif why:
+                row.update(action="keep", reason=f"over the cap, {why}")
+            elif args.apply:
+                errs = empty_target(entry)
+                after = du(entry)
+                freed += size - after
+                row.update(action="error" if errs else "clean", reason="over the cap", after=after)
+                if errs:
+                    errors += 1
+                    row["errors"] = errs
+            else:
+                freed += size
+                row.update(action="clean", reason="over the cap")
     mode = "freed" if args.apply else "dry run, would free"
     if args.json:
-        json.dump({"apply": args.apply, "cap_bytes": cap, "freed_bytes": freed, "entries": report}, out, indent=2)
+        json.dump({"apply": args.apply, "cap_bytes": cap, "freed_bytes": freed, "errors": errors, "entries": report}, out, indent=2)
         out.write("\n")
     else:
         for r in report:
             out.write(f"{r['action']:6} {human(r['bytes']):>10}  {r['path']}  ({r['reason']})\n")
+            for e in r.get("errors", []):
+                out.write(f"       error: {e}\n")
         out.write(f"{mode}: {human(freed)}\n")
-    return 0
+    return 1 if errors else 0
 
 
 def free_pct(path: str) -> tuple[float, int, int]:
@@ -366,6 +445,7 @@ def main(argv=None, out=sys.stdout) -> int:
     k = sub.add_parser("cap")
     k.add_argument("--cap-gib", type=float, required=True)
     k.add_argument("--apply", action="store_true")
+    k.add_argument("--proc", default="/proc", help=argparse.SUPPRESS)
     f = sub.add_parser("floor")
     f.add_argument("path", nargs="?")
     f.add_argument("--min-free-pct", type=float, default=FLOOR_PCT)

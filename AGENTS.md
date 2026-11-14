@@ -148,7 +148,11 @@ python3 scripts/build_target_cleanup.py cap --cap-gib 80
 header of the script lists the patterns), and keeps the `terrarium*`
 entries, symlinks, every entry of a live agent and every entry that a
 running process uses. It prints each path with its size and the total
-freed. `cap` never removes a shared target dir, only its build output.
+freed. `cap` never removes a shared target dir, only its build output,
+and only while its own lock and every `.cargo-lock` in it are free and no
+process uses it. Run both as root: when the script cannot read a process
+in `/proc`, it keeps everything and says so. A failed delete is reported,
+the run goes on, and the exit code is 1.
 
 ### Run it on a clean checkout of a pushed commit
 

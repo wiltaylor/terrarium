@@ -119,7 +119,7 @@ class CleanSelection(Tree):
     def test_text_log_names_the_freed_space(self):
         self.mk("grok-1192-dev", size=8192)
         rc, out = run("--root", str(self.root), "clean", "--proc", str(self.proc),
-                      "--live", "", "--done", "grok-1192:TER-1192")
+                      "--live", "lead", "--done", "grok-1192:TER-1192")
         self.assertEqual(rc, 0)
         self.assertIn("remove", out)
         self.assertIn("grok-1192-dev", out)
@@ -128,7 +128,7 @@ class CleanSelection(Tree):
     def test_symlink_is_kept_and_its_target_outside_untouched(self):
         (self.outside / "keepme").write_text("data")
         os.symlink(self.outside, self.root / "grok-1192-link")
-        rc, out = self.clean("--live", "", "--done", "grok-1192:TER-1192", "--apply")
+        rc, out = self.clean("--live", "lead", "--done", "grok-1192:TER-1192", "--apply")
         self.assertEqual(rc, 0)
         entry = json.loads(out)["entries"][0]
         self.assertEqual((entry["action"], entry["reason"]), ("keep", "symlink"))
@@ -142,7 +142,7 @@ class CleanSelection(Tree):
         (a / "sub").mkdir()
         self.fake_proc(100, cwd=a / "sub")
         self.fake_proc(101, target=b)
-        rc, out = self.clean("--live", "", "--done", "grok-1192:TER-1192", "--apply")
+        rc, out = self.clean("--live", "lead", "--done", "grok-1192:TER-1192", "--apply")
         self.assertEqual(rc, 0)
         self.assertTrue(a.exists())
         self.assertTrue(b.exists())
@@ -157,10 +157,10 @@ class CleanSelection(Tree):
 
         def late(proc):
             calls.append(1)
-            return real(proc) if len(calls) == 1 else [a]
+            return real(proc) if len(calls) == 1 else ([a], [])
 
         with mock.patch.object(btc, "busy_paths", late):
-            rc, out = self.clean("--live", "", "--done", "grok-1192:TER-1192", "--apply")
+            rc, out = self.clean("--live", "lead", "--done", "grok-1192:TER-1192", "--apply")
         self.assertEqual(rc, 0)
         self.assertTrue(a.exists())
         self.assertEqual(json.loads(out)["freed_bytes"], 0)
@@ -169,20 +169,78 @@ class CleanSelection(Tree):
         with self.assertRaises(SystemExit):
             run("--root", str(self.root), "clean", "--done", "grok-1192:TER-1192")
         for bad in ("grok-1192", "../x:TER-1", "grok:../x", "terrarium-cardcheck:TER-2", ":TER-1"):
-            rc, _ = self.clean("--live", "", "--done", bad)
+            rc, _ = self.clean("--live", "lead", "--done", bad)
             self.assertEqual(rc, 2, bad)
-        rc, _ = self.clean("--live", "a/b", "--done", "grok-1192:TER-1192")
-        self.assertEqual(rc, 2)
+        for live in ("a/b", "", " ", " , "):
+            rc, _ = self.clean("--live", live, "--done", "grok-1192:TER-1192")
+            self.assertEqual(rc, 2, repr(live))
+
+    def test_unreadable_process_keeps_everything_and_says_so(self):
+        a = self.mk("grok-1192-dev")
+        (self.proc / "200").mkdir()  # no cwd link: readlink fails
+        real = os.readlink
+
+        def readlink(path):
+            if str(path).startswith(str(self.proc / "200")):
+                raise PermissionError(13, "Permission denied")
+            return real(path)
+
+        with mock.patch.object(btc.os, "readlink", readlink):
+            rc, out = self.clean("--live", "lead", "--done", "grok-1192:TER-1192", "--apply")
+        self.assertEqual(rc, 0)
+        self.assertTrue(a.exists())
+        entry = json.loads(out)["entries"][0]
+        self.assertEqual(entry["action"], "keep")
+        self.assertIn("cannot read 1 processes", entry["reason"])
+        self.assertIn("200", entry["reason"])
+
+    def test_ended_process_is_ignored(self):
+        a = self.mk("grok-1192-dev")
+        (self.proc / "201").mkdir()  # no cwd link: the process ended
+        rc, out = self.clean("--live", "lead", "--done", "grok-1192:TER-1192", "--apply")
+        self.assertEqual(rc, 0)
+        self.assertFalse(a.exists())
+
+    def test_delete_error_goes_on_and_exits_1(self):
+        a = self.mk("grok-1192-TER-1192-a")
+        b = self.mk("grok-1192-TER-1192-b")
+        c = self.mk("grok-1192-TER-1192-c")
+        real = btc.remove
+
+        def remove(path):
+            if path == b:
+                raise PermissionError(13, "Permission denied", str(path))
+            real(path)
+
+        with mock.patch.object(btc, "remove", remove):
+            rc, out = self.clean("--live", "lead", "--done", "grok-1192:TER-1192", "--apply")
+        self.assertEqual(rc, 1)
+        doc = json.loads(out)
+        acts = {Path(e["path"]).name: e["action"] for e in doc["entries"]}
+        self.assertEqual(acts, {a.name: "remove", b.name: "error", c.name: "remove"})
+        self.assertEqual(doc["errors"], 1)
+        self.assertFalse(a.exists())
+        self.assertTrue(b.exists())
+        self.assertFalse(c.exists())
+        err = next(e for e in doc["entries"] if e["action"] == "error")
+        self.assertIn("PermissionError", err["reason"])
+        with mock.patch.object(btc, "remove", remove):
+            b2 = self.mk("grok-1192-TER-1192-b2")
+            rc, text = run("--root", str(self.root), "clean", "--proc", str(self.proc),
+                           "--live", "lead", "--done", "grok-1192:TER-1192", "--apply")
+        self.assertEqual(rc, 1)
+        self.assertIn("errors: 1 entries could not be removed", text)
+        self.assertFalse(b2.exists())
 
     def test_refuses_slash_and_relative_roots(self):
         for root in ("/", "src", str(Path.home())):
-            rc, _ = run("--root", root, "clean", "--live", "", "--done", "grok-1192:TER-1192")
+            rc, _ = run("--root", root, "clean", "--live", "lead", "--done", "grok-1192:TER-1192")
             self.assertEqual(rc, 2, root)
 
     def test_bound_rule_needs_the_card_number(self):
         self.mk("grok-1192-other")
         self.mk("grok-1192-TER-7-x")
-        rc, out = self.clean("--live", "", "--done", "grok-1192:TER-7")
+        rc, out = self.clean("--live", "lead", "--done", "grok-1192:TER-7")
         got = {Path(e["path"]).name for e in json.loads(out)["entries"]}
         self.assertEqual(got, {"grok-1192-TER-7-x"})
 
@@ -197,7 +255,8 @@ class Cap(Tree):
         return t
 
     def cap(self, *extra):
-        return run("--root", str(self.root), "--json", "cap", "--cap-gib", str(64 * 1024 / btc.GIB), *extra)
+        return run("--root", str(self.root), "--json", "cap", "--proc", str(self.proc),
+                   "--cap-gib", str(64 * 1024 / btc.GIB), *extra)
 
     def test_over_cap_cleaned_only_with_apply_under_lock(self):
         big = self.target("terrarium-cardcheck-target-2", 200 * 1024)
@@ -234,6 +293,63 @@ class Cap(Tree):
             self.assertEqual((e["action"], e["reason"]), ("keep", "over the cap, a lock is held"))
         self.assertTrue((slot_t / "debug" / "deps" / "big").exists())
         self.assertTrue((cargo_t / "debug" / "deps" / "big").exists())
+
+    def test_dev_target_needs_its_own_lock_free(self):
+        dev = self.target("terrarium-dev-target", 200 * 1024)
+        lock = self.root / "terrarium-dev-target.lock"
+        self.assertFalse(lock.exists())
+        rc, _ = self.cap()  # a dry run makes no lock file
+        self.assertFalse(lock.exists())
+        lock.write_text("")
+        with open(lock) as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            rc, out = self.cap("--apply")
+        self.assertEqual(json.loads(out)["entries"][0]["reason"], "over the cap, a lock is held")
+        self.assertTrue((dev / "debug" / "deps" / "big").exists())
+        lock.unlink()
+        rc, out = self.cap("--apply")  # makes and takes its own lock
+        self.assertEqual(rc, 0)
+        self.assertTrue(lock.exists())
+        self.assertFalse((dev / "debug" / "deps").exists())
+
+    def test_held_cargo_lock_of_dev_target_skips(self):
+        dev = self.target("terrarium-dev-target", 200 * 1024)
+        with open(dev / "debug" / ".cargo-lock") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            rc, out = self.cap("--apply")
+        self.assertEqual(json.loads(out)["entries"][0]["action"], "keep")
+        self.assertTrue((dev / "debug" / "deps" / "big").exists())
+
+    def test_busy_dev_target_is_kept(self):
+        dev = self.target("terrarium-dev-target", 200 * 1024)
+        self.fake_proc(300, cwd=dev / "debug")
+        rc, out = self.cap("--apply")
+        entry = json.loads(out)["entries"][0]
+        self.assertEqual((entry["action"], entry["reason"]), ("keep", "over the cap, used by a running process"))
+        self.assertTrue((dev / "debug" / "deps" / "big").exists())
+
+    def test_new_profile_dir_with_a_cargo_lock_is_left_alone(self):
+        dev = self.target("terrarium-dev-target", 200 * 1024)
+        real = btc.cargo_locks
+        calls = []
+
+        def late(target):
+            calls.append(target)
+            found = real(target)
+            if len(calls) == 2:  # right after the keep set: a cargo starts `release`
+                (dev / "release").mkdir()
+                (dev / "release" / ".cargo-lock").write_text("")
+                (dev / "release" / "out").write_bytes(b"x")
+            return found
+
+        with mock.patch.object(btc, "cargo_locks", late):
+            rc, out = self.cap("--apply")
+        self.assertEqual(rc, 1)
+        entry = json.loads(out)["entries"][0]
+        self.assertEqual(entry["action"], "error")
+        self.assertIn("a new .cargo-lock appeared", entry["errors"][0])
+        self.assertTrue((dev / "release" / "out").exists())
+        self.assertFalse((dev / "debug" / "deps").exists())
 
     def test_missing_slot_lock_skips_and_other_dirs_are_ignored(self):
         t = self.target("terrarium-cardcheck-target-4", 200 * 1024)
