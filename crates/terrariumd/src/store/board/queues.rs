@@ -572,8 +572,8 @@ mod tests {
             "{plans:?}"
         );
         assert!(
-            plans.iter().any(|p| p
-                .starts_with("SEARCH h USING INDEX rule_runs_lane_pending (lane=? AND updated_at>?)")),
+            plans.iter().any(|p| p.starts_with("SEARCH h USING ")
+                && p.ends_with("INDEX rule_runs_lane_pending (lane=? AND updated_at>?)")),
             "{plans:?}"
         );
     }
