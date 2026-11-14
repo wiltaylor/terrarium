@@ -7893,8 +7893,7 @@ async fn until_slot_probe(lock: &Path) {
                 return false;
             };
             let argv: Vec<&[u8]> = raw.split(|b| *b == 0).collect();
-            argv.first()
-                .is_some_and(|a0| a0.ends_with(b"flock"))
+            argv.first().is_some_and(|a0| a0.ends_with(b"flock"))
                 && argv.contains(&&b"-E"[..])
                 && argv.contains(&lock.as_bytes())
         })
