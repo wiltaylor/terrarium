@@ -39,7 +39,11 @@ fn shared(td: &TestDaemon) -> terrariumd::api::Shared {
 
 async fn call(td: &TestDaemon, who: &str) -> String {
     let r = td
-        .post_as(who, "/api/services/gen/requests", json!({"request": {"n": 1}}))
+        .post_as(
+            who,
+            "/api/services/gen/requests",
+            json!({"request": {"n": 1}}),
+        )
         .await;
     r.ok()["id"].as_str().unwrap().to_owned()
 }
@@ -126,10 +130,7 @@ async fn a_done_request_mails_once_and_its_result_is_fetched() {
         .unwrap();
     let got = mails(&td, "p/w1", &id).await;
     assert_eq!(got.len(), 1, "{got:?}");
-    assert_eq!(
-        got[0]["subject"],
-        format!("Service gen: request {id} done")
-    );
+    assert_eq!(got[0]["subject"], format!("Service gen: request {id} done"));
     let body = body_of(&td, "p/w1", &got[0]).await;
     assert!(
         body.contains(&format!("terrarium service result {id} --out <dir>")),
@@ -167,7 +168,9 @@ async fn a_done_request_mails_once_and_its_result_is_fetched() {
     let r = td
         .get_as(
             "p/w1",
-            &format!("/api/service-requests/{id}/result/sub/more.txt?format=json&offset=1&length=2"),
+            &format!(
+                "/api/service-requests/{id}/result/sub/more.txt?format=json&offset=1&length=2"
+            ),
         )
         .await;
     assert_eq!(
@@ -176,7 +179,13 @@ async fn a_done_request_mails_once_and_its_result_is_fetched() {
                 "eof": false, "data_base64": "ZWw="})
     );
     // No way out of the response directory.
-    for bad in ["link", "..%2F..%2Foutside", "sub", "nope.txt", "sub/..%2Fout.txt"] {
+    for bad in [
+        "link",
+        "..%2F..%2Foutside",
+        "sub",
+        "nope.txt",
+        "sub/..%2Fout.txt",
+    ] {
         let r = td
             .get_as("p/w1", &format!("/api/service-requests/{id}/result/{bad}"))
             .await;
@@ -303,7 +312,10 @@ async fn the_retention_counts_from_the_end() {
     assert_eq!(r.ok()["files"], json!([]));
     assert!(r.ok()["files_deleted_at"].is_string(), "{}", r.body);
     let r = td
-        .get_as("p/w1", &format!("/api/service-requests/{id}/result/out.txt"))
+        .get_as(
+            "p/w1",
+            &format!("/api/service-requests/{id}/result/out.txt"),
+        )
         .await;
     assert_eq!(r.status, 404, "{}", r.body);
     assert!(r.body.to_string().contains("retention"), "{}", r.body);

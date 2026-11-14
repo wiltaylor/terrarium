@@ -536,7 +536,11 @@ async fn requests_of(
     ))
 }
 
-pub(super) async fn visible_request(state: &Shared, actor: &Actor, id: &str) -> ApiResult<RequestRow> {
+pub(super) async fn visible_request(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<RequestRow> {
     let i = id.to_owned();
     state
         .db

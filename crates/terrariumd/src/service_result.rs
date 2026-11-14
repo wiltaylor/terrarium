@@ -127,7 +127,9 @@ pub fn plain_path(rel: &str) -> bool {
     !rel.is_empty()
         && !rel.starts_with('/')
         && !rel.contains('\\')
-        && rel.split('/').all(|p| !p.is_empty() && p != "." && p != "..")
+        && rel
+            .split('/')
+            .all(|p| !p.is_empty() && p != "." && p != "..")
         && Path::new(rel)
             .components()
             .all(|c| matches!(c, Component::Normal(_)))
@@ -460,8 +462,16 @@ mod tests {
         assert!(resolve(&root, "out.mp4").is_some());
         assert!(resolve(&root, "sub/log.txt").is_some());
         for bad in [
-            "", "/etc/passwd", "../secret", "sub/../out.mp4", "./out.mp4", "sub", "link",
-            "updir/secret", "sub//log.txt", "nope",
+            "",
+            "/etc/passwd",
+            "../secret",
+            "sub/../out.mp4",
+            "./out.mp4",
+            "sub",
+            "link",
+            "updir/secret",
+            "sub//log.txt",
+            "nope",
         ] {
             assert!(resolve(&root, bad).is_none(), "{bad}");
         }

@@ -195,8 +195,7 @@ async fn fetch_result(
                  sha256 {sha} (the file changed or broke on the way; try again)"
             ));
         }
-        std::fs::rename(&part, to)
-            .with_context(|| format!("cannot write {}", to.display()))?;
+        std::fs::rename(&part, to).with_context(|| format!("cannot write {}", to.display()))?;
         bytes += offset;
     }
     std::fs::write(&record, serde_json::to_vec_pretty(&v)?)
