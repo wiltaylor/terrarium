@@ -2407,12 +2407,7 @@ async fn effective_skills_end_the_prompt_and_follow_a_change() {
     // The supervisor takes the config repo when it is made.
     td.restart_daemon().await;
     let id = td.agent("demo", "bob", json!({"prompt": "t"})).await;
-    let harness_dir = td
-        .dir
-        .path()
-        .join("state/agents")
-        .join(&id)
-        .join("harness");
+    let harness_dir = td.dir.path().join("state/agents").join(&id).join("harness");
     let prompt_file = harness_dir.join("prompt.md");
     let cycle = async |want: usize| {
         td.post(&format!("/api/agents/{id}/start"), None).await;
@@ -2448,7 +2443,10 @@ async fn effective_skills_end_the_prompt_and_follow_a_change() {
     let started = cycle(3).await;
     assert_eq!(started[2]["data"]["source"], "startup");
     let text = std::fs::read_to_string(&prompt_file).unwrap();
-    assert!(text.ends_with("- `alpha-check`: Check the alpha ferns."), "{text}");
+    assert!(
+        text.ends_with("- `alpha-check`: Check the alpha ferns."),
+        "{text}"
+    );
     assert!(!text.contains("beta-check"), "{text}");
     // No default skills: no section, and a new session again.
     let (s, b) = td

@@ -238,9 +238,8 @@ pub fn skills_section(
             skills_dir.display()
         ),
     };
-    let mut out = format!(
-        "# Your skills\n\nThese are your skills. Before a task that one fits, {how}.\n\n"
-    );
+    let mut out =
+        format!("# Your skills\n\nThese are your skills. Before a task that one fits, {how}.\n\n");
     for m in skills {
         out.push_str(&format!(
             "- `{}`: {}\n",
@@ -269,7 +268,7 @@ fn skill_line(text: &str, max: usize) -> String {
     };
     format!(
         "{}...",
-        cut.trim_end_matches(|c: char| c == ',' || c == ';' || c == ':' || c == ' ')
+        cut.trim_end_matches([',', ';', ':', '.', ' '])
     )
 }
 
@@ -1356,7 +1355,8 @@ mod tests {
             meta("delivery-process", "The board flow."),
             meta("terrarium-tests", "Push test results."),
         ];
-        let list = "\n\n- `delivery-process`: The board flow.\n- `terrarium-tests`: Push test results.";
+        let list =
+            "\n\n- `delivery-process`: The board flow.\n- `terrarium-tests`: Push test results.";
         let head = "# Your skills\n\nThese are your skills. Before a task that one fits, ";
         let read = "read `/state/agents/A/harness/skills/<name>/SKILL.md` and follow it.";
         for (harness, how) in [
@@ -1388,6 +1388,7 @@ mod tests {
         assert_eq!(skill_line("Two\n  lines.", 160), "Two lines.");
         assert_eq!(skill_line("alpha beta, gamma", 14), "alpha beta...");
         assert_eq!(skill_line("abcdefghij", 6), "abc...");
+        assert_eq!(skill_line("Go on. Then stop.", 10), "Go on...");
         let long = "word ".repeat(300);
         let line = skill_line(&long, SKILL_LINE_MAX);
         assert!(line.chars().count() <= SKILL_LINE_MAX, "{line}");
@@ -1401,7 +1402,10 @@ mod tests {
     #[test]
     fn the_skills_section_is_last() {
         let text = compose(Some("Base."), "P\n", &ctx());
-        let text = append_section(format!("{text}\n\nEphemeral."), Some("# Your skills".into()));
+        let text = append_section(
+            format!("{text}\n\nEphemeral."),
+            Some("# Your skills".into()),
+        );
         assert_eq!(text, "Base.\n\nP\n\nEphemeral.\n\n# Your skills");
         assert_eq!(append_section("P".into(), None), "P");
     }
