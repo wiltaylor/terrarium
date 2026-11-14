@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
 """A fake Grok Build TUI for the grok adapter lifecycle test (TER-1192).
 
-It is a fixture: it follows the documented grok surface (docs.x.ai,
-"Hooks", "Keyboard shortcuts", the 1.0.77 help), not a capture of a
-signed-in grok. It sends the hooks the way Terrarium's personal hook file
-makes grok send them (`terrarium hook <Name>` with the JSON on stdin): one
-JSON line per connection to TERRARIUM_SOCKET, with the documented
-camelCase fields `hookEventName`, `sessionId`, `cwd`, `workspaceRoot`.
+It is a fixture that follows the signed-in grok 1.0.77 capture (TER-1312,
+`crates/adapters/grok/tests/fixtures/`). It sends the hooks the way
+Terrarium's personal hook file makes grok send them (`terrarium hook
+<Name>` with the JSON on stdin): one JSON line per connection to
+TERRARIUM_SOCKET. Like grok, each field comes twice: `hookEventName` in
+snake_case (`pre_tool_use`) beside `hook_event_name` in PascalCase, and
+`sessionId` beside `session_id`.
+
+Each state redraws the whole screen like grok's TUI: the recent lines,
+the busy status line (`⠋ Waiting for response… [stop]`) during a turn,
+the input box with `❯`, and the key hint line (`Ctrl+c:cancel` during a
+turn). The cursor waits in the box, so typed text shows there.
 
 Arguments (the ones the adapter passes):
-  --session-id UUID   a new conversation: SessionStart, source "startup"
-  --resume ID         SessionStart, source "resume"
+  --session-id UUID   a new conversation: SessionStart, source "new"
+  --resume ID         SessionStart, source "load"
   --cwd, --model, --append-system-prompt, --system-prompt  read and shown
 
 Input (cooked mode; the paste markers are removed):
-  /quit           exactly: send SessionEnd and exit 0 (the exit keys)
+  /quit           exactly: send SessionEnd, then Stop with reason
+                  `shutdown` (as grok), and exit 0 (the exit keys)
   hold ...        a turn that runs until Ctrl-C (SIGINT): it prints
-                  `cancelled` and the prompt, with no Stop hook
+                  `cancelled` and the idle box, with no Stop hook (as
+                  grok)
   any other line  UserPromptSubmit, `working...`, `done: <text>`, Stop
 
 It exits with code 3 when a permission flag (--always-approve, --yolo,
@@ -44,6 +52,10 @@ FORBIDDEN = (
 )
 cancel = False
 busy = False
+LOG = []
+COLS = 80
+IDLE_HINT = "Shift+Tab:mode  │  Ctrl+x:shortcuts"
+BUSY_HINT = "Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+x:shortcuts"
 
 
 def arg(name):
@@ -58,14 +70,21 @@ SESSION = arg("--session-id") or arg("--resume") or ""
 CWD = arg("--cwd") or os.getcwd()
 
 
+def snake(name):
+    return "".join("_" + c.lower() if c.isupper() else c for c in name).lstrip("_")
+
+
 def hook(name, extra=None):
     if not SOCK:
         return
     body = {
-        "hookEventName": name,
+        "hookEventName": snake(name),
+        "hook_event_name": name,
         "sessionId": SESSION,
+        "session_id": SESSION,
         "cwd": CWD,
         "workspaceRoot": CWD,
+        "permissionMode": "default",
     }
     body.update(extra or {})
     msg = json.dumps({"type": "hook", "hook": name, "payload": body}) + "\n"
@@ -80,6 +99,22 @@ def hook(name, extra=None):
 def out(text):
     sys.stdout.write(text)
     sys.stdout.flush()
+
+
+def frame(status=None):
+    """Redraw the screen: recent lines, status, box, key hints."""
+    rows = LOG[-10:]
+    text = "\x1b[2J\x1b[H" + "".join(f"{l}\r\n" for l in rows)
+    if status:
+        text += f"   ⠋ {status}… 0.0s [stop]\r\n"
+    inner = COLS - 6
+    text += "\r\n  ╭" + "─" * inner + "╮\r\n"
+    text += "  │ ❯" + " " * (inner - 2) + "│\r\n"
+    text += "  ╰" + "─" * inner + "╯\r\n\r\n"
+    text += "  " + (BUSY_HINT if status else IDLE_HINT) + "\r\n"
+    box_row = len(rows) + (1 if status else 0) + 3
+    text += f"\x1b[{box_row};7H"
+    out(text)
 
 
 def on_sigint(_sig, _frame):
@@ -99,40 +134,45 @@ def main():
     signal.signal(signal.SIGINT, on_sigint)
     prompt_flag = "append" if arg("--append-system-prompt") else (
         "replace" if arg("--system-prompt") else "none")
-    out(f"fake grok 1.0.77 model={arg('--model') or '-'} prompt={prompt_flag}\r\n")
-    source = "resume" if arg("--resume") else "startup"
+    LOG.append(f"fake grok 1.0.77 model={arg('--model') or '-'} prompt={prompt_flag}")
+    source = "load" if arg("--resume") else "new"
     hook("SessionStart", {"source": source})
     while True:
-        out("> ")
+        frame()
         line = sys.stdin.readline()
         if not line:
             hook("SessionEnd", {"reason": "eof"})
             return
         text = line.replace("\x1b[200~", "").replace("\x1b[201~", "").rstrip("\r\n")
         if text == "/quit":
-            hook("SessionEnd", {"reason": "exit"})
-            out("bye\r\n")
+            hook("SessionEnd", {"reason": "shutdown"})
+            hook("Stop", {"reason": "shutdown"})
+            out("\x1b[2J\x1b[Hbye\r\nResume this session with:\r\n")
+            out(f"  grok --resume {SESSION}\r\n")
             sys.exit(0)
         if not text.strip():
             continue
         hook("UserPromptSubmit", {"prompt": text})
-        out("working...\r\n")
+        LOG.append(f"❯ {text}")
+        frame("Waiting for response")
         busy = True
         cancel = False
         if text.startswith("hold"):
             while not cancel:
                 time.sleep(0.02)
         else:
-            hook("PreToolUse", {"toolName": "Bash", "toolInput": {"command": "true"}})
+            tool = {"toolName": "run_terminal_command", "toolUseId": "call-1-0",
+                    "toolInput": {"command": "true", "description": "Run true"}}
+            hook("PreToolUse", tool)
             time.sleep(0.2)
-            hook("PostToolUse", {"toolName": "Bash", "toolInput": {"command": "true"}})
+            hook("PostToolUse", tool)
         busy = False
         if cancel:
             cancel = False
-            out("cancelled\r\n")
+            LOG.append("Turn cancelled by user. cancelled")
             continue
-        out(f"done: {text}\r\n")
-        hook("Stop")
+        LOG.append(f"done: {text}")
+        hook("Stop", {"reason": "end_turn"})
 
 
 if __name__ == "__main__":

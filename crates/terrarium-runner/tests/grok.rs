@@ -126,11 +126,12 @@ async fn a_grok_agent_runs_turns_cancels_and_quits() {
         .chain(read_events(h.runner.events_path()).iter())
         .any(|e| {
             matches!(e, Event::SessionStarted { harness_session, source, .. }
-                if harness_session.0 == SESSION && source.as_deref() == Some("startup"))
+                if harness_session.0 == SESSION && source.as_deref() == Some("new"))
         });
     assert!(started, "no SessionStarted: {seen:?}");
 
-    // A turn: the camelCase hooks open and close it, with the tool events.
+    // A turn: the hooks (snake_case `hookEventName`, as grok 1.0.77) open
+    // and close it, with the tool events.
     let d = h.runner.type_turn("hello grok");
     timeout(wait(), d.wait())
         .await
@@ -143,7 +144,7 @@ async fn a_grok_agent_runs_turns_cancels_and_quits() {
     assert!(seen.contains(&Event::TurnEnd));
     assert!(
         seen.iter()
-            .any(|e| matches!(e, Event::ToolUse { tool, .. } if tool == "Bash"))
+            .any(|e| matches!(e, Event::ToolUse { tool, .. } if tool == "run_terminal_command"))
     );
     until_screen(&h, "done: hello grok").await;
 
@@ -185,12 +186,13 @@ async fn a_grok_agent_runs_turns_cancels_and_quits() {
     let all = read_events(h.runner.events_path());
     assert!(
         all.iter().any(|e| matches!(e,
-            Event::SessionEnded { reason } if reason.as_deref() == Some("exit"))),
+            Event::SessionEnded { reason } if reason.as_deref() == Some("shutdown"))),
         "{all:?}"
     );
 }
 
-/// A resume passes `--resume <id>`; grok reports the session as resumed.
+/// A resume passes `--resume <id>`; grok reports the session as loaded
+/// (`source` `load`, as grok 1.0.77).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_grok_agent_resumes_its_session() {
     let tmp = tempfile::tempdir().expect("tmp");
@@ -200,7 +202,7 @@ async fn a_grok_agent_resumes_its_session() {
     until("SessionStarted resume", || {
         read_events(h.runner.events_path()).iter().any(|e| {
             matches!(e, Event::SessionStarted { harness_session, source, .. }
-                if *harness_session == id && source.as_deref() == Some("resume"))
+                if *harness_session == id && source.as_deref() == Some("load"))
         })
     })
     .await;

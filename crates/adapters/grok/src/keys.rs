@@ -1,11 +1,18 @@
 //! Keystrokes for the Grok Build TUI.
 //!
 //! Sources: docs.x.ai "Keyboard shortcuts" and "Modes and commands"
-//! (res-1190 F2, F4). Enter submits; a busy Enter queues or steers.
-//! Ctrl+C cancels the running turn, but first clears a focused input that
-//! holds text. Esc does NOT cancel. `/quit` or `/exit` quits; Ctrl+Q and
-//! Ctrl+D quit only on a second press. None of it is checked in a
-//! signed-in TUI yet (TER-1192 release gate).
+//! (res-1190 F2, F4), checked in the signed-in grok 1.0.77 TUI (TER-1312,
+//! `tests/fixtures/screens/grok-1.0.77.txt`): a pasted turn and a CR in
+//! its own write submit; one Ctrl+C cancels the running turn ("Turn
+//! cancelled by user"); `/quit` then CR exits with code 0 and prints
+//! `grok --resume <id>`.
+//!
+//! The permission question lists four options with the second selected:
+//! `1 Yes, and don't ask again for anything (always-approve mode)`,
+//! `2 Yes, proceed`, `3 No, reject`, `4 Never allow: <cmd>`. Its footer
+//! says `Ctrl+o:always-approve` and `Esc:scrollback`: Esc does NOT deny.
+//! No answer here moves up, so no answer can reach option 1, and no key
+//! here is Ctrl+O.
 
 use std::time::Duration;
 
@@ -52,11 +59,15 @@ pub fn exit() -> Vec<u8> {
     b"/quit\r".to_vec()
 }
 
-/// Answer a question on the screen. Not captured: the usual menu keys.
+/// Answer a question on the screen.
 ///
-/// - `Choice(n)`: Down `n` times, then CR.
-/// - `Allow`: CR, which takes the first (selected) option.
-/// - `Deny`: Esc.
+/// - `Choice(n)`: Down `n` times from the selected option, then CR. On
+///   the permission question the selection starts on option 2, so
+///   `Choice(0)` is `Yes, proceed` and option 1 is never reached.
+/// - `Allow`: CR, which takes the selected option. On the permission
+///   question that is `Yes, proceed`, a one-time allow.
+/// - `Deny`: Down, then CR: `No, reject`, the option under the selected
+///   one. Esc only goes to the scrollback.
 pub fn answer(answer: &Answer) -> Vec<u8> {
     match answer {
         Answer::Choice(n) => {
@@ -65,7 +76,11 @@ pub fn answer(answer: &Answer) -> Vec<u8> {
             out
         }
         Answer::Allow => ENTER.to_vec(),
-        Answer::Deny => ESC.to_vec(),
+        Answer::Deny => {
+            let mut out = DOWN.to_vec();
+            out.extend_from_slice(ENTER);
+            out
+        }
     }
 }
 
@@ -94,6 +109,12 @@ mod tests {
         assert_eq!(exit(), b"/quit\r".to_vec());
         assert_eq!(answer(&Answer::Choice(2)), b"\x1b[B\x1b[B\r".to_vec());
         assert_eq!(answer(&Answer::Allow), b"\r".to_vec());
-        assert_eq!(answer(&Answer::Deny), b"\x1b".to_vec());
+        assert_eq!(answer(&Answer::Deny), b"\x1b[B\r".to_vec());
+        // No answer moves up (to `always-approve mode`) or sends Ctrl+O.
+        for a in [Answer::Allow, Answer::Deny, Answer::Choice(3)] {
+            let keys = answer(&a);
+            assert!(!keys.windows(3).any(|w| w == b"\x1b[A"), "{a:?}");
+            assert!(!keys.contains(&0x0f), "{a:?}");
+        }
     }
 }

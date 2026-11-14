@@ -1,23 +1,23 @@
 //! Adapter for Grok Build (`grok`), the harness of an xAI plan
 //! (`terrarium_core::xai`, TER-1190 chose it, TER-1192 builds it).
 //!
-//! The facts come from `grok --help` of 1.0.77 and the public docs
-//! (res-1190 on TER-1190). Nothing was checked in a signed-in TUI yet.
-//! These are release gates, and need the operator's OK through the lead:
-//! the PTY lifecycle (prompt readiness, submit, cancel with Ctrl+C,
-//! quit), the hook payload fields, a refresh of `auth.json` in place, the
-//! model IDs, and the update suppression. Until then:
+//! The facts come from `grok --help` of 1.0.77, the public docs (res-1190
+//! on TER-1190), and the signed-in check of 1.0.77 in ask mode (TER-1312:
+//! the PTY lifecycle, the real hook payloads, the model IDs and the
+//! `grok usage SESSION_ID` schema; fixtures in `tests/fixtures/`).
 //!
-//! - the runner reads readiness from the hooks and its generic detector:
-//!   [`Adapter::screen_hint`] is `Unknown`;
-//! - usage is not read: `grok usage SESSION_ID` waits for its schema, and
-//!   the status-line context percentage is not pool usage;
+//! - [`Adapter::screen_hint`] reads the captured screens ([`screen`]).
+//! - usage is not read yet: `grok usage SESSION_ID` prints JSON (session
+//!   totals and `turns`, `costUsdTicks`, `primaryModelId`); the plan's
+//!   weekly limit shows only in the TUI (`/usage`), and the status-line
+//!   context percentage is not pool usage;
 //! - `/compact` is off ([`HarnessId::compact_command`]).
 //!
 //! - [`launch`]: the command line and env.
 //! - [`config`]: the per-agent files (the personal hooks) and the overlays.
 //! - [`hooks`]: hook payloads to events.
 //! - [`keys`]: turns, answers, interrupt and exit as keystrokes.
+//! - [`screen`]: the screen detector.
 //! - [`session`]: the recorded session UUID.
 
 pub mod config;
@@ -25,15 +25,17 @@ pub mod flags;
 pub mod hooks;
 pub mod keys;
 pub mod launch;
+pub mod screen;
 pub mod session;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use semver::Version;
+use terrarium_core::adapter::Screen;
 use terrarium_core::{
     Adapter, Agent, Answer, Event, FileOverlay, HarnessId, HarnessSessionId, HookPayload,
-    LaunchSpec, Result,
+    LaunchSpec, Result, ScreenHint,
 };
 
 pub use flags::{GROK_1_0, GrokFlags};
@@ -180,6 +182,10 @@ impl Adapter for GrokAdapter {
 
     fn hook_event(&self, hook: &HookPayload) -> Vec<Event> {
         hooks::hook_events(hook)
+    }
+
+    fn screen_hint(&self, screen: &Screen) -> ScreenHint {
+        screen::screen_hint(screen)
     }
 
     fn find_session_id(&self, agent: &Agent) -> Option<HarnessSessionId> {

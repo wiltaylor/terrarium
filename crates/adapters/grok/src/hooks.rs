@@ -1,19 +1,29 @@
 //! Map Grok Build hook payloads to Terrarium events.
 //!
-//! The payload is JSON on stdin (docs.x.ai, "Hooks"). Every event has
-//! `hookEventName`, `sessionId`, `cwd`, and `workspaceRoot`; the tool
-//! events add `toolName` and `toolInput`. The other fields (the prompt of
-//! `UserPromptSubmit`, the error of `StopFailure`, a tool call ID) are not
-//! documented: the mapper reads the camelCase name first, then the Claude
-//! Code name, and works without them. Grok also reads Claude Code hook
-//! files, so a snake_case payload is possible. The signed-in capture
-//! (TER-1192, release gate) records the real fields.
+//! The payload is JSON on stdin (docs.x.ai, "Hooks"). Grok 1.0.77 sends
+//! every field twice, camelCase and the Claude Code snake_case name
+//! (signed-in capture, TER-1312, `tests/fixtures/hooks/captured/`).
+//! The event name differs between the two: `hookEventName` is snake_case
+//! (`pre_tool_use`) and `hook_event_name` is PascalCase (`PreToolUse`).
+//! [`event_name`] takes the PascalCase name and turns a snake_case one
+//! into it. Every event has `sessionId`, `cwd`, `workspaceRoot`,
+//! `timestamp`, `permissionMode`, and from the first turn
+//! `transcriptPath`; the tool events add `toolName`, `toolUseId`,
+//! `toolInput`, and `toolResult` after the call.
 //!
-//! - `UserPromptSubmit` opens a turn and `Stop` closes it. `StopFailure`
-//!   closes it too, with a notice.
+//! - `UserPromptSubmit` opens a turn and `Stop` closes it (`reason`
+//!   `end_turn`). `StopFailure` closes it too, with a notice. A turn
+//!   cancelled with Ctrl+C sends NO `Stop`: the runner ends it from the
+//!   screen. `/quit` sends `SessionEnd` and then a `Stop` with `reason`
+//!   `shutdown`.
 //! - `PermissionDenied` is a denial, NOT a permission request: it is a
 //!   notice, never a question.
-//! - `Notification` is a notice. A question shows on the screen.
+//! - `Notification` is a notice, except `notificationType`
+//!   `permission_prompt`: grok shows a permission question and waits.
+//!   `idle_prompt` comes about a minute after a turn ends without a
+//!   reply.
+
+use std::borrow::Cow;
 
 use serde_json::Value;
 use terrarium_core::{Event, HarnessSessionId, HookPayload};
@@ -24,10 +34,32 @@ fn s<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a str> {
         .filter(|t| !t.is_empty())
 }
 
-/// The event name: `hookEventName`, else the name from
-/// `terrarium hook <name>`.
-pub fn event_name(hook: &HookPayload) -> &str {
-    s(&hook.body, &["hookEventName", "hook_event_name"]).unwrap_or(&hook.hook)
+/// The event name in PascalCase: `hook_event_name`, else `hookEventName`
+/// (snake_case in grok 1.0.77, so `pre_tool_use` becomes `PreToolUse`),
+/// else the name from `terrarium hook <name>`.
+pub fn event_name(hook: &HookPayload) -> Cow<'_, str> {
+    if let Some(name) = s(&hook.body, &["hook_event_name"]) {
+        return Cow::Borrowed(name);
+    }
+    match s(&hook.body, &["hookEventName"]) {
+        Some(name) if name.contains('_') || name.starts_with(|c: char| c.is_ascii_lowercase()) => {
+            Cow::Owned(pascal_case(name))
+        }
+        Some(name) => Cow::Borrowed(name),
+        None => Cow::Borrowed(&hook.hook),
+    }
+}
+
+/// `pre_tool_use` to `PreToolUse`.
+fn pascal_case(name: &str) -> String {
+    name.split('_')
+        .map(|part| {
+            let mut c = part.chars();
+            c.next()
+                .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 /// The session ID of a payload.
@@ -90,7 +122,7 @@ fn tool_id(b: &Value) -> Option<String> {
 /// Map one hook payload to events.
 pub fn hook_events(hook: &HookPayload) -> Vec<Event> {
     let b = &hook.body;
-    match event_name(hook) {
+    match event_name(hook).as_ref() {
         "SessionStart" => session_id(hook)
             .map(|id| Event::SessionStarted {
                 harness_session: id,
@@ -135,7 +167,8 @@ pub fn hook_events(hook: &HookPayload) -> Vec<Event> {
         }],
         "Notification" => vec![Event::Notification {
             message: s(b, &["message", "title"]).unwrap_or_default().to_owned(),
-            question: false,
+            question: s(b, &["notificationType", "notification_type"])
+                == Some("permission_prompt"),
         }],
         "SessionEnd" => vec![Event::SessionEnded {
             reason: s(b, &["reason"]).map(str::to_owned),
@@ -247,6 +280,143 @@ mod tests {
                 ),
                 "{name}: {ev:?}"
             );
+        }
+    }
+
+    /// The payloads of the signed-in grok 1.0.77 check (TER-1312), in
+    /// order: a new session with three turns (a read-only command, a
+    /// `touch`, a write that asked for permission), a turn cancelled with
+    /// Ctrl+C, `/quit`, then `--resume` with one turn and `/quit`. The
+    /// hook name passed to the mapper is a dummy, so the body alone must
+    /// name the event.
+    fn captured() -> Vec<(String, Vec<Event>)> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hooks/captured");
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .expect("captured dir")
+            .map(|e| e.expect("entry").path())
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .collect();
+        files.sort();
+        files
+            .iter()
+            .map(|path| {
+                let body: Value =
+                    serde_json::from_str(&std::fs::read_to_string(path).expect("fixture"))
+                        .expect("json");
+                let hook = HookPayload {
+                    harness: HarnessId::Grok,
+                    hook: "unknown".into(),
+                    body,
+                };
+                (event_name(&hook).into_owned(), hook_events(&hook))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_captured_event_names_are_snake_case_and_map() {
+        let names: Vec<String> = captured().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(
+            names,
+            [
+                "SessionStart",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "Stop",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "Stop",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "Notification",
+                "PostToolUse",
+                "Stop",
+                "UserPromptSubmit",
+                "Notification",
+                "SessionEnd",
+                "Stop",
+                "SessionStart",
+                "UserPromptSubmit",
+                "Stop",
+                "SessionEnd",
+                "Stop",
+            ]
+        );
+        // Only the camelCase name: snake_case, made PascalCase.
+        let hook = HookPayload {
+            harness: HarnessId::Grok,
+            hook: "x".into(),
+            body: serde_json::json!({"hookEventName": "post_tool_use_failure"}),
+        };
+        assert_eq!(event_name(&hook), "PostToolUseFailure");
+    }
+
+    #[test]
+    fn the_captured_session_maps_to_turns_tools_and_one_question() {
+        let all = captured();
+        let session = HarnessSessionId("01a1d8b7-fce7-7fd1-a82b-ea116c408859".into());
+        assert_eq!(
+            all[0].1,
+            [Event::SessionStarted {
+                harness_session: session.clone(),
+                transcript_path: None,
+                source: Some("new".into()),
+            }]
+        );
+        // A resume names the same session, with `source` `load`.
+        assert_eq!(
+            all[18].1,
+            [Event::SessionStarted {
+                harness_session: session,
+                transcript_path: None,
+                source: Some("load".into()),
+            }]
+        );
+        assert_eq!(
+            all[1].1,
+            [Event::TurnStart {
+                prompt: Some("Run the shell command: wc -c note.txt   and tell me the number.".into())
+            }]
+        );
+        let [Event::ToolUse { tool, summary, id, .. }] = all[2].1.as_slice() else {
+            panic!("{:?}", all[2].1);
+        };
+        assert_eq!(tool, "run_terminal_command");
+        assert_eq!(summary.as_deref(), Some("wc -c note.txt"));
+        assert_eq!(id.as_deref(), Some("call-80d1d45a-3661-414b-a4d8-823e883a8471-0"));
+        assert!(matches!(
+            all[3].1.as_slice(),
+            [Event::ToolFinished { ok: true, id: Some(_), .. }]
+        ));
+        assert_eq!(all[4].1, [Event::TurnEnd]);
+        // The permission question blocks; the later idle prompt does not.
+        assert_eq!(
+            all[11].1,
+            [Event::Notification {
+                message: "Tool permission requested".into(),
+                question: true,
+            }]
+        );
+        assert_eq!(
+            all[15].1,
+            [Event::Notification {
+                message: "Waiting for your next prompt".into(),
+                question: false,
+            }]
+        );
+        // The Ctrl+C turn (index 14) has no Stop before the idle prompt.
+        assert!(matches!(all[14].1.as_slice(), [Event::TurnStart { .. }]));
+        assert_eq!(
+            all[16].1,
+            [Event::SessionEnded {
+                reason: Some("shutdown".into())
+            }]
+        );
+        // Each event of the capture maps to at least one event.
+        for (i, (name, events)) in all.iter().enumerate() {
+            assert!(!events.is_empty(), "{i} {name}");
         }
     }
 
