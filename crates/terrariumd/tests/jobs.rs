@@ -5497,10 +5497,12 @@ async fn ter275_two_ordinary_recipes_overlap_in_the_same_cached_repo() {
     let lab = lab(2).await;
     let fixtures = common::FixtureGuard::new(lab._dirs.path());
     let gate = lab._dirs.path().join("gate");
+    // How long a recipe holds its gate, and so the bound of the wait below.
+    const GATE: Duration = Duration::from_secs(150);
     let recipe = format!(
         "touch '{}/recipe-'\"$TERRARIUM_JOB_SLOT\" && {}",
         lab._dirs.path().display(),
-        common::gate_wait(&gate, DEADLINE)
+        common::gate_wait(&gate, GATE)
     );
     lab.td.put("/api/projects/p/delivery", json!({
         "target": "p-box", "recipe": recipe, "slots": 2,
@@ -5519,10 +5521,12 @@ async fn ter275_two_ordinary_recipes_overlap_in_the_same_cached_repo() {
             .await;
         assert_eq!(response.status, 201, "{}", response.body);
     }
-    // TER-1286: two job starts took over `common::WAIT` under load. A
-    // recipe holds its gate up to DEADLINE, so if the recipes were
-    // serialized, the second could not start before this wait ends: the
-    // wait is DEADLINE, and a job that ends first fails it at once.
+    // TER-1286: two job starts took over `common::WAIT` (60 s) under load.
+    // A recipe holds its gate for GATE, counted from its own start, which
+    // is after this wait starts. So if the recipes were serialized, the
+    // second could not start before this wait ends. The wait is GATE, not
+    // more: a longer wait lets a serialized second recipe start after the
+    // first one's gate timed out. A job that ends first fails it at once.
     let start = Instant::now();
     while !(lab._dirs.path().join("recipe-1").exists()
         && lab._dirs.path().join("recipe-2").exists())
@@ -5533,7 +5537,7 @@ async fn ter275_two_ordinary_recipes_overlap_in_the_same_cached_repo() {
                 .any(|j| j["state"] != "queued" && j["state"] != "running")
         });
         assert!(
-            !ended && start.elapsed() < DEADLINE,
+            !ended && start.elapsed() < GATE,
             "recipes serialized behind the cache lock, or a job ended: {jobs:#}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -7877,6 +7881,34 @@ async fn until_file(p: &Path, what: &str) {
     }
 }
 
+/// Wait until the daemon probes slot lock `lock` of a lost run: its
+/// `flock -E 75 -w <secs> <lock> true` (`SLOT_FREE` in `src/jobs.rs`) runs
+/// on this host (TER-1286). The holder of [`lose_a_run_with_a_held_slot`]
+/// is `flock -w 300 <lock> ...`, without `-E`. At most [`DEADLINE`].
+async fn until_slot_probe(lock: &Path) {
+    let lock = lock.to_str().unwrap();
+    let probing = || {
+        std::fs::read_dir("/proc").unwrap().flatten().any(|e| {
+            let Ok(raw) = std::fs::read(e.path().join("cmdline")) else {
+                return false;
+            };
+            let argv: Vec<&[u8]> = raw.split(|b| *b == 0).collect();
+            argv.first()
+                .is_some_and(|a0| a0.ends_with(b"flock"))
+                && argv.contains(&&b"-E"[..])
+                && argv.contains(&lock.as_bytes())
+        })
+    };
+    let start = Instant::now();
+    while !probing() {
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the daemon never waited for the held slot lock {lock}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Queue a merge of one card whose first run sleeps until it is lost and
 /// whose rerun passes, and lose that run with its slot lock held past its
 /// kill. `wait`: the cap of the wait for the slot lock of this job.
@@ -7971,9 +8003,10 @@ async fn a_lost_run_reruns_only_after_its_slot_lock_is_free() {
     let lab = lab(1).await;
     let marks = tempfile::tempdir().unwrap();
     let (c1, job_id, holder) = lose_a_run_with_a_held_slot(&lab, marks.path(), None).await;
-    // The daemon looks at the slot while the holder has it, then the slot
-    // is free.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // The daemon waits on the slot while the holder has it, then the slot
+    // is free. Without the wait of TER-676 no probe comes, and this fails.
+    let lock = lab._dirs.path().join("jobs/p/slot-0.lock");
+    until_slot_probe(&lock).await;
     std::fs::write(marks.path().join("release"), "").unwrap();
     let card = lab
         .until_card(&c1, "accepted", |c| c["column"] == "accepted")

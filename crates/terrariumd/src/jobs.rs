@@ -277,9 +277,11 @@ impl Runtime {
     }
 
     /// Hold the background pages of job log cleanup
-    /// ([`crate::job_logs::maintain`]), for tests of the cleanup API. When
-    /// this returns, no page runs: one that had the cleanup lock has
-    /// ended, and a later one sees the hold under that lock and skips.
+    /// ([`crate::job_logs::maintain`]), for tests of the cleanup API only.
+    /// When this returns, no page holds the cleanup lock: one that had it
+    /// has ended, and a later one sees the hold before it takes the lock
+    /// (TER-1286), so a call of the API never meets it.
+    #[doc(hidden)]
     pub async fn hold_log_maintenance(&self) {
         self.log_maintenance_hold.store(true, Ordering::SeqCst);
         drop(self.log_cleanup.lock().await);
@@ -668,12 +670,9 @@ async fn end_lost(state: &Shared, l: Lost) {
     // TER-676: a job that goes back to the queue starts again only after
     // the lost run let go of its slot. Its receive step takes the slot
     // lock without a wait, so a rerun that starts while the lost run still
-    // ends fails as held. Past the cap the job ends, with why. A release
-    // never goes back to the queue (TER-623), so it does not wait: a held
-    // slot made its error end red after the cap (TER-1286).
-    let rerun = job.kind != JobKind::Release;
+    // ends fails as held. Past the cap the job ends, with why.
     let red = match (&def, dir.as_deref()) {
-        (Some(def), Some(dir)) if running && rerun && red.is_none() && wraps && !other_host => {
+        (Some(def), Some(dir)) if running && red.is_none() && wraps && !other_host => {
             match wait_slot_free(state, def, &job, dir).await {
                 Some(held) => {
                     let merge = job.kind == JobKind::Merge;
