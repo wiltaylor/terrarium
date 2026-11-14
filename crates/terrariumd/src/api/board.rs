@@ -669,10 +669,11 @@ fn record_before(
     if !accepted_heads::is_queue(&card.column, card.column_role.as_deref()) {
         return Ok(());
     }
-    if crate::api::jobs::branch_of(card, None).ok().as_ref() == Some(branch) {
-        if accepted_heads::record_open(t, &card.id, branch, commit)? {
-            board::queues::release_card_column(t, &card.id)?;
-        }
+    // A merge_queue batch may take the card now (TER-1204).
+    if crate::api::jobs::branch_of(card, None).ok().as_ref() == Some(branch)
+        && accepted_heads::record_open(t, &card.id, branch, commit)?
+    {
+        board::queues::release_card_column(t, &card.id)?;
     }
     Ok(())
 }

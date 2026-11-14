@@ -5601,14 +5601,16 @@ async fn left_out_cards_of_a_batch_do_not_hold_the_merge_lane() {
     batch_merge_column(&td).await;
     hold(&td, &h).await;
     no_head(&td, &n).await;
-    for id in [&n, &b, &h] {
+    for id in [&n, &h] {
         move_to(&td, id, "merge_queue").await;
     }
     for id in &ready[..3] {
         move_to(&td, id, "merge_queue").await;
     }
+    // B can go, but its repo is not the repo of the first ready card.
+    move_to(&td, &b, "merge_queue").await;
     settle(&td).await;
-    // 6 cards wait, 3 of them can go: no batch.
+    // 6 cards wait, 3 of them make the batch of repo app: no batch yet.
     assert!(open_jobs(&td).await.is_empty());
     for id in [&n, &b, &h].into_iter().chain(&ready[..3]) {
         assert!(card(&td, id).await["queued"].is_object(), "{id}");
