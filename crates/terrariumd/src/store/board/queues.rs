@@ -226,24 +226,33 @@ const JOB_OF_C: &str = "(j.card = c.id OR EXISTS (SELECT 1 FROM json_each(j.batc
 /// board order: no open job, and neither admitted nor with a job end at
 /// or after the cutoff `?2`. A card with no queue row (it was in the
 /// column before the `batch` release, or before the conversion of the
-/// board) has no admission time.
-fn stale_in_batch(conn: &Connection, column_id: i64, cutoff: &str) -> ApiResult<Vec<String>> {
-    let sql = format!(
+/// board) has no admission time. Only a job queued at or after the
+/// admission counts (the batch job comes after it), so the jobs are read
+/// by `jobs_project_created_at`, and the open ones by `jobs_project_state`
+/// (TER-1204).
+fn stale_sql() -> String {
+    format!(
         "SELECT c.id FROM cards c
           WHERE c.column_id = ?1 AND c.archived = 0 AND c.kind = 'card'
             AND NOT EXISTS (SELECT 1 FROM card_queue q
                              WHERE q.card = c.id AND q.admitted_at IS NULL)
             AND coalesce((SELECT q.admitted_at FROM card_queue q WHERE q.card = c.id), '') < ?2
-            AND NOT EXISTS (SELECT 1 FROM jobs j
+            AND NOT EXISTS (SELECT 1 FROM jobs j INDEXED BY jobs_project_state
                              WHERE j.project = c.project AND j.state IN ('queued', 'running')
                                AND {JOB_OF_C})
-            AND NOT EXISTS (SELECT 1 FROM jobs j INDEXED BY jobs_project_ended
-                             WHERE j.project = c.project AND j.ended_at >= ?2
+            AND NOT EXISTS (SELECT 1 FROM jobs j INDEXED BY jobs_project_created_at
+                             WHERE j.project = c.project
+                               AND j.created_at >= coalesce(
+                                     (SELECT q.admitted_at FROM card_queue q WHERE q.card = c.id), '')
+                               AND j.ended_at >= ?2
                                AND j.state IN ('passed', 'failed', 'cancelled')
                                AND {JOB_OF_C})
           ORDER BY c.position"
-    );
-    let mut st = conn.prepare(&sql)?;
+    )
+}
+
+fn stale_in_batch(conn: &Connection, column_id: i64, cutoff: &str) -> ApiResult<Vec<String>> {
+    let mut st = conn.prepare(&stale_sql())?;
     let rows = st
         .query_map(params![column_id, cutoff], |r| r.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -714,4 +723,42 @@ pub fn sweep_all(t: &mut Tx<'_>) -> ApiResult<()> {
         release_project(t, &project)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// The stale test of a batch reads jobs by index, never by a scan
+    /// (rev-1204b finding 5). Run with `--nocapture` for the plan.
+    #[test]
+    fn the_stale_test_reads_jobs_by_index() {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        let mut q = c
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", stale_sql()))
+            .unwrap();
+        let plans: Vec<String> = q
+            .query_map(params![1, "2026-11-14T00:00:00.000Z"], |r| r.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        println!("{}", plans.join("\n"));
+        // `SCAN json_each` (a batch list) is fine; a scan of a table is not.
+        let scans = |t: &str| {
+            plans
+                .iter()
+                .any(|p| p == &format!("SCAN {t}") || p.starts_with(&format!("SCAN {t} ")))
+        };
+        assert!(!scans("j") && !scans("c") && !scans("q"), "{plans:?}");
+        assert!(
+            plans.iter().any(|p| p.contains("jobs_project_created_at")),
+            "{plans:?}"
+        );
+        assert!(
+            plans.iter().any(|p| p.contains("jobs_project_state")),
+            "{plans:?}"
+        );
+    }
 }
