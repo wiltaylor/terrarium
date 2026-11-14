@@ -8808,6 +8808,14 @@ in order (Q3 A).
 The audit actions: `service.create`, `service.update`, `service.delete`,
 `service.call`, `service.cancel`, `service.timed_out`.
 
+**The dashboard** (TER-1269) has a Services page at `/services`: each
+service the actor may see with its definition, `open_requests` of its
+queue, the count of each state among the loaded requests (the newest 100;
+the API has no count by state), its requests (newest first, a filter by
+state), and cancel of an open request. It uses the routes above, so it has
+the rights of the CLI. A reload every 15 seconds keeps an open row, the
+filter, and an open cancel confirm.
+
 ## 18. Fleet
 
 A fleet file declares projects, their repos, agents, and targets, global
