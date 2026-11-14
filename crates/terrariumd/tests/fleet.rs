@@ -1042,11 +1042,7 @@ async fn export_and_apply_carry_a_converted_board() {
     assert_eq!(now, ids);
 
     // A column that the board does not have: 422, nothing written.
-    let bad = edited.replacen(
-        "name = \"merge_queue\"",
-        "name = \"no_such_column\"",
-        1,
-    );
+    let bad = edited.replacen("name = \"merge_queue\"", "name = \"no_such_column\"", 1);
     assert_ne!(bad, edited);
     let bad = bad.replacen("count = 3", "count = 4", 1);
     let r = nd.post("/api/fleet/apply", body(&bad)).await;
