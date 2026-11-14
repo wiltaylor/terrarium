@@ -214,6 +214,11 @@ async fn retained_log_cleanup_is_project_scoped_and_skips_active_or_missing_targ
 #[tokio::test]
 async fn retained_log_recipe_records_size_and_budget_cleanup_expires_it() {
     let lab = lab(1).await;
+    // TER-1286: the background page of log cleanup runs each minute. Under
+    // load it overlapped the calls below (409, or the log gone before the
+    // call that should expire it). Hold it for this test.
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    state.job_queue.hold_log_maintenance().await;
     set_recipe(&lab, "printf hello").await;
     let head = lab.branch("retained-log", "next", &[("OK", "yes\n")]);
     let job = validate_card(&lab, "retained-log", &head).await;
@@ -227,7 +232,6 @@ async fn retained_log_recipe_records_size_and_budget_cleanup_expires_it() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello");
     let keep = lab.td.post("/api/projects/p/jobs/cleanup", json!({})).await;
     assert_eq!(keep.ok()["removed"], 0);
-    let state = lab.td.daemon.as_ref().unwrap().state.clone();
     state
         .db
         .write("system", |t| {
@@ -4942,7 +4946,8 @@ async fn a_lost_or_cancelled_release_never_runs_again() {
                    "work_dir": lab._dirs.path().join("jobs"),
                    "release_target": "gbox",
                    "release_recipe": format!(
-                       "echo \"$TERRARIUM_JOB_ID\" >> '{m}/runs'; touch \"{m}/ran-$TERRARIUM_JOB_ID\"; sleep 600")}),
+                       "echo \"$TERRARIUM_JOB_ID\" >> '{m}/runs'; echo $$ > \"{m}/pid-$TERRARIUM_JOB_ID\"; \
+                        touch \"{m}/ran-$TERRARIUM_JOB_ID\"; sleep 600")}),
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
@@ -5007,6 +5012,20 @@ async fn a_lost_or_cancelled_release_never_runs_again() {
         "{j:#}"
     );
     assert_eq!(j["attempt"], 1, "{j:#}");
+    // TER-1286: the job ends only after the kill of its lost run, so the
+    // run is gone now. A run that is still there holds the release slot,
+    // and case 3 below could not start: fail here, with the reason.
+    let pid: u32 = std::fs::read_to_string(marks.path().join(format!("pid-{id}")))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    if alive(pid) {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+        panic!("the kill of the lost release run did not end it (PID {pid}): {j:#}");
+    }
 
     // 2. A release that was running when the daemon stopped.
     let lost = ulid::Ulid::new().to_string();
@@ -5489,10 +5508,12 @@ async fn ter275_two_ordinary_recipes_overlap_in_the_same_cached_repo() {
     let lab = lab(2).await;
     let fixtures = common::FixtureGuard::new(lab._dirs.path());
     let gate = lab._dirs.path().join("gate");
+    // How long a recipe holds its gate, and so the bound of the wait below.
+    const GATE: Duration = Duration::from_secs(150);
     let recipe = format!(
         "touch '{}/recipe-'\"$TERRARIUM_JOB_SLOT\" && {}",
         lab._dirs.path().display(),
-        common::gate_wait(&gate, DEADLINE)
+        common::gate_wait(&gate, GATE)
     );
     lab.td.put("/api/projects/p/delivery", json!({
         "target": "p-box", "recipe": recipe, "slots": 2,
@@ -5511,15 +5532,26 @@ async fn ter275_two_ordinary_recipes_overlap_in_the_same_cached_repo() {
             .await;
         assert_eq!(response.status, 201, "{}", response.body);
     }
+    // TER-1286: two job starts took over `common::WAIT` (60 s) under load.
+    // A recipe holds its gate for GATE, counted from its own start, which
+    // is after this wait starts. So if the recipes were serialized, the
+    // second could not start before this wait ends. The wait is GATE, not
+    // more: a longer wait lets a serialized second recipe start after the
+    // first one's gate timed out. A job that ends first fails it at once.
     let start = Instant::now();
     while !(lab._dirs.path().join("recipe-1").exists()
         && lab._dirs.path().join("recipe-2").exists())
     {
+        let jobs = lab.td.get("/api/projects/p/jobs").await.ok().clone();
+        let ended = jobs["jobs"].as_array().is_some_and(|a| {
+            a.iter()
+                .any(|j| j["state"] != "queued" && j["state"] != "running")
+        });
         assert!(
-            start.elapsed() < common::WAIT,
-            "recipes serialized behind the cache lock"
+            !ended && start.elapsed() < GATE,
+            "recipes serialized behind the cache lock, or a job ended: {jobs:#}"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     std::fs::write(&gate, "go").unwrap();
     let jobs = lab.until_idle().await;
@@ -7844,23 +7876,78 @@ fn stop_group(mut child: std::process::Child) {
     let _ = child.wait();
 }
 
+/// The process group of this test process.
+fn own_pgid() -> u32 {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+    let rest = &stat[stat.rfind(')').unwrap() + 2..];
+    rest.split(' ').nth(2).unwrap().parse().unwrap()
+}
+
+/// Wait until file `p` exists, at most [`DEADLINE`].
+async fn until_file(p: &Path, what: &str) {
+    let start = Instant::now();
+    while !p.exists() {
+        assert!(start.elapsed() < DEADLINE, "{what}: no {}", p.display());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Wait until the daemon probes slot lock `lock` of a lost run: its
+/// `flock -E 75 -w <secs> <lock> true` (`SLOT_FREE` in `src/jobs.rs`) runs
+/// on this host (TER-1286). The holder of [`lose_a_run_with_a_held_slot`]
+/// is `flock -w 300 <lock> ...`, without `-E`. At most [`DEADLINE`].
+async fn until_slot_probe(lock: &Path) {
+    let lock = lock.to_str().unwrap();
+    let probing = || {
+        std::fs::read_dir("/proc").unwrap().flatten().any(|e| {
+            let Ok(raw) = std::fs::read(e.path().join("cmdline")) else {
+                return false;
+            };
+            let argv: Vec<&[u8]> = raw.split(|b| *b == 0).collect();
+            argv.first().is_some_and(|a0| a0.ends_with(b"flock"))
+                && argv.contains(&&b"-E"[..])
+                && argv.contains(&lock.as_bytes())
+        })
+    };
+    let start = Instant::now();
+    while !probing() {
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the daemon never waited for the held slot lock {lock}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Queue a merge of one card whose first run sleeps until it is lost and
-/// whose rerun passes. When the recipe runs, `hold` secs of a slot holder
-/// start (it gets the lock once the lost run lets go of it), and the host
-/// agent restarts: the run is lost. `wait`: the cap of the wait for the
-/// slot lock of this job. Returns the card, the job, and the holder.
+/// whose rerun passes, and lose that run with its slot lock held past its
+/// kill. `wait`: the cap of the wait for the slot lock of this job.
+///
+/// TER-1286: the lock passes to a holder outside the run with no gap. A
+/// holder that only waited on the lock while the daemon killed the run
+/// raced the daemon's own probe of the lock: under load the probe got it
+/// first, found it free, and the rerun failed in its receive step as held.
+/// So, while the host agent is down (the daemon cannot look), the test
+/// ends the run's process group itself, waits until the holder owns the
+/// lock (its mark `got`), and only then starts the host agent again. The
+/// holder keeps the lock until the test writes `{m}/release` (or 300 s),
+/// then writes `{m}/freed` and lets go. A rerun that starts before
+/// `freed` writes `early` into `{m}/runs`. Returns the card, the job, and
+/// the holder.
 async fn lose_a_run_with_a_held_slot(
     lab: &Lab,
     m: &Path,
-    hold: u32,
     wait: Option<u64>,
 ) -> (String, String, std::process::Child) {
+    use std::os::unix::process::CommandExt;
     let md = m.display().to_string();
     set_recipe(
         lab,
         &format!(
             "test -f OK && echo run >> '{md}/runs' && \
-             if test -f '{md}/ran'; then exit 0; fi; touch '{md}/ran'; sleep 600"
+             if test -f '{md}/ran'; then test -f '{md}/freed' || echo early >> '{md}/runs'; exit 0; fi; \
+             s=$(cat /proc/$$/stat) && s=${{s##*) }} && set -- $s && echo $3 > '{md}/pgid.tmp' && \
+             mv '{md}/pgid.tmp' '{md}/pgid' && touch '{md}/ran' && sleep 600"
         ),
     )
     .await;
@@ -7875,18 +7962,39 @@ async fn lose_a_run_with_a_held_slot(
     if let Some(w) = wait {
         terrariumd::jobs::set_lost_slot_wait(&job_id, w);
     }
-    let ran = m.join("ran");
-    let start = Instant::now();
-    while !ran.exists() {
-        assert!(start.elapsed() < DEADLINE, "the recipe never started");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    // The holder waits for the lock that the lost run holds: when the
-    // kill ends the run, the holder has it before the daemon looks.
+    until_file(&m.join("ran"), "the recipe never started").await;
+    let pgid: u32 = std::fs::read_to_string(m.join("pgid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        pgid > 1 && pgid != own_pgid(),
+        "the run is not in a process group of its own: {pgid}"
+    );
     let lock = lab._dirs.path().join("jobs/p/slot-0.lock");
     assert!(lock.exists(), "no slot lock at {}", lock.display());
-    let holder = slot_holder(&lock, hold);
     lab.agent_down().await;
+    let holder = std::process::Command::new("flock")
+        .args(["-w", "300"])
+        .arg(&lock)
+        .args([
+            "sh",
+            "-c",
+            "touch \"$1/got\"; n=0; while ! test -f \"$1/release\" && test $n -lt 3000; do \
+             sleep 0.1; n=$((n+1)); done; touch \"$1/freed\"",
+            "holder",
+            &md,
+        ])
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    // The run ends as one that the kill does not reach would end slowly:
+    // its lock goes to the holder, which owns it before the daemon looks.
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pgid}")])
+        .status();
+    until_file(&m.join("got"), "the holder never got the slot lock").await;
     lab.agent_up().await;
     (c1, job_id, holder)
 }
@@ -7904,16 +8012,16 @@ async fn a_lost_run_reruns_only_after_its_slot_lock_is_free() {
     }
     let lab = lab(1).await;
     let marks = tempfile::tempdir().unwrap();
-    let (c1, job_id, holder) = lose_a_run_with_a_held_slot(&lab, marks.path(), 6, None).await;
-    let waiting = Instant::now();
+    let (c1, job_id, holder) = lose_a_run_with_a_held_slot(&lab, marks.path(), None).await;
+    // The daemon waits on the slot while the holder has it, then the slot
+    // is free. Without the wait of TER-676 no probe comes, and this fails.
+    let lock = lab._dirs.path().join("jobs/p/slot-0.lock");
+    until_slot_probe(&lock).await;
+    std::fs::write(marks.path().join("release"), "").unwrap();
     let card = lab
         .until_card(&c1, "accepted", |c| c["column"] == "accepted")
         .await;
     stop_group(holder);
-    assert!(
-        waiting.elapsed() >= Duration::from_secs(3),
-        "the rerun did not wait for the held slot"
-    );
     let text = comments(&card);
     assert!(!text.contains("is held by another job"), "{card}");
     assert!(!text.contains("failed before its tests"), "{card}");
@@ -7926,6 +8034,10 @@ async fn a_lost_run_reruns_only_after_its_slot_lock_is_free() {
     assert_eq!(j["state"], "passed", "{j:#}");
     assert_eq!(j["attempt"], 1, "{j:#}");
     let runs = std::fs::read_to_string(marks.path().join("runs")).unwrap();
+    assert!(
+        !runs.contains("early"),
+        "the rerun did not wait for the held slot: {runs}"
+    );
     assert_eq!(runs.lines().count(), 2, "{runs}");
 }
 
@@ -7940,7 +8052,7 @@ async fn a_lost_run_whose_slot_stays_held_ends_with_the_lock_in_its_tail() {
     }
     let lab = lab(1).await;
     let marks = tempfile::tempdir().unwrap();
-    let (_c1, job_id, holder) = lose_a_run_with_a_held_slot(&lab, marks.path(), 120, Some(2)).await;
+    let (_c1, job_id, holder) = lose_a_run_with_a_held_slot(&lab, marks.path(), Some(2)).await;
     let jobs = lab.until_idle().await;
     stop_group(holder);
     assert_eq!(jobs.len(), 1, "{jobs:#?}");

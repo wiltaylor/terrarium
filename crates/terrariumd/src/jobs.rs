@@ -236,6 +236,10 @@ pub struct Runtime {
     /// True while [`record_accepted_heads`] does nothing (TER-580): a test
     /// holds the background read to see what the API pre-read recorded.
     accepted_hold: std::sync::atomic::AtomicBool,
+    /// True while the background pages of job log cleanup do nothing
+    /// (TER-1286): a test of the cleanup API holds them, so its calls
+    /// neither get a 409 nor find its logs already gone.
+    log_maintenance_hold: AtomicBool,
 }
 
 impl Default for Runtime {
@@ -246,6 +250,7 @@ impl Default for Runtime {
             recovered: tokio::sync::watch::Sender::new(false),
             log_cleanup: tokio::sync::Mutex::new(()),
             accepted_hold: std::sync::atomic::AtomicBool::new(false),
+            log_maintenance_hold: AtomicBool::new(false),
         }
     }
 }
@@ -269,6 +274,21 @@ impl Runtime {
 
     fn accepted_held(&self) -> bool {
         self.accepted_hold.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Hold the background pages of job log cleanup
+    /// ([`crate::job_logs::maintain`]), for tests of the cleanup API only.
+    /// When this returns, no page holds the cleanup lock: one that had it
+    /// has ended, and a later one sees the hold before it takes the lock
+    /// (TER-1286), so a call of the API never meets it.
+    #[doc(hidden)]
+    pub async fn hold_log_maintenance(&self) {
+        self.log_maintenance_hold.store(true, Ordering::SeqCst);
+        drop(self.log_cleanup.lock().await);
+    }
+
+    pub(crate) fn log_maintenance_held(&self) -> bool {
+        self.log_maintenance_hold.load(Ordering::SeqCst)
     }
 
     /// Wait until [`spawn`] has taken up the jobs of the last daemon. From
