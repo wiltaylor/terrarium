@@ -352,6 +352,7 @@ gives them to the routers and the mail code.
 | `TERRARIUM_ARTIFACT_PUBLIC_URL` | `--artifact-public-url` | unset | The artifact origin in signed URLs and the CSP. |
 | `TERRARIUM_WS_QUERY_TOKEN` | `--ws-query-token` | `0` | `1`: take `?token=` on an upgrade. |
 | `TERRARIUM_PROJECT_PAGES_V2` | `--project-pages-v2` | `0` | Project pages (TER-1077). Strict switch parser. `1` turns them on: see "Project page layout v2" for the switch-on step and what the first start initializes. `0` is the rollback. |
+| `TERRARIUM_BOARD_COLUMNS` | `--board-columns` | `1` | The column rules (TER-1117, §19.14): at each load of the config every board that is not on column rules yet is converted, and a new project gets the standard board. `0` keeps the legacy flows for every project (no per-project fallback). C2b removes the switch. |
 | `TERRARIUM_SESSION_TTL` | `--session-ttl` | `30d` | The life of a session cookie. The daemon renews it past half its life. |
 | `TERRARIUM_CLI_SESSION_TTL` | `--cli-session-ttl` | `90d` | The life of a CLI session token (`terrarium login`). |
 | `TERRARIUM_SESSION_MAX_AGE` | `--session-max-age` | `90d` | The longest life of a dashboard session through its renewals, from the login. |
@@ -10508,6 +10509,69 @@ the role `x` to another column. `@x` may still follow the role `x` to
 another column when it named the column with that role before, and it may
 keep its own column by name, also renamed in the same change (`@x`
 rewritten to `@<new name>`).
+
+### 19.14 The conversion of the boards (TER-1117)
+
+Kanban rework C5 (D5): at the load of the config (the start and `POST
+/api/reload`), after the projects, their rules files and the fleets, the
+daemon converts each board that is not on `board_flow = columns`, each in
+its own write. A converted board is skipped, so a second load writes
+nothing. A board that cannot be converted (more than 300 column rules, or a
+rule that a column refuses) stays as it was and is one line of the load
+report.
+
+What a board runs today is converted: the built-in pack mapped to the board
+(the migration of §19.12) with its `rules.wcl`. A `code` board leaves out
+`triage-new-backlog`, `triage-moved-backlog`, `triage-hourly` and
+`version-cut` (the coded flow never ran them; its schedules stay), and gets
+the rules of `rules.validate.wcl` when it has a validating column (the
+coded flow moved a validated card there).
+
+| Today | Column rule |
+|---|---|
+| a `card` rule on `moved` or `created` | `lands` on each column that its `data.to`, `data.to_role` and `if_card.column` allow. The `data.to*` conditions go; `data.change` stays, with `admitted` added on a column with a WIP limit or a `job` or `batch` release. A `data.from*` condition stays: a card that returns from a wait column lands where it returns to |
+| a `card` rule on `wait_met` or `archived` | that trigger on each column (every column but `done` for `wait_met`) |
+| a `job` or `job.verdict` rule | `job_result` with the events of its `data.change` (`verdict` for `job.verdict`) and the kinds of its `data.kind`, a copy on every column but `done` |
+| a `rule.hourly` rule (`triage-hourly`) | `timer` of 3600 s on the first column: one run an hour, with no card |
+| a rule with `version.cut` | as a card rule, and a `<name>-timer` rule of 60 s on the same column (the wait of the cut) |
+| a batch `job.queue` with `min_cards` or `max_wait_minutes` (`merge-queue-batch`) | the `batch` queue of its `from` column (`batch_size` = `min_cards`, `max_wait_seconds` = 60 x `max_wait_minutes`, `max_batch_cards` = `limit`), and a `lands` rule with a plain `job.queue` batch |
+| `card_dispatcher = X` | on `ready`: `dispatch` (`lands`), `dispatch-timer` (60 s), and `dispatch-on-free-slot` (`leaves` of the working column), each a `card.assign` with `templates` (`type:small=card-small`, `type:impl=card-impl`, `type:hard` and `type:impl-hard` = `card-impl-hard`), `owner` X, `from` ready |
+| `review_dispatcher = Y` | on the review column: `review-start` (`lands`) and `review-start-timer` (60 s, `from` the review column), each a `review.start` with `owner` Y, `card-review`, 3 rounds |
+
+The flow is set to `columns` first, then the rules are written (a
+`review.start` needs a columns board). A rule keeps its name, conditions,
+actions and `max_per_hour`; its description names the old rule. A column
+that has a rule of the same name keeps it, and the converted one is not
+written. A rule that is off, or that fits no row (another event, a card rule
+without a `data.change` of `eq` or `one_of`, a glob on `data.to`), is not
+converted and is named in the report.
+
+Each conversion writes a `board_conversions` row (the old flow and its
+time, the two dispatcher settings, the hash of `rules.wcl`, the IDs of the
+rules written, the old queue of the batch column, the report), an audit row
+`board.convert`, and a mail from `system` to each lead of the project with
+the report. `rules.wcl` and the dispatcher settings stay stored and have no
+effect (C2b removes them).
+
+Known differences: a card that waits in a full column's queue lands on its
+`admitted` event, which has no `from_role`, so `agent-unpark` and
+`merge-group-returned` do not run for it; the setting timers run every 60
+s, not on the 15 s tick; `templates` needs exactly one listed label, where
+the fixed map needed exactly one `type:` label.
+
+| Method and path | Body | Answer |
+|---|---|---|
+| `GET /api/projects/{name}/board/conversion` | | `200`, `{project, board_flow, switch, conversion, plan}`. `conversion` is the stored row (`null` before one), `plan` the conversion of the board now, written nowhere (`null` on a columns board): `{columns: [{column, rules}], batch, report: [{rule, result, trigger, columns, note}], problems}`. A project reader. |
+| `POST /api/projects/{name}/board/convert` | `{action}` | `apply`: convert now (`result` `converted` or `skipped`). `revert`: remove the rules the conversion wrote (an edited one too), put back the batch column's queue, set the old flow from now (`board_flow_at`), and delete the row (`404` without one), audit `board.convert_revert`. Run it while the queues are idle. Only the operator (`403`). |
+
+**The standard board.** With the switch on, a new project (API, fleet,
+config import) gets the board of the delivery process: `backlog`,
+`research` (WIP 2), `ready`, `in_progress` (`working`), `review`,
+`merge_queue` (batch 4 cards or 1800 s, at most 8), `accepted`, `blocked`,
+`done`, on `board_flow = columns`, with the rules of a converted `rules`
+board with the merge queue rules and no dispatcher (audit `board.standard`).
+A dispatcher in its project file has no effect there: write a `card.assign`
+or `review.start` rule.
 
 ## 20. Event sources and ingest
 
