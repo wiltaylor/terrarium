@@ -5008,6 +5008,13 @@ Cards leave the queue first in, first out; a new card never overtakes one
 that waits. When a card gets its slot the daemon writes the `card` event
 `admitted` (with `queued_at` and `to_count`, the admitted cards of the
 column), and the `lands` and `count_reached` rules of the column run on it.
+Like `moved`, the event has `from` and `from_role` (the column of the move
+that queued the card, and its role) and `to` and `to_role` (the column that
+admits it), so a `lands` rule with a `data.from_role` condition matches a
+card that returns from a wait column into a full one (TER-1304). A card put
+back in a `batch` queue keeps the `from` of its first move; a row that no
+move wrote (a card admitted under `wip` and put back after a change to
+`batch`) has `from: null`.
 A card that leaves the queue (a move or an archive) never landed: its
 column runs no `leaves` or `archived` rule for it (`from_queued: true` on
 the `moved` event, `queued: true` on `archived`).
