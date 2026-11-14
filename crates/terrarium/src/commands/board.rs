@@ -718,11 +718,13 @@ async fn show_board(ctx: &Ctx, path: &str) -> anyhow::Result<()> {
 }
 
 /// The column of a card, with its queue place when it waits for a slot
-/// (TER-1114): `in_progress, queued 2`.
+/// (TER-1114): `in_progress, queued 2`, and why it waits when the daemon
+/// says (TER-1284): `merge_queue, queued 1: held`.
 fn column_text(k: &Value) -> String {
-    match k["queued"]["place"].as_i64() {
-        Some(place) => format!("{}, queued {place}", field(k, "column")),
-        None => field(k, "column"),
+    match (k["queued"]["place"].as_i64(), k["queued"]["reason"].as_str()) {
+        (Some(place), Some(why)) => format!("{}, queued {place}: {why}", field(k, "column")),
+        (Some(place), None) => format!("{}, queued {place}", field(k, "column")),
+        (None, _) => field(k, "column"),
     }
 }
 
