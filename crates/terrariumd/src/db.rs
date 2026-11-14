@@ -4132,8 +4132,8 @@ mod tests {
     }
 
     /// TER-1192: `agents.harness` takes 'grok'. The column swap keeps each
-    /// agent row and every column value, and no row of a table that
-    /// references `agents` goes (a DROP TABLE would cascade).
+    /// agent row, every column value, the rows that name an agent, and
+    /// every foreign key to `agents` (a DROP TABLE would cascade).
     #[test]
     fn the_agents_harness_check_takes_grok_and_keeps_every_row() {
         const NAME: &str = "ter-1192-grok-agents.sql";
@@ -4177,8 +4177,22 @@ mod tests {
                 .collect::<Result<_, _>>()
                 .unwrap()
         };
+        let references = |conn: &Connection| -> Vec<String> {
+            conn.prepare(
+                "SELECT m.name || '.' || f.\"from\" || ' ' || f.on_delete \
+                 FROM sqlite_master m, pragma_foreign_key_list(m.name) f \
+                 WHERE m.type = 'table' AND f.\"table\" = 'agents' ORDER BY 1",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
         let cols = columns(&conn);
         let rows = dump(&conn);
+        let refs = references(&conn);
+        assert!(refs.len() > 3, "{refs:?}");
         let refused = conn.execute(insert, rusqlite::params!["g0", "g0", "grok", "m"]);
         assert!(
             refused
@@ -4209,12 +4223,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(broken, 0);
-        // A delete still cascades through the kept references.
-        conn.execute("DELETE FROM agents WHERE id = 'a1'", []).unwrap();
-        let sessions: i64 = conn
-            .query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(sessions, 0);
+        // Every reference to `agents` is still there, with its action.
+        assert_eq!(references(&conn), refs);
         assert_eq!(migrate(&mut conn).unwrap(), 0);
     }
 
