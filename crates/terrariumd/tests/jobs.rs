@@ -2054,6 +2054,14 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str
     // A merge pass: the name `accepted` is the fallback.
     let head = lab.branch("ter-c", "next", &[("OK", "yes\n")]);
     let b = lab.card("by name", "ter-c").await;
+    // TER-1278: merge from the review role column, as a lead does. The merge
+    // group repair drops a member in `backlog` (returned for more work); when
+    // it ran before the job ended, it closed the group with `e2e` running.
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{b}/move"), json!({"column": "qa"}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
     let r = lab
         .td
         .post_as(&lab.lead, &format!("/api/cards/{b}/merge"), json!({}))
@@ -2086,6 +2094,15 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str
             let recipe = g.steps.iter().find(|s| s.name == "e2e").unwrap();
             if recipe.state == "done" {
                 break g;
+            }
+            // A closed group takes no more step writes: fail now, not at
+            // the stall deadline.
+            if g.closed_at.is_some() {
+                let card = lab.card_of(&g.id).await;
+                panic!(
+                    "merge group closed with e2e {}: {g:?}; group card: {card:#}",
+                    recipe.state
+                );
             }
             if progress.due() {
                 let jobs = lab.jobs().await;
