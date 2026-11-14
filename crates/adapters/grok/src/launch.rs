@@ -52,7 +52,13 @@ pub fn build(
         SessionStart::Fresh(uuid) => spec.arg(f.session_id).arg(uuid),
         SessionStart::Resume(id) => spec.arg(f.resume).arg(id.0.as_str()),
     };
-    if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
+    // A model that would read as a flag never goes out (rev-1192 F4; the
+    // daemon refuses such an agent at its start, too).
+    if let Some(model) = agent
+        .model
+        .as_deref()
+        .filter(|m| !m.is_empty() && terrarium_core::config::check_model(m).is_ok())
+    {
         spec = spec.arg(f.model).arg(model);
     }
     if let Some(text) = prompt.filter(|t| !t.trim().is_empty()) {
@@ -183,6 +189,18 @@ mod tests {
                     spec.args
                 );
             }
+        }
+    }
+
+    /// rev-1192 F4: a model that reads as a flag is not passed.
+    #[test]
+    fn a_flag_as_model_is_not_passed() {
+        let opts = GrokOptions::default();
+        for bad in ["--always-approve", "-m", "a b"] {
+            let agent = test_agent(Some(bad));
+            let spec = build(&opts, &agent, SessionStart::Fresh("u"), None);
+            assert!(!args(&spec).contains(&"--model"), "{bad}");
+            assert!(!args(&spec).contains(&bad), "{bad}");
         }
     }
 

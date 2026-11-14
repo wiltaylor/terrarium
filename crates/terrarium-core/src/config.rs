@@ -631,6 +631,26 @@ pub fn clean_persona(name: Option<String>) -> std::result::Result<Option<String>
     }
 }
 
+/// Is `model` a model name that an agent may have? The harnesses take it
+/// as the value of their `--model` flag (TER-1192, rev-1192 F4), so a
+/// value that starts with `-` would read as another flag, and white space
+/// is never part of a model ID. An empty name is valid: it means "the
+/// harness default".
+pub fn check_model(model: &str) -> std::result::Result<(), String> {
+    if model.starts_with('-') {
+        return Err(format!(
+            "the model `{model}` is not valid: a model name cannot start with `-`"
+        ));
+    }
+    if model.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "the model `{}` is not valid: a model name has no white space",
+            model.escape_debug()
+        ));
+    }
+    Ok(())
+}
+
 /// The key in a definition file that names a file with the system prompt.
 pub const SYSTEM_PROMPT_FILE_KEY: &str = "system_prompt_file";
 
@@ -1552,6 +1572,18 @@ impl Definitions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TER-1192 (rev-1192 F4): a model that would read as a flag, or that
+    /// has white space, is refused.
+    #[test]
+    fn model_names_cannot_be_flags_or_have_white_space() {
+        for ok in ["", "grok-build", "claude-haiku-4.5", "openai/gpt-6-luna", "m:1"] {
+            assert!(check_model(ok).is_ok(), "{ok}");
+        }
+        for bad in ["-x", "--always-approve", "a b", "a\tb", "m\n--trust", " m"] {
+            assert!(check_model(bad).is_err(), "{bad:?}");
+        }
+    }
 
     fn round_trip<T>(text: &str) -> T
     where

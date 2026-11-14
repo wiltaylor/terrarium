@@ -1604,6 +1604,14 @@ fn check_subscription(
     agent: &Agent,
     sub: Option<&SubscriptionCheck>,
 ) -> Result<Option<Subscription>, SupervisorError> {
+    // A model that would read as a flag, or with white space, never
+    // reaches a `--model` (rev-1192 F4): a row from before the check, or
+    // a file edited by hand.
+    if let Some(model) = agent.model.as_deref()
+        && let Err(why) = terrarium_core::config::check_model(model)
+    {
+        return Err(SupervisorError::NotReady(why));
+    }
     // pi uses API keys only (PLAN §16.3): a plan login does not list pi,
     // so say why before the harness list does.
     if let Some(SubscriptionCheck::Found(s)) = sub
@@ -1740,6 +1748,21 @@ impl RunnerSupervisor {
 
     fn state(&self) -> Option<Shared> {
         self.inner.state.get().and_then(Weak::upgrade)
+    }
+
+    /// Build the redaction matcher again before the start and after the
+    /// exit of a grok agent (TER-1192, rev-1191 a): grok refreshes its
+    /// login file itself, so the matcher holds the tokens of the file as
+    /// it is now. True when it built it; other harnesses need no build.
+    async fn rebuild_matcher_for(&self, harness: HarnessId) -> bool {
+        if harness != HarnessId::Grok {
+            return false;
+        }
+        let Some(state) = self.state() else {
+            return false;
+        };
+        crate::secrets::redact::rebuild(&state).await;
+        true
     }
 
     fn entry(&self, harness: HarnessId) -> Result<AdapterEntry, SupervisorError> {
@@ -2616,11 +2639,7 @@ impl RunnerSupervisor {
         // Grok refreshes its login file itself: the matcher holds the
         // tokens of the file as it is now before the first output line
         // (TER-1192). The login watch and the exit build it again later.
-        if agent.harness == HarnessId::Grok
-            && let Some(state) = self.state()
-        {
-            crate::secrets::redact::rebuild(&state).await;
-        }
+        self.rebuild_matcher_for(agent.harness).await;
         self.record_version(id, agent.harness, harness_version);
         self.record_accounts(id, &accounts);
         let resume = if fresh_for_prompt {
@@ -3846,11 +3865,9 @@ impl RunnerSupervisor {
         // A grok agent may have refreshed its login file just before it
         // exited: take the new tokens into the matcher now (TER-1192,
         // rev-1191 a), before its last output is read.
-        let grok = lock(&self.inner.slots)
-            .get(&id)
-            .is_some_and(|s| s.agent.harness == HarnessId::Grok);
-        if grok && let Some(state) = self.state() {
-            crate::secrets::redact::rebuild(&state).await;
+        let harness = lock(&self.inner.slots).get(&id).map(|s| s.agent.harness);
+        if let Some(h) = harness {
+            self.rebuild_matcher_for(h).await;
         }
         // The harness is gone: its stream is free (`crate::stream_limit`).
         self.stream_forget(id);
@@ -8720,6 +8737,82 @@ mod tests {
         }
     }
 
+    /// rev-1192 F3: the matcher holds a grok login's tokens after the
+    /// build that a grok launch and exit run, and a token that grok
+    /// refreshes in place after the next step of the login watch. Other
+    /// harnesses run no build.
+    #[tokio::test]
+    async fn grok_launch_exit_and_a_login_refresh_rebuild_the_matcher() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = workspace_state(tmp.path());
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            state.state_dir.clone(),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            SandboxConfig::default(),
+            HashMap::new(),
+        ));
+        assert!(sup.inner.state.set(Arc::downgrade(&state)).is_ok());
+        let redacted = |t: &str| state.db.redactor().get().redact_str(t).into_owned();
+        let old = "xai-at-F3w9Zk2LmP4rT8vBlaunch";
+        crate::accounts::write_credential(
+            &state.state_dir,
+            "x-super",
+            HarnessId::Grok,
+            format!(r#"{{"session": {{"access_token": "{old}"}}}}"#).as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(redacted(old), old, "no build yet");
+        assert!(!sup.rebuild_matcher_for(HarnessId::Claude).await);
+        assert_eq!(redacted(old), old);
+        // The build of a grok launch (and of its exit: the same call).
+        assert!(sup.rebuild_matcher_for(HarnessId::Grok).await);
+        assert_eq!(redacted(old), "[secret:subscription/x-super]");
+
+        // grok refreshes the file in place, with no daemon call.
+        let mut last = None;
+        assert!(crate::secrets::redact::watch_grok_step(&state, &mut last).await);
+        assert!(!crate::secrets::redact::watch_grok_step(&state, &mut last).await);
+        let new = "xai-at-F3N4eW8tOk3nV6yU2c-refreshed";
+        let path = crate::accounts::credential_path(
+            &crate::accounts::store_dir(&state.state_dir, "x-super"),
+            HarnessId::Grok,
+        );
+        std::fs::write(
+            &path,
+            format!(r#"{{"session": {{"access_token": "{new}"}}}}"#),
+        )
+        .unwrap();
+        assert_eq!(redacted(new), new, "not before the watch reads it");
+        assert!(crate::secrets::redact::watch_grok_step(&state, &mut last).await);
+        assert_eq!(redacted(new), "[secret:subscription/x-super]");
+        // The token it replaced stays in the matcher (TER-1259).
+        assert_eq!(redacted(old), "[secret:subscription/x-super]");
+    }
+
+    /// rev-1192 F4: an agent whose stored model reads as a flag, or has
+    /// white space, does not start, whatever its harness.
+    #[test]
+    fn a_model_that_reads_as_a_flag_does_not_start() {
+        let agent = |h: HarnessId, model: &str| -> Agent {
+            serde_json::from_value(serde_json::json!({
+                "id": AgentId::new(), "name": "a", "project": "p", "harness": h,
+                "model": model, "workspace": "/w"
+            }))
+            .unwrap()
+        };
+        for h in HarnessId::ALL {
+            assert!(check_subscription(&agent(h, "grok-build"), None).is_ok(), "{h}");
+            for bad in ["--always-approve", "-x", "a b"] {
+                let Err(SupervisorError::NotReady(msg)) = check_subscription(&agent(h, bad), None)
+                else {
+                    panic!("{h} started with model {bad:?}");
+                };
+                assert!(msg.contains("is not valid"), "{msg}");
+            }
+        }
+    }
+
     /// The isolation gap of the cross-harness run: each agent's session
     /// files (transcripts, session index, session store) come from its own
     /// harness dir. The sandbox binds them read-write over the session
@@ -8730,11 +8823,15 @@ mod tests {
     async fn the_sandbox_binds_the_agent_session_dirs_over_the_shared_home() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
-        let homes: HashMap<HarnessId, PathBuf> =
-            [HarnessId::Claude, HarnessId::Codex, HarnessId::Copilot]
-                .into_iter()
-                .map(|h| (h, tmp.path().join("auth").join(h.to_string())))
-                .collect();
+        let homes: HashMap<HarnessId, PathBuf> = [
+            HarnessId::Claude,
+            HarnessId::Codex,
+            HarnessId::Copilot,
+            HarnessId::Grok,
+        ]
+        .into_iter()
+        .map(|h| (h, tmp.path().join("auth").join(h.to_string())))
+        .collect();
         for h in homes.values() {
             std::fs::create_dir_all(h).unwrap();
         }
@@ -8750,7 +8847,7 @@ mod tests {
             sandbox,
             homes.clone(),
         ));
-        let cases: [(HarnessId, &[&str]); 3] = [
+        let cases: [(HarnessId, &[&str]); 4] = [
             (
                 HarnessId::Claude,
                 &[
@@ -8773,6 +8870,13 @@ mod tests {
                     "session-store.db-shm",
                     "logs",
                 ],
+            ),
+            // Its sessions, and its own config and trust files: no grok
+            // agent changes the config or trusts a folder for another
+            // (TER-1192, rev-1192 F1).
+            (
+                HarnessId::Grok,
+                &["sessions", "config.toml", "trusted_folders.toml"],
             ),
         ];
         for (harness, areas) in cases {
@@ -8808,6 +8912,14 @@ mod tests {
                     !binds.iter().any(|b| b.2 == shared.join(area)),
                     "{harness} {area}: the shared one is bound"
                 );
+            }
+            if harness == HarnessId::Grok {
+                // The personal hooks: the agent's own dir, read-only.
+                let target = inside.join("hooks");
+                let hits: Vec<_> = binds.iter().filter(|b| b.3 == target).collect();
+                assert_eq!(hits.len(), 1, "grok hooks: {a:?}");
+                assert_eq!(hits[0].1, "--ro-bind", "grok hooks");
+                assert_eq!(hits[0].2, own.join("hooks"), "grok hooks");
             }
             if harness == HarnessId::Codex {
                 let sqlite = own.join("sqlite");

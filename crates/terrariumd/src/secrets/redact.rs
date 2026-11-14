@@ -394,18 +394,30 @@ pub async fn watch_grok_logins(state: std::sync::Weak<AppState>) {
         let Some(s) = state.upgrade() else {
             return;
         };
-        let dir = s.state_dir.clone();
-        let now = tokio::task::spawn_blocking(move || crate::accounts::grok_auth_stamps(&dir))
-            .await
-            .unwrap_or_default();
-        if grok_logins_changed(last.as_deref(), &now) {
-            tracing::debug!("a Grok login changed; building the redaction matcher");
-            rebuild(&s).await;
-        }
-        last = Some(now);
+        watch_grok_step(&s, &mut last).await;
         drop(s);
         tokio::time::sleep(GROK_WATCH_INTERVAL).await;
     }
+}
+
+/// One read of [`watch_grok_logins`]: read the stamps, build the matcher
+/// when they changed since `last`, and keep them in `last`. True when it
+/// built the matcher.
+pub async fn watch_grok_step(
+    state: &AppState,
+    last: &mut Option<Vec<crate::accounts::GrokStamp>>,
+) -> bool {
+    let dir = state.state_dir.clone();
+    let now = tokio::task::spawn_blocking(move || crate::accounts::grok_auth_stamps(&dir))
+        .await
+        .unwrap_or_default();
+    let changed = grok_logins_changed(last.as_deref(), &now);
+    if changed {
+        tracing::debug!("a Grok login changed; building the redaction matcher");
+        rebuild(state).await;
+    }
+    *last = Some(now);
+    changed
 }
 
 /// The labels that `actor` sees in a text that the daemon redacts when it
