@@ -635,12 +635,13 @@ mod tests {
         assert_eq!(back, r);
 
         // The second fill is from the cache; `refresh` asks again.
+        // One npm call per harness (grok too, TER-1192).
         let n = npm.calls.lock().unwrap().len();
-        assert_eq!(n, 4);
+        assert_eq!(n, HarnessId::ALL.len());
         cache.fill(&mut r, false).await;
-        assert_eq!(npm.calls.lock().unwrap().len(), 4);
+        assert_eq!(npm.calls.lock().unwrap().len(), n);
         cache.fill(&mut r, true).await;
-        assert_eq!(npm.calls.lock().unwrap().len(), 8);
+        assert_eq!(npm.calls.lock().unwrap().len(), 2 * n);
 
         // An installed version (after an update) wins over the pin.
         for h in &mut r.harnesses {

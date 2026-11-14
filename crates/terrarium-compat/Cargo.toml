@@ -14,6 +14,7 @@ terrarium-adapter-claude.workspace = true
 terrarium-adapter-codex.workspace = true
 terrarium-adapter-copilot.workspace = true
 terrarium-adapter-pi.workspace = true
+terrarium-adapter-grok.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 semver.workspace = true

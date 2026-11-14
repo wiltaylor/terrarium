@@ -93,6 +93,22 @@ const TMP_MARK: &str = ".tmp-";
 const OLD_MARK: &str = ".old-";
 /// A temp dir older than this is a leftover of a stopped install.
 const STALE_TMP: Duration = Duration::from_secs(30 * 60);
+/// The env var of the Grok home ([`HarnessId::home_env`]).
+const GROK_HOME_ENV: &str = "GROK_HOME";
+/// The Grok home of an install, in the version dir.
+const GROK_INSTALL_HOME: &str = "grok-home";
+
+/// `GROK_HOME` for npm and the version check in the prefix `prefix`.
+/// The `@xai-official/grok` postinstall unpacks the native binary beside
+/// its bin entry (`lib/node_modules/@xai-official/grok/bin/grok-native`,
+/// which `bin/grok` links to), and a second copy into `$GROK_HOME/bin`,
+/// and writes `$GROK_HOME/config.toml`. Without this var those writes go
+/// to the daemon's own `~/.grok`, outside the tools dir. The links are
+/// relative, so the rename of the version dir keeps them.
+pub fn grok_install_home(prefix: &Path) -> PathBuf {
+    prefix.join(GROK_INSTALL_HOME)
+}
+
 /// The flat layout of before the version dirs: npm's own prefix dirs.
 const FLAT_MODULES: &str = "lib/node_modules";
 
@@ -557,6 +573,7 @@ impl ToolsConfig {
             tokio::process::Command::new(&bin)
                 .arg("--version")
                 .env("PATH", self.path_env(Some(&prefix.join("bin"))))
+                .env(GROK_HOME_ENV, grok_install_home(prefix))
                 .stdin(Stdio::null())
                 .kill_on_drop(true)
                 .output(),
@@ -588,6 +605,9 @@ impl ToolsConfig {
             .args(specs)
             .env("NPM_CONFIG_PREFIX", prefix)
             .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
+            // The grok postinstall writes `$GROK_HOME/bin` and
+            // `config.toml`: keep them in the version dir (TER-1192).
+            .env(GROK_HOME_ENV, grok_install_home(prefix))
             .env("PATH", self.path_env(None))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1277,6 +1297,10 @@ for a in "$@"; do
     @github/copilot) bin=copilot ;;
     @earendil-works/pi-coding-agent) bin=pi ;;
     copilot-custom-system-prompt) bin=copilot-custom-system-prompt ;;
+    @xai-official/grok) bin=grok
+      # As its postinstall: the binary copy and config.toml go to GROK_HOME.
+      [ -n "$GROK_HOME" ] || { echo "no GROK_HOME" >&2; exit 1; }
+      mkdir -p "$GROK_HOME/bin" && echo '[cli]' > "$GROK_HOME/config.toml" ;;
     *) echo "npm error 404 Not Found - $pkg" >&2; exit 1 ;;
   esac
   mkdir -p "$prefix/lib/node_modules/$pkg" "$prefix/bin"
@@ -1435,6 +1459,14 @@ mod tests {
         let marker = std::fs::read_to_string(c.copilot_home.join(EXTENSION_MARKER)).unwrap();
         assert!(marker.starts_with("copilot-prompt-"), "{marker}");
         let stamp = m["codex"].installed_at;
+        // The grok postinstall wrote into the version dir, not a home
+        // (TER-1192).
+        let grok = c.pin("grok").unwrap();
+        assert_eq!(grok.package, "@xai-official/grok");
+        let grok_dir = c.version_dir("grok", &grok.version);
+        assert_eq!(grok_install_home(&grok_dir), grok_dir.join("grok-home"));
+        assert!(grok_dir.join("grok-home/config.toml").is_file());
+        assert!(grok_dir.join("grok-home/bin").is_dir());
 
         // The command runs through `bin/`, as on PATH.
         let out = std::process::Command::new(c.bin_dir().join("codex"))
