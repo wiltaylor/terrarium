@@ -119,7 +119,8 @@ pub trait Adapter: Send + Sync {
     }
 
     /// Keystrokes that submit a user turn. The default is bracketed paste and
-    /// then Enter.
+    /// then Enter. [`bracketed_paste`] removes the paste markers from the
+    /// text first (TER-1289, TER-1325): a turn can carry untrusted mail.
     fn type_turn(&self, text: &str) -> Vec<u8> {
         bracketed_paste(text)
     }
@@ -339,11 +340,16 @@ pub fn raw_text_keys(text: &str) -> Vec<u8> {
     out
 }
 
-/// Wrap `text` in bracketed-paste markers and add a carriage return.
+/// Wrap `text` in bracketed-paste markers and add a carriage return. The
+/// paste markers in `text` are removed first ([`strip_paste_markers`]): a
+/// marker in the text would end the paste early, and the rest of the text
+/// would be typed as keys (TER-1289). Every caller gets the strip, also an
+/// adapter that keeps the default [`Adapter::type_turn`] (TER-1325).
 pub fn bracketed_paste(text: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(text.len() + 13);
+    let clean = strip_paste_markers(text);
+    let mut out = Vec::with_capacity(clean.len() + 13);
     out.extend_from_slice(PASTE_START.as_bytes());
-    out.extend_from_slice(text.as_bytes());
+    out.extend_from_slice(clean.as_bytes());
     out.extend_from_slice(PASTE_END.as_bytes());
     out.push(b'\r');
     out
@@ -380,6 +386,51 @@ mod tests {
     #[test]
     fn bracketed_paste_wraps_text() {
         assert_eq!(bracketed_paste("hi"), b"\x1b[200~hi\x1b[201~\r".to_vec());
+    }
+
+    /// An adapter with only the required methods: it keeps every default.
+    struct DefaultAdapter;
+
+    impl Adapter for DefaultAdapter {
+        fn id(&self) -> HarnessId {
+            HarnessId::Claude
+        }
+        fn detect_version(&self) -> Result<Version> {
+            Ok(Version::new(0, 0, 0))
+        }
+        fn launch(&self, _agent: &Agent, _resume: Option<&HarnessSessionId>) -> LaunchSpec {
+            LaunchSpec::default()
+        }
+        fn hook_event(&self, _hook: &HookPayload) -> Vec<Event> {
+            Vec::new()
+        }
+    }
+
+    /// TER-1325: the default `type_turn` strips the paste markers, also
+    /// nested ones, so a marker in the text cannot end the paste early.
+    #[test]
+    fn default_type_turn_strips_paste_markers() {
+        let a = DefaultAdapter;
+        assert_eq!(a.type_turn("hi"), b"\x1b[200~hi\x1b[201~\r".to_vec());
+        for text in [
+            "a\x1b[201~/exit\rb",
+            "a\x1b[200~b",
+            "a\x1b[20\x1b[201~1~/exit\rb",
+        ] {
+            let keys = a.type_turn(text);
+            let body = &keys[PASTE_START.len()..keys.len() - PASTE_END.len() - 1];
+            let body = std::str::from_utf8(body).unwrap();
+            assert!(keys.starts_with(PASTE_START.as_bytes()), "{text:?}");
+            assert!(keys.ends_with(b"\x1b[201~\r"), "{text:?}");
+            assert!(
+                !body.contains(PASTE_START) && !body.contains(PASTE_END),
+                "{text:?} -> {body:?}"
+            );
+        }
+        assert_eq!(
+            a.type_turn("a\x1b[20\x1b[201~1~b"),
+            b"\x1b[200~ab\x1b[201~\r".to_vec()
+        );
     }
 
     #[test]
