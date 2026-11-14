@@ -1,0 +1,10 @@
+{
+  "hookEventName": "PermissionDenied",
+  "sessionId": "0f8e4c2a-7b1d-4e3f-9a6c-5d2b8e1f4a7c",
+  "cwd": "/home/agent/work",
+  "workspaceRoot": "/home/agent/work",
+  "toolName": "Bash",
+  "toolInput": {
+    "command": "rm -rf build"
+  }
+}

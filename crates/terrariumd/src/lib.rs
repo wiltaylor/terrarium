@@ -505,6 +505,11 @@ async fn activate(
 
     let mut owned = ActivationTasks(Vec::new());
     let tasks = &mut owned.0;
+    // The matcher is built again whenever grok refreshes a login file
+    // (TER-1192).
+    tasks.push(tokio::spawn(secrets::redact::watch_grok_logins(
+        std::sync::Arc::downgrade(&state),
+    )));
     tasks.push(state.executor.hosts.spawn_resume_grace());
     tasks.push(executor::durable::spawn_cleanup(&state));
     tasks.push(spawn_pump(state.clone()));

@@ -16,7 +16,7 @@ use terrarium_core::{
 use terrarium_runner::{NoHandler, Runner, RunnerConfig};
 
 use crate::Settings;
-use crate::harness::{self, Claude, Codex, Copilot, Harness, Pi};
+use crate::harness::{self, Claude, Codex, Copilot, Grok, Harness, Pi};
 use crate::leftovers::{self, MountPoint, Snapshot};
 use crate::recording::{Captured, RecordingAdapter};
 use crate::report::{Outcome, Report};
@@ -106,8 +106,19 @@ pub async fn run_suite(settings: &Settings) -> Report {
                 }
                 run_one(&h, settings, &mut report).await;
             }
-            // Not in `HarnessId::ALL` yet: no adapter (TER-1192).
-            HarnessId::Grok => report.skip(id, "all", "no grok adapter yet (TER-1192)"),
+            HarnessId::Grok => {
+                let h = Grok::new(settings, home);
+                if settings.dry_run {
+                    run_one(&h, settings, &mut report).await;
+                } else {
+                    report.skip(
+                        id,
+                        "all",
+                        "a real grok run is a signed-in, metered check: it needs the \
+                         operator's OK through the lead (TER-1192 release gate)",
+                    );
+                }
+            }
         }
     }
     report

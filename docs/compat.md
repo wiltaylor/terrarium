@@ -60,6 +60,7 @@ section for the new version below, as for the versions below.
 | 2026-10-24 | copilot-prompt | 0.1.2 | first pin | - |
 | 2026-10-26 | codex | 0.160.0 → 0.164.0 | major | verified live in the container 2026-10-26 (codex: 1 turn; pi: 0 turns, start only) |
 | 2026-10-26 | pi | 0.85.1 → 1.4.0 | major | verified live in the container 2026-10-26 (codex: 1 turn; pi: 0 turns, start only) |
+| 2026-11-14 | grok | 1.0.77 | first pin (TER-1192) | dry run and fixtures only; the signed-in run is a release gate |
 
 ---
 
@@ -1231,6 +1232,52 @@ build.
   the 1.4.0 model catalog (`pi-ai/dist/providers/*.models.js`).
 - `google-gemini-cli` (in `provider.rs`) is not a provider in the 1.4.0
   catalog.
+
+---
+
+## Grok Build 1.0.77
+
+The adapter `crates/adapters/grok` (TER-1192). Grok Build is the harness
+of an xAI plan row (`terrarium_core::xai`); TER-1190 chose it over Cursor
+CLI. Every fact below comes from the unsigned 1.0.77 binary (`--version`,
+`--help`), the npm package, and the public docs
+([hooks](https://docs.x.ai/build/features/hooks),
+[reference](https://docs.x.ai/build/cli/reference), res-1190 on
+TER-1190). Nothing was run signed in, and no model turn ran. The tests use
+fixtures: hand-written hook payloads (`crates/adapters/grok/tests/fixtures/hooks/`)
+and a fake TUI (`crates/terrarium-runner/tests/fake_grok/`).
+
+| Topic | Fact | Status |
+|---|---|---|
+| Install | `@xai-official/grok` (npm, `bin/grok`, Node >= 20) with a per-platform optional package. Its postinstall unpacks the native binary beside the bin entry (`bin/grok` → `grok-native`, relative links) and a second copy into `$GROK_HOME/bin`, and writes `$GROK_HOME/config.toml`. The installer sets `GROK_HOME=<version dir>/grok-home` for npm and the version check, so nothing goes to the daemon's home (`harness_tools::grok_install_home`). The launch runs the absolute `bin/grok` of the active version dir. | read (package source) |
+| Home | `$GROK_HOME`, else `~/.grok` (the npm launcher and postinstall: "matching the Rust grok_home()"). `HarnessId::Grok.home_env()` is `GROK_HOME`. A login (`grok login --device-auth`) runs with `HOME` = the scratch home and `GROK_HOME` = its `.grok`. | read (package source) |
+| Version | `grok --version` prints `grok 1.0.77 (50ca579fa996)`. | verified (unsigned, res-1190) |
+| Session | `--session-id <UUID>` starts a NEW conversation with that ID; `--resume <ID>` resumes. The adapter records the UUID of a fresh start. | read (help) |
+| Prompt | `--append-system-prompt <text>`, or `--system-prompt <text>` for an agent with its own base prompt (the Claude Code aliases). Whether a resume takes a changed prompt is not known: `prompt_frozen_on_resume` is true. | read (docs) |
+| Hooks | Terrarium's bridge is a PERSONAL hook file (`hooks/terrarium.json` in the agent's own `hooks/`, bound over the shared home's): no `--trust`. Each event runs `terrarium hook <Name>`. Payload: `hookEventName`, `sessionId`, `cwd`, `workspaceRoot`; tool events add `toolName`, `toolInput`. `PermissionDenied` is a notice, not a question. | read (docs) |
+| Keys | Turn: bracketed paste, CR 0.3 s later. Interrupt: one Ctrl-C (Esc does not cancel). Exit: `/quit`, CR 0.3 s later. Answers: Down × n and CR, CR, Esc. | read (docs) |
+| Permissions | No `--always-approve`, `--yolo`, `--trust`, `--permission-mode`, or `--allow` rule (a test checks each launch). Grok asks before a tool call that its rules do not allow; the question shows on the screen. | adapter rule |
+| Redaction | The matcher is built again before a grok agent starts, after it exits, and within 2 s of a change of an account's Grok `auth.json` (`secrets::redact::watch_grok_logins`, a stat of size, change time, and inode; no content). Accepted gap (rev-1192 F3): a token that grok writes in place is not in the matcher for up to 2 s, and output in that time is stored unredacted. A token that grok writes and replaces again within one gap is never read. | unit test (`grok_launch_exit_and_a_login_refresh_rebuild_the_matcher`) |
+| Config and trust | Each grok agent gets its own `config.toml` (a copy of the shared one) and an empty `trusted_folders.toml`, written by the daemon at each launch and bound over the shared files (rev-1192 F1). A trust decision or a config change of one agent reaches no other agent and not the shared home, and is gone at the agent's next start. The operator's own trust list does not reach the agents. Both are read-write binds: whether grok exits when it cannot write them is not captured. | unit test; bwrap args test |
+| Model | A model that starts with `-` or has white space is refused at the config check (`config::check_model`, every harness) and at the start (`check_subscription`); the grok launch never passes it (rev-1192 F4). | unit test |
+
+### Grok Build: not tested (release gates, need the operator's OK)
+
+- The PTY lifecycle of the signed-in TUI: the ready screen, a submit of a
+  multi-line paste, a question with allow and deny, Ctrl-C with empty and
+  non-empty input, `/quit`, `--resume`. Until then the runner reads
+  readiness from the hooks and its generic detector (`screen_hint` is
+  `Unknown`).
+- The real hook payloads (the prompt field, the error of `StopFailure`),
+  their order, and that personal hooks run with no trust.
+- Whether grok refreshes `auth.json` in place (the single-file bind needs
+  it) or by a rename.
+- The model IDs of the plan (`grok models`), `grok usage SESSION_ID` and
+  its schema (no usage is read until then), and the session file layout
+  (no transcript is read).
+- The update suppression of the native binary, and that it writes nothing
+  to the tools dir.
+- `/compact` (`HarnessId::compact_command` is `None`).
 
 ---
 

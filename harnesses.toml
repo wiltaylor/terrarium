@@ -57,6 +57,15 @@ package = "@earendil-works/pi-coding-agent"
 version = "1.4.0"
 binary = "pi"
 
+[harness.grok]
+# Grok Build (xAI). The package's postinstall unpacks the native binary
+# beside its bin entry and into $GROK_HOME/bin; the installer sets GROK_HOME
+# inside the version dir, so nothing goes to the daemon's home
+# (crates/terrariumd/src/harness_tools.rs, TER-1192).
+package = "@xai-official/grok"
+version = "1.0.77"
+binary = "grok"
+
 # npm packages that are not harnesses. `for` names the harness that uses it.
 [extension.copilot-prompt]
 # The Copilot system-prompt extension. `terrariumd harness install`

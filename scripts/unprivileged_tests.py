@@ -40,8 +40,9 @@ ALONE = frozenset({("terrariumd", "lib"), ("terrariumd", "it")})
 WIDTH = 2
 # Only these reach the tests: the merge job's env stays with root. The rustup
 # and cargo homes let tests that run rustc or cargo find the pinned toolchain.
+# RUST_TEST_THREADS keeps the ci cap on libtest threads (.just/ci/mod.just, TER-1318).
 PASS_ENV = ("PATH", "LANG", "LC_ALL", "TZ", "RUST_BACKTRACE", "RUST_LOG",
-            "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "CARGO_HOME")
+            "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "CARGO_HOME", "RUST_TEST_THREADS")
 
 
 def package_names(metadata: str) -> dict[str, str]:
