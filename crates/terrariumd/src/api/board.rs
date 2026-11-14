@@ -670,7 +670,9 @@ fn record_before(
         return Ok(());
     }
     if crate::api::jobs::branch_of(card, None).ok().as_ref() == Some(branch) {
-        accepted_heads::record_open(t, &card.id, branch, commit)?;
+        if accepted_heads::record_open(t, &card.id, branch, commit)? {
+            board::queues::release_card_column(t, &card.id)?;
+        }
     }
     Ok(())
 }

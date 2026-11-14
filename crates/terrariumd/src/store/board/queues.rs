@@ -301,6 +301,9 @@ fn return_stale(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
     Ok(())
 }
 
+/// [`merge_candidates`]: the cards a batch takes, and a release-blocker.
+type Candidates = (Vec<(String, String)>, Option<String>);
+
 /// The waiting cards of merge_queue column `s` that a batch merge takes
 /// now, as `merge-queue-batch` counts them (TER-1204): only cards that can
 /// go ([`crate::rules_verbs::merge_ready`]) with a repo in `next_repos`,
@@ -312,8 +315,13 @@ fn merge_candidates(
     conn: &Connection,
     s: &Settings,
     queue: &[(String, String)],
-) -> ApiResult<(Vec<(String, String)>, Option<String>)> {
+) -> ApiResult<Candidates> {
     let served = crate::store::jobs::delivery(conn, &s.project)?.next_repos;
+    // A project with no `next` repo has no merge lane: the column is a
+    // plain `batch` column.
+    if served.is_empty() {
+        return Ok((queue.to_vec(), None));
+    }
     let cards: std::collections::HashMap<String, Card> =
         selection_cards(conn, &s.project, &s.name)?
             .into_iter()
@@ -633,6 +641,22 @@ pub fn release(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
                 return Ok(());
             }
         }
+    }
+}
+
+/// [`release`] for the column of card `card`: its reviewed commit is
+/// recorded now, so a merge_queue batch may take it (TER-1204).
+pub fn release_card_column(t: &mut Tx<'_>, card: &str) -> ApiResult<()> {
+    let column: Option<i64> = t
+        .query_row(
+            "SELECT column_id FROM cards WHERE id = ?1 AND archived = 0",
+            [card],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match column {
+        Some(c) => release(t, c),
+        None => Ok(()),
     }
 }
 

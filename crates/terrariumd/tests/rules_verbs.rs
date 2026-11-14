@@ -5561,17 +5561,13 @@ async fn hold(td: &TestDaemon, id: &str) {
         .unwrap();
 }
 
-/// Drop the reviewed commit of card `id`.
-async fn drop_head(td: &TestDaemon, id: &str) {
-    let id = id.to_owned();
-    state(td)
-        .db
-        .write("test", move |t| {
-            t.execute("DELETE FROM card_accepted_heads WHERE card = ?1", [id])?;
-            Ok(())
-        })
-        .await
-        .unwrap();
+/// Give card `id` a branch that is not on the remote: its move into the
+/// merge queue records no reviewed commit.
+async fn no_head(td: &TestDaemon, id: &str) {
+    let r = td
+        .patch(&format!("/api/cards/{id}"), json!({"branch": "no-such-branch"}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
 }
 
 /// rev-1204 finding 1, rev-1204b finding 3: the merge_queue column counts
@@ -5601,10 +5597,10 @@ async fn left_out_cards_of_a_batch_do_not_hold_the_merge_lane() {
     settle(&td).await;
     batch_merge_column(&td).await;
     hold(&td, &h).await;
+    no_head(&td, &n).await;
     for id in [&n, &b, &h] {
         move_to(&td, id, "merge_queue").await;
     }
-    drop_head(&td, &n).await;
     for id in &ready[..3] {
         move_to(&td, id, "merge_queue").await;
     }
@@ -5694,10 +5690,10 @@ async fn an_unready_release_blocker_does_not_stop_the_merge_queue() {
     batch_merge_column(&td).await;
     hold(&td, &held).await;
     store_job(&td, JobKind::Validate, &[&busy]).await;
+    no_head(&td, &headless).await;
     for id in [&held, &headless, &busy, &other] {
         move_to(&td, id, "merge_queue").await;
     }
-    drop_head(&td, &headless).await;
     sweep_queues(&td).await;
     for id in [&held, &headless, &busy, &other] {
         assert!(card(&td, id).await["queued"].is_object(), "{id}");
