@@ -88,13 +88,13 @@ class UnprivilegedTests(unittest.TestCase):
     def test_the_child_gets_its_home_and_not_the_job_env(self):
         env = {"PATH": "/usr/bin", "TERRARIUM_TOKEN": "x", "HOME": "/root", "RUST_BACKTRACE": "1",
                "TMPDIR": "/root/tmp", "RUSTUP_HOME": "/r", "RUSTUP_TOOLCHAIN": "1.97.1",
-               "CARGO_HOME": "/c", "CARGO_TARGET_DIR": "/t"}
+               "CARGO_HOME": "/c", "CARGO_TARGET_DIR": "/t", "RUST_TEST_THREADS": "8"}
         with mock.patch.dict(os.environ, env, clear=True):
             child = ut.child_env("/tmp/h")
         # No TMPDIR: the tests use the shared /tmp, like the release CI (TER-575).
         self.assertEqual(child, {"PATH": "/usr/bin", "RUST_BACKTRACE": "1", "RUSTUP_HOME": "/r",
                                  "RUSTUP_TOOLCHAIN": "1.97.1", "CARGO_HOME": "/c",
-                                 "HOME": "/tmp/h", "USER": "ci", "LOGNAME": "ci"})
+                                 "RUST_TEST_THREADS": "8", "HOME": "/tmp/h", "USER": "ci", "LOGNAME": "ci"})
 
     def test_each_binary_gets_a_fresh_private_home(self):
         with tempfile.TemporaryDirectory() as root, \

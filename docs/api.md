@@ -348,6 +348,7 @@ gives them to the routers and the mail code.
 | `TERRARIUM_THREAD_STALE` | `--thread-stale` | `14d` | The time that an Inbox thread waits on the operator with no activity before the daemon closes it as stale and mails its report-to lead (§6.13): a duration, or `off` (also `0`). |
 | `TERRARIUM_QUOTA_SAMPLE_KEEP` | `--quota-sample-keep` | `48h` | The quota probe samples (`quota_samples`, §16.6) younger than this stay; each hour the scheduler deletes the older ones in transactions of at most 500 rows, and the newest sample of each window stays at any age. The default history of `GET /api/subscriptions/{name}/quota` (§16.3). A duration of at least `24h`. |
 | `TERRARIUM_CARD_REMINDER` | none | `on` | The `card_reminder` of an agent that sets none (§6.2, "Card reminder"): `on` or `off` (also `1`, `true`, `yes`, and `0`, `false`, `no`). Empty or not valid: on. The daemon reads it once. |
+| `TERRARIUM_SERVICE_REQUEST_KEEP` | none | `30d` | The time that the row of an ended service request stays after its end (§17.12, "The sweep"); then the sweep deletes it, after its payload. A duration of at least `7d` (the payload retention) and at most `3650d`. Not valid: `30d`, with a warning. The daemon reads it once. |
 | `TERRARIUM_ARTIFACT_LISTEN` | `--artifact-listen` | `0.0.0.0:8081` | The artifact origin listener. Empty: none, and the dashboard port serves `/a/...`. |
 | `TERRARIUM_ARTIFACT_PUBLIC_URL` | `--artifact-public-url` | unset | The artifact origin in signed URLs and the CSP. |
 | `TERRARIUM_WS_QUERY_TOKEN` | `--ws-query-token` | `0` | `1`: take `?token=` on an upgrade. |
@@ -5008,6 +5009,13 @@ Cards leave the queue first in, first out; a new card never overtakes one
 that waits. When a card gets its slot the daemon writes the `card` event
 `admitted` (with `queued_at` and `to_count`, the admitted cards of the
 column), and the `lands` and `count_reached` rules of the column run on it.
+Like `moved`, the event has `from` and `from_role` (the column of the move
+that queued the card, and its role) and `to` and `to_role` (the column that
+admits it), so a `lands` rule with a `data.from_role` condition matches a
+card that returns from a wait column into a full one (TER-1304). A card put
+back in a `batch` queue keeps the `from` of its first move; a row that no
+move wrote (a card admitted under `wip` and put back after a change to
+`batch`) has `from: null`.
 A card that leaves the queue (a move or an archive) never landed: its
 column runs no `leaves` or `archived` rule for it (`from_queued: true` on
 the `moved` event, `queued: true` on `archived`).
@@ -8809,19 +8817,28 @@ in order (Q3 A).
   `payload_deleted_at` is set; its bytes stop counting toward the caps
   (Q2 A). The retention counts from `ended_at`, not from the call
   (TER-1268, rev-1264b minor 2): a response written after a long wait and
-  run is kept the full 7 days. The payload of an open request stays. The
-  request rows stay: nothing prunes them yet.
+  run is kept the full 7 days. The payload of an open request stays.
+- The row of an ended request whose payload is gone and that ended more
+  than `TERRARIUM_SERVICE_REQUEST_KEEP` ago (default 30 days) is deleted,
+  at most 500 rows each minute, the oldest end first, through the partial
+  index `service_requests_prunable` (TER-1285).
+  `GET /api/service-requests/{id}` then gives `404`. An open request is
+  never deleted.
 
 **The result mail** (C5, design D6, TER-1268). Each request gets one mail
 from `system` to its caller when it ends, whatever ended it: a run (C3,
 C4), the wait limit, or a cancel. The subject is `Service <name>: request
 <id> <state>`. The body has the request ID, the state, the exit code, the
-error, the end time, the number and bytes of the response files, the
-response JSON (the first 16 KiB), and the fetch command `terrarium service
-result <id> --out <dir>`. A `failed` or `timed_out` mail adds the last
-8 KiB of `log_tail` and says to send the request again: nothing is tried
-again (Q4 A). The mail is redacted as every mail is. The mail has no
-attachment: the files are fetched.
+error (the first 1 KiB), the end time, the number and bytes of the
+response files, the response JSON (the first 16 KiB), and the fetch command
+`terrarium service result <id> --out <dir>`. A `failed` or `timed_out`
+mail adds the last 4 KiB of `log_tail` and says to send the request again:
+nothing is tried again (Q4 A). Each of these texts is redacted whole, then
+cut (rev-1268), so that a secret across a cut point leaves no part of its
+value. The mail has no attachment: the files are fetched.
+
+The request keeps at most 4 KiB of `error` (its start) and of `log_tail`
+(its end), each redacted before the write (`store::services::MAX_TEXT`).
 
 The mail is an outbox: an ended request with no `mailed_at` is due, and
 one write sends the mail and sets `mailed_at`, so a request never gets two.

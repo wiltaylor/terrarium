@@ -2,7 +2,9 @@
 //! the requests that did not start within their wait limit end as
 //! `timed_out`; each ended request whose result mail is due gets it
 //! (TER-1268); the payloads of requests that ended more than the 7-day
-//! retention ago are deleted.
+//! retention ago are deleted; then the rows of ended requests that ended
+//! more than [`ENV_REQUEST_KEEP`] ago (default 30 days), with their payload
+//! gone, are deleted (TER-1285).
 
 use std::time::Duration;
 
@@ -16,11 +18,54 @@ use crate::store::services as store;
 /// How often the sweep runs.
 pub const TICK: Duration = Duration::from_secs(60);
 
+/// The global time that the row of an ended request stays after its end
+/// (TER-1285). A duration of at least the payload retention.
+pub const ENV_REQUEST_KEEP: &str = "TERRARIUM_SERVICE_REQUEST_KEEP";
+
+/// The default of [`ENV_REQUEST_KEEP`].
+pub const DEFAULT_REQUEST_KEEP: Duration = Duration::from_secs(30 * 24 * 3600);
+
+/// The longest value of [`ENV_REQUEST_KEEP`]: 3650 days.
+pub const MAX_REQUEST_KEEP: Duration = Duration::from_secs(3650 * 24 * 3600);
+
+/// A value of [`ENV_REQUEST_KEEP`]: a duration of at least the payload
+/// retention, so that a row goes only after its payload, and at most
+/// [`MAX_REQUEST_KEEP`], so that the cutoff is always a valid time.
+pub fn parse_request_keep(s: &str) -> Result<Duration, String> {
+    let d = crate::settings::parse_duration(s)?;
+    if d < terrarium_core::service::RETENTION {
+        return Err(format!(
+            "`{}`: keep the request rows at least 7d (the payload retention)",
+            s.trim()
+        ));
+    }
+    if d > MAX_REQUEST_KEEP {
+        return Err(format!(
+            "`{}`: keep the request rows at most 3650d",
+            s.trim()
+        ));
+    }
+    Ok(d)
+}
+
+/// The keep time from [`ENV_REQUEST_KEEP`]. Unset or empty: the default.
+/// A value that does not parse gives the default, with a warning.
+pub fn request_keep_from_env() -> Duration {
+    match std::env::var(ENV_REQUEST_KEEP) {
+        Ok(v) if !v.trim().is_empty() => parse_request_keep(&v).unwrap_or_else(|e| {
+            warn!("{ENV_REQUEST_KEEP}: {e}; the request rows stay 30d");
+            DEFAULT_REQUEST_KEEP
+        }),
+        _ => DEFAULT_REQUEST_KEEP,
+    }
+}
+
 pub fn spawn(state: Shared) -> JoinHandle<()> {
+    let keep = request_keep_from_env();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(TICK).await;
-            if let Err(e) = sweep(&state, chrono::Utc::now()).await {
+            if let Err(e) = sweep_with(&state, chrono::Utc::now(), keep).await {
                 warn!("service sweep failed: {}", e.message);
             }
         }
@@ -31,8 +76,19 @@ fn fmt(at: chrono::DateTime<chrono::Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-/// One sweep at `at`: `(timed out, payloads deleted)`.
+/// One sweep at `at` with the default keep time: `(timed out, payloads
+/// deleted)`.
 pub async fn sweep(state: &Shared, at: chrono::DateTime<chrono::Utc>) -> ApiResult<(usize, usize)> {
+    sweep_with(state, at, DEFAULT_REQUEST_KEEP).await
+}
+
+/// One sweep at `at` that keeps the ended request rows for `keep` after
+/// their end: `(timed out, payloads deleted)`.
+pub async fn sweep_with(
+    state: &Shared,
+    at: chrono::DateTime<chrono::Utc>,
+    keep: Duration,
+) -> ApiResult<(usize, usize)> {
     let now = fmt(at);
     let timed_out = state
         .db
@@ -81,5 +137,45 @@ pub async fn sweep(state: &Shared, at: chrono::DateTime<chrono::Utc>) -> ApiResu
             .await?;
         deleted += 1;
     }
+    // The rows go after their payload: a row whose payload is still there
+    // stays (TER-1285).
+    // A keep time with no valid cutoff skips the prune; the sweep goes on.
+    let Some(cutoff) = chrono::Duration::from_std(keep)
+        .ok()
+        .and_then(|k| at.checked_sub_signed(k))
+    else {
+        warn!("the service request keep time is out of range: no prune");
+        return Ok((timed_out.len(), deleted));
+    };
+    let cutoff = fmt(cutoff);
+    let pruned = state
+        .db
+        .write("system", move |t| {
+            store::prune_ended(t, &cutoff, store::PRUNE_BATCH)
+        })
+        .await?;
+    if pruned > 0 {
+        info!(rows = pruned, "pruned ended service requests");
+    }
     Ok((timed_out.len(), deleted))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_request_keep_is_at_least_the_payload_retention() {
+        assert_eq!(parse_request_keep("30d").unwrap(), DEFAULT_REQUEST_KEEP);
+        assert_eq!(
+            parse_request_keep("7d").unwrap(),
+            terrarium_core::service::RETENTION
+        );
+        assert!(parse_request_keep("6d").unwrap_err().contains("7d"));
+        assert_eq!(parse_request_keep("3650d").unwrap(), MAX_REQUEST_KEEP);
+        assert!(parse_request_keep("3651d").unwrap_err().contains("3650d"));
+        assert!(parse_request_keep("100000000d").is_err());
+        assert!(parse_request_keep("soon").is_err());
+    }
 }

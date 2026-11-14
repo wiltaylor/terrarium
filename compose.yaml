@@ -106,6 +106,9 @@ services:
       TERRARIUM_COMPACT_MAX_AGE: ${TERRARIUM_COMPACT_MAX_AGE:-off}
       # The card reminder of an agent that sets none (docs/api.md §6.2): on or off.
       TERRARIUM_CARD_REMINDER: ${TERRARIUM_CARD_REMINDER:-on}
+      # The time that the row of an ended service request stays after its
+      # end (docs/api.md §17.12): a duration from 7d to 3650d.
+      TERRARIUM_SERVICE_REQUEST_KEEP: ${TERRARIUM_SERVICE_REQUEST_KEEP:-30d}
       # Days that the session archive of a removed agent stays. Empty: the
       # trash days. 0 keeps it forever.
       TERRARIUM_SESSION_ARCHIVE_DAYS: ${TERRARIUM_SESSION_ARCHIVE_DAYS:-}
