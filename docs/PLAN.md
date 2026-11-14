@@ -599,6 +599,21 @@ renders the variables in each part. A missing or empty harness section is
 left out. The packaged defaults hold the four sections, and the config
 repo seeds them (§8.3).
 
+**The end of the prompt.** Two sections follow the protocol template, in
+every mode: the ephemeral section of a spawned agent (its owner and how
+to finish), then the list of the agent's effective skills (TER-1306). The
+list is the skills that the start delivered (§8.6: the default-on skills
+and `skills`, less `skills_off`), sorted by name, one line each: the name
+and the description, cut at a word to at most 160 characters. Its first
+line says how the harness loads a skill: the Skill tool as
+`terrarium:<name>` (Claude Code), the `skill` tool (Copilot), or a read of
+`<harness dir>/skills/<name>/SKILL.md` (Codex, pi, grok). An agent with no
+skill gets no section. The list only makes the agent aware of its skills:
+the skill files and the skill tools do not change. It is part of the
+prompt hash, so a skill that is added or switched off starts a new
+session of a harness that keeps the prompt of a session
+(`new_session_on_prompt_change`).
+
 **Project instructions (`AGENTS.md`).** Terrarium uses `AGENTS.md` only.
 The protocol template tells each agent to read `AGENTS.md` in its
 workspace and in each repo; a deeper file wins. Nothing loads `CLAUDE.md`.

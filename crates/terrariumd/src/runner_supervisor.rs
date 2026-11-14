@@ -2112,6 +2112,40 @@ impl RunnerSupervisor {
                         .map_err(|e| format!("cannot create {}: {e}", d.display()))?;
                 }
                 terrarium_runner::create_private_dir(&dirs.2).map_err(|e| launch_fs_error(&e))?;
+                // The agent's effective skills (PLAN §8.6: the default-on
+                // skills and its `skills`, less `skills_off`): a fresh copy
+                // in `harness/skills/` at each start, which the sandbox
+                // binds read-only, and the record for "restart to apply".
+                let skills_dir = terrarium_core::skills::delivered_dir(&dirs.1);
+                let no_library = dirs.1.join(".no-skill-library");
+                let library = skill_library.as_deref().unwrap_or(&no_library);
+                let assigned = a.skill_selection().assigned_in(library);
+                let record = dirs.2.join(crate::skills::DELIVERED_FILE);
+                // The record of the previous start, before this one
+                // replaces it: the skills that changed since then
+                // (GitHub #23).
+                let earlier: Option<terrarium_core::skills::Delivery> =
+                    safefs::read_to_string(&record)
+                        .ok()
+                        .and_then(|t| serde_json::from_str(&t).ok());
+                let delivery = terrarium_core::skills::deliver(library, &assigned, &skills_dir)?;
+                let skills_changed = earlier
+                    .map(|e| delivery.changed_since(&e))
+                    .unwrap_or_default();
+                let json = serde_json::to_vec(&delivery).map_err(|e| e.to_string())?;
+                safefs::write_private(&record, &json).map_err(|e| {
+                    format!("cannot write {}: {}", record.display(), launch_fs_error(&e))
+                })?;
+                a.delivered_skills = delivery.names.clone();
+                // The last section of the prompt (TER-1306): the skills that
+                // this start delivered, so the agent knows them. It is in
+                // the hash below: a skill change starts a new session of a
+                // harness that keeps the prompt of a session.
+                let metas = terrarium_core::skills::describe(&skills_dir, &delivery.names);
+                let text = prompt::append_section(
+                    text,
+                    prompt::skills_section(a.harness, &skills_dir, &metas),
+                );
                 let hash = sha256_hex(&text);
                 let hash_path = dirs.2.join(SESSION_PROMPT_HASH);
                 // No symlink follow (F11): the daemon reads and writes in
@@ -2138,31 +2172,6 @@ impl RunnerSupervisor {
                 let path = dirs.1.join("prompt.md");
                 std::fs::write(&path, text)
                     .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-                // The agent's effective skills (PLAN §8.6: the default-on
-                // skills and its `skills`, less `skills_off`): a fresh copy
-                // in `harness/skills/` at each start, which the sandbox
-                // binds read-only, and the record for "restart to apply".
-                let skills_dir = terrarium_core::skills::delivered_dir(&dirs.1);
-                let no_library = dirs.1.join(".no-skill-library");
-                let library = skill_library.as_deref().unwrap_or(&no_library);
-                let assigned = a.skill_selection().assigned_in(library);
-                let record = dirs.2.join(crate::skills::DELIVERED_FILE);
-                // The record of the previous start, before this one
-                // replaces it: the skills that changed since then
-                // (GitHub #23).
-                let earlier: Option<terrarium_core::skills::Delivery> =
-                    safefs::read_to_string(&record)
-                        .ok()
-                        .and_then(|t| serde_json::from_str(&t).ok());
-                let delivery = terrarium_core::skills::deliver(library, &assigned, &skills_dir)?;
-                let skills_changed = earlier
-                    .map(|e| delivery.changed_since(&e))
-                    .unwrap_or_default();
-                let json = serde_json::to_vec(&delivery).map_err(|e| e.to_string())?;
-                safefs::write_private(&record, &json).map_err(|e| {
-                    format!("cannot write {}: {}", record.display(), launch_fs_error(&e))
-                })?;
-                a.delivered_skills = delivery.names.clone();
                 if !home.is_dir() {
                     return Err(format!(
                         "the {} home {} does not exist; log in first, or point the daemon at it \
