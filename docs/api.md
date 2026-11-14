@@ -8689,6 +8689,7 @@ description  = "Make a video from a prompt"
 kind         = "script"                     # or "agent"
 target       = "helios-gpu"
 command      = ["/opt/video/run"]           # script: the program and its fixed arguments
+env_secrets  = { HF_TOKEN = "hf-token" }   # script: env name to secret name (C3)
 # template   = "video-agent"                # agent: the template ...
 # prompt     = "Make the video the request describes."   # ... and the prompt
 max_run_time = "2h"                         # default 1h; 1m to 24h
@@ -8815,6 +8816,61 @@ the API has no count by state), its requests (newest first, a filter by
 state), and cancel of an open request. It uses the routes above, so it has
 the rights of the CLI. A reload every 15 seconds keeps an open row, the
 filter, and an open cancel confirm.
+
+**The script kind** (C3, TER-1266, design D4;
+`crates/terrariumd/src/service_script.rs`). A pass every 5 s takes each
+`running` request of a `script` service whose run has not started, and
+runs it:
+
+1. A new directory on the target, `${TMPDIR:-/tmp}/terrarium-service-<id>-XXXXXX`
+   (`mktemp -d`, mode 0700), with `request.json` (the request JSON),
+   `payload` (when the request has one; its byte count is checked), and an
+   empty `out/`.
+2. The service's `command` runs there with no shell, the directory as its
+   working directory, and this environment:
+
+   | Variable | Value |
+   |---|---|
+   | `TERRARIUM_SERVICE` | the service name |
+   | `TERRARIUM_SERVICE_REQUEST_ID` | the request ID |
+   | `TERRARIUM_SERVICE_DIR` | the directory |
+   | `TERRARIUM_SERVICE_REQUEST` | `<dir>/request.json` |
+   | `TERRARIUM_SERVICE_PAYLOAD` | `<dir>/payload`; not set without a payload |
+   | `TERRARIUM_SERVICE_OUTPUT` | `<dir>/out`: the files to return |
+   | `TERRARIUM_SERVICE_RESPONSE` | `<dir>/response.json`: the response JSON to return (optional) |
+
+   plus one variable per `env_secrets` entry. Its time limit is what is
+   left of `max_run_time` from the start of the request.
+3. Exit 0: `response.json` (at most 256 KiB, JSON) is the request's
+   `response`, and the files under `out/` are copied as one `tar` stream
+   into `<state>/services/payloads/<id>/response/`. Only regular files and
+   directories with plain paths are kept (a link or device is left out), at
+   most 10000 files, and at most the bytes that `max_retained` (and the
+   global cap) leaves; more fails the request. Their size is
+   `response_size`, and it counts toward the caps with `payload_size`.
+   The request is `done` with `exit_code` 0.
+4. Any other end is `failed`, with `exit_code` and the end of the redacted
+   log (stdout and stderr, at most 4 KiB) in `error`. The run's time
+   limit is `timed_out`. A request that is cancelled or timed out while
+   it runs has its process killed. The directory on the target is removed
+   in each case, and the audit has `service.run`.
+
+**Secrets by name.** `env_secrets = { HF_TOKEN = "hf-token" }` maps an env
+name to a secret name (a script service only; at most 32; the env name
+rules of a tool: `A-Z`, `0-9`, `_`, not `PATH`, `LD_*`, `DYLD_*`, or
+`TERRARIUM_*`). A project service opens its project's secret; a global
+secret only when the project holds a grant of it (PLAN §16b.6a), because
+a project_admin defines a project service. A global service opens global
+secrets. The values are only in the process environment on the target:
+never on a command line, in the audit, or in a log; the log tail is
+redacted with the run's own values first, then the daemon matcher. A
+missing secret or grant fails the request with the name, not a value.
+
+A run never starts twice (Q4 A, no retry): `script_dir` is set before the
+run starts. A `running` script request with a `script_dir` and no live run
+(the daemon restarted during the run) ends as `failed`; send it again. The
+target needs `sh`, `mktemp`, `cat`, `wc`, `tar`, and `rm`; a Windows host
+target fails the request.
 
 ## 18. Fleet
 
