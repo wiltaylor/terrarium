@@ -567,6 +567,12 @@ fn write_credential_within(
     let _one = swaps();
     let _locks = harness_locks(harness, &[&store], timeout).map_err(err)?;
     let path = credential_path(&store, harness);
+    if harness == HarnessId::Grok {
+        let keep: Vec<String> = serde_json::from_slice::<Value>(bytes)
+            .map(|v| json_strings(&v).into_iter().map(str::to_owned).collect())
+            .unwrap_or_default();
+        retain_grok(state_dir, sub, &keep);
+    }
     match harness {
         // Codex and Grok: in place, because a running agent has the file
         // bound.
@@ -696,19 +702,39 @@ pub fn grok_secret_values(state_dir: &Path) -> Vec<(String, Vec<String>)> {
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let path = credential_path(&store_dir(state_dir, &name), HarnessId::Grok);
-        let Some(v) = read_nofollow(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        else {
-            continue;
-        };
-        let values: Vec<String> = json_strings(&v).into_iter().map(str::to_owned).collect();
+        let values = grok_values_in(&path);
         if !values.is_empty() {
             out.push((name, values));
         }
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+/// The string values of the Grok `auth.json` at `path`; empty when there
+/// is no such file or it is not JSON. Secrets.
+fn grok_values_in(path: &Path) -> Vec<String> {
+    read_nofollow(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .map(|v| json_strings(&v).into_iter().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// Keep the Grok tokens of the account of `sub` in the redaction matcher
+/// for the life of the daemon before the daemon replaces or removes its
+/// Grok credential file (TER-1257, rev-1239b): an agent that started with
+/// them may still run. `keep` holds the values of the new file, which the
+/// matcher has anyway. Call it before the write or the removal.
+fn retain_grok(state_dir: &Path, sub: &str, keep: &[String]) {
+    let path = credential_path(&store_dir(state_dir, sub), HarnessId::Grok);
+    let gone: Vec<String> = grok_values_in(&path)
+        .into_iter()
+        .filter(|v| !keep.contains(v))
+        .collect();
+    if !gone.is_empty() {
+        crate::secrets::redact::retain_dropped(state_dir, sub, gone);
+    }
 }
 
 /// Move the login of a finished login session from its scratch home into
@@ -750,6 +776,7 @@ pub fn remove(state_dir: &Path, sub: &str) -> io::Result<bool> {
         return Ok(false);
     }
     let _one = swaps();
+    retain_grok(state_dir, sub, &[]);
     fs::remove_dir_all(&dir)?;
     Ok(true)
 }
@@ -763,6 +790,9 @@ pub fn remove_credential(state_dir: &Path, sub: &str, harness: HarnessId) -> io:
         return Ok(false);
     }
     let _one = swaps();
+    if harness == HarnessId::Grok {
+        retain_grok(state_dir, sub, &[]);
+    }
     fs::remove_file(&path)?;
     Ok(true)
 }

@@ -321,6 +321,21 @@ class CargoStep(unittest.TestCase):
         self.assertIn("timed out", test["tail"])
         self.assertIn("passed on the rerun", out)
 
+    def test_a_test_name_filter_keeps_one_libtest_separator(self):
+        # TER-1261: `-- webhooks::` plus a second `-- <JSON options>` made
+        # `json` a name filter, and tests outside `webhooks::` ran.
+        code, calls, _, _ = self.run_with([
+            (PLAIN_FAIL, cargo(2, ["a"]), 101),
+            (plain(passed=["a::flaky"]), cargo(2), 0)],
+            args=("-p", "terrariumd", "--test", "it", "--no-fail-fast", "--", "webhooks::"))
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[0], ("rust.json", [
+            "cargo", "test", "-p", "terrariumd", "--test", "it", "--no-fail-fast", "--",
+            *rust_tests.JSON, "webhooks::"]))
+        self.assertEqual(calls[1], ("rust-rerun.json", [
+            "cargo", "test", "-p", "terrariumd", "--test", "it", "--no-fail-fast", "--",
+            *rust_tests.JSON, "a::flaky", "--exact", "webhooks::"]))
+
     def test_a_forged_rerun_line_changes_nothing(self):
         # The test output prints the old marker line and a fake JSON result;
         # the record has only the test that this script saw fail and reran.

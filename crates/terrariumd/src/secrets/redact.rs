@@ -13,7 +13,11 @@
 //!   ([`crate::accounts::grok_secret_values`]), with the label
 //!   `subscription/<name>`. Grok refreshes that file itself: the daemon
 //!   builds the matcher again after a Grok login and after a verify of the
-//!   row, so a refreshed token joins it then (TER-1191).
+//!   row, so a refreshed token joins it then (TER-1191). Each Grok value
+//!   that a build reads stays in the matcher for the life of the daemon
+//!   ([`retain_dropped`], TER-1259), also when Grok refreshes it away. A
+//!   token that Grok writes and replaces between two builds is never read,
+//!   so the matcher never holds it.
 //!
 //! - each key that the daemon dropped from a row that became an xai plan
 //!   row ([`retain_dropped`], TER-1239), for the life of the daemon: an
@@ -255,9 +259,16 @@ pub fn check_value(
 
 /// The entries of the Grok Build logins in the plan accounts (TER-1191).
 /// Their scope is `global`, as for the subscription keys.
+///
+/// Each value read here also goes to [`retain_dropped`] (TER-1259): Grok
+/// refreshes its file itself, through the bind of a running agent, and
+/// the daemon does not see that write. An agent that used the old token
+/// may still print it, so no Grok value that a build once held leaves the
+/// matcher while the daemon runs.
 fn grok_entries(state_dir: &Path) -> Vec<Entry<Zeroizing<String>>> {
     let mut out = Vec::new();
     for (name, values) in crate::accounts::grok_secret_values(state_dir) {
+        retain_dropped(state_dir, &name, values.clone());
         for value in values {
             out.push(Entry {
                 label: format!("{SUBSCRIPTION_PREFIX}{name}"),
@@ -497,6 +508,11 @@ mod tests {
             r.redact_str("xai-at-N4eW8tOk3nV6yU2c"),
             "[secret:subscription/x-super]"
         );
+        // The daemon replaced the file: the old token stays (TER-1257).
+        assert_eq!(
+            r.redact_str("xai-at-Q7w9Zk2LmP4rT8vB"),
+            "[secret:subscription/x-super]"
+        );
         // A transcript block: the text, the tool input, and the result.
         use terrarium_core::transcript::{BlockKind, BlockRole, ToolCall, ToolResult};
         let mut b = Block::new(
@@ -538,12 +554,44 @@ mod tests {
             !text.contains("xai-at-") && !text.contains("xai-rt-"),
             "{text}"
         );
-        // The logout removes the account: the next build has no Grok entry.
+        // The logout removes the account. Its tokens stay in the matcher
+        // for the life of the daemon (TER-1257); no Grok file is read.
         assert!(crate::accounts::remove(dir.path(), "x-super").unwrap());
+        assert!(crate::accounts::grok_secret_values(dir.path()).is_empty());
         let r = build(&c, dir.path()).unwrap();
         assert_eq!(
-            r.redact_str("xai-at-N4eW8tOk3nV6yU2c"),
-            "xai-at-N4eW8tOk3nV6yU2c"
+            r.redact_str("xai-at-N4eW8tOk3nV6yU2c xai-rt-H3nJ6sD1fG5kL0pX"),
+            "[secret:subscription/x-super] [secret:subscription/x-super]"
+        );
+    }
+
+    /// TER-1259: Grok rewrites its file itself, with no daemon call. A
+    /// token that a build read stays in the matcher after that rewrite.
+    #[test]
+    fn a_grok_token_refreshed_by_grok_stays_in_the_matcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = crate::secrets::tests::db();
+        crate::accounts::write_credential(
+            dir.path(),
+            "x-self",
+            terrarium_core::HarnessId::Grok,
+            br#"{"session": {"access_token": "xai-at-Vb6Nm1Qw8Er3Ty5U"}}"#,
+        )
+        .unwrap();
+        build(&c, dir.path()).unwrap();
+        let file = crate::accounts::credential_path(
+            &crate::accounts::store_dir(dir.path(), "x-self"),
+            terrarium_core::HarnessId::Grok,
+        );
+        std::fs::write(
+            &file,
+            r#"{"session": {"access_token": "xai-at-Zx4Cv7Bn2Ml9Kj0H"}}"#,
+        )
+        .unwrap();
+        let r = build(&c, dir.path()).unwrap();
+        assert_eq!(
+            r.redact_str("xai-at-Vb6Nm1Qw8Er3Ty5U xai-at-Zx4Cv7Bn2Ml9Kj0H"),
+            "[secret:subscription/x-self] [secret:subscription/x-self]"
         );
     }
 

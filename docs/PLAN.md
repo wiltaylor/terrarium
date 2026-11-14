@@ -3271,6 +3271,17 @@ shows:
   progress line still shows; a secret split across two writes further
   apart than that is not found whole. A file copy (`cp`) is not changed.
 
+The matcher also holds each token of the Grok Build login of an xAI plan
+account (`store/grok/auth.json`, TER-1191). Grok refreshes that file
+itself, through the bind of a running agent, and the daemon does not see
+that write. The daemon reads the file at each build of the matcher (at the
+start, after a Grok login, after a verify of the row). Each Grok value that
+a build reads stays in the matcher until the daemon ends, also when Grok
+replaces it or the account goes (TER-1259): an agent that used it may still
+print it. A token that Grok writes and replaces again between two builds is
+never read, so the matcher never holds it. A restart forgets the old
+values.
+
 The live terminal stream of an agent's harness goes to the operator only
 and is not redacted.
 Redaction is a guard against accidents. It does not stop an agent with a
