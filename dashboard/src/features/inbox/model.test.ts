@@ -97,8 +97,8 @@ describe("inbox model", () => {
       item("s", { kind: "system" }),
       item("done", { open: false, kind: "mail" }),
     ]);
-    expect(c).toEqual({ open: 2, urgent: 1, critical: 0, question: 2, notice: 0, mail: 1, system: 1, watch: 0, thread: 0, thread_urgent: 0, thread_critical: 0 });
-    expect(badge(c)).toEqual({ n: 2, cls: "nav-count", title: "Waiting for you: 2 question. 1 urgent" });
+    expect(c).toEqual({ open: 3, urgent: 1, critical: 0, question: 2, notice: 1, mail: 1, system: 1, watch: 0, thread: 0, thread_urgent: 0, thread_critical: 0 });
+    expect(badge(c)).toEqual({ n: 3, cls: "nav-count", title: "Waiting for you: 2 question, 1 notice. 1 urgent" });
     expect(badge({ ...c, urgent: 0 })!.cls).toBe("nav-count info");
     expect(badge(EMPTY_COUNTS)).toBeNull();
   });
