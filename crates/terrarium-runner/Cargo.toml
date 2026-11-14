@@ -16,6 +16,7 @@ bin = [
     "dep:terrarium-adapter-codex",
     "dep:terrarium-adapter-copilot",
     "dep:terrarium-adapter-pi",
+    "dep:terrarium-adapter-grok",
     "dep:clap",
     "dep:anyhow",
     "dep:tracing-subscriber",
@@ -40,6 +41,12 @@ required-features = ["bin"]
 name = "runner"
 path = "tests/runner.rs"
 
+[[test]]
+name = "grok"
+path = "tests/grok.rs"
+# The grok adapter comes with the binary's adapters.
+required-features = ["bin"]
+
 [dependencies]
 terrarium-core.workspace = true
 terrarium-version.workspace = true
@@ -60,6 +67,7 @@ terrarium-adapter-claude = { workspace = true, optional = true }
 terrarium-adapter-codex = { workspace = true, optional = true }
 terrarium-adapter-copilot = { workspace = true, optional = true }
 terrarium-adapter-pi = { workspace = true, optional = true }
+terrarium-adapter-grok = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
@@ -70,6 +78,7 @@ semver = { workspace = true, optional = true }
 terrarium-runner = { path = ".", features = ["test-support"] }
 tempfile.workspace = true
 semver.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true
