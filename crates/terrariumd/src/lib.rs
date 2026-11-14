@@ -75,6 +75,7 @@ pub mod sandbox;
 pub mod scheduler;
 pub mod secrets;
 pub mod self_update;
+pub mod service_script;
 pub mod service_sweep;
 pub mod session_archive;
 pub mod settings;
@@ -559,6 +560,7 @@ async fn activate(
     warn_direct_push_deny(&state).await;
     tasks.push(spawn_prune_timer(state.clone()));
     tasks.push(spawn_artifact_sweep(state.clone()));
+    tasks.push(service_script::spawn(state.clone()));
     tasks.push(service_sweep::spawn(state.clone()));
     tasks.push(target_roots::spawn(state.clone()));
     tasks.push(leases::spawn_timer(&state));

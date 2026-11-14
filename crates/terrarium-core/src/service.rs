@@ -9,6 +9,7 @@
 //! ([`ServiceDef::check`]). The daemon adds the checks against its store:
 //! the project, the target and its kind, and the callers.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -43,6 +44,9 @@ pub const MIN_FREE_PERCENT: u64 = 20;
 pub const RETENTION: Duration = Duration::from_secs(7 * 24 * 3600);
 /// The largest request JSON.
 pub const REQUEST_JSON_MAX: usize = 256 * 1024;
+
+/// The most `env_secrets` of one script service.
+pub const ENV_SECRETS_MAX: usize = 32;
 
 /// What runs a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +108,11 @@ pub struct ServiceDef {
     /// `script`: the program and its fixed arguments (C3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
+    /// `script`: env var name to secret name (C3). The daemon sets each
+    /// value in the environment of the run on the target, never on a
+    /// command line or in a log.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_secrets: BTreeMap<String, String>,
     /// `agent`: the template of the agent (C4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
@@ -245,6 +254,15 @@ impl ServiceDef {
                 if self.template.is_some() || self.prompt.is_some() {
                     return Err("`template` and `prompt` are for an agent service".into());
                 }
+                if self.env_secrets.len() > ENV_SECRETS_MAX {
+                    return Err(format!("env_secrets has more than {ENV_SECRETS_MAX} entries"));
+                }
+                for (env, secret) in &self.env_secrets {
+                    crate::tool::check_env(env)?;
+                    if secret.trim().is_empty() {
+                        return Err(format!("env_secrets `{env}` names no secret"));
+                    }
+                }
             }
             Kind::Agent => {
                 if self.template.as_deref().is_none_or(|t| t.trim().is_empty()) {
@@ -255,6 +273,9 @@ impl ServiceDef {
                 }
                 if !self.command.is_empty() {
                     return Err("`command` is for a script service".into());
+                }
+                if !self.env_secrets.is_empty() {
+                    return Err("`env_secrets` is for a script service".into());
                 }
             }
         }
@@ -487,6 +508,30 @@ mod tests {
         let mut s = def("");
         s.template = Some("t".into());
         assert!(s.check().unwrap_err().contains("for an agent"));
+        a.command.clear();
+        a.env_secrets.insert("TOKEN".into(), "t".into());
+        assert!(a.check().unwrap_err().contains("for a script"));
+    }
+
+    #[test]
+    fn env_secrets_of_a_script() {
+        let d = def("env_secrets = { HF_TOKEN = \"hf-token\" }\n");
+        d.check().unwrap();
+        assert_eq!(d.env_secrets["HF_TOKEN"], "hf-token");
+        for (extra, says) in [
+            ("env_secrets = { token = \"t\" }\n", "bad env name"),
+            ("env_secrets = { PATH = \"t\" }\n", "may not set"),
+            ("env_secrets = { TERRARIUM_SERVICE_DIR = \"t\" }\n", "may not set"),
+            ("env_secrets = { TOKEN = \" \" }\n", "names no secret"),
+        ] {
+            let e = def(extra).check().unwrap_err();
+            assert!(e.contains(says), "{extra}: {e}");
+        }
+        let mut many = def("");
+        for i in 0..=ENV_SECRETS_MAX {
+            many.env_secrets.insert(format!("S{i}"), "x".into());
+        }
+        assert!(many.check().unwrap_err().contains("more than"));
     }
 
     #[test]

@@ -416,7 +416,7 @@ pub fn check_name(name: &str) -> Result<(), String> {
 
 /// A valid env var name for `env_secrets`, not one that changes how the
 /// command is found or loaded.
-fn check_env(name: &str) -> Result<(), String> {
+pub fn check_env(name: &str) -> Result<(), String> {
     let ok = name
         .chars()
         .next()

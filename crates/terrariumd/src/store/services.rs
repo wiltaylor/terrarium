@@ -676,10 +676,11 @@ pub fn payload_file(state_dir: &Path, id: &str) -> PathBuf {
     payload_dir(state_dir, id).join("request")
 }
 
-/// The payload bytes kept for `service`, or for every service.
+/// The payload bytes kept for `service`, or for every service: the
+/// request payloads and the response files (TER-1266).
 pub fn retained_bytes(conn: &Connection, service: Option<&str>) -> ApiResult<u64> {
     let n: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(payload_size), 0) FROM service_requests
+        "SELECT COALESCE(SUM(payload_size + response_size), 0) FROM service_requests
          WHERE payload_deleted_at IS NULL AND (?1 IS NULL OR service = ?1)",
         [service],
         |r| r.get(0),
