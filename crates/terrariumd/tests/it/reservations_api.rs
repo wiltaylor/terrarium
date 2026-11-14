@@ -55,7 +55,7 @@ async fn internal_commands_participate_in_reservation_cleanup() {
     server.abort();
 }
 
-async fn setup() -> (
+pub(crate) async fn setup() -> (
     TestDaemon,
     tokio::task::JoinHandle<()>,
     tokio::task::JoinHandle<()>,

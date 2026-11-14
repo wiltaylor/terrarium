@@ -18,6 +18,7 @@ mod remotes;
 mod rule_assign;
 mod rule_review;
 mod run_cancel;
+mod service_sched;
 mod services;
 mod ssh_restart;
 mod ter221_latency;

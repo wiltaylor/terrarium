@@ -8662,9 +8662,9 @@ TER-1264 (Services C1, design D1-D3 of Inbox thread
 request queue. A caller sends a request (JSON and an optional payload file)
 and gets a request ID at once; the daemon runs the request later on the
 service's target. This section has the definition, the queue, the request
-states, and the payload store. Scheduling and the run (C2-C4), the result
-mail and fetch (C5), and outside HTTP callers (C6) come later: in C1 a
-request stays `queued` until it is cancelled or times out.
+states, the payload store, and the scheduling (C2, TER-1265). The run
+(C3, C4), the result mail and fetch (C5), and outside HTTP callers (C6)
+come later.
 
 **Definition.** `services/<name>.toml` in the config repo (source `file`;
 `POST /api/reload` picks up a change), or `POST /api/services` (source
@@ -8706,7 +8706,8 @@ reload:
   target). A shared GPU needs `gpu_vram`. Any GPU claim on a docker target
   needs a managed ephemeral target with an `image`, the rule of a docker
   GPU reservation (`terrarium reserve`, `crates/terrariumd/src/reservations.rs`), so that the claim C2 reserves is not refused
-  later.
+  later. Any resource claim needs a host or docker target that names a
+  host, as a reservation does (TER-1265).
 - `callers`: `project:<name>` or `agent:<project>/<name>`. Empty: the
   agents of the service's own project; a global service with an empty list
   is called only by its admins.
@@ -8767,8 +8768,11 @@ refused by the space limits.
 `project`, `caller` (`operator` or `agent:<project>/<name>`),
 `caller_agent`, `state`, `request`, `payload_size`, `payload_sha256`,
 `response`, `exit_code`, `error`, `wait_until`, `created_at`,
-`started_at`, `ended_at`, `payload_deleted_at`, and `position` (the place
-in the queue, 1 is next) while it is `queued`.
+`started_at`, `ended_at`, `payload_deleted_at`, `reservation_id` (the
+reservation of the claim), `lease_id` (the target lease of the run),
+`run_until` (the end of the run), `released_at` (the reservation and the
+lease were given back), and `position` (the place in the queue, 1 is next)
+while it is `queued`.
 
 | State | Meaning | Next |
 |---|---|---|
@@ -8790,6 +8794,46 @@ in order (Q3 A).
   deleted, and `payload_deleted_at` is set; its bytes stop counting toward
   the caps (Q2 A). The payload of an open request stays. The request rows
   stay: nothing prunes them yet.
+
+**Scheduling** (C2, TER-1265, design D3; `crates/terrariumd/src/service_sched.rs`).
+A pass runs every 5 s, in this order:
+
+1. An open request of a service that no longer exists ends as `failed`.
+2. A `running` request at its `run_until` ends as `timed_out` (the run
+   passed the service's `max_run_time`).
+3. A `waiting` request whose reservation is active goes to `running`. One
+   whose reservation timed out in its queue ends as `timed_out`; one whose
+   reservation ended in another way ends as `failed`.
+4. Each ended request, whoever ended it (the run, a cancel, the wait
+   limit, the steps above), gives back its reservation (a queued one is
+   cancelled, an active one retracted) and its target lease (revoked),
+   and gets `released_at`. A release that fails (a busy or offline host)
+   is tried again at the next pass.
+5. The requests that may start, oldest first. Without a resource claim the
+   request goes to `running` at once, with `run_until` = now plus
+   `max_run_time`. With a claim it gets one reservation on the target's
+   host (`POST /api/hosts/{host}/reservations` with `queue`): held by the
+   target, for `max_run_time`, with the time left to `wait_until` as its
+   queue timeout, and the CPU, memory, and GPUs of the claim. The claim
+   gives a GPU count; the daemon picks the host's GPUs that no open
+   reservation claims first. The request is then `waiting`, and `running`
+   when the reservation is active, with `run_until` = the end of the
+   reservation. A refusal with `409` or `resource_busy` (the host is
+   offline, the target runs, the target holds a reservation already)
+   leaves the request `queued`, and it is tried again after 60 s; the
+   requests behind it wait. Any other refusal ends it as `failed` with the
+   reason in `error`.
+
+A target holds one reservation on a host at a time, so a service with a
+resource claim runs one request at a time per target, whatever its
+`concurrency`.
+
+A target lease needs an agent. The agent that runs a request (C4) gets a
+lease of the service's target until `run_until`
+(`service_sched::lease_run`), and step 4 revokes it. A script run (C3) has
+no agent and no lease; its reservation holds the resources. The
+scheduler calls the reservation and lease routes as the operator, so the
+reservation's `granted_by` and the lease's `granted_by` are `operator`.
 
 The audit actions: `service.create`, `service.update`, `service.delete`,
 `service.call`, `service.cancel`, `service.timed_out`.

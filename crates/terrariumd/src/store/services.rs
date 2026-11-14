@@ -114,6 +114,27 @@ pub fn validate(conn: &Connection, def: &ServiceDef) -> ApiResult<()> {
             def.name, def.target
         )));
     }
+    // C2 (TER-1265, rev-1264b minor 1): a claim is reserved through the
+    // target, and `crate::reservations` takes only a host or docker target
+    // on a host. Refuse the rest here, so that a defined service can
+    // always reserve.
+    if !def.resources.is_empty() {
+        if !matches!(target.def.kind, TargetKind::Host | TargetKind::Docker) {
+            let kind = format!("{:?}", target.def.kind).to_lowercase();
+            return Err(ApiError::invalid(format!(
+                "service `{}` claims resources, and target `{}` is a {kind} target: a resource \
+                 claim needs a host or docker target",
+                def.name, def.target
+            )));
+        }
+        if target.def.host.is_none() {
+            return Err(ApiError::invalid(format!(
+                "service `{}` claims resources, and target `{}` has no host: a resource claim \
+                 is reserved on the target's host",
+                def.name, def.target
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -376,6 +397,14 @@ pub struct RequestRow {
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub payload_deleted_at: Option<String>,
+    /// The reservation of the resource claim (C2, TER-1265).
+    pub reservation_id: Option<String>,
+    /// The target lease of the agent that runs the request (C2).
+    pub lease_id: Option<String>,
+    /// A running request past this time ends as `timed_out` (C2).
+    pub run_until: Option<String>,
+    /// The reservation and the lease of an ended request were given back.
+    pub released_at: Option<String>,
     /// The place in the service's queue (1 is next), for a queued request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<u64>,
@@ -383,7 +412,7 @@ pub struct RequestRow {
 
 const REQ_COLS: &str = "id, service, project, caller, caller_agent, state, request, payload_size, \
      payload_sha256, response, exit_code, error, wait_until, created_at, started_at, ended_at, \
-     payload_deleted_at";
+     payload_deleted_at, reservation_id, lease_id, run_until, released_at";
 
 fn json_col(s: Option<String>, i: usize) -> rusqlite::Result<Option<Value>> {
     s.map(|s| {
@@ -422,6 +451,10 @@ fn req_row(r: &Row<'_>) -> rusqlite::Result<RequestRow> {
         started_at: r.get(14)?,
         ended_at: r.get(15)?,
         payload_deleted_at: r.get(16)?,
+        reservation_id: r.get(17)?,
+        lease_id: r.get(18)?,
+        run_until: r.get(19)?,
+        released_at: r.get(20)?,
         position: None,
     })
 }
