@@ -1073,9 +1073,7 @@ async fn export_and_apply_carry_a_converted_board() {
 
 /// The column names of a board, in order.
 async fn column_names(td: &TestDaemon, project: &str) -> Vec<String> {
-    td.get(&format!("/api/projects/{project}/board"))
-        .await
-        .ok()["columns"]
+    td.get(&format!("/api/projects/{project}/board")).await.ok()["columns"]
         .as_array()
         .unwrap()
         .iter()

@@ -1522,7 +1522,8 @@ fn write_column(w: &mut Writer, c: &FleetColumn) {
     w.out
         .push_str(&format!("name = {}\n", toml::Value::String(c.name.clone())));
     if let Some(r) = &c.role {
-        w.out.push_str(&format!("role = {}\n", toml::Value::String(r.clone())));
+        w.out
+            .push_str(&format!("role = {}\n", toml::Value::String(r.clone())));
     }
     if let Some(n) = c.wip_limit {
         w.out.push_str(&format!("wip_limit = {n}\n"));

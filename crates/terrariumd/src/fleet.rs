@@ -551,7 +551,11 @@ fn export_columns(
     }
     let mut out = Vec::new();
     for (name, role, wip) in board::column_layout(conn, project)? {
-        let c = column_def(&column_options::get_options(conn, project, &name)?, role, wip);
+        let c = column_def(
+            &column_options::get_options(conn, project, &name)?,
+            role,
+            wip,
+        );
         if let Some(e) = c.toml_problem() {
             return Err(ApiError::invalid(format!(
                 "column `{name}`: {e}; a fleet file cannot hold this value"
@@ -611,7 +615,9 @@ fn add_columns(
             .iter()
             .rev()
             .find_map(|p| order.iter().position(|o| o.name == p.name));
-        let at_index = after.map_or(1, |k| k + 1).clamp(1, order.len().saturating_sub(1));
+        let at_index = after
+            .map_or(1, |k| k + 1)
+            .clamp(1, order.len().saturating_sub(1));
         order.insert(
             at_index,
             board::ColumnSpec {
