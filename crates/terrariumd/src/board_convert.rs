@@ -452,7 +452,7 @@ pub fn revert(t: &mut Tx<'_>, project: &str) -> ApiResult<Outcome> {
         removed += before.rules.len() - keep.len();
         let values: Vec<Value> = keep
             .iter()
-            .map(|r| serde_json::to_value(r))
+            .map(serde_json::to_value)
             .collect::<Result<_, _>>()
             .map_err(|e| ApiError::internal(e.to_string()))?;
         put_options(
