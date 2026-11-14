@@ -8655,6 +8655,145 @@ waits.
   timeout, or a `409` on the run ends it with exit code 77; Ctrl-C
   retracts the question and exits 130.
 
+### 17.12 Services
+
+TER-1264 (Services C1, design D1-D3 of Inbox thread
+01M7BKWKTBCZSXS1VYSM473GBT). A service is a named script or agent with a
+request queue. A caller sends a request (JSON and an optional payload file)
+and gets a request ID at once; the daemon runs the request later on the
+service's target. This section has the definition, the queue, the request
+states, and the payload store. Scheduling and the run (C2-C4), the result
+mail and fetch (C5), and outside HTTP callers (C6) come later: in C1 a
+request stays `queued` until it is cancelled or times out.
+
+**Definition.** `services/<name>.toml` in the config repo (source `file`;
+`POST /api/reload` picks up a change), or `POST /api/services` (source
+`api`):
+
+```toml
+description  = "Make a video from a prompt"
+kind         = "script"                     # or "agent"
+target       = "helios-gpu"
+command      = ["/opt/video/run"]           # script: the program and its fixed arguments
+# template   = "video-agent"                # agent: the template ...
+# prompt     = "Make the video the request describes."   # ... and the prompt
+max_run_time = "2h"                         # default 1h; 1m to 24h
+concurrency  = 1                            # default 1; 1 to 16
+wait_limit   = "24h"                        # default 24h; 1m to 7d
+max_payload  = "64MiB"                      # default 64MiB; at most 1GiB
+max_retained = "1GiB"                       # default 1GiB; at most 10GiB
+callers      = ["project:demo", "agent:meta/lead"]
+project      = "demo"                       # optional: a project service
+
+[resources]
+cpu_millis    = 4000
+memory        = "16GiB"
+gpus          = 1
+gpu_exclusive = true                        # or gpu_vram = "16GiB" for a shared GPU
+```
+
+The checks; a definition that fails one is `422 invalid` (an unknown field
+is `400`), and a file that fails one is left out with an error line of the
+reload:
+
+- `name`: 1-32 of `a-z`, `0-9`, `-`, starting with a letter.
+- `kind = "script"` needs `command` and takes no `template` or `prompt`;
+  `kind = "agent"` needs `template` and `prompt` and takes no `command`.
+- `target` must exist and must not be a release target. A project service
+  may only name a target of its own project.
+- `resources`: `gpu_exclusive` needs `gpus` of 1 or more and a docker
+  target (MEM-399: an exclusive GPU is refused on a host, ssh, or vmlab
+  target). A shared GPU needs `gpu_vram`. Any GPU claim on a docker target
+  needs a managed ephemeral target with an `image`, the rule of a docker
+  GPU reservation (`terrarium reserve`, `crates/terrariumd/src/reservations.rs`), so that the claim C2 reserves is not refused
+  later.
+- `callers`: `project:<name>` or `agent:<project>/<name>`. Empty: the
+  agents of the service's own project; a global service with an empty list
+  is called only by its admins.
+
+**Who.** A global service is defined, changed, and removed by a sysadmin
+or the operator; a project service also by a project_admin (the lead) of
+its project. `PATCH` and `DELETE` of a file service are `409 file_managed`.
+`DELETE` is `409` while the service has an open request. An agent sees the
+services of its project and those it may call; any other service is `404`.
+
+A reload keeps a file service whose file went (or no longer checks) while
+it has open requests: it keeps its last good definition, gets
+`removed_at`, and takes no new call (`409`). The reload reports it with an
+error line. The first reload after its requests end removes it; a reload
+that finds its file again, and the file checks, makes it active again.
+
+| Route | Who | What |
+|---|---|---|
+| `GET /api/services` | all | the services the actor may see |
+| `GET /api/services/{name}` | the same | the definition, `open_requests`, and `may_call` |
+| `POST /api/services` | see above | `201` the service |
+| `PATCH /api/services/{name}` | see above | a JSON merge patch; the name and the project do not change |
+| `DELETE /api/services/{name}` | see above | `204` |
+| `POST /api/services/{name}/requests` | a caller, or an admin of the service | queue a request |
+| `GET /api/services/{name}/requests` | an admin: all; others: their own | `?state=`, `?limit=` (default 100, at most 1000); newest first |
+| `GET /api/service-requests/{id}` | the caller or an admin of the service | one request |
+| `POST /api/service-requests/{id}/cancel` | the same | `409` when it has ended |
+| `GET /api/service-requests/{id}/payload` | the same | the payload, `application/octet-stream`, with `x-terrarium-sha256`; `404` when there is none or the retention deleted it |
+
+**A call.** The body is one of:
+
+- `application/json`: `{"request": <any JSON>, "payload_base64": "<the file
+  as standard base64>"}`. Both fields are optional. This is the CLI's form.
+- `multipart/form-data` with a `request` part (JSON text) and a `payload`
+  part (the file). Both are optional; another part is `400`.
+
+The request JSON is at most 256 KiB. The answer is `201`:
+
+```json
+{"id": "01M7...", "service": "video-gen", "state": "queued", "position": 1,
+ "wait_until": "2026-11-15T09:00:00.000Z", "status_url": "/api/service-requests/01M7..."}
+```
+
+The payload limits (O2 of the card); each refusal leaves no file:
+
+| Limit | Default | Error |
+|---|---|---|
+| one payload | `max_payload`, 64 MiB | `413 too_large`; a `Content-Length` over the limit is refused before the body is read |
+| kept by one service | `max_retained`, 1 GiB | `503 unavailable` |
+| kept by all services | 100 GiB, not per service | `503 unavailable` |
+| free space of the state filesystem after the write | at least 20%, not per service | `503 unavailable`; also when the free space cannot be read |
+
+A payload is the file `<state>/services/payloads/<id>/request`, and its
+size and sha256 are on the request. A call with no payload is never
+refused by the space limits.
+
+**A request.** The fields: `id` (a ULID: the arrival order), `service`,
+`project`, `caller` (`operator` or `agent:<project>/<name>`),
+`caller_agent`, `state`, `request`, `payload_size`, `payload_sha256`,
+`response`, `exit_code`, `error`, `wait_until`, `created_at`,
+`started_at`, `ended_at`, `payload_deleted_at`, and `position` (the place
+in the queue, 1 is next) while it is `queued`.
+
+| State | Meaning | Next |
+|---|---|---|
+| `queued` | accepted; waits behind the concurrency limit | `waiting`, `cancelled`, `timed_out`, `failed` |
+| `waiting` | waits for its resources (C2) | `running`, `queued`, `cancelled`, `timed_out`, `failed` |
+| `running` | runs (C3, C4) | `done`, `failed`, `cancelled`, `timed_out` |
+| `done`, `failed`, `cancelled`, `timed_out` | ended | none |
+
+The requests that may start are the oldest `queued` ones, as many as
+`concurrency` leaves after the `waiting` and `running` ones; the rest wait
+in order (Q3 A).
+
+**The sweep** runs each minute:
+
+- A `queued` or `waiting` request still there at `wait_until` (the call
+  time plus `wait_limit`) ends as `timed_out` (Q5 A). Its caller gets a
+  mail from `system`, and the audit has `service.timed_out`.
+- The payload of an ended request whose call is more than 7 days old is
+  deleted, and `payload_deleted_at` is set; its bytes stop counting toward
+  the caps (Q2 A). The payload of an open request stays. The request rows
+  stay: nothing prunes them yet.
+
+The audit actions: `service.create`, `service.update`, `service.delete`,
+`service.call`, `service.cancel`, `service.timed_out`.
+
 ## 18. Fleet
 
 A fleet file declares projects, their repos, agents, and targets, global

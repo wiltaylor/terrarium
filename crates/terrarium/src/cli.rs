@@ -117,6 +117,15 @@ pub enum Command {
         #[command(subcommand)]
         command: ToolCmd,
     },
+    /// Services (TER-1264): a named script or agent with a request queue.
+    /// `call` queues a request (JSON and a payload file) and returns its ID
+    /// at once. Defined in services/<name>.toml or with `service new`; a
+    /// sysadmin or the project lead makes one
+    #[command(visible_alias = "services")]
+    Service {
+        #[command(subcommand)]
+        command: ServiceCmd,
+    },
     /// System prompts: the library in the config repo (PLAN §8.1). An
     /// agent or a template selects one with `--persona <name>`
     #[command(visible_alias = "system-prompts")]
@@ -4126,6 +4135,57 @@ pub enum SystemPromptCmd {
         #[arg(long)]
         force: bool,
     },
+}
+
+/// `terrarium service ...` (TER-1264).
+#[derive(Debug, Subcommand)]
+pub enum ServiceCmd {
+    /// List the services that you may see: all for the operator and a
+    /// sysadmin, else your project's and those you may call
+    Ls,
+    /// Show a service: its definition, its open requests, and whether you
+    /// may call it
+    Show { name: String },
+    /// Define a service from a TOML file (the format of
+    /// services/<name>.toml). A global service needs sysadmin; a project
+    /// service (`project = "..."` in the file) needs its project lead
+    New {
+        /// The service name; default: the file name without `.toml`
+        #[arg(long)]
+        name: Option<String>,
+        /// The TOML file
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+    /// Remove a service defined with `service new`. Refused while it has
+    /// open requests
+    Rm { name: String },
+    /// Queue a request. Prints the request ID at once; the service runs it
+    /// later
+    Call {
+        name: String,
+        /// The request JSON, or `@<file>` to read it from a file. Not
+        /// `--json`: that is the global output flag
+        #[arg(long)]
+        request: Option<String>,
+        /// A payload file for the service
+        #[arg(long)]
+        payload: Option<std::path::PathBuf>,
+    },
+    /// List the requests of a service: all for its admins, else your own
+    Requests {
+        name: String,
+        /// Only this state: queued, waiting, running, done, failed,
+        /// cancelled, or timed_out
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Show one request: its state, its place in the queue, and its result
+    Status { id: String },
+    /// Cancel a request that has not ended
+    Cancel { id: String },
 }
 
 /// `terrarium skill ...` (docs/api.md §26).

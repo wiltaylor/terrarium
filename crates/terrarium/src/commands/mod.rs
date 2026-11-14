@@ -26,6 +26,7 @@ pub mod rules;
 pub mod schedules;
 pub mod screen;
 pub mod secrets;
+pub mod services;
 pub mod skills;
 pub mod spawns;
 pub mod ssh_keys;
@@ -103,6 +104,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Template { command } => templates::template(ctx, command).await,
         Command::Skill { command } => skills::skill(ctx, command).await,
         Command::Tool { command } => tools::tool(ctx, command).await,
+        Command::Service { command } => services::service(ctx, command).await,
         Command::SystemPrompt { command } => system_prompts::system_prompt(ctx, command).await,
         Command::Mail { command } => mail::mail(ctx, command).await,
         Command::Inbox { command } => mail::inbox(ctx, command).await,

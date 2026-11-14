@@ -39,6 +39,7 @@ pub mod reservations;
 pub mod rules;
 pub mod run_cleanup;
 pub mod schedules;
+pub mod services;
 pub mod session_refs;
 pub mod spawns;
 pub mod subscriptions;

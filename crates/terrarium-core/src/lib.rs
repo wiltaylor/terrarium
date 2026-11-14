@@ -40,6 +40,7 @@ pub mod rules_tools;
 pub mod schedule;
 pub mod secret_scan;
 pub mod selfhosted;
+pub mod service;
 pub mod skills;
 pub mod status;
 pub mod tail;

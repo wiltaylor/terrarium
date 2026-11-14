@@ -75,6 +75,7 @@ pub mod sandbox;
 pub mod scheduler;
 pub mod secrets;
 pub mod self_update;
+pub mod service_sweep;
 pub mod session_archive;
 pub mod settings;
 pub mod skills;
@@ -558,6 +559,7 @@ async fn activate(
     warn_direct_push_deny(&state).await;
     tasks.push(spawn_prune_timer(state.clone()));
     tasks.push(spawn_artifact_sweep(state.clone()));
+    tasks.push(service_sweep::spawn(state.clone()));
     tasks.push(target_roots::spawn(state.clone()));
     tasks.push(leases::spawn_timer(&state));
     tasks.push(reservations::spawn_timer(&state));
@@ -961,6 +963,15 @@ pub async fn apply_definitions(
         .await?;
     report.errors.extend(tool_errors);
     agent_tools::refresh(state).await;
+    // The service files (TER-1264), after the targets that they name.
+    let service_defs = defs.services.clone();
+    let (_, service_errors) = state
+        .db
+        .write("system", move |t| {
+            store::services::sync_files(t, &service_defs)
+        })
+        .await?;
+    report.errors.extend(service_errors);
     // Schedules of the project files, after the agents and targets that
     // they name (docs/api.md §19), and the templates (§21).
     // The `[[templates]]` of a project file are an import into the
