@@ -3,7 +3,9 @@ set working-directory := '../..'
 import '../shared.just'
 
 # At most 8 libtest threads per test binary (operator decision, META-225): 32 threads per suite fought over
-# shared store locks on build2's 24-core quota. An explicit RUST_TEST_THREADS in the caller's environment wins.
+# shared store locks on build2's 24-core quota. An explicit RUST_TEST_THREADS in the caller's environment wins,
+# except in the release gate (scripts/release.py passes only its PASS_ENV, so 8 applies there). The uid 1001
+# pass passes it on (scripts/unprivileged_tests.py PASS_ENV).
 export RUST_TEST_THREADS := env("RUST_TEST_THREADS", "8")
 
 [default, private]
