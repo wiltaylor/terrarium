@@ -5198,6 +5198,40 @@ async fn column_rules_merge_a_batch_cut_a_version_and_build_it() {
     only_column_runs(&td).await;
 }
 
+/// TER-1280: a repair tick between a red end and the requeue keeps the
+/// `merge_queue` members of the open group, so the lead can queue it again.
+#[tokio::test]
+async fn merge_group_repair_keeps_red_batch_members_until_the_requeue() {
+    use terrariumd::store::groups;
+    let td = columns_merge_lab().await;
+    let (a, b) = two_cards(&td).await;
+    move_to(&td, &a, "merge_queue").await;
+    move_to(&td, &b, "merge_queue").await;
+    settle(&td).await;
+    let job = the_open_job(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    end_job(&td, &job, false).await;
+    let (members, group) = ([a.clone(), b.clone()], gid.clone());
+    let kept = state(&td)
+        .db
+        .write("test", move |t| {
+            // The engine's tick: the red job has ended, no job is open.
+            groups::expire(t)?;
+            let g = groups::get(t, &group)?;
+            Ok(g.closed_at.is_none() && members.iter().all(|m| g.members.contains(m)))
+        })
+        .await
+        .unwrap();
+    assert!(kept, "{}", card(&td, &gid).await);
+    for id in [&a, &b] {
+        assert_eq!(column_of(&td, id).await, "merge_queue");
+        assert_eq!(card(&td, id).await["group"]["id"], gid);
+    }
+}
+
 /// The pack's red path on the batch merge queue: a red group gets a fix
 /// card (at most 3); the lead queues the group again with the newest fix
 /// card first; the 4th red run splits the batch. A red half of one card

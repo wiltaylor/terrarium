@@ -21,6 +21,13 @@ const MERGE_JOB_OPEN_SQL: &str = "SELECT EXISTS(SELECT 1 FROM jobs
       AND (card = ?1 OR EXISTS (SELECT 1 FROM json_each(jobs.batch)
                                 WHERE json_extract(value, '$.card') = ?1)))";
 
+/// The card's newest merge job, alone or in a batch, ended `failed` (red).
+const MERGE_JOB_RED_SQL: &str = "SELECT coalesce((SELECT state = 'failed' FROM jobs
+    WHERE kind = 'merge'
+      AND (card = ?1 OR EXISTS (SELECT 1 FROM json_each(jobs.batch)
+                                WHERE json_extract(value, '$.card') = ?1))
+    ORDER BY created_at DESC, id DESC LIMIT 1), 0)";
+
 fn event(t: &mut Tx<'_>, id: &str, change: &str) -> ApiResult<()> {
     let project = board::project_of(t, id)?;
     t.emit(
@@ -662,6 +669,10 @@ fn pending_run(conn: &Connection, id: &str) -> ApiResult<Option<String>> {
 /// in `backlog`, and the job's later step writes found the group closed.
 /// The repair removes such a member once the job has ended.
 ///
+/// A `merge_queue` member whose newest merge job ended red also stays
+/// (TER-1280): the lead queues the open group again, so the repair must not
+/// drop it between the red end and the requeue. The group's close removes it.
+///
 /// `waiting` holds when each waiting group was first skipped. A group that
 /// waited [`RECONCILE_WAIT`] is repaired anyway. Returns the groups that
 /// wait now, with that time.
@@ -709,7 +720,8 @@ pub fn reconcile_merge_groups(
             if card.archived || (repair && card.column == "done")
                 || (!repair && !merging
                     && ((job_ended && role.as_deref() == Some("merge_queue")
-                            && super::jobs::open_of_card(t, member)?.is_none())
+                            && super::jobs::open_of_card(t, member)?.is_none()
+                            && !t.query_row(MERGE_JOB_RED_SQL, [member], |r| r.get::<_, bool>(0))?)
                         || matches!(role.as_deref(), Some("working" | "blocked"))
                         || (role.is_none() && matches!(card.column.as_str(), "ready" | "backlog"))))
             {
