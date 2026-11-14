@@ -395,8 +395,12 @@ fn return_stale(t: &mut Tx<'_>, column_id: i64) -> ApiResult<()> {
         let mark = (!had_job).then_some(at.as_str());
         t.execute(
             "INSERT OR REPLACE INTO card_queue
-                    (card, column_id, seq, queued_at, held_eta, held_eta_by, stale_at)
-             SELECT id, ?2, ?3, ?4, eta_at, eta_set_by, ?5 FROM cards WHERE id = ?1",
+                    (card, column_id, seq, queued_at, held_eta, held_eta_by, stale_at,
+                     from_column, from_role)
+             SELECT id, ?2, ?3, ?4, eta_at, eta_set_by, ?5,
+                    (SELECT from_column FROM card_queue WHERE card = ?1),
+                    (SELECT from_role FROM card_queue WHERE card = ?1)
+               FROM cards WHERE id = ?1",
             params![card, column_id, first - n + i as i64, at, mark],
         )?;
         t.execute(
@@ -502,8 +506,15 @@ pub(super) fn must_queue(conn: &Connection, project: &str, column_id: i64) -> Ap
 }
 
 /// Put card `card` in the queue of column `column_id`, last. A new card
-/// changes the batch: the stale marks of the column go (TER-1284).
-pub(super) fn enqueue(t: &mut Tx<'_>, card: &str, column_id: i64) -> ApiResult<()> {
+/// changes the batch: the stale marks of the column go (TER-1284). `from`
+/// is the column of the move and its role: the `admitted` event carries
+/// them (TER-1304).
+pub(super) fn enqueue(
+    t: &mut Tx<'_>,
+    card: &str,
+    column_id: i64,
+    from: (&str, Option<&str>),
+) -> ApiResult<()> {
     unmark_column(t, column_id)?;
     let seq: i64 = t.query_row(
         "SELECT coalesce(max(seq), 0) + 1 FROM card_queue WHERE column_id = ?1",
@@ -511,9 +522,10 @@ pub(super) fn enqueue(t: &mut Tx<'_>, card: &str, column_id: i64) -> ApiResult<(
         |r| r.get(0),
     )?;
     t.execute(
-        "INSERT OR REPLACE INTO card_queue (card, column_id, seq, queued_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![card, column_id, seq, now()],
+        "INSERT OR REPLACE INTO card_queue
+                (card, column_id, seq, queued_at, from_column, from_role)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![card, column_id, seq, now(), from.0, from.1],
     )?;
     Ok(())
 }
@@ -601,13 +613,25 @@ pub(super) fn hold_eta(t: &mut Tx<'_>, card: &str, eta: Option<&str>, by: &str) 
     Ok(n > 0)
 }
 
+/// The values of a `card_queue` row that [`admit`] reads.
+type Admitted = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 /// Admit card `card` to its column: `keep` holds its row for a `job` slot
-/// or a `batch`.
+/// or a `batch`. The `admitted` event carries the `from` and `from_role`
+/// of the queuing move, and `to` and `to_role`, as `moved` does
+/// (TER-1304): a `lands` rule with a `data.from*` condition matches here.
 fn admit(t: &mut Tx<'_>, card: &str, keep: bool) -> ApiResult<()> {
-    let (queued_at, held, held_by): (String, Option<String>, Option<String>) = t.query_row(
-        "SELECT queued_at, held_eta, held_eta_by FROM card_queue WHERE card = ?1",
+    let (queued_at, held, held_by, from, from_role): Admitted = t.query_row(
+        "SELECT queued_at, held_eta, held_eta_by, from_column, from_role
+           FROM card_queue WHERE card = ?1",
         [card],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
     let at = now();
     if keep {
@@ -625,6 +649,8 @@ fn admit(t: &mut Tx<'_>, card: &str, keep: bool) -> ApiResult<()> {
         &row,
         "admitted",
         json!({"queued_at": queued_at, "assignee": row.assignee,
+               "from": from, "from_role": from_role,
+               "to": row.column, "to_role": row.column_role,
                "to_count": admitted_count(t, row.column_id)?}),
     )?;
     if let Some(eta) = held {
