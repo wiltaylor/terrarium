@@ -397,7 +397,10 @@ mod tests {
         let v = fetch_result(&ctx, "01R", &out, false).await.unwrap();
         assert_eq!(v["files"], 1);
         assert_eq!(v["bytes"], 5);
-        assert_eq!(std::fs::read(out.join("files/sub/a.txt")).unwrap(), b"hello");
+        assert_eq!(
+            std::fs::read(out.join("files/sub/a.txt")).unwrap(),
+            b"hello"
+        );
         assert!(!out.join("files/sub/a.txt.partial").exists());
         let rec: Value =
             serde_json::from_slice(&std::fs::read(out.join("result.json")).unwrap()).unwrap();
@@ -406,8 +409,16 @@ mod tests {
         assert_eq!(reqs[0].path, "/api/service-requests/01R/result");
         assert_eq!(reqs[1].path, "/api/service-requests/01R/result/sub/a.txt");
         let q = |i: usize| reqs[i].query.clone();
-        assert!(q(1).contains(&("offset".to_owned(), "0".to_owned())), "{:?}", q(1));
-        assert!(q(2).contains(&("offset".to_owned(), "3".to_owned())), "{:?}", q(2));
+        assert!(
+            q(1).contains(&("offset".to_owned(), "0".to_owned())),
+            "{:?}",
+            q(1)
+        );
+        assert!(
+            q(2).contains(&("offset".to_owned(), "3".to_owned())),
+            "{:?}",
+            q(2)
+        );
         // Again: refused without --force, done with it.
         mock.reply(200, listing(HELLO_SHA));
         let e = fetch_result(&ctx, "01R", &out, false).await.unwrap_err();

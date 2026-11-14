@@ -254,9 +254,7 @@ pub fn mail_text(
         files.0, files.1
     ));
     if let Some(resp) = &r.response {
-        let text = redact(
-            &serde_json::to_string_pretty(resp).unwrap_or_else(|_| resp.to_string()),
-        );
+        let text = redact(&serde_json::to_string_pretty(resp).unwrap_or_else(|_| resp.to_string()));
         let (shown, was_cut) = cut(&text, MAIL_RESPONSE_BYTES, false);
         b.push_str("\nThe response JSON");
         if was_cut {

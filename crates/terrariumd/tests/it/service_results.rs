@@ -341,7 +341,11 @@ async fn a_secret_is_redacted_before_each_cut() {
     // the last 4 KiB (the token starts 10 bytes before that cut), the
     // stored error its first 4 KiB, the mail the first 16 KiB of the
     // response JSON (10 bytes of `{\n  "a": "` before the value).
-    let log = format!("{}{TOKEN}{}", "a".repeat(50), "b".repeat(max - TOKEN.len() + 10));
+    let log = format!(
+        "{}{TOKEN}{}",
+        "a".repeat(50),
+        "b".repeat(max - TOKEN.len() + 10)
+    );
     let error = format!("{}{TOKEN}", "c".repeat(max - 6));
     let pad = terrariumd::service_result::MAIL_RESPONSE_BYTES - 16;
     let value = format!("{}{TOKEN}", "d".repeat(pad));
@@ -357,14 +361,21 @@ async fn a_secret_is_redacted_before_each_cut() {
         },
     )
     .await;
-    terrariumd::service_result::send_due(&shared(&td)).await.unwrap();
+    terrariumd::service_result::send_due(&shared(&td))
+        .await
+        .unwrap();
     let r = td
         .get_as("p/w1", &format!("/api/service-requests/{id}/result"))
         .await;
     let v = r.ok().clone();
     let tail = v["log_tail"].as_str().unwrap();
     let err = v["error"].as_str().unwrap();
-    assert!(tail.len() <= max && err.len() <= max, "{} {}", tail.len(), err.len());
+    assert!(
+        tail.len() <= max && err.len() <= max,
+        "{} {}",
+        tail.len(),
+        err.len()
+    );
     let got = mails(&td, "p/w1", &id).await;
     assert_eq!(got.len(), 1, "{got:?}");
     let body = body_of(&td, "p/w1", &got[0]).await;
