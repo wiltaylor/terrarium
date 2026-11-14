@@ -5513,9 +5513,10 @@ async fn ter275_two_ordinary_recipes_overlap_in_the_same_cached_repo() {
         && lab._dirs.path().join("recipe-2").exists())
     {
         let jobs = lab.td.get("/api/projects/p/jobs").await.ok().clone();
-        let ended = jobs["jobs"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|j| j["state"] != "queued" && j["state"] != "running"));
+        let ended = jobs["jobs"].as_array().is_some_and(|a| {
+            a.iter()
+                .any(|j| j["state"] != "queued" && j["state"] != "running")
+        });
         assert!(
             !ended && start.elapsed() < DEADLINE,
             "recipes serialized behind the cache lock, or a job ended: {jobs:#}"
@@ -7975,7 +7976,10 @@ async fn a_lost_run_reruns_only_after_its_slot_lock_is_free() {
     assert_eq!(j["state"], "passed", "{j:#}");
     assert_eq!(j["attempt"], 1, "{j:#}");
     let runs = std::fs::read_to_string(marks.path().join("runs")).unwrap();
-    assert!(!runs.contains("early"), "the rerun did not wait for the held slot: {runs}");
+    assert!(
+        !runs.contains("early"),
+        "the rerun did not wait for the held slot: {runs}"
+    );
     assert_eq!(runs.lines().count(), 2, "{runs}");
 }
 

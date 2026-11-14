@@ -350,7 +350,9 @@ async fn cleanup_page(
         .try_lock()
         .map_err(|_| ApiError::conflict("job log cleanup is already running"))?;
     if background && state.job_queue.log_maintenance_held() {
-        return Ok(serde_json::json!({"removed":0,"skipped":0,"scanned":0,"next":0,"conflicts":[]}));
+        return Ok(
+            serde_json::json!({"removed":0,"skipped":0,"scanned":0,"next":0,"conflicts":[]}),
+        );
     }
     let p = project.clone();
     let (logs, def, mut total, next) = state

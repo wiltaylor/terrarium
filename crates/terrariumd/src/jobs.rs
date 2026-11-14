@@ -673,9 +673,7 @@ async fn end_lost(state: &Shared, l: Lost) {
     // slot made its error end red after the cap (TER-1286).
     let rerun = job.kind != JobKind::Release;
     let red = match (&def, dir.as_deref()) {
-        (Some(def), Some(dir))
-            if running && rerun && red.is_none() && wraps && !other_host =>
-        {
+        (Some(def), Some(dir)) if running && rerun && red.is_none() && wraps && !other_host => {
             match wait_slot_free(state, def, &job, dir).await {
                 Some(held) => {
                     let merge = job.kind == JobKind::Merge;
