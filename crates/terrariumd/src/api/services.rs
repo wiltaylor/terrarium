@@ -351,6 +351,7 @@ async fn call(
             "calling service `{name}` needs a place in its callers list, or project_admin of its project, sysadmin, or the operator"
         )));
     }
+    refuse_removed(&row)?;
     // The body limit of this service, before the bytes are read: the
     // payload as base64 (4/3) and room for the request JSON.
     let max = row.def.max_payload_bytes();
@@ -374,7 +375,7 @@ async fn call(
     let free = store::free_space(&state.state_dir);
     if free.is_none() && size > 0 {
         tracing::warn!(
-            "cannot read the free space of the state directory; the 20% floor is not checked"
+            "cannot read the free space of the state directory; payloads are refused until it can be read"
         );
     }
     // The caps before the file is written; the insert checks them again.
@@ -384,9 +385,11 @@ async fn call(
         .read(move |c| store::check_payload_room(c, &r2, size, free))
         .await?;
     let id = ulid::Ulid::new().to_string();
-    let sha = match &parsed.payload {
+    let Call { request, payload } = parsed;
+    // The bytes move into the write task: no second copy in memory.
+    let sha = match payload {
         Some(data) => {
-            let (dir, id2, data) = (state.state_dir.clone(), id.clone(), data.clone());
+            let (dir, id2) = (state.state_dir.clone(), id.clone());
             let sha = tokio::task::spawn_blocking(move || {
                 write_payload(&dir, &id2, &data)?;
                 Ok::<_, std::io::Error>(hex(&sha2::Sha256::digest(&data)))
@@ -398,11 +401,12 @@ async fn call(
         }
         None => None,
     };
-    let (id2, request) = (id.clone(), parsed.request);
+    let id2 = id.clone();
     let res = state
         .db
         .write(actor.label(), move |t| {
             let row = store::get(t, &row.def.name)?;
+            refuse_removed(&row)?;
             store::check_payload_room(t, &row, size, free)?;
             let r = store::insert_request(
                 t,
@@ -444,6 +448,18 @@ async fn call(
             "status_url": format!("/api/service-requests/{}", r.id),
         })),
     ))
+}
+
+/// A file service kept as removed takes no new call
+/// (`store::services::sync_files`).
+fn refuse_removed(row: &ServiceRow) -> ApiResult<()> {
+    if let Some(at) = &row.removed_at {
+        return Err(ApiError::conflict(format!(
+            "service `{}` was removed from services/{}.toml at {at}; it stays only until its open requests end and takes no new call",
+            row.def.name, row.def.name
+        )));
+    }
+    Ok(())
 }
 
 fn too_large(row: &ServiceRow, len: u64) -> ApiError {

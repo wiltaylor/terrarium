@@ -5,7 +5,60 @@
 use crate::common;
 
 use common::TestDaemon;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
+use hyper::{Method, Request};
+use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
+use tokio::net::UnixStream;
+
+/// A POST with a raw body and a content type, as agent `agent`:
+/// `(status, the body as JSON)`.
+async fn raw(td: &TestDaemon, path: &str, ct: &str, body: Vec<u8>, agent: &str) -> (u16, Value) {
+    let stream = UnixStream::connect(&td.socket).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("host", "localhost")
+        .header("content-type", ct)
+        .header("x-terrarium-agent", agent)
+        .body(Full::new(Bytes::from(body)))
+        .unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+    let status = resp.status().as_u16();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+/// Plenty of free space, whatever the disk of this machine has (the 20%
+/// floor has its unit test in `store::services`).
+fn plenty_of_space() {
+    terrariumd::store::services::override_free_space(Some((900 << 30, 1000 << 30)));
+}
+
+/// Move request `id` along the state edges, as C2 will.
+async fn move_request(td: &TestDaemon, id: &str, steps: &[(&str, &str)]) {
+    use terrarium_core::service::State;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    for (from, to) in steps {
+        let (id, from, to) = (
+            id.to_owned(),
+            State::parse(from).unwrap(),
+            State::parse(to).unwrap(),
+        );
+        state
+            .db
+            .write("system", move |t| {
+                terrariumd::store::services::transition(t, &id, from, to, Default::default())
+            })
+            .await
+            .unwrap();
+    }
+}
 
 /// Project `p` with a lead, two members, and targets; project `q` with a
 /// member; a sysadmin in `ops`; a global target `box`.
@@ -24,7 +77,8 @@ async fn setup() -> TestDaemon {
     for t in [
         json!({"name": "box", "kind": "ssh", "address": "u@h"}),
         json!({"name": "p-box", "kind": "ssh", "project": "p", "address": "u@h"}),
-        json!({"name": "p-gpu", "kind": "docker", "project": "p", "host": "helios", "image": "alpine"}),
+        json!({"name": "p-gpu", "kind": "docker", "project": "p", "host": "helios", "image": "alpine", "ephemeral": true}),
+        json!({"name": "p-dock", "kind": "docker", "project": "p", "host": "helios", "image": "alpine"}),
         json!({"name": "q-box", "kind": "ssh", "project": "q", "address": "u@h"}),
     ] {
         let r = td.post("/api/targets", t.clone()).await;
@@ -73,6 +127,15 @@ async fn a_definition_follows_the_rules() {
             ),
             422,
             "not a docker target",
+        ),
+        // The docker GPU rule of `reservations.rs`: ephemeral with an image.
+        (
+            with(
+                script("g3", Some("p"), "p-dock"),
+                json!({"resources": {"gpus": 1, "gpu_exclusive": true}}),
+            ),
+            422,
+            "ephemeral",
         ),
         (
             script("t2", Some("p"), "q-box"),
@@ -235,9 +298,7 @@ async fn who_calls_and_who_sees_a_request() {
 /// per service, and the download.
 #[tokio::test]
 async fn payloads_are_stored_and_limited() {
-    // Plenty of free space, whatever the disk of this machine has (the
-    // 20% floor has its unit test in `store::services`).
-    terrariumd::store::services::override_free_space(Some((900 << 30, 1000 << 30)));
+    plenty_of_space();
     let td = setup().await;
     td.post(
         "/api/services",
@@ -362,9 +423,192 @@ async fn a_request_past_its_wait_limit_times_out_with_a_mail() {
             .any(|m| m["subject"].as_str().unwrap_or("").contains(&id)),
         "{mail:?}"
     );
-    // Past the retention, an ended request's payload goes.
-    let much_later = chrono::Utc::now() + chrono::Duration::days(8);
-    terrariumd::service_sweep::sweep(&state, much_later)
+}
+
+/// Q2 A: the payload of an ended request is deleted 7 days after the
+/// call; one at 6 days stays, and so does the payload of an open request.
+/// The deleted bytes no longer count toward `max_retained`.
+#[tokio::test]
+async fn payloads_go_after_the_seven_day_retention() {
+    plenty_of_space();
+    let td = setup().await;
+    td.post(
+        "/api/services",
+        with(
+            script("keep", Some("p"), "p-box"),
+            json!({"max_payload": "8", "max_retained": "10"}),
+        ),
+    )
+    .await
+    .ok();
+    let call = |b64: &str| json!({"request": {}, "payload_base64": b64});
+    // Two payloads of 5 bytes ("BYTES"): the service is full.
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let r = td
+            .post_as("p/w1", "/api/services/keep/requests", call("QllURVM="))
+            .await;
+        ids.push(r.ok()["id"].as_str().unwrap().to_owned());
+    }
+    let (ended, open) = (ids[0].clone(), ids[1].clone());
+    let r = td
+        .post_as("p/w1", "/api/services/keep/requests", call("QllURVM="))
+        .await;
+    assert_eq!(r.status, 503, "{}", r.body);
+    // One ends; the other runs (C2 will move it).
+    td.post_as("p/w1", &format!("/api/service-requests/{ended}/cancel"), json!({}))
+        .await
+        .ok();
+    move_request(&td, &open, &[("queued", "waiting"), ("waiting", "running")]).await;
+    let dir = |id: &str| td.state.join("services/payloads").join(id);
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let now = chrono::Utc::now();
+    // At 6 days both payloads stay.
+    let (_, deleted) = terrariumd::service_sweep::sweep(&state, now + chrono::Duration::days(6))
         .await
         .unwrap();
+    assert_eq!(deleted, 0);
+    assert!(dir(&ended).join("request").exists());
+    let row = td.get_as("p/w1", &format!("/api/service-requests/{ended}")).await;
+    assert!(row.ok()["payload_deleted_at"].is_null(), "{}", row.body);
+    // At 8 days the ended one goes; the running one stays.
+    let (_, deleted) = terrariumd::service_sweep::sweep(&state, now + chrono::Duration::days(8))
+        .await
+        .unwrap();
+    assert_eq!(deleted, 1);
+    assert!(!dir(&ended).exists());
+    assert!(dir(&open).join("request").exists());
+    let row = td.get_as("p/w1", &format!("/api/service-requests/{ended}")).await;
+    assert!(row.ok()["payload_deleted_at"].is_string(), "{}", row.body);
+    let r = td
+        .get_as("p/w1", &format!("/api/service-requests/{ended}/payload"))
+        .await;
+    assert_eq!(r.status, 404, "{}", r.body);
+    assert!(r.body.to_string().contains("retention"), "{}", r.body);
+    let row = td.get_as("p/w1", &format!("/api/service-requests/{open}")).await;
+    assert!(row.ok()["payload_deleted_at"].is_null(), "{}", row.body);
+    // The 5 freed bytes fit again.
+    let r = td
+        .post_as("p/w1", "/api/services/keep/requests", call("QllURVM="))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+}
+
+/// A call over HTTP as multipart: the `request` part and the `payload`
+/// part (the file), stored as they came.
+#[tokio::test]
+async fn a_multipart_call_stores_the_payload() {
+    plenty_of_space();
+    let td = setup().await;
+    td.post("/api/services", script("mp", Some("p"), "p-box"))
+        .await
+        .ok();
+    let mut body = b"--XyZ\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{\"seconds\": 5}\r\n\
+--XyZ\r\nContent-Disposition: form-data; name=\"payload\"; filename=\"in.bin\"\r\n\
+Content-Type: application/octet-stream\r\n\r\n"
+        .to_vec();
+    let data: Vec<u8> = (0..=255u8).collect();
+    body.extend_from_slice(&data);
+    body.extend_from_slice(b"\r\n--XyZ--\r\n");
+    let (status, v) = raw(
+        &td,
+        "/api/services/mp/requests",
+        "multipart/form-data; boundary=XyZ",
+        body,
+        "p/w1",
+    )
+    .await;
+    assert_eq!(status, 201, "{v}");
+    let id = v["id"].as_str().unwrap();
+    let row = td.get_as("p/w1", &format!("/api/service-requests/{id}")).await;
+    assert_eq!(row.ok()["request"], json!({"seconds": 5}));
+    assert_eq!(row.ok()["payload_size"], 256);
+    let file = td.state.join("services/payloads").join(id).join("request");
+    assert_eq!(std::fs::read(file).unwrap(), data);
+    // An unknown part is refused.
+    let (status, v) = raw(
+        &td,
+        "/api/services/mp/requests",
+        "multipart/form-data; boundary=XyZ",
+        b"--XyZ\r\nContent-Disposition: form-data; name=\"other\"\r\n\r\nx\r\n--XyZ--\r\n".to_vec(),
+        "p/w1",
+    )
+    .await;
+    assert_eq!(status, 400, "{v}");
+}
+
+/// A body over the service's limit is refused from its Content-Length,
+/// before the body is read: the message names the exact length.
+#[tokio::test]
+async fn a_body_over_the_limit_is_413_before_it_is_read() {
+    let td = setup().await;
+    td.post(
+        "/api/services",
+        with(script("tiny", Some("p"), "p-box"), json!({"max_payload": "8"})),
+    )
+    .await
+    .ok();
+    let body = json!({"request": {"pad": "x".repeat(400 * 1024)}}).to_string();
+    let len = body.len();
+    let (status, v) = raw(
+        &td,
+        "/api/services/tiny/requests",
+        "application/json",
+        body.into_bytes(),
+        "p/w1",
+    )
+    .await;
+    assert_eq!(status, 413, "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("the call has {len} bytes")),
+        "{v}"
+    );
+}
+
+/// TER-1264 review finding 3: a reload does not remove a file service
+/// with open requests. It stays as removed, takes no new call, and goes
+/// at the first reload after its requests end.
+#[tokio::test]
+async fn a_reload_keeps_a_removed_file_service_while_requests_are_open() {
+    let td = setup().await;
+    let dir = td.config.join("services");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("echo.toml");
+    let text = "kind = \"script\"\ntarget = \"p-box\"\nproject = \"p\"\ncommand = [\"/opt/echo\"]\n";
+    std::fs::write(&file, text).unwrap();
+    td.post_empty("/api/reload").await.ok();
+    let r = td
+        .post_as("p/w1", "/api/services/echo/requests", json!({}))
+        .await;
+    let id = r.ok()["id"].as_str().unwrap().to_owned();
+    std::fs::remove_file(&file).unwrap();
+    let r = td.post_empty("/api/reload").await;
+    let errors = r.ok()["errors"].to_string();
+    assert!(errors.contains("kept as removed"), "{errors}");
+    let s = td.get("/api/services/echo").await.ok().clone();
+    assert!(s["removed_at"].is_string(), "{s}");
+    let r = td
+        .post_as("p/w1", "/api/services/echo/requests", json!({}))
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    // The file comes back: active again.
+    std::fs::write(&file, text).unwrap();
+    td.post_empty("/api/reload").await.ok();
+    let s = td.get("/api/services/echo").await.ok().clone();
+    assert!(s["removed_at"].is_null(), "{s}");
+    // Gone again, and the request ends: the next reload removes it.
+    std::fs::remove_file(&file).unwrap();
+    td.post_empty("/api/reload").await.ok();
+    td.post_as("p/w1", &format!("/api/service-requests/{id}/cancel"), json!({}))
+        .await
+        .ok();
+    td.post_empty("/api/reload").await.ok();
+    td.get("/api/services/echo").await.err(404, "not_found");
+    // The request stays readable.
+    td.get_as("p/w1", &format!("/api/service-requests/{id}"))
+        .await
+        .ok();
 }

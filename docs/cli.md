@@ -834,6 +834,29 @@ terrarium tool run --detach <name> -- <args>  start it and return: a process wai
 - In the sandbox each granted tool is a link in `/opt/terrarium/agent-tools/bin`, last on `PATH`: `tracker-read show ABC-12` runs `terrarium tool run tracker-read -- show ABC-12`.
 - `tool run` streams stdout and stderr, sends stdin only to a tool with `stdin = true` (and only when stdin is not a terminal), stops the run on Ctrl-C (exit 130), and exits with the tool's exit code. A refused run (no grant: `404`, a rule: `422`, the rate: `429`) prints the daemon's message and exits 1.
 
+### Services
+
+`service` has the alias `services`. A service is a named script or agent
+with a request queue (TER-1264, [api.md §17.12](api.md#1712-services)). It
+is defined in `services/<name>.toml` of the config repo or with `service
+new`; a sysadmin makes a global service, and the project lead a project
+service.
+
+```
+terrarium service ls                         the services you may see: NAME, KIND, TARGET, OWNER, GPU, CONC, SOURCE
+terrarium service show <name>                the definition, the open requests, and whether you may call it
+terrarium service new --file <toml> [--name <n>]   define a service; the name defaults to the file name
+terrarium service rm <name>                  remove a service of the API (refused while a request is open)
+terrarium service call <name> [--request <json|@file>] [--payload <file>]   queue a request; prints its ID at once
+terrarium service requests <name> [--state <s>] [--limit <n>]   the requests: all for its admins, else your own
+terrarium service status <id>                one request: its state, its place in the queue, its result
+terrarium service cancel <id>                cancel a request that has not ended
+```
+
+- `--request` is the request JSON (not `--json`: that is the global output flag).
+- The payload goes as base64 in the JSON body, so a payload of 64 MiB is a body of about 86 MiB.
+- A request waits at most the service's `wait_limit` (default 24h) to start; then it ends as `timed_out` and you get a mail.
+
 ### System prompts
 
 `system-prompt` has the alias `system-prompts`. The library is

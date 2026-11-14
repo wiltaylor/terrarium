@@ -5,9 +5,14 @@
 -- `services/<name>.toml` file (source `file`) or the API (source `api`),
 -- as `tools` does.
 --
+-- `removed_at`: a file service whose file went (or no longer checks) while
+-- it had open requests. It stays so that those requests can end, and it
+-- takes no new call; the next reload with no open request removes it.
+--
 -- `service_requests` is the queue and its history. `service` is not a
--- foreign key: the history of a removed service stays until the retention
--- sweep. The payload bytes are files in the daemon's state directory
+-- foreign key: the rows of a removed service stay. Nothing prunes the rows
+-- yet; the retention sweep deletes only the payload files. The payload
+-- bytes are files in the daemon's state directory
 -- (`services/payloads/<id>/request`); `payload_size` counts toward the
 -- per-service and the global cap until `payload_deleted_at` is set.
 CREATE TABLE services (
@@ -15,6 +20,7 @@ CREATE TABLE services (
     project    TEXT,                              -- NULL: a global service
     def        TEXT NOT NULL,                     -- JSON ServiceDef
     source     TEXT NOT NULL DEFAULT 'api' CHECK (source IN ('file', 'api')),
+    removed_at TEXT,                              -- NULL: active
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

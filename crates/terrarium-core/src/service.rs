@@ -31,6 +31,10 @@ pub const CONCURRENCY_MAX: u32 = 16;
 pub const DEFAULT_MAX_PAYLOAD: u64 = 64 * 1024 * 1024;
 pub const MAX_PAYLOAD_MAX: u64 = 1024 * 1024 * 1024;
 pub const DEFAULT_MAX_RETAINED: u64 = 1024 * 1024 * 1024;
+/// The most that one service may keep: a tenth of the global cap, so one
+/// project's service cannot take the store of all others (TER-1264 review
+/// finding 5).
+pub const MAX_RETAINED_MAX: u64 = 10 * 1024 * 1024 * 1024;
 /// The global payload cap and the free-space floor of the state
 /// filesystem (O2). Not per service.
 pub const GLOBAL_PAYLOAD_CAP: u64 = 100 * 1024 * 1024 * 1024;
@@ -120,7 +124,8 @@ pub struct ServiceDef {
     /// The largest payload of one request (default 64MiB, at most 1GiB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_payload: Option<String>,
-    /// The payload bytes this service keeps at one time (default 1GiB).
+    /// The payload bytes this service keeps at one time (default 1GiB, at
+    /// most 10GiB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retained: Option<String>,
     /// Who may call: `project:<name>` or `agent:<project>/<name>`. Empty:
@@ -290,8 +295,10 @@ impl ServiceDef {
         {
             return Err(format!("max_payload `{v}` is over 1GiB"));
         }
-        if let Some(v) = &self.max_retained {
-            size("max_retained", v)?;
+        if let Some(v) = &self.max_retained
+            && size("max_retained", v)? > MAX_RETAINED_MAX
+        {
+            return Err(format!("max_retained `{v}` is over 10GiB"));
         }
         if self.max_retained_bytes() < self.max_payload_bytes() {
             return Err("max_retained is smaller than max_payload".into());
@@ -493,6 +500,7 @@ mod tests {
             ("concurrency = 17\n", "concurrency"),
             ("max_payload = \"2GiB\"\n", "over 1GiB"),
             ("max_payload = \"lots\"\n", "bad max_payload"),
+            ("max_retained = \"11GiB\"\n", "over 10GiB"),
             (
                 "max_payload = \"512MiB\"\nmax_retained = \"256MiB\"\n",
                 "smaller",

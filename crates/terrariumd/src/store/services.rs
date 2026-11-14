@@ -36,11 +36,15 @@ pub struct ServiceRow {
     pub scope: &'static str,
     /// `file` or `api`.
     pub source: String,
+    /// Set when the file of a file service went (or no longer checks)
+    /// while it had open requests: it takes no new call, and the next
+    /// reload with no open request removes it.
+    pub removed_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
 
-const COLS: &str = "name, def, source, created_at, updated_at";
+const COLS: &str = "name, def, source, removed_at, created_at, updated_at";
 
 fn row(r: &Row<'_>) -> rusqlite::Result<ServiceRow> {
     let name: String = r.get(0)?;
@@ -57,8 +61,9 @@ fn row(r: &Row<'_>) -> rusqlite::Result<ServiceRow> {
         },
         def,
         source: r.get(2)?,
-        created_at: r.get(3)?,
-        updated_at: r.get(4)?,
+        removed_at: r.get(3)?,
+        created_at: r.get(4)?,
+        updated_at: r.get(5)?,
     })
 }
 
@@ -94,6 +99,18 @@ pub fn validate(conn: &Connection, def: &ServiceDef) -> ApiResult<()> {
         return Err(ApiError::invalid(format!(
             "service `{}` claims an exclusive GPU, and target `{}` is not a docker target: \
              an exclusive GPU is enforced only on a docker target",
+            def.name, def.target
+        )));
+    }
+    // The rule of `crate::reservations` for a GPU reservation on a docker
+    // target, so that the claim that C2 reserves is not refused later.
+    if def.resources.gpus > 0
+        && target.def.kind == TargetKind::Docker
+        && (!target.def.ephemeral || target.def.image.is_none())
+    {
+        return Err(ApiError::invalid(format!(
+            "service `{}` claims a GPU on docker target `{}`, which is not a managed ephemeral \
+             target with an image: a docker GPU reservation needs `ephemeral = true` and `image`",
             def.name, def.target
         )));
     }
@@ -210,7 +227,8 @@ pub fn open_requests(conn: &Connection, service: &str) -> ApiResult<usize> {
 }
 
 /// `DELETE /api/services/{name}`. Refused while a request is open: cancel
-/// them first. The ended requests stay until the retention sweep.
+/// them first. The rows of the ended requests stay (nothing prunes them
+/// yet).
 pub fn delete(t: &mut Tx<'_>, name: &str) -> ApiResult<ServiceRow> {
     let current = get(t, name)?;
     refuse_file(&current)?;
@@ -226,7 +244,12 @@ pub fn delete(t: &mut Tx<'_>, name: &str) -> ApiResult<ServiceRow> {
 
 /// The `services/<name>.toml` files: add, change, and remove the `file`
 /// rows, as `store::tools::sync_files`. A file that fails a check is left
-/// out with an error line.
+/// out with an error line. A file service that is gone, or whose file
+/// fails a check, while it has open requests is not removed: it keeps its
+/// last good definition, gets `removed_at`, and takes no new call, so the
+/// open requests can end (TER-1264 review finding 3). A later reload
+/// removes it when no request is open, or makes it active again when its
+/// file is back and checks.
 pub fn sync_files(t: &mut Tx<'_>, defs: &[ServiceDef]) -> ApiResult<(Changes, Vec<String>)> {
     let mut changes = Changes::default();
     let mut errors = Vec::new();
@@ -242,9 +265,10 @@ pub fn sync_files(t: &mut Tx<'_>, defs: &[ServiceDef]) -> ApiResult<(Changes, Ve
                 insert(t, def, SOURCE_FILE)?;
                 changes.added.push(def.name.clone());
             }
-            Some(r) if r.def != *def || r.source != SOURCE_FILE => {
+            Some(r) if r.def != *def || r.source != SOURCE_FILE || r.removed_at.is_some() => {
                 t.execute(
-                    "UPDATE services SET project = ?2, def = ?3, source = 'file', updated_at = ?4
+                    "UPDATE services SET project = ?2, def = ?3, source = 'file', removed_at = NULL,
+                       updated_at = ?4
                      WHERE name = ?1",
                     params![def.name, def.project, def_json(def)?, now()],
                 )?;
@@ -253,20 +277,34 @@ pub fn sync_files(t: &mut Tx<'_>, defs: &[ServiceDef]) -> ApiResult<(Changes, Ve
             Some(_) => {}
         }
     }
-    let gone: Vec<String> = list(t)?
+    let gone: Vec<ServiceRow> = list(t)?
         .into_iter()
         .filter(|r| r.source == SOURCE_FILE && !kept.contains(&r.def.name))
-        .map(|r| r.def.name)
         .collect();
-    for name in gone {
-        t.execute("DELETE FROM services WHERE name = ?1", [&name])?;
-        changes.removed.push(name);
+    for r in gone {
+        let name = r.def.name;
+        let open = open_requests(t, &name)?;
+        if open == 0 {
+            t.execute("DELETE FROM services WHERE name = ?1", [&name])?;
+            changes.removed.push(name);
+            continue;
+        }
+        if r.removed_at.is_none() {
+            t.execute(
+                "UPDATE services SET removed_at = ?2, updated_at = ?2 WHERE name = ?1",
+                params![name, now()],
+            )?;
+            changes.updated.push(name.clone());
+        }
+        errors.push(format!(
+            "services/{name}.toml: service `{name}` is kept as removed while it has {open} open request(s); it takes no new call"
+        ));
     }
     Ok((changes, errors))
 }
 
-/// The project was removed: its services go. Their requests stay as
-/// history until the retention sweep.
+/// The project was removed: its services go. The rows of their requests
+/// stay (nothing prunes them yet).
 pub fn on_project_deleted(conn: &Connection, name: &str) -> ApiResult<usize> {
     Ok(conn.execute("DELETE FROM services WHERE project = ?1", [name])?)
 }
@@ -692,8 +730,8 @@ pub fn free_space(dir: &Path) -> Option<FreeSpace> {
 /// May `size` more payload bytes of `service` be stored? The per-payload
 /// and the per-service limits of the service, the global cap, and the
 /// free-space floor of the state filesystem (O2). `free`: `None` when the
-/// free space is not known (the check is then skipped and logged by the
-/// caller). The error is `413` for a payload over its limit, `503` for a
+/// free space cannot be read; the floor then fails closed and refuses
+/// every payload (TER-1264 review finding 7). The error is `413` for a payload over its limit, `503` for a
 /// full store.
 pub fn check_payload_room(
     conn: &Connection,
@@ -729,9 +767,13 @@ pub fn check_payload_room(
             core::GLOBAL_PAYLOAD_CAP
         )));
     }
-    if let Some((avail, total)) = free
-        && total > 0
-        && avail.saturating_sub(size).saturating_mul(100)
+    let Some((avail, total)) = free else {
+        return Err(full(
+            "the free space of the state filesystem cannot be read: no new payloads".into(),
+        ));
+    };
+    if total == 0
+        || avail.saturating_sub(size).saturating_mul(100)
             < total.saturating_mul(core::MIN_FREE_PERCENT)
     {
         return Err(full(format!(
@@ -787,6 +829,7 @@ mod tests {
             def,
             scope: "global",
             source: "api".into(),
+            removed_at: None,
             created_at: String::new(),
             updated_at: String::new(),
         }
@@ -810,8 +853,12 @@ mod tests {
         // Exactly 20% left passes; an empty payload is never refused by it.
         check_payload_room(&conn, &s, 100, Some((300, 1000))).unwrap();
         check_payload_room(&conn, &s, 0, Some((0, 1000))).unwrap();
-        // Unknown free space: the floor is not checked.
-        check_payload_room(&conn, &s, 100, None).unwrap();
+        // Unknown free space: refused (fails closed), but not a call with
+        // no payload.
+        let e = check_payload_room(&conn, &s, 100, None).unwrap_err();
+        assert_eq!(e.code, Code::Unavailable, "{}", e.message);
+        assert!(e.message.contains("cannot be read"), "{}", e.message);
+        check_payload_room(&conn, &s, 0, None).unwrap();
         // Retained bytes of the service count toward max_retained.
         conn.execute(
             "INSERT INTO service_requests (id, service, caller, request, payload_size, wait_until, created_at)
@@ -822,6 +869,25 @@ mod tests {
         check_payload_room(&conn, &s, 50, plenty).unwrap();
         let e = check_payload_room(&conn, &s, 51, plenty).unwrap_err();
         assert!(e.message.contains("keeps 100"), "{}", e.message);
+        // The global cap: all services' bytes count. With r1 (100) and r2
+        // (the cap minus 150), 50 more bytes fit and 51 do not.
+        let big = i64::try_from(core::GLOBAL_PAYLOAD_CAP - 150).unwrap();
+        conn.execute(
+            "INSERT INTO service_requests (id, service, caller, request, payload_size, wait_until, created_at)
+             VALUES ('r2', 'other', 'operator', '{}', ?1, 'x', 'x')",
+            [big],
+        )
+        .unwrap();
+        // Service `t` keeps nothing itself, so only the global cap applies.
+        let mut t = service("100", "150");
+        t.def.name = "t".into();
+        check_payload_room(&conn, &t, 50, plenty).unwrap();
+        let e = check_payload_room(&conn, &t, 51, plenty).unwrap_err();
+        assert_eq!(e.code, Code::Unavailable, "{}", e.message);
+        assert!(e.message.contains("global cap"), "{}", e.message);
+        // A deleted payload no longer counts.
+        mark_payload_deleted(&conn, "r2").unwrap();
+        check_payload_room(&conn, &t, 51, plenty).unwrap();
     }
 
     #[test]
