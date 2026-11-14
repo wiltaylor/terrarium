@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-const HARNESSES: [&str; 4] = ["claude", "codex", "copilot", "pi"];
+const HARNESSES: [&str; 5] = ["claude", "codex", "copilot", "pi", "grok"];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -138,6 +138,7 @@ fn variant(name: &str) -> &'static str {
         "claude" => "Claude",
         "codex" => "Codex",
         "copilot" => "Copilot",
+        "grok" => "Grok",
         _ => "Pi",
     }
 }

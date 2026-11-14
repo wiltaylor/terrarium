@@ -12,14 +12,18 @@ pub enum HarnessId {
     Copilot,
     Pi,
     /// Grok Build (`grok`), the harness of an xAI plan (`crate::xai`).
-    /// A value only: it is not in [`HarnessId::ALL`] (no pin, no installer,
-    /// no adapter) until the grok adapter lands (TER-1192), and a launch of
-    /// it is refused.
+    /// Its adapter is `terrarium-adapter-grok` (TER-1192).
     Grok,
 }
 
 impl HarnessId {
-    pub const ALL: [HarnessId; 4] = [Self::Claude, Self::Codex, Self::Copilot, Self::Pi];
+    pub const ALL: [HarnessId; 5] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Copilot,
+        Self::Pi,
+        Self::Grok,
+    ];
 
     /// The name used in config files, paths, and the API.
     pub fn as_str(self) -> &'static str {
@@ -57,7 +61,9 @@ impl HarnessId {
     pub fn compact_command(self) -> Option<&'static str> {
         match self {
             Self::Claude | Self::Codex | Self::Copilot | Self::Pi => Some("/compact"),
-            // Not checked yet (TER-1192).
+            // Not checked yet: `/compact` of Grok Build and its
+            // PreCompact/PostCompact hooks need the signed-in capture
+            // (TER-1192, release gate).
             Self::Grok => None,
         }
     }
@@ -69,9 +75,10 @@ impl HarnessId {
             Self::Codex => "CODEX_HOME",
             Self::Copilot => "COPILOT_HOME",
             Self::Pi => "PI_CODING_AGENT_DIR",
-            // Grok Build reads `~/.grok` (its login is `~/.grok/auth.json`):
-            // its home is the dir that holds `.grok`.
-            Self::Grok => "HOME",
+            // Grok Build reads `$GROK_HOME`, else `~/.grok` (its login is
+            // `auth.json` there). The npm launcher and its postinstall
+            // name the same var ("matching the Rust grok_home()").
+            Self::Grok => "GROK_HOME",
         }
     }
 }
@@ -87,7 +94,6 @@ impl FromStr for HarnessId {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::ALL
             .into_iter()
-            .chain([Self::Grok])
             .find(|h| h.as_str() == s)
             .ok_or_else(|| format!("unknown harness `{s}`"))
     }
