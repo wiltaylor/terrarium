@@ -128,7 +128,11 @@ pub fn screen_state<S: AsRef<str>>(lines: &[S]) -> ScreenState {
         ..ScreenState::default()
     };
     let bottom = lines.iter().rposition(|l| l.trim_start().starts_with('╰'));
-    let top = bottom.and_then(|b| lines[..b].iter().rposition(|l| l.trim_start().starts_with('╭')));
+    let top = bottom.and_then(|b| {
+        lines[..b]
+            .iter()
+            .rposition(|l| l.trim_start().starts_with('╭'))
+    });
     if let (Some(a), Some(b)) = (top, bottom) {
         let inner = &lines[a + 1..b];
         if inner

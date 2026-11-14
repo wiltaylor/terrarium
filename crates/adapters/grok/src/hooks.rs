@@ -167,8 +167,7 @@ pub fn hook_events(hook: &HookPayload) -> Vec<Event> {
         }],
         "Notification" => vec![Event::Notification {
             message: s(b, &["message", "title"]).unwrap_or_default().to_owned(),
-            question: s(b, &["notificationType", "notification_type"])
-                == Some("permission_prompt"),
+            question: s(b, &["notificationType", "notification_type"]) == Some("permission_prompt"),
         }],
         "SessionEnd" => vec![Event::SessionEnded {
             reason: s(b, &["reason"]).map(str::to_owned),
@@ -377,18 +376,32 @@ mod tests {
         assert_eq!(
             all[1].1,
             [Event::TurnStart {
-                prompt: Some("Run the shell command: wc -c note.txt   and tell me the number.".into())
+                prompt: Some(
+                    "Run the shell command: wc -c note.txt   and tell me the number.".into()
+                )
             }]
         );
-        let [Event::ToolUse { tool, summary, id, .. }] = all[2].1.as_slice() else {
+        let [
+            Event::ToolUse {
+                tool, summary, id, ..
+            },
+        ] = all[2].1.as_slice()
+        else {
             panic!("{:?}", all[2].1);
         };
         assert_eq!(tool, "run_terminal_command");
         assert_eq!(summary.as_deref(), Some("wc -c note.txt"));
-        assert_eq!(id.as_deref(), Some("call-80d1d45a-3661-414b-a4d8-823e883a8471-0"));
+        assert_eq!(
+            id.as_deref(),
+            Some("call-80d1d45a-3661-414b-a4d8-823e883a8471-0")
+        );
         assert!(matches!(
             all[3].1.as_slice(),
-            [Event::ToolFinished { ok: true, id: Some(_), .. }]
+            [Event::ToolFinished {
+                ok: true,
+                id: Some(_),
+                ..
+            }]
         ));
         assert_eq!(all[4].1, [Event::TurnEnd]);
         // The permission question blocks; the later idle prompt does not.
