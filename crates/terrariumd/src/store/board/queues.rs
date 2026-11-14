@@ -339,8 +339,7 @@ fn merge_candidates(
             continue;
         }
         if blocker.is_none()
-            && c
-                .labels
+            && c.labels
                 .iter()
                 .any(|l| l == crate::rules_verbs::RELEASE_BLOCKER)
         {

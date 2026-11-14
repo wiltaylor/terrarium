@@ -5565,7 +5565,10 @@ async fn hold(td: &TestDaemon, id: &str) {
 /// merge queue records no reviewed commit.
 async fn no_head(td: &TestDaemon, id: &str) {
     let r = td
-        .patch(&format!("/api/cards/{id}"), json!({"branch": "no-such-branch"}))
+        .patch(
+            &format!("/api/cards/{id}"),
+            json!({"branch": "no-such-branch"}),
+        )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
 }
