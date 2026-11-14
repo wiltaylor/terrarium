@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::agent_template::{self, TemplateDef};
 use terrarium_core::config::{
-    AgentDef, DeliveryDef, Policy, ProjectDef, RepoDef, SubscriptionDef, TargetDef,
+    AgentDef, BoardFlow, DeliveryDef, Policy, ProjectDef, RepoDef, SubscriptionDef, TargetDef,
 };
 use terrarium_core::fleet::{self, Fleet, Issue, Kind};
 use terrarium_core::{HarnessId, Role};
@@ -35,7 +35,10 @@ use crate::store::agents::{self, AgentPatch, AgentView};
 use crate::store::projects::{
     self, NewProject, NewRepo, ProjectPatch, SOURCE_API, SOURCE_FILE, fleet_source,
 };
-use crate::store::{Page, jobs, repos, schedules, subscriptions, targets, templates};
+use crate::store::board::column_options::{
+    self, ColumnChecks, ColumnOptions, ColumnQueue, OptionsPut,
+};
+use crate::store::{Page, board, jobs, repos, schedules, subscriptions, targets, templates};
 
 /// The `source` word of an object a fleet owns: `fleet:<name>`.
 pub use crate::store::projects::SOURCE_FLEET as SOURCE_PREFIX;
@@ -398,6 +401,7 @@ fn live_project(
     names: &BTreeSet<String>,
     checkout: &Value,
     delivery: bool,
+    board: Option<&[fleet::FleetColumn]>,
 ) -> ApiResult<Value> {
     let mut repos: Vec<Value> = all_repos(conn, &p.name)?
         .into_iter()
@@ -420,7 +424,209 @@ fn live_project(
     if delivery {
         spec["delivery"] = json!(jobs::delivery(conn, &p.name)?);
     }
+    if let Some(columns) = board {
+        spec["board_flow"] = json!(p.board_flow.as_str());
+        spec["columns"] = live_columns(conn, &p.name, columns)?;
+    }
     Ok(spec)
+}
+
+// ---- The options of a converted board (TER-1305) ----
+
+/// The board of a fleet project: its `[[projects.columns]]` when the file
+/// names `board_flow = "columns"`. `None`: the fleet does not manage the
+/// board, and the plan and the apply leave it as it is.
+fn managed_board(p: &fleet::FleetProject) -> Option<&[fleet::FleetColumn]> {
+    (p.def.board_flow == Some(BoardFlow::Columns)).then_some(p.columns.as_slice())
+}
+
+/// A column rule as a fleet file holds it: without its ID.
+fn rule_value(r: &terrarium_core::board_rules::ColumnRule) -> Value {
+    let mut v = json!(r);
+    if let Some(m) = v.as_object_mut() {
+        m.remove("id");
+    }
+    v
+}
+
+/// The options of a column as a fleet file holds them.
+fn column_def(o: &ColumnOptions) -> fleet::FleetColumn {
+    fleet::FleetColumn {
+        name: o.column.clone(),
+        checks: Some(json!(o.checks)),
+        queue: Some(json!(o.queue)),
+        rules: Some(o.rules.iter().map(rule_value).collect()),
+    }
+}
+
+/// The live options of the columns that the file names, in the file's
+/// order. A column that the board does not have is `{name, missing}`.
+fn live_columns(
+    conn: &Connection,
+    project: &str,
+    columns: &[fleet::FleetColumn],
+) -> ApiResult<Value> {
+    let names = board::column_roles(conn, project)?;
+    let mut out = Vec::new();
+    for c in columns {
+        if names.iter().any(|(n, _)| *n == c.name) {
+            let o = column_options::get_options(conn, project, &c.name)?;
+            out.push(json!(column_def(&o)));
+        } else {
+            out.push(json!({"name": c.name, "missing": true}));
+        }
+    }
+    Ok(Value::Array(out))
+}
+
+/// The desired options of the columns of the file, in the form of
+/// [`live_columns`]: each value read as the API reads it (the defaults
+/// filled in), and an absent key the live value. A value that does not
+/// read stays as it is: the apply names the problem.
+fn desired_columns(columns: &[fleet::FleetColumn], live: Option<&Value>) -> Value {
+    fn typed<T: Serialize + for<'de> Deserialize<'de>>(v: &Value) -> Value {
+        serde_json::from_value::<T>(v.clone()).map_or_else(|_| v.clone(), |t| json!(t))
+    }
+    let list = columns
+        .iter()
+        .map(|c| {
+            let have = live
+                .and_then(Value::as_array)
+                .and_then(|l| l.iter().find(|x| x["name"] == c.name.as_str()));
+            let pick = |key: &str, mine: Option<Value>| {
+                mine.or_else(|| have.map(|h| h[key].clone()).filter(|v| !v.is_null()))
+            };
+            let rules = c.rules.as_ref().map(|list| {
+                Value::Array(
+                    list.iter()
+                        .map(|r| {
+                            serde_json::from_value::<terrarium_core::board_rules::ColumnRule>(
+                                r.clone(),
+                            )
+                            .map_or_else(|_| r.clone(), |r| rule_value(&r))
+                        })
+                        .collect(),
+                )
+            });
+            json!({
+                "name": c.name,
+                "checks": pick("checks", c.checks.as_ref().map(typed::<ColumnChecks>)),
+                "queue": pick("queue", c.queue.as_ref().map(typed::<ColumnQueue>)),
+                "rules": pick("rules", rules),
+            })
+        })
+        .collect();
+    Value::Array(list)
+}
+
+/// The columns of a `columns` board for an export, in board order.
+/// Another board: none (TER-1305).
+fn export_columns(
+    conn: &Connection,
+    project: &str,
+    flow: BoardFlow,
+) -> ApiResult<Vec<fleet::FleetColumn>> {
+    if flow != BoardFlow::Columns {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for (name, _) in board::column_roles(conn, project)? {
+        let c = column_def(&column_options::get_options(conn, project, &name)?);
+        if let Some(e) = c.toml_problem() {
+            return Err(ApiError::invalid(format!(
+                "column `{name}`: {e}; a fleet file cannot hold this value"
+            )));
+        }
+        out.push(c);
+    }
+    Ok(out)
+}
+
+/// Apply the board of a fleet project (TER-1305): `board_flow = columns`
+/// first (the column-only verbs need it), then the options of each column
+/// of the file. A rule matches the column's rule of the same name and
+/// keeps its ID, so an unchanged file writes nothing. Only the operator
+/// and a project admin (the right of the options `PUT`): the switch to
+/// column rules is not undone by a file.
+fn apply_board(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    project: &str,
+    columns: &[fleet::FleetColumn],
+) -> ApiResult<()> {
+    policy::edit_column_options(actor, project)?;
+    if projects::set_columns_flow(t, project)? {
+        t.audit(
+            "project.board_flow",
+            project,
+            Some(project),
+            json!({"board_flow": "columns", "source": "fleet"}),
+        )?;
+    }
+    let names = board::column_roles(t, project)?;
+    for c in columns {
+        let at = format!("projects.{project}.columns.{}", c.name);
+        let named = |e: ApiError| ApiError {
+            message: format!("{at}: {}", e.message),
+            ..e
+        };
+        if !names.iter().any(|(n, _)| *n == c.name) {
+            return Err(ApiError::invalid(format!(
+                "{at}: the board of `{project}` has no column `{}`",
+                c.name
+            )));
+        }
+        let before = column_options::get_options(t, project, &c.name)?;
+        let checks = match &c.checks {
+            Some(v) => serde_json::from_value(v.clone())
+                .map_err(|e| ApiError::invalid(format!("{at}.checks: {e}")))?,
+            None => before.checks,
+        };
+        let queue = match &c.queue {
+            Some(v) => serde_json::from_value(v.clone())
+                .map_err(|e| ApiError::invalid(format!("{at}.queue: {e}")))?,
+            None => before.queue,
+        };
+        let rules = c.rules.as_ref().map(|list| {
+            let mut used: BTreeSet<String> = BTreeSet::new();
+            list.iter()
+                .map(|r| {
+                    let mut r = r.clone();
+                    if let Some(m) = r.as_object_mut() {
+                        // An ID of the file is of another daemon.
+                        m.remove("id");
+                        let same = m.get("name").and_then(Value::as_str).and_then(|n| {
+                            before.rules.iter().find_map(|b| {
+                                b.id.as_ref()
+                                    .filter(|id| b.name == n && !used.contains(*id))
+                                    .cloned()
+                            })
+                        });
+                        if let Some(id) = same {
+                            used.insert(id.clone());
+                            m.insert("id".into(), Value::String(id));
+                        }
+                    }
+                    r
+                })
+                .collect()
+        });
+        column_options::put_options(
+            t,
+            actor,
+            project,
+            &c.name,
+            &OptionsPut {
+                base_version: before.version,
+                checks,
+                queue,
+                rules,
+                _can_edit: None,
+            },
+        )
+        .map_err(named)?;
+    }
+    Ok(())
 }
 
 /// The desired state of a project. `delivery`: the job queue config that
@@ -429,6 +635,7 @@ fn desired_project(
     def: &ProjectDef,
     live_prefix: Option<&str>,
     delivery: Option<&DeliveryDef>,
+    board: Option<Value>,
 ) -> Value {
     let mut spec = json!({
         "description": def.description.clone().unwrap_or_default(),
@@ -448,6 +655,10 @@ fn desired_project(
     }
     if let Some(d) = delivery {
         spec["delivery"] = json!(d);
+    }
+    if let Some(columns) = board {
+        spec["board_flow"] = json!(BoardFlow::Columns.as_str());
+        spec["columns"] = columns;
     }
     spec
 }
@@ -765,9 +976,10 @@ pub fn plan(conn: &Connection, f: &Fleet) -> ApiResult<Plan> {
         }
         let checkout = applied.map_or_else(|| json!([]), |a| a["checkout"].clone());
         let delivery = desired_delivery(p, applied);
+        let board = managed_board(p);
         let live = match &live_row {
             Some(row) => Some(Live {
-                spec: live_project(conn, row, &names, &checkout, delivery.is_some())?,
+                spec: live_project(conn, row, &names, &checkout, delivery.is_some(), board)?,
                 source: row.source.clone(),
             }),
             None => None,
@@ -776,6 +988,7 @@ pub fn plan(conn: &Connection, f: &Fleet) -> ApiResult<Plan> {
             &p.def,
             live_row.as_ref().map(|r| r.card_prefix.as_str()),
             delivery.as_ref(),
+            board.map(|c| desired_columns(c, live.as_ref().map(|l| &l.spec["columns"]))),
         );
         entries.push(classify(
             &f.name,
@@ -1491,8 +1704,23 @@ pub fn apply(
         })
         .map(|p| (p, p.delivery.clone().unwrap_or_default()))
         .collect();
+    // The boards that change (TER-1305), from the plan as well.
+    let boards: Vec<&fleet::FleetProject> = f
+        .projects
+        .iter()
+        .filter(|p| {
+            managed_board(p).is_some()
+                && plan.entries.iter().any(|e| {
+                    e.kind == Kind::Project
+                        && e.key == p.def.name
+                        && e.changes
+                            .iter()
+                            .any(|c| c.field == "board_flow" || c.field == "columns")
+                })
+        })
+        .collect();
     for p in &f.projects {
-        apply_project(t, &name, &p.def, p.delivery.is_some())?;
+        apply_project(t, &name, p)?;
     }
     for d in f.all_targets() {
         // TER-623 (review-ter-623-r3 finding 1): the rule of the target API,
@@ -1544,7 +1772,15 @@ pub fn apply(
                     format!("projects.{project}.delivery: {}", e.message),
                 )
             })?;
-        record_project(t, &name, &p.def, p.delivery.is_some())?;
+        record_project(t, &name, p)?;
+    }
+    // The options of the converted boards (TER-1305), after the job queue
+    // configs: a column rule may queue a job.
+    for p in boards {
+        if let Some(columns) = managed_board(p) {
+            apply_board(t, actor, &p.def.name, columns)?;
+        }
+        record_project(t, &name, p)?;
     }
     for (p, d) in f.all_templates() {
         // Any write to a template with grants needs the right to grant
@@ -1715,12 +1951,8 @@ pub fn apply(
     Ok(out)
 }
 
-fn apply_project(
-    t: &mut Tx<'_>,
-    fleet_name: &str,
-    def: &ProjectDef,
-    delivery: bool,
-) -> ApiResult<()> {
+fn apply_project(t: &mut Tx<'_>, fleet_name: &str, p: &fleet::FleetProject) -> ApiResult<()> {
+    let def = &p.def;
     let prior = owner(t, Kind::Project, &def.name)?;
     let mut managed: BTreeSet<String> = def.repos.iter().map(|r| r.name.clone()).collect();
     if let Some(o) = &prior {
@@ -1767,8 +1999,8 @@ fn apply_project(
         }
     }
     // Who runs the card flow (TER-170): the fleet sets it when it gives
-    // the key.
-    if let Some(flow) = def.board_flow {
+    // the key. `columns` comes with the board options ([`apply_board`]).
+    if let Some(flow) = def.board_flow.filter(|f| *f != BoardFlow::Columns) {
         projects::set_board_flow(t, &def.name, flow)?;
     }
     projects::set_review_dispatcher_from_file(t, &def.name, def.review_dispatcher.as_deref())?;
@@ -1806,12 +2038,13 @@ fn apply_project(
             )?;
         }
     }
-    record_project(t, fleet_name, def, delivery)
+    record_project(t, fleet_name, p)
 }
 
-/// Record a project as it is now as the state of the last apply. With
-/// `delivery`, the fleet manages its job queue config.
-fn record_project(t: &Tx<'_>, fleet_name: &str, def: &ProjectDef, delivery: bool) -> ApiResult<()> {
+/// Record a project as it is now as the state of the last apply, with the
+/// job queue config and the board when the fleet manages them.
+fn record_project(t: &Tx<'_>, fleet_name: &str, p: &fleet::FleetProject) -> ApiResult<()> {
+    let def = &p.def;
     let row = projects::get(t, &def.name)?;
     let names: BTreeSet<String> = def.repos.iter().map(|r| r.name.clone()).collect();
     let spec = live_project(
@@ -1819,7 +2052,8 @@ fn record_project(t: &Tx<'_>, fleet_name: &str, def: &ProjectDef, delivery: bool
         &row,
         &names,
         &json!(def.checkout.on_agent_create),
-        delivery,
+        p.delivery.is_some(),
+        managed_board(p),
     )?;
     record(
         t,
@@ -1989,6 +2223,7 @@ pub fn export(
     checkout: Vec<String>,
 ) -> ApiResult<Fleet> {
     let p = projects::get(conn, project)?;
+    let columns = export_columns(conn, project, p.board_flow)?;
     let checkout = match owner(conn, Kind::Project, project)? {
         Some(o) if checkout.is_empty() => {
             serde_json::from_value(o.applied["checkout"].clone()).unwrap_or_default()
@@ -2084,13 +2319,14 @@ pub fn export(
                 schedules: project_schedules,
                 templates: project_templates,
                 github_authors: Vec::new(),
-                // `columns` is not a file value (TER-1113): only the upgrade sets it.
-                board_flow: (p.board_flow == terrarium_core::config::BoardFlow::Rules)
-                    .then_some(p.board_flow),
+                // `code` is the default. `columns` comes with the options of
+                // the columns (TER-1305).
+                board_flow: (p.board_flow != BoardFlow::Code).then_some(p.board_flow),
             },
             agents,
             targets,
             delivery,
+            columns,
         }],
     })
 }

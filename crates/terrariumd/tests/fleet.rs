@@ -4,6 +4,8 @@
 
 use crate::common;
 
+use std::collections::BTreeMap;
+
 use common::{TestDaemon, write};
 use serde_json::{Value, json};
 
@@ -861,6 +863,236 @@ async fn export_and_apply_carry_the_job_queue_config() {
     nd.put("/api/projects/dq/delivery", def.clone()).await.ok();
     let plan = nd.post("/api/fleet/plan", body(&dropped)).await;
     assert_eq!(plan.ok()["summary"]["update"], 0, "{}", plan.body);
+}
+
+/// Switch `project` to the column rules, as the C5 upgrade does.
+async fn columns_flow(td: &TestDaemon, project: &str) {
+    let p = project.to_owned();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("operator", move |t| {
+            terrariumd::store::projects::set_columns_flow(t, &p)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+fn options_path(project: &str, column: &str) -> String {
+    format!("/api/projects/{project}/board/columns/{column}/options")
+}
+
+async fn options(td: &TestDaemon, project: &str, column: &str) -> Value {
+    td.get(&options_path(project, column)).await.ok().clone()
+}
+
+/// The rules of a column without their IDs.
+fn rules_of(o: &Value) -> Vec<Value> {
+    o["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let mut r = r.clone();
+            r.as_object_mut().unwrap().remove("id");
+            r
+        })
+        .collect()
+}
+
+/// TER-1305: an export of a board on column rules carries the options of
+/// each column (checks, queue, rules), and an apply on a new daemon makes
+/// the same board. A second apply writes nothing; a rule that the file
+/// changes keeps its ID. A file that names a column the board does not
+/// have is refused with nothing written.
+#[tokio::test]
+async fn export_and_apply_carry_a_converted_board() {
+    let td = TestDaemon::start().await;
+    td.project("cb").await;
+    columns_flow(&td, "cb").await;
+    let review = options(&td, "cb", "review").await;
+    let mut checks = review["checks"].clone();
+    checks["require_comment_on_enter"] = json!(true);
+    let rules = json!([
+        {"name": "two", "trigger": {"kind": "count_reached", "count": 2},
+         "actions": [{"verb": "mail", "args": {"to": ["operator"],
+                      "subject": "two in \"review\"\nsee the board"}}]},
+        {"name": "back", "trigger": {"kind": "lands"},
+         "if_card": [{"not_column": ["ready"], "column": ["@review"]}],
+         "actions": [{"verb": "card.move", "args": {"to": "ready"}}]},
+    ]);
+    td.put(
+        &options_path("cb", "review"),
+        json!({"base_version": review["version"], "checks": checks,
+               "queue": review["queue"], "rules": rules}),
+    )
+    .await
+    .ok();
+    let mq = options(&td, "cb", "merge_queue").await;
+    let queue = json!({"release": "batch", "batch_size": 3, "max_wait_seconds": 900,
+                       "max_batch_cards": 6});
+    td.put(
+        &options_path("cb", "merge_queue"),
+        json!({"base_version": mq["version"], "checks": mq["checks"], "queue": queue}),
+    )
+    .await
+    .ok();
+    let source = td.get("/api/projects/cb/board").await.ok().clone();
+    let columns: Vec<String> = source["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap().to_owned())
+        .collect();
+    let mut want = BTreeMap::new();
+    for c in &columns {
+        want.insert(c.clone(), options(&td, "cb", c).await);
+    }
+
+    let e = td.get("/api/fleet/export?project=cb").await;
+    let content = e.ok()["content"].as_str().unwrap().to_owned();
+    assert!(content.contains("board_flow = \"columns\""), "{content}");
+    assert_eq!(
+        content.matches("[[projects.columns]]").count(),
+        columns.len(),
+        "{content}"
+    );
+    assert!(!content.contains(" id = \""), "{content}");
+    // The export plans with no change on its own daemon.
+    let plan = td.post("/api/fleet/plan", body(&content)).await;
+    let p = entry(plan.ok(), "project", "cb");
+    assert_eq!(p["action"], "unchanged", "{p}");
+
+    // A new daemon: the apply makes the same board.
+    let nd = TestDaemon::start().await;
+    let r = nd.post("/api/fleet/apply", body(&content)).await;
+    assert_eq!(r.ok()["summary"]["conflict"], 0, "{}", r.body);
+    assert_eq!(
+        nd.get("/api/projects/cb").await.ok()["board_flow"],
+        "columns"
+    );
+    let mut versions = BTreeMap::new();
+    for c in &columns {
+        let got = options(&nd, "cb", c).await;
+        let w = &want[c];
+        assert_eq!(got["checks"], w["checks"], "{c}");
+        assert_eq!(got["queue"], w["queue"], "{c}");
+        assert_eq!(rules_of(&got), rules_of(w), "{c}");
+        versions.insert(c.clone(), got["version"].clone());
+    }
+    let ids: Vec<Value> = options(&nd, "cb", "review").await["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].clone())
+        .collect();
+    assert_eq!(ids.len(), 2);
+
+    // Idempotent: no change in the plan, and a second apply writes no
+    // option (the versions stay). The export is the same file.
+    let plan = nd.post("/api/fleet/plan", body(&content)).await;
+    let s = &plan.ok()["summary"];
+    assert_eq!(
+        (s["update"].as_u64(), s["create"].as_u64()),
+        (Some(0), Some(0)),
+        "{}",
+        plan.body
+    );
+    nd.post("/api/fleet/apply", body(&content)).await.ok();
+    for c in &columns {
+        assert_eq!(options(&nd, "cb", c).await["version"], versions[c], "{c}");
+    }
+    let again = nd.get("/api/fleet/export?project=cb").await;
+    assert_eq!(again.ok()["content"].as_str().unwrap(), content);
+
+    // The project admin changes one rule: the plan names `columns`, and
+    // the rule keeps its ID.
+    let lead = nd.agent("cb", "lead", json!({"roles": ["project_admin"]})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let edited = content.replacen("count = 2", "count = 3", 1);
+    assert_ne!(edited, content);
+    let plan = nd.post("/api/fleet/plan", body(&edited)).await;
+    let p = entry(plan.ok(), "project", "cb");
+    assert_eq!(p["action"], "update", "{p}");
+    let fields: Vec<&str> = p["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["field"].as_str().unwrap())
+        .collect();
+    assert_eq!(fields, ["columns"], "{p}");
+    nd.post_as(&lead, "/api/fleet/apply", body(&edited))
+        .await
+        .ok();
+    let got = options(&nd, "cb", "review").await;
+    assert_eq!(got["rules"][0]["trigger"]["count"], 3, "{got}");
+    let now: Vec<Value> = got["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].clone())
+        .collect();
+    assert_eq!(now, ids);
+
+    // A column that the board does not have: 422, nothing written.
+    let bad = edited.replacen(
+        "name = \"merge_queue\"",
+        "name = \"no_such_column\"",
+        1,
+    );
+    assert_ne!(bad, edited);
+    let bad = bad.replacen("count = 3", "count = 4", 1);
+    let r = nd.post("/api/fleet/apply", body(&bad)).await;
+    r.err(422, "invalid");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("projects.cb.columns.no_such_column"),
+        "{}",
+        r.body
+    );
+    assert_eq!(
+        options(&nd, "cb", "review").await["rules"][0]["trigger"]["count"],
+        3
+    );
+}
+
+/// TER-1305: a board that is not on column rules exports as before: no
+/// `[[projects.columns]]`, and `board_flow` only for `rules`.
+#[tokio::test]
+async fn export_of_a_board_off_column_rules_has_no_columns() {
+    let td = TestDaemon::start().await;
+    td.project("pl").await;
+    let flow = td.get("/api/projects/pl").await.ok()["board_flow"].clone();
+    let content = td.get("/api/fleet/export?project=pl").await.ok()["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    if flow == "columns" {
+        // The standard board of a new project (TER-1117) is on column
+        // rules: nothing more to check here.
+        return;
+    }
+    assert!(!content.contains("[[projects.columns]]"), "{content}");
+    assert!(!content.contains("board_flow"), "{content}");
+    td.patch("/api/projects/pl", json!({"board_flow": "rules"}))
+        .await
+        .ok();
+    let content = td.get("/api/fleet/export?project=pl").await.ok()["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(content.contains("board_flow = \"rules\""), "{content}");
+    assert!(!content.contains("[[projects.columns]]"), "{content}");
+    // It plans with no change: `board_flow` is a key of a fleet project.
+    let plan = td.post("/api/fleet/plan", body(&content)).await;
+    assert_eq!(entry(plan.ok(), "project", "pl")["action"], "unchanged");
 }
 
 /// TER-86: an export carries the spawn policy (with the bound fields of

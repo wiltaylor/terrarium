@@ -64,6 +64,14 @@ next_repos = ["terrarium"]       # optional: the repos with a `next` branch
 work_dir = "/tmp/terrarium-jobs" # optional
 timeout_secs = 3600              # optional
 
+[[projects.columns]]             # optional: a column of a `board_flow = "columns"` board (TER-1305)
+name = "merge_queue"
+checks = { require_comment_on_enter = false, require_dependencies_met = false, terminal_for_members = false, clear_eta_on_enter = true }
+queue = { release = "batch", batch_size = 4, max_wait_seconds = 1800, max_batch_cards = 8 }
+rules = [
+    { name = "two", trigger = { kind = "count_reached", count = 2 }, actions = [{ verb = "mail", args = { to = ["operator"], subject = "two in the queue" } }] },
+]
+
 [[projects.agents]]              # an AgentDef without `project`, plus `start`
 name = "lead"
 prompt = "project-lead"
@@ -138,6 +146,23 @@ Rules:
   shows a change as the `delivery` field of the project. Without the
   table the apply leaves the config as it is. A file that drops a table
   that the fleet applied before clears the config (no queue).
+- `board_flow` is `code`, `rules`, or `columns`. `fleet export` writes it
+  when it is not `code`. A board on column rules (api.md §19.13, §19.14)
+  exports as `board_flow = "columns"` and one `[[projects.columns]]` for
+  each column, in board order: its `name` and the `checks`, `queue`, and
+  `rules` of `GET /api/projects/{name}/board/columns/{column}/options`,
+  without the rule IDs (TER-1305). `[[projects.columns]]` needs
+  `board_flow = "columns"`. The apply switches the project to column rules
+  first, then writes each named column as the options `PUT` does, with its
+  checks: the column must be on the board, a rule matches the column's
+  rule of the same name and keeps its ID, and an absent key keeps what the
+  column has. A column that the file does not name stays as it is. An
+  unchanged file writes nothing. A plan shows a change as the
+  `board_flow` and `columns` fields of the project. The file carries no
+  column names, roles, or WIP limits: the board is the one the project
+  has, or the board of a new project. A file does not take a board off
+  column rules. An export of a value that TOML cannot hold (a `null` in a
+  list of a rule) fails and names the rule.
 - `policy.targets` names global targets and targets of the agent's own
   project.
 - `policy` takes `targets`, `mail_to`, `cross_project`, `calendar_write`,
@@ -269,6 +294,7 @@ PLAN §10 applies to each object of the plan:
 |---|---|
 | A new project | sysadmin or the operator |
 | A change to a project | project_admin of the project |
+| A change to a project's `board_flow = "columns"` or `[[projects.columns]]` | project_admin of the project or the operator (as `PUT /api/projects/{name}/board/columns/{column}/options`) |
 | A change to a project's `delivery` | project_admin of the project, and for a global `target` sysadmin or the operator (as `PUT /api/projects/{name}/delivery`) |
 | An agent (create, update, delete, start) | project_admin of its project |
 | A role on an agent | the rule of `role grant`: sysadmin needs the operator |

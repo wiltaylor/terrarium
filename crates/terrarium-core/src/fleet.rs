@@ -87,7 +87,12 @@ const PROJECT_KEYS: &[&str] = &[
     "schedules",
     "templates",
     "delivery",
+    "board_flow",
+    "columns",
 ];
+/// The keys of `[[projects.columns]]` (TER-1305), in the order of the
+/// schema.
+const COLUMN_KEYS: &[&str] = &["name", "checks", "queue", "rules"];
 /// The keys of `[projects.delivery]` (TER-87), in the order of the schema.
 const DELIVERY_KEYS: &[&str] = &[
     "merge_secrets",
@@ -255,6 +260,50 @@ pub struct FleetProject {
     /// The job queue config of the project (`[projects.delivery]`,
     /// TER-87). `None`: the file does not set it.
     pub delivery: Option<DeliveryDef>,
+    /// The options of the board's columns (`[[projects.columns]]`,
+    /// TER-1305), only with `board_flow = "columns"`. Empty: the file does
+    /// not set them.
+    pub columns: Vec<FleetColumn>,
+}
+
+/// The options of one board column in a fleet file (TER-1305): the
+/// `checks`, `queue`, and `rules` of `GET
+/// /api/projects/{name}/board/columns/{column}/options`, without the rule
+/// IDs. The daemon reads and checks the values at the apply. An absent key
+/// keeps what the column has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetColumn {
+    /// The name of a column of the board.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<serde_json::Value>,
+    /// The whole rule list of the column, in order. A rule matches the
+    /// column's rule of the same name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<serde_json::Value>>,
+}
+
+impl FleetColumn {
+    /// The first value of the column that a fleet file cannot hold (a
+    /// `null` in a list), as `<key>: <error>`. The export checks it, so
+    /// that [`Fleet::to_toml`] leaves nothing out.
+    pub fn toml_problem(&self) -> Option<String> {
+        let bad = |v: &serde_json::Value| toml::Value::try_from(without_nulls(v)).err();
+        for (key, v) in [("checks", &self.checks), ("queue", &self.queue)] {
+            if let Some(e) = v.as_ref().and_then(bad) {
+                return Some(format!("{key}: {e}"));
+            }
+        }
+        for (i, r) in self.rules.iter().flatten().enumerate() {
+            if let Some(e) = bad(r) {
+                let name = r["name"].as_str().map_or_else(String::new, |n| format!(" ({n})"));
+                return Some(format!("rules[{i}]{name}: {e}"));
+            }
+        }
+        None
+    }
 }
 
 /// A parsed fleet file, with the defaults applied.
@@ -797,6 +846,18 @@ fn project(
     let agent_tables = tables(&mut t, "agents", at, issues);
     let target_tables = tables(&mut t, "targets", at, issues);
     let delivery = delivery(t.remove("delivery"), &format!("{at}.delivery"), issues);
+    let columns = columns(tables(&mut t, "columns", at, issues), issues);
+    // `columns` is not a value of a project file (TER-1113): a fleet file
+    // names it only with the options of the converted board (TER-1305).
+    let columns_flow = t.get("board_flow").and_then(toml::Value::as_str) == Some("columns");
+    if columns_flow {
+        t.remove("board_flow");
+    } else if !columns.is_empty() {
+        issues.push(Issue::error(
+            format!("{at}.columns"),
+            "`[[projects.columns]]` needs `board_flow = \"columns\"` in the project",
+        ));
+    }
     if let Some(toml::Value::Table(s)) = t.get("checkout") {
         unknown_keys(s, CHECKOUT_KEYS, &format!("{at}.checkout"), issues);
     }
@@ -835,6 +896,9 @@ fn project(
         }
     }
     let mut def: ProjectDef = def(t, at, issues)?;
+    if columns_flow {
+        def.board_flow = Some(crate::config::BoardFlow::Columns);
+    }
     def.templates
         .retain(|d| check_template(d, &format!("{at}.templates.{}", d.name), issues));
     let agents = agent_tables
@@ -990,7 +1054,29 @@ fn project(
         agents,
         targets,
         delivery,
+        columns,
     })
+}
+
+/// The `[[projects.columns]]` of a project (TER-1305): each with its keys,
+/// each column once.
+fn columns(list: Vec<(String, toml::Table)>, issues: &mut Vec<Issue>) -> Vec<FleetColumn> {
+    let mut out: Vec<FleetColumn> = Vec::new();
+    for (at, t) in list {
+        unknown_keys(&t, COLUMN_KEYS, &at, issues);
+        let Some(c) = def::<FleetColumn>(t, &at, issues) else {
+            continue;
+        };
+        if out.iter().any(|o| o.name == c.name) {
+            issues.push(Issue::error(
+                &at,
+                format!("column `{}` is declared twice", c.name),
+            ));
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The `[projects.delivery]` table of a project (TER-87). The daemon
@@ -1308,6 +1394,9 @@ impl Fleet {
             if let Some(d) = &p.delivery {
                 w.table(Some("[projects.delivery]"), &table_of(d), DELIVERY_KEYS);
             }
+            for c in &p.columns {
+                write_column(&mut w, c);
+            }
             for d in &p.def.templates {
                 write_template(&mut w, d, "projects.templates");
             }
@@ -1412,6 +1501,52 @@ impl Writer {
             self.out
                 .push_str(&toml::to_string(&inline).unwrap_or_default());
         }
+    }
+}
+
+/// One `[[projects.columns]]` (TER-1305): `checks` and `queue` as inline
+/// tables, `rules` as an array of inline tables, one rule a line. A JSON
+/// `null` in an object is left out (absent is the same as null there).
+fn write_column(w: &mut Writer, c: &FleetColumn) {
+    if !w.out.is_empty() {
+        w.out.push('\n');
+    }
+    w.out.push_str("[[projects.columns]]\n");
+    w.out.push_str(&format!(
+        "name = {}\n",
+        toml::Value::String(c.name.clone())
+    ));
+    let value = |v: &serde_json::Value| toml::Value::try_from(without_nulls(v)).ok();
+    for (key, v) in [("checks", &c.checks), ("queue", &c.queue)] {
+        if let Some(v) = v.as_ref().and_then(value) {
+            w.out.push_str(&format!("{key} = {v}\n"));
+        }
+    }
+    if let Some(rules) = &c.rules {
+        if rules.is_empty() {
+            w.out.push_str("rules = []\n");
+        } else {
+            w.out.push_str("rules = [\n");
+            for v in rules.iter().filter_map(value) {
+                w.out.push_str(&format!("    {v},\n"));
+            }
+            w.out.push_str("]\n");
+        }
+    }
+}
+
+/// `v` without the `null` members of its objects, at every depth.
+fn without_nulls(v: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(m) => Value::Object(
+            m.iter()
+                .filter(|(_, x)| !x.is_null())
+                .map(|(k, x)| (k.clone(), without_nulls(x)))
+                .collect(),
+        ),
+        Value::Array(a) => Value::Array(a.iter().map(without_nulls).collect()),
+        other => other.clone(),
     }
 }
 
@@ -1722,6 +1857,101 @@ name = "beta"
             assert!(
                 errs.iter()
                     .any(|i| i.at == "projects.alpha.delivery" && i.message.contains(word)),
+                "{from}: {errs:#?}"
+            );
+        }
+    }
+
+    /// TER-1305: a converted board (`board_flow = "columns"` with
+    /// `[[projects.columns]]`) parses and round-trips; `board_flow = "rules"`
+    /// is a key of a fleet project; the columns need the columns flow, and
+    /// each column comes once.
+    #[test]
+    fn converted_board_parses_and_round_trips() {
+        let text = r#"
+[[projects]]
+name = "alpha"
+board_flow = "columns"
+
+[[projects.columns]]
+name = "review"
+checks = { require_comment_on_enter = false, require_dependencies_met = false, terminal_for_members = false, clear_eta_on_enter = true }
+queue = { release = "wip" }
+rules = [
+    { name = "two", trigger = { kind = "count_reached", count = 2 }, actions = [{ verb = "mail", args = { to = ["operator"], subject = "two\nin \"review\"" } }] },
+    { name = "back", trigger = { kind = "lands" }, if_card = [{ column = ["@review"] }], actions = [{ verb = "card.move", args = { to = "ready" } }] },
+]
+
+[[projects.columns]]
+name = "merge_queue"
+queue = { release = "batch", batch_size = 4, max_wait_seconds = 1800 }
+
+[[projects.columns]]
+name = "done"
+rules = []
+
+[[projects]]
+name = "beta"
+board_flow = "rules"
+"#;
+        let f = parse(text, Some("cb"))
+            .ok()
+            .unwrap_or_else(|e| panic!("{e:#?}"));
+        let a = &f.projects[0];
+        assert_eq!(a.def.board_flow, Some(crate::config::BoardFlow::Columns));
+        let names: Vec<&str> = a.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["review", "merge_queue", "done"]);
+        let rules = a.columns[0].rules.as_ref().unwrap();
+        assert_eq!(rules[0]["trigger"]["count"], 2);
+        assert_eq!(rules[0]["actions"][0]["args"]["subject"], "two\nin \"review\"");
+        assert!(a.columns[1].checks.is_none() && a.columns[1].rules.is_none());
+        assert_eq!(a.columns[2].rules, Some(Vec::new()));
+        assert_eq!(
+            f.projects[1].def.board_flow,
+            Some(crate::config::BoardFlow::Rules)
+        );
+        assert!(f.projects[1].columns.is_empty());
+        let out = f.to_toml();
+        assert_eq!(out.matches("[[projects.columns]]").count(), 3, "{out}");
+        assert_eq!(out.matches("board_flow = \"columns\"").count(), 1, "{out}");
+        let again = parse(&out, Some("cb"))
+            .ok()
+            .unwrap_or_else(|e| panic!("{e:#?}\n{out}"));
+        assert_eq!(f, again, "{out}");
+        assert!(a.columns.iter().all(|c| c.toml_problem().is_none()));
+
+        // A null in a list cannot be written: the export names the rule.
+        let mut c = a.columns[0].clone();
+        c.rules.as_mut().unwrap()[1]["actions"][0]["args"]["to"] =
+            serde_json::json!([null]);
+        let p = c.toml_problem().unwrap();
+        assert!(p.starts_with("rules[1] (back):"), "{p}");
+
+        for (from, to, at, word) in [
+            (
+                "board_flow = \"columns\"",
+                "",
+                "projects.alpha.columns",
+                "needs `board_flow",
+            ),
+            (
+                "name = \"done\"",
+                "name = \"review\"",
+                "projects.alpha.columns.review",
+                "declared twice",
+            ),
+            (
+                "queue = { release = \"wip\" }",
+                "queue = { release = \"wip\" }\nwip = 3",
+                "projects.alpha.columns.review",
+                "unknown key `wip`",
+            ),
+        ] {
+            let bad = text.replacen(from, to, 1);
+            let errs = parse(&bad, Some("cb")).ok().unwrap_err();
+            assert!(
+                errs.iter()
+                    .any(|i| i.at == at && i.message.contains(word)),
                 "{from}: {errs:#?}"
             );
         }
